@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
@@ -23,7 +24,10 @@ import (
 func main() {
 	var (
 		configDir  = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
+		certDir    = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")
 		adminAddr  = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
+		httpsAddr  = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
+		httpAddr   = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
 		logLevel   = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
 		showVer    = flag.Bool("version", false, "print version and exit")
@@ -62,10 +66,22 @@ func main() {
 		Str("externalBaseURL", settings.ExternalBaseURL).
 		Msg("config loaded")
 
-	srv := server.New(*adminAddr, st)
-	if err := srv.Start(ctx); err != nil {
-		log.Fatal().Err(err).Msg("admin server error")
+	dp := dataplane.New(dataplane.Config{HTTPSAddr: *httpsAddr, HTTPAddr: *httpAddr, CertDir: *certDir})
+	if err := dp.Reload(cfg); err != nil {
+		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
+
+	admin := server.New(*adminAddr, st)
+
+	errc := make(chan error, 2)
+	go func() { errc <- admin.Start(ctx) }()
+	go func() { errc <- dp.Start(ctx) }()
+
+	if err := <-errc; err != nil {
+		log.Error().Err(err).Msg("server error, shutting down")
+		stop() // cancel ctx so the sibling server shuts down too
+	}
+	<-errc
 	log.Info().Msg("shutdown complete")
 }
 
