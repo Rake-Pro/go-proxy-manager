@@ -1,0 +1,17 @@
+# Build output
+/bin/
+/gpm
+
+# Local runtime data (git-backed config dir, certs, db, etc.)
+/data/
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store

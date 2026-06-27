@@ -1,0 +1,21 @@
+# Keep the build context small. go.mod/go.sum and source are NOT ignored.
+.git
+.gitignore
+.github
+
+# Build artifacts / local runtime
+bin/
+data/
+
+# Docs (not needed by the build)
+*.md
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Docker files themselves
+Dockerfile
+.dockerignore
