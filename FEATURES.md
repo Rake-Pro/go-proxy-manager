@@ -132,14 +132,23 @@ stars - the reasons a rewrite is worth considering.
    schema; make migrations reversible and the data portable (no one-way trap).
 10. **Minimal, auditable dependencies.** The whole motivation: escape the Node
     advisory churn. Small vendored Go dep set, no runtime pip/yarn fetches.
+11. **Import from an existing NPM / NPMplus install** `[GOAL]`. Best-effort,
+    one-time importer that reads an existing NPM/NPMplus `/data` (SQLite DB +
+    `nginx/proxy_host` confs + certs) and maps proxy/redirect/stream/404 hosts,
+    access lists, and certificates into our schema. Explicitly **not** a
+    guaranteed long-term-supported path - the goal is to migrate the current
+    homelab config once and tweak by hand afterward. Lossy/unsupported fields
+    should be reported, not silently dropped.
 
 ## 5. Target feature set for the Go version (proposed tiers)
 
 **MVP (parity + the headline auth win):**
 - Proxy / redirect / stream (TCP/UDP) / 404 hosts; config generation (nginx or a
   native Go reverse proxy - TBD in design).
-- Let's Encrypt HTTP-01 + DNS-01 wildcard (broad provider support incl. route53),
-  custom certs. ACME-server-agnostic (LE/ZeroSSL/Google) `[from NPM+]`.
+- Let's Encrypt HTTP-01 + DNS-01 wildcard, custom certs. ACME-server-agnostic
+  (LE/ZeroSSL/Google) `[from NPM+]`. Broad DNS-01 provider coverage is a backlog
+  item (pick providers per need; not AWS-specific). A Go ACME library
+  (lego/CertMagic) gives wide provider support natively.
 - Access lists: IP allow/deny + basic auth, **multiple per host/location**
   `[from NPM+]`.
 - **First-class SSO**: OIDC login + **trusted forward-auth header login** +
@@ -206,7 +215,9 @@ stars - the reasons a rewrite is worth considering.
 
 ## 7. Constraints to design around (learned from both)
 
-- **route53** must work as a DNS-01 provider (NPMplus dropped it; we use AWS).
+- **Broad DNS-01 provider coverage** as a backlog item (NPMplus dropped several,
+  incl. route53); choose providers per need - not a fixed or AWS-specific
+  requirement.
 - **Permissive license / clean-room** - don't inherit AGPLv3 by copying NPMplus.
 - **No one-way migration trap** - portable data, documented schema.
 - **Broad arch + no surprise CPU baseline** (NPMplus needs x86-64-v2).
@@ -214,7 +225,57 @@ stars - the reasons a rewrite is worth considering.
   DNS-only today.
 - **DNS-01 wildcard via the homelab's existing setup** (shared `npm-1` wildcard).
 
-## 8. Sources
+## 8. Community-demanded features (issue-mined)
+
+Mined from open GitHub issues by 👍 reactions + comment volume (2026-06-27).
+**Key finding:** NPMplus has *already shipped* most of NPM's long-standing top
+asks (OIDC on hosts, client certs, multiple access lists per host, named streams,
+geoblocking, copy-host, i18n). So the strongest differentiation for the Go version
+is the high-demand items that **neither** project serves well (marked ★).
+
+| Feature | NPM demand (issue, 👍/comments) | NPMplus | Go-version call |
+|---|---|---|---|
+| Dark mode UI | #707/#3538, ~169👍 | likely (new frontend) | MVP UI |
+| Backup / export / restore in UI ★ | #168, ~151👍 | no | **Yes** - underserved; pairs with portable-data goal |
+| Mail proxying (SMTP/IMAP/POP3, SNI/STARTTLS) | #1110, 148👍; NPMplus #1756 open | partial (streams) | Tier 2 |
+| Brute-force protection (Fail2Ban/CrowdSec) | #39/#1131, ~139👍 | yes (CrowdSec) | Tier 2 (WAF/bouncer hook) |
+| SSO: OIDC **+ SAML** admin login | ~134👍 across #437/#1624/#5126 | OIDC yes, SAML no | MVP (OIDC, headline); SAML backlog |
+| LDAP / AD admin login ★ | #159, ~89👍 | nginx LDAP module only, not admin login | Backlog - underserved for admin login |
+| Client cert / mTLS | #768, ~82👍 | shipped | Tier 2 |
+| HTTP/3 + QUIC | #1550, ~80👍 | yes | Tier 2 |
+| Rate limiting ★ | #116, 56👍 | no native UI | **Yes** - underserved |
+| Load balancing / upstream groups | #156, 69👍 | yes | MVP/Tier 2 with UI |
+| GeoIP / geoblocking | #46, 51👍/128c; NPMplus #730 most-commented-open | module (community) | Tier 2 - do it cleanly/native |
+| Custom SSL cert mgmt (local path, edit existing) | #87/#1618/#593, ~117👍 | shipped (edit custom certs) | MVP |
+| Stream SNI/TLS | #1829, 53👍 | yes | Tier 2 |
+| Anubis / bot protection | #4682, 36👍 (recent) | yes | Tier 3 / optional |
+| Access-log viewer in UI | #401, 27👍 | GoAccess | Tier 2 (or metrics) |
+| robots.txt / no-index toggle | #245, 35👍 | yes | MVP toggle |
+| Custom timeouts | #257, 29👍 | config | MVP config |
+| Offline fallback / custom location | #3512, 32👍/47c | custom locations | Tier 2 |
+
+**From NPMplus issues/roadmap worth adopting:**
+- **Webhooks / event hooks on host lifecycle** (#2191) ★ - neither ships it; strong
+  fit with our GitOps/automation ethos. **Yes.**
+- **Reusable / shared DNS provider credentials** (#2911) - QoL. Yes.
+- **Host grouping / tagging / folders** (#2741) ★ - neither ships it; UX at scale. Yes.
+- **Multiple ACME servers per instance** (#1332) - Tier 2.
+- **WebAuthn / passkeys** (NPMplus roadmap #2440) - backlog; complements SSO.
+- **Email notifications / password reset** (roadmap) - Tier 2.
+- **cosign image signing** (roadmap) - adopt as a build-pipeline goal (supply chain).
+- **2FA controls** (require TOTP after OIDC / admin-disable TOTP for others, roadmap)
+  - folds into our MFA-delegation goal (#4 above).
+
+**Best differentiation opportunities (★ = high demand, poorly served by both):**
+backup/restore, rate limiting, LDAP admin login, lifecycle webhooks, host grouping.
+Plus our own headline (native trusted forward-auth login + safe SSO-only) and the
+config importer (section 4 #11), which no one offers as a clean path.
+
+**Note on ACME:** NPM uses certbot, NPMplus uses certbot-with-fewer-providers, and
+both have open "switch to acme.sh" asks. A Go rewrite using lego/CertMagic
+sidesteps that debate entirely with broad native DNS-01 support.
+
+## 9. Sources
 
 - NPM README + advanced-config/setup docs (`NginxProxyManager/nginx-proxy-manager`)
 - NPMplus README + compose.yaml (`ZoeyVid/NPMplus`)
