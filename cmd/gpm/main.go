@@ -12,12 +12,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
+	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
 	"github.com/rs/zerolog/log"
@@ -30,6 +33,10 @@ func main() {
 		adminAddr  = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
 		httpsAddr  = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
 		httpAddr   = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
+		sessionDB  = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
+		localUser  = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username (break-glass)")
+		localHash  = flag.String("local-admin-hash", os.Getenv("GPM_LOCAL_ADMIN_PASSWORD_HASH"), "bcrypt hash of the local admin password")
+		cookieSecure = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
 		logLevel   = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
 		showVer    = flag.Bool("version", false, "print version and exit")
@@ -73,12 +80,28 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
 
+	sessStore, err := session.Open(*sessionDB)
+	if err != nil {
+		log.Fatal().Err(err).Str("path", *sessionDB).Msg("failed to open session store")
+	}
+	defer sessStore.Close()
+	go sessionGC(ctx, sessStore)
+
+	authn := auth.NewAuthenticator(auth.Options{
+		Store:     sessStore,
+		Secure:    *cookieSecure,
+		LocalUser: *localUser,
+		LocalHash: *localHash,
+	})
+	authn.Configure(cfg, settings)
+
 	// ACME manager: issues/renews DNS-01 certs and reloads the data plane's cert
-	// set whenever a certificate changes.
+	// set whenever a certificate changes; also refreshes auth config.
 	acmeMgr := acme.NewManager(acme.Options{
 		CertDir: *certDir,
 		OnChange: func() {
-			if c, _, err := st.Load(ctx); err == nil {
+			if c, st2, err := st.Load(ctx); err == nil {
+				authn.Configure(c, st2)
 				if err := dp.Reload(c); err != nil {
 					log.Error().Err(err).Msg("failed to reload data plane after certificate change")
 				}
@@ -90,7 +113,7 @@ func main() {
 		return c, err
 	})
 
-	admin := server.New(*adminAddr, st)
+	admin := server.New(*adminAddr, st, authn)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()
@@ -102,6 +125,24 @@ func main() {
 	}
 	<-errc
 	log.Info().Msg("shutdown complete")
+}
+
+// sessionGC periodically purges expired sessions.
+func sessionGC(ctx context.Context, st *session.Store) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n, err := st.GC(ctx); err != nil {
+				log.Warn().Err(err).Msg("session GC failed")
+			} else if n > 0 {
+				log.Debug().Int("removed", n).Msg("expired sessions purged")
+			}
+		}
+	}
 }
 
 func envOr(key, def string) string {

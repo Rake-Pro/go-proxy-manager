@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
 	"github.com/rs/zerolog/log"
@@ -17,15 +18,25 @@ import (
 type Server struct {
 	addr  string
 	store *store.Store
+	authn *auth.Authenticator
 	http  *http.Server
 }
 
 // New constructs the admin server bound to addr.
-func New(addr string, st *store.Store) *Server {
-	s := &Server{addr: addr, store: st}
+func New(addr string, st *store.Store, authn *auth.Authenticator) *Server {
+	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /version", s.handleVersion)
+
+	// Authentication endpoints.
+	mux.HandleFunc("GET /auth/login", s.handleLogin)
+	mux.HandleFunc("GET /auth/callback", s.handleCallback)
+	mux.HandleFunc("POST /auth/local", s.handleLocalLogin)
+	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+
+	// Protected: proves the session/role gate. The real admin API lands in P0e.
+	mux.Handle("GET /api/me", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleMe)))
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           mux,

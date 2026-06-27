@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
-	"github.com/rs/zerolog/log"
 )
 
 // registry indexes reusable config objects by name for chain assembly.
@@ -59,24 +58,15 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		h = accessListHandler(compileAccessList(al), clientIP, h)
 	}
 
-	// Outermost: authentication. Until P0d this fails closed so a host that
-	// declares auth is never silently left open.
+	// Outermost: authentication. forward-auth is enforced here; per-host OIDC
+	// gating fails closed until P1 (see authMiddlewareHandler).
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
-		if !ok || mw.Type != model.MWTypeAuth {
+		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = unimplementedAuthHandler(host.Name, name, h)
+		h = authMiddlewareHandler(mw, reg, host.Name, h)
 	}
 
 	return h
-}
-
-// unimplementedAuthHandler denies all requests for an auth middleware that is
-// not yet implemented, rather than passing them through.
-func unimplementedAuthHandler(host, mw string, _ http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Warn().Str("host", host).Str("middleware", mw).Msg("auth middleware not yet implemented (P0d) - denying")
-		http.Error(w, "Authentication not configured", http.StatusNotImplemented)
-	})
 }
