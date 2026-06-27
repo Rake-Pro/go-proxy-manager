@@ -30,6 +30,12 @@ import (
 )
 
 func main() {
+	// Subcommands. Default (no subcommand) runs the daemon.
+	if len(os.Args) > 1 && os.Args[1] == "import" {
+		runImport(os.Args[2:])
+		return
+	}
+
 	var (
 		configDir  = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
 		certDir    = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")

@@ -209,6 +209,43 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 	return s.git.CommitAll(ctx, msg, author)
 }
 
+// SaveBatch writes many objects in a single commit. It merges them onto the
+// current config, validates the whole graph once, and only then writes every
+// file and commits - so a bulk import (e.g. from NPM) lands atomically as one
+// revision, or fails without writing a partial, invalid state.
+func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message string, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg, _, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+	merged := cfg
+	for _, o := range objs {
+		merged = withObject(&merged, o)
+	}
+	if err := merged.Validate(); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, o := range objs {
+		dir, ok := kindDir[o.Kind()]
+		if !ok {
+			return "", fmt.Errorf("unknown object kind %q", o.Kind())
+		}
+		path := filepath.Join(s.dir, dir, o.GetMeta().Name+".yaml")
+		if err := writeYAML(path, stampTimes(o, now)); err != nil {
+			return "", err
+		}
+	}
+	if message == "" {
+		message = "Import configuration"
+	}
+	return s.git.CommitAll(ctx, message, author)
+}
+
 // Head returns the current config repo HEAD commit hash.
 func (s *Store) Head(ctx context.Context) (string, error) {
 	return s.git.Head(ctx)
