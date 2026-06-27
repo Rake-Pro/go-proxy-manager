@@ -24,6 +24,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
+	"github.com/Rake-Pro/go-proxy-manager/internal/ui"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
 	"github.com/rs/zerolog/log"
 )
@@ -134,7 +135,12 @@ func main() {
 		},
 	})
 
-	admin := server.New(*adminAddr, st, authn, apiHandler)
+	uiHandler, err := ui.Handler()
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to initialise admin UI")
+	}
+
+	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()

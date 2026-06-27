@@ -23,8 +23,9 @@ type Server struct {
 }
 
 // New constructs the admin server bound to addr. apiHandler, if non-nil, is the
-// REST CRUD API; it is mounted under /api/ behind an admin-role gate.
-func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler http.Handler) *Server {
+// REST CRUD API (mounted under /api/ behind an admin-role gate); uiHandler, if
+// non-nil, is the embedded SPA (mounted at /).
+func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, uiHandler http.Handler) *Server {
 	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -43,6 +44,12 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler htt
 	// precedence over this subtree for that exact path.
 	if apiHandler != nil {
 		mux.Handle("/api/", s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler)))
+	}
+
+	// The embedded SPA at the catch-all root. More specific routes above win;
+	// the shell is public and the app redirects to /auth/login on a 401.
+	if uiHandler != nil {
+		mux.Handle("/", uiHandler)
 	}
 	s.http = &http.Server{
 		Addr:              addr,
