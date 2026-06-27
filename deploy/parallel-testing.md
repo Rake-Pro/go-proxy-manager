@@ -41,19 +41,23 @@ certbot's certs are root-owned (`0600` keys) and the import runs as a non-root
 container user, so use `sudo` and make the snapshot readable - otherwise the
 certs come back "not found" and every host loses its TLS reference.
 
-Run:
+Run (start clean so a previous partial copy can't nest; the `/.` form copies
+contents, not the directory):
 ```
-sudo cp -a <NPM_DIR>/data <SNAPSHOT>
-sudo cp -a <NPM_DIR>/letsencrypt <SNAPSHOT>/letsencrypt   # if LE certs live separately
+sudo rm -rf <SNAPSHOT>
+mkdir -p <SNAPSHOT>/letsencrypt
+sudo cp -a <NPM_DIR>/data/.        <SNAPSHOT>/
+sudo cp -a <NPM_DIR>/letsencrypt/. <SNAPSHOT>/letsencrypt/   # if LE certs live separately
 sudo chmod -R a+rX <SNAPSHOT>
 ```
 
-Expect: the snapshot contains NPM's SQLite DB and its certs, readable by the
-non-root import container. (It holds private keys - `rm -rf <SNAPSHOT>` after cutover.)
+Expect: the snapshot contains NPM's SQLite DB and the cert files under
+`letsencrypt/live/<name>/`, readable by the non-root import container. (It holds
+private keys - `sudo rm -rf <SNAPSHOT>` after cutover.)
 
-Verify:
+Verify (an actual cert file, not just the dir):
 ```
-ls <SNAPSHOT>/database.sqlite >/dev/null && echo OK
+ls <SNAPSHOT>/database.sqlite <SNAPSHOT>/letsencrypt/live/*/fullchain.pem >/dev/null && echo OK
 ```
 -> prints `OK`.
 
