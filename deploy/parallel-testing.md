@@ -37,14 +37,19 @@ or add `-f deploy/compose.parallel.yaml`.
 ## Step 1 - Snapshot NPM's data (read-only)
 
 Why: the import must read a copy, never the live database NPM is writing.
+certbot's certs are root-owned (`0600` keys) and the import runs as a non-root
+container user, so use `sudo` and make the snapshot readable - otherwise the
+certs come back "not found" and every host loses its TLS reference.
 
 Run:
 ```
 sudo cp -a <NPM_DIR>/data <SNAPSHOT>
 sudo cp -a <NPM_DIR>/letsencrypt <SNAPSHOT>/letsencrypt   # if LE certs live separately
+sudo chmod -R a+rX <SNAPSHOT>
 ```
 
-Expect: the snapshot contains NPM's SQLite DB (and its certs).
+Expect: the snapshot contains NPM's SQLite DB and its certs, readable by the
+non-root import container. (It holds private keys - `rm -rf <SNAPSHOT>` after cutover.)
 
 Verify:
 ```
@@ -70,7 +75,9 @@ Verify: the counts roughly match your NPM setup and you have read every warning
 Let's Encrypt certs). Note what you will re-create by hand.
 
 If it fails (`no NPM sqlite database found`): `<SNAPSHOT>` must directly contain
-`database.sqlite` (re-check `<NPM_DIR>/data`).
+`database.sqlite` (re-check `<NPM_DIR>/data`). If you see `certificate files not
+found` and hosts lose their TLS reference, the snapshot's `letsencrypt/` was not
+copied with `sudo` or is not readable - re-run the `sudo cp` + `sudo chmod -R a+rX`.
 
 ---
 
