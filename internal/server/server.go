@@ -22,8 +22,9 @@ type Server struct {
 	http  *http.Server
 }
 
-// New constructs the admin server bound to addr.
-func New(addr string, st *store.Store, authn *auth.Authenticator) *Server {
+// New constructs the admin server bound to addr. apiHandler, if non-nil, is the
+// REST CRUD API; it is mounted under /api/ behind an admin-role gate.
+func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler http.Handler) *Server {
 	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -35,8 +36,14 @@ func New(addr string, st *store.Store, authn *auth.Authenticator) *Server {
 	mux.HandleFunc("POST /auth/local", s.handleLocalLogin)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 
-	// Protected: proves the session/role gate. The real admin API lands in P0e.
+	// Current principal (user-level): proves the session/role gate.
 	mux.Handle("GET /api/me", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleMe)))
+
+	// REST CRUD API (admin-only). The more specific /api/me above takes
+	// precedence over this subtree for that exact path.
+	if apiHandler != nil {
+		mux.Handle("/api/", s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler)))
+	}
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           mux,

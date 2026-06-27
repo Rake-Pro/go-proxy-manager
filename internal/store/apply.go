@@ -45,6 +45,43 @@ func withObject(cfg *model.Config, obj model.Object) model.Config {
 	return c
 }
 
+// withoutObject returns a copy of cfg with the named object of the given kind
+// removed, used to validate that no dangling references remain before deleting.
+func withoutObject(cfg *model.Config, kind, name string) model.Config {
+	c := *cfg
+	switch kind {
+	case "ProxyHost":
+		c.ProxyHosts = dropNamed(c.ProxyHosts, name)
+	case "RedirectHost":
+		c.RedirectHosts = dropNamed(c.RedirectHosts, name)
+	case "StreamHost":
+		c.StreamHosts = dropNamed(c.StreamHosts, name)
+	case "DeadHost":
+		c.DeadHosts = dropNamed(c.DeadHosts, name)
+	case "Certificate":
+		c.Certificates = dropNamed(c.Certificates, name)
+	case "DNSProvider":
+		c.DNSProviders = dropNamed(c.DNSProviders, name)
+	case "IdentityProvider":
+		c.IdentityProviders = dropNamed(c.IdentityProviders, name)
+	case "AccessList":
+		c.AccessLists = dropNamed(c.AccessLists, name)
+	case "Middleware":
+		c.Middlewares = dropNamed(c.Middlewares, name)
+	}
+	return c
+}
+
+func dropNamed[T model.Object](list []T, name string) []T {
+	out := make([]T, 0, len(list))
+	for _, o := range list {
+		if o.GetMeta().Name != name {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 func stampMeta(m model.ObjectMeta, now time.Time) model.ObjectMeta {
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = now

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,14 @@ var kindDir = map[string]string{
 }
 
 const settingsFile = "settings.yaml"
+
+// Sentinel errors so callers can branch on outcome without matching message text.
+var (
+	// ErrNotFound is returned when an object does not exist.
+	ErrNotFound = errors.New("object not found")
+	// ErrDanglingRef is returned when a delete would leave a dangling reference.
+	ErrDanglingRef = errors.New("delete would leave a dangling reference")
+)
 
 // Store reads and writes the typed config objects as per-object YAML files in a
 // git repo. It is safe for concurrent use.
@@ -168,6 +177,38 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	return s.git.CommitAll(ctx, msg, author)
 }
 
+// Delete removes the named object of the given kind. It refuses the delete if
+// doing so would leave a dangling reference (e.g. removing a certificate still
+// used by a host), surfacing the referrers instead. On success it removes the
+// YAML file and commits.
+func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dir, ok := kindDir[kind]
+	if !ok {
+		return "", fmt.Errorf("unknown object kind %q", kind)
+	}
+	path := filepath.Join(s.dir, dir, name+".yaml")
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("%s %q: %w", kind, name, ErrNotFound)
+	}
+
+	cfg, _, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+	if err := withoutObject(&cfg, kind, name).Validate(); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		return "", err
+	}
+	msg := fmt.Sprintf("%s %q: delete", kind, name)
+	return s.git.CommitAll(ctx, msg, author)
+}
+
 // Head returns the current config repo HEAD commit hash.
 func (s *Store) Head(ctx context.Context) (string, error) {
 	return s.git.Head(ctx)
@@ -181,6 +222,27 @@ func (s *Store) History(ctx context.Context, kind, name string, limit int) ([]Co
 	}
 	rel := filepath.Join(dir, name+".yaml")
 	return s.git.Log(ctx, rel, limit)
+}
+
+// RepoHistory returns the repo-wide config change history.
+func (s *Store) RepoHistory(ctx context.Context, limit int) ([]Commit, error) {
+	return s.git.Log(ctx, "", limit)
+}
+
+// SaveSettings validates and writes the singleton settings object, then commits.
+func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := settings.Validate(); err != nil {
+		return "", err
+	}
+	if settings.SchemaVersion == 0 {
+		settings.SchemaVersion = model.SchemaVersion
+	}
+	if err := writeYAML(filepath.Join(s.dir, settingsFile), settings); err != nil {
+		return "", err
+	}
+	return s.git.CommitAll(ctx, "Settings: update", author)
 }
 
 func loadDir[T any](root, sub string) ([]T, error) {

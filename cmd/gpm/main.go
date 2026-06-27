@@ -9,12 +9,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
@@ -95,25 +97,44 @@ func main() {
 	})
 	authn.Configure(cfg, settings)
 
-	// ACME manager: issues/renews DNS-01 certs and reloads the data plane's cert
-	// set whenever a certificate changes; also refreshes auth config.
-	acmeMgr := acme.NewManager(acme.Options{
-		CertDir: *certDir,
-		OnChange: func() {
-			if c, st2, err := st.Load(ctx); err == nil {
-				authn.Configure(c, st2)
-				if err := dp.Reload(c); err != nil {
-					log.Error().Err(err).Msg("failed to reload data plane after certificate change")
-				}
-			}
-		},
-	})
+	// reload re-reads the config and applies it to both the auth layer and the
+	// data plane. It is the single path used after any config or certificate
+	// change (API writes, ACME issuance) so the running state never drifts.
+	reload := func() {
+		c, st2, err := st.Load(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("reload: failed to load config")
+			return
+		}
+		authn.Configure(c, st2)
+		if err := dp.Reload(c); err != nil {
+			log.Error().Err(err).Msg("reload: failed to reload data plane")
+		}
+	}
+
+	// ACME manager: issues/renews DNS-01 certs and reloads on certificate change.
+	acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: reload})
 	go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
 		c, _, err := st.Load(ctx)
 		return c, err
 	})
 
-	admin := server.New(*adminAddr, st, authn)
+	// REST CRUD API: writes go through the git-backed store; commits are authored
+	// by the requesting admin principal; OnChange reloads the running state.
+	apiHandler := api.New(api.Deps{
+		Store:    st,
+		OnChange: reload,
+		Author: func(r *http.Request) store.Author {
+			p, _ := auth.PrincipalFrom(r.Context())
+			name := p.Name
+			if name == "" {
+				name = p.Subject
+			}
+			return store.Author{Name: name, Email: p.Email}
+		},
+	})
+
+	admin := server.New(*adminAddr, st, authn, apiHandler)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()
