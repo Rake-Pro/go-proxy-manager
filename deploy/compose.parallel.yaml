@@ -4,7 +4,10 @@
 # before any cutover.
 #
 #   Admin UI/API : 127.0.0.1:8081  (localhost-only by design - not exposed)
-#   Data plane   : 8080 (http) / 8443 (https)
+#   Data plane   : 8880 (http) / 8843 (https)
+#
+# Ports are chosen to avoid existing services on this host (e.g. service-x on
+# 8080). Adjust the GPM_* env + ports below if any still collide.
 #
 # Quick start (see deploy/parallel-testing.md for the full runbook):
 #   export GPM_ADMIN_HASH="$(docker run --rm <image> hashpw 'choose-a-strong-pass')"
@@ -28,8 +31,8 @@ services:
       GPM_CERT_DIR: /data/certs
       GPM_SESSION_DB: /data/session.db
       GPM_ADMIN_ADDR: ":8081"
-      GPM_HTTPS_ADDR: ":8443"
-      GPM_HTTP_ADDR: ":8080"
+      GPM_HTTPS_ADDR: ":8843"
+      GPM_HTTP_ADDR: ":8880"
       GPM_LOG_CONSOLE: "1"
       # Break-glass admin for testing. Generate with: gpm hashpw '<password>'
       GPM_LOCAL_ADMIN_USER: admin
@@ -41,8 +44,8 @@ services:
       CF_API_TOKEN: ${CF_API_TOKEN:-}
     ports:
       - "127.0.0.1:8081:8081" # admin - localhost only
-      - "8080:8080"           # data plane http
-      - "8443:8443"           # data plane https
+      - "8880:8880"           # data plane http
+      - "8843:8843"           # data plane https
     volumes:
       - gpm-data:/data
     cap_drop:

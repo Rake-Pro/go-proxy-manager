@@ -10,7 +10,7 @@ intact for instant rollback.
 
 - **Never read or write the live install directly.** Import from a *copy* of
   NPM's `/data`, not the running database.
-- **No port conflicts.** The new app uses 8080/8443 (data plane) and
+- **No port conflicts.** The new app uses 8880/8843 (data plane) and
   127.0.0.1:8081 (admin). NPM keeps 80/443/81. Nothing overlaps.
 - **Admin is localhost-only** until cutover (`127.0.0.1:8081`). Reach it with an
   SSH tunnel: `ssh -L 8081:127.0.0.1:8081 <server>`.
@@ -74,14 +74,14 @@ Run from the server. Replace `HOST` with each imported domain; the imported
       break-glass admin. Every view renders from live data.
 - [ ] **Honest version**: `curl -s 127.0.0.1:8081/version` shows the real commit.
 - [ ] **TLS + SNI + proxy** (per host):
-      `curl -sv --connect-to HOST:8443:127.0.0.1:8443 https://HOST:8443/ -o /dev/null`
+      `curl -sv --connect-to HOST:8843:127.0.0.1:8843 https://HOST:8843/ -o /dev/null`
       → expect HTTP 2xx/3xx from the real backend and the correct cert in the
       handshake.
 - [ ] **Force-SSL**: `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n'
-      --connect-to HOST:8080:127.0.0.1:8080 http://HOST:8080/` → 308 to https.
+      --connect-to HOST:8880:127.0.0.1:8880 http://HOST:8880/` → 308 to https.
 - [ ] **HTTP/2**: confirm `http_version: 2` on the https call above.
 - [ ] **Websockets**: exercise a host that uses them (e.g. Home Assistant) and
-      confirm the upgrade works through 8443.
+      confirm the upgrade works through 8843.
 - [ ] **Access lists**: a host behind `lan-only` allows your LAN IP and the
       basic-auth user (re-set the password via `gpm hashpw` if needed), denies
       others.
