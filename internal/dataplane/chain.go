@@ -99,6 +99,15 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		h = accessListHandler(compileAccessList(al), reg.clientIP, h)
 	}
 
+	// Guards (conditional deny rules), in the access-control tier.
+	for _, name := range host.Middlewares {
+		mw, ok := reg.middlewares[name]
+		if !ok || mw.Type != model.MWTypeGuard || mw.Guard == nil {
+			continue
+		}
+		h = guardHandler(compileGuard(*mw.Guard), reg.clientIP, h)
+	}
+
 	// Outermost: authentication. forward-auth is enforced here; per-host OIDC
 	// gating fails closed until P1 (see authMiddlewareHandler).
 	for _, name := range host.Middlewares {

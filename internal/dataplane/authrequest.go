@@ -3,6 +3,7 @@ package dataplane
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -86,8 +87,9 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 	}, nil
 }
 
-// handler gates next behind the external auth server.
-func (p *authRequestProxy) handler(hostName string, next http.Handler) http.Handler {
+// handler gates next behind the external auth server. clientIP resolves the real
+// client address; allowNets (per-host) bypass auth entirely.
+func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, hostName string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip any client-presented identity headers up front so a forged
 		// X-authentik-* can never reach the upstream, regardless of branch.
@@ -100,6 +102,16 @@ func (p *authRequestProxy) handler(hostName string, next http.Handler) http.Hand
 		if r.URL.Path == p.prefix || strings.HasPrefix(r.URL.Path, p.prefix+"/") {
 			p.outpost.ServeHTTP(w, r)
 			return
+		}
+
+		// AllowFrom networks (e.g. the LAN) bypass SSO entirely: proxied straight
+		// through with no auth subrequest and no identity headers (they were just
+		// stripped above). Matches NPM "satisfy any; allow <LAN>; deny all".
+		if len(allowNets) > 0 {
+			if ip := clientIP(r); ip != nil && ipInNets(ip, allowNets) {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		resp, err := p.authenticate(r)

@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
@@ -41,7 +42,13 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		if err != nil {
 			return failClosed(hostName, "auth-request: "+err.Error())
 		}
-		return arp.handler(hostName, next)
+		var allowNets []*net.IPNet
+		for _, c := range mw.Auth.AllowFrom {
+			if n := parseNet(c); n != nil {
+				allowNets = append(allowNets, n)
+			}
+		}
+		return arp.handler(reg.clientIP, allowNets, hostName, next)
 	case model.AuthModeOIDC:
 		return failClosedf(hostName, "per-host OIDC gating is not yet implemented (P1); denying")
 	default:

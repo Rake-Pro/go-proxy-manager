@@ -1,6 +1,17 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"net"
+)
+
+// validCIDROrIP reports whether s parses as a CIDR or a bare IP.
+func validCIDROrIP(s string) bool {
+	if _, _, err := net.ParseCIDR(s); err == nil {
+		return true
+	}
+	return net.ParseIP(s) != nil
+}
 
 // Middleware types. The compiled data plane applies a host/location's referenced
 // middlewares as an ordered chain of http.Handler wrappers - so auth, headers,
@@ -9,6 +20,7 @@ import "fmt"
 const (
 	MWTypeAuth      = "auth"
 	MWTypeHeaders   = "headers"
+	MWTypeGuard     = "guard"
 	MWTypeRateLimit = "rate-limit" // defined now, enforced in P1
 )
 
@@ -23,8 +35,13 @@ const (
 // requires the resolved identity to hold one of RequiredRoles.
 type AuthMiddleware struct {
 	IdentityProvider string   `json:"identityProvider" yaml:"identityProvider"`
-	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth (defaults from IdP type)
+	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth | auth-request (defaults from IdP type)
 	RequiredRoles    []string `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
+	// AllowFrom lists client CIDRs that bypass authentication entirely and are
+	// proxied straight through (no auth subrequest, no identity headers). The
+	// typed form of NPM "satisfy any; allow <LAN>; deny all" - LAN skips SSO.
+	// Applies to auth-request mode.
+	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 }
 
 // HeadersMiddleware mutates request/response headers declaratively (security
@@ -34,6 +51,26 @@ type HeadersMiddleware struct {
 	SetResponse    map[string]string `json:"setResponse,omitempty" yaml:"setResponse,omitempty"`
 	RemoveRequest  []string          `json:"removeRequest,omitempty" yaml:"removeRequest,omitempty"`
 	RemoveResponse []string          `json:"removeResponse,omitempty" yaml:"removeResponse,omitempty"`
+}
+
+// GuardMiddleware is the typed form of NPM's conditional nginx "if" blocks: it
+// denies a matching request unless the client is in an allow-list of networks.
+// It fires when ANY Trigger matches; a request that matches and whose client IP
+// is not in AllowFrom gets DenyStatus. This expresses rules the whole-host/
+// location AccessList cannot - e.g. "POST to /login is LAN-only" (break-glass).
+type GuardMiddleware struct {
+	Triggers   []GuardTrigger `json:"triggers" yaml:"triggers"`
+	AllowFrom  []string       `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`   // client CIDRs exempt from the deny
+	DenyStatus int            `json:"denyStatus,omitempty" yaml:"denyStatus,omitempty"` // default 403
+}
+
+// GuardTrigger matches a request. A trigger matches when ALL of its set fields
+// match: the path equals one of Paths (if any), the method is one of Methods (if
+// any), and every QueryEquals arg equals its value.
+type GuardTrigger struct {
+	Paths       []string          `json:"paths,omitempty" yaml:"paths,omitempty"`
+	Methods     []string          `json:"methods,omitempty" yaml:"methods,omitempty"`
+	QueryEquals map[string]string `json:"queryEquals,omitempty" yaml:"queryEquals,omitempty"`
 }
 
 // RateLimitMiddleware is defined in the schema now so P1 enforcement is additive.
@@ -49,6 +86,7 @@ type Middleware struct {
 	Type      string               `json:"type" yaml:"type"`
 	Auth      *AuthMiddleware      `json:"auth,omitempty" yaml:"auth,omitempty"`
 	Headers   *HeadersMiddleware   `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Guard     *GuardMiddleware     `json:"guard,omitempty" yaml:"guard,omitempty"`
 	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
 }
 
@@ -72,9 +110,26 @@ func (m Middleware) Validate() error {
 		default:
 			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth|auth-request, got %q", m.Name, mode)
 		}
+		for _, c := range m.Auth.AllowFrom {
+			if !validCIDROrIP(c) {
+				return fmt.Errorf("middleware %q: auth.allowFrom has invalid CIDR/IP %q", m.Name, c)
+			}
+		}
 	case MWTypeHeaders:
 		if m.Headers == nil {
 			return fmt.Errorf("middleware %q: headers spec required", m.Name)
+		}
+	case MWTypeGuard:
+		if m.Guard == nil || len(m.Guard.Triggers) == 0 {
+			return fmt.Errorf("middleware %q: guard requires at least one trigger", m.Name)
+		}
+		for _, c := range m.Guard.AllowFrom {
+			if !validCIDROrIP(c) {
+				return fmt.Errorf("middleware %q: guard.allowFrom has invalid CIDR/IP %q", m.Name, c)
+			}
+		}
+		if s := m.Guard.DenyStatus; s != 0 && (s < 400 || s > 599) {
+			return fmt.Errorf("middleware %q: guard.denyStatus must be a 4xx/5xx code, got %d", m.Name, s)
 		}
 	case MWTypeRateLimit:
 		if m.RateLimit == nil || m.RateLimit.RequestsPerSecond <= 0 {

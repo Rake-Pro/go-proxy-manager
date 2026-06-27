@@ -108,6 +108,31 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "requiredRoles is not supported in auth-request mode",
 		},
 		{
+			name: "valid guard middleware",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "login-lan"}, Type: MWTypeGuard,
+				Guard: &GuardMiddleware{
+					Triggers:  []GuardTrigger{{Paths: []string{"/login"}, Methods: []string{"POST"}}},
+					AllowFrom: []string{"192.0.2.0/24"},
+				},
+			}}},
+		},
+		{
+			name: "guard requires a trigger",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "g"}, Type: MWTypeGuard, Guard: &GuardMiddleware{},
+			}}},
+			wantErr: "guard requires at least one trigger",
+		},
+		{
+			name: "guard rejects bad allowFrom",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "g"}, Type: MWTypeGuard,
+				Guard: &GuardMiddleware{Triggers: []GuardTrigger{{Paths: []string{"/x"}}}, AllowFrom: []string{"nope"}},
+			}}},
+			wantErr: "invalid CIDR/IP",
+		},
+		{
 			name: "duplicate cert domain rejected",
 			cfg: Config{Certificates: []Certificate{
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},
