@@ -13,8 +13,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
+	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
@@ -70,6 +72,23 @@ func main() {
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
+
+	// ACME manager: issues/renews DNS-01 certs and reloads the data plane's cert
+	// set whenever a certificate changes.
+	acmeMgr := acme.NewManager(acme.Options{
+		CertDir: *certDir,
+		OnChange: func() {
+			if c, _, err := st.Load(ctx); err == nil {
+				if err := dp.Reload(c); err != nil {
+					log.Error().Err(err).Msg("failed to reload data plane after certificate change")
+				}
+			}
+		},
+	})
+	go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
+		c, _, err := st.Load(ctx)
+		return c, err
+	})
 
 	admin := server.New(*adminAddr, st)
 
