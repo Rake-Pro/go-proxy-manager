@@ -5,6 +5,10 @@
 # Local runtime data (git-backed config dir, certs, db, etc.)
 /data/
 
+# Secrets (compose env files) - never commit; .env.example is tracked
+.env
+deploy/.env
+
 # Go test / coverage artifacts
 *.test
 *.out

@@ -1,121 +1,226 @@
-# Parallel testing & cutover runbook
+# Runbook: Validate go-proxy-manager beside an existing NPM, then cut over
 
-Validate go-proxy-manager fully **before touching the live Nginx Proxy Manager
-install**. The plan: run the new app in parallel on the same server with
-non-conflicting ports, import a *copy* of the real config, exercise every
-feature, complete a security review, and only then cut over - with NPM kept
-intact for instant rollback.
+**Purpose:** Run go-proxy-manager in parallel with a live Nginx Proxy Manager
+install, import a copy of the real config, validate every feature, then cut over
+- with zero risk to the running install until the final step.
+**Audience:** operator with shell + docker on the NPM host.
+**Time:** ~60-90 min validation; ~15 min cutover.
+**Risk:** None through Step 6 (read-only copy, alternate ports, NPM untouched).
+Step 8 (cutover) is the only disruptive step, and it is reversible (Rollback).
 
-## Safety principles (do not skip)
+This is the generic runbook. For the example.com homelab host, the filled-in instance
+lives at `homelab/go-proxy-manager/parallel-testing.md` in the GitOps repo. The
+reusable template these follow is `docs/runbook-template.md`.
 
-- **Never read or write the live install directly.** Import from a *copy* of
-  NPM's `/data`, not the running database.
-- **No port conflicts.** The new app uses 8880/8843 (data plane) and
-  127.0.0.1:8081 (admin). NPM keeps 80/443/81. Nothing overlaps.
-- **Admin is localhost-only** until cutover (`127.0.0.1:8081`). Reach it with an
-  SSH tunnel: `ssh -L 8081:127.0.0.1:8081 <server>`.
-- **DNS is untouched.** All host testing uses `curl --resolve` / `--connect-to`,
-  so public resolution still points at NPM the whole time.
-- **ACME against Let's Encrypt STAGING first** (a throwaway test subdomain), so
-  you never risk prod certs or hit rate limits. Imported certs are static copies,
-  so day-one parallel testing needs no issuance at all.
-- Keep the NPM container running and unchanged throughout.
+## Prerequisites
 
-## Phase 0 - build the image
+- [ ] SSH + `docker` / `docker compose` on the NPM host.
+- [ ] `docker login ghcr.io` works (the image is private), or build locally.
+- [ ] This repo's `deploy/compose.parallel.yaml` is on the host.
+- [ ] A DNS-provider API token (only needed at Step 6, ACME).
 
+## Variables
+
+| Placeholder  | Meaning                                     | Value / example                          |
+| ------------ | ------------------------------------------- | ---------------------------------------- |
+| `<NPM_DIR>`  | NPM's compose dir (holds `data/`)           | `/opt/nginx-proxy-manager`               |
+| `<SNAPSHOT>` | read-only copy of NPM data for import       | `/srv/gpm-import`                        |
+| `<HOST>`     | a domain you are validating                 | `app.example.com`                        |
+| `<ADMIN_PW>` | break-glass admin password you choose       | (your choice)                            |
+| `IMAGE`      | the container image                         | `ghcr.io/rake-pro/go-proxy-manager:main` |
+
+Run `docker compose` commands from the directory holding `compose.parallel.yaml`,
+or add `-f deploy/compose.parallel.yaml`.
+
+---
+
+## Step 1 - Snapshot NPM's data (read-only)
+
+Why: the import must read a copy, never the live database NPM is writing.
+
+Run:
 ```
-# On the server (or build in CI and pull the GHCR image):
-git clone https://github.com/Rake-Pro/go-proxy-manager && cd go-proxy-manager
-docker build -t gpm:test .
-```
-
-## Phase 1 - snapshot the live NPM data (read-only)
-
-```
-# Copy, never mount the live dir. NPM keeps running.
-sudo cp -a /path/to/npm/data /srv/npm-data-copy
-```
-
-## Phase 2 - preview the import (dry run, writes nothing)
-
-```
-docker run --rm -v /srv/npm-data-copy:/npm:ro gpm:test \
-    import --npm-data /npm --dry-run
-```
-
-Read the summary and **every warning**. Expect warnings for: `advanced_config`
-(raw nginx - re-create as typed middleware), `block_exploits`/`caching` (no
-equivalent yet), and Let's Encrypt certs ("reconfigure as ACME for auto-renewal").
-Decide what you'll re-create by hand before relying on the result.
-
-## Phase 3 - real import into the test volume
-
-```
-export GPM_ADMIN_HASH="$(docker run --rm gpm:test hashpw 'choose-a-strong-pass')"
-
-# import writes the config + copies cert PEMs into the gpm-data volume
-docker compose -f deploy/compose.parallel.yaml run --rm \
-    -v /srv/npm-data-copy:/npm:ro gpm import --npm-data /npm
+sudo cp -a <NPM_DIR>/data <SNAPSHOT>
+sudo cp -a <NPM_DIR>/letsencrypt <SNAPSHOT>/letsencrypt   # if LE certs live separately
 ```
 
-## Phase 4 - start the parallel stack
+Expect: the snapshot contains NPM's SQLite DB (and its certs).
 
+Verify:
 ```
-docker compose -f deploy/compose.parallel.yaml up -d
-docker logs -f gpm-test     # confirm "config loaded" + "data plane ... listening"
+ls <SNAPSHOT>/database.sqlite >/dev/null && echo OK
+```
+-> prints `OK`.
+
+---
+
+## Step 2 - Preview the import (writes nothing)
+
+Why: see exactly what maps and what will not, before any write.
+
+Run:
+```
+docker run --rm -v <SNAPSHOT>:/npm:ro IMAGE import --npm-data /npm --dry-run
 ```
 
-## Phase 5 - validation checklist
+Expect: a summary (host / cert / access-list counts) and a list of warnings.
 
-Run from the server. Replace `HOST` with each imported domain; the imported
-*real* certs mean TLS validates, and upstreams are the same backends NPM proxies.
+Verify: the counts roughly match your NPM setup and you have read every warning
+(raw `advanced_config`, `block_exploits`, `caching`, "reconfigure as ACME" for
+Let's Encrypt certs). Note what you will re-create by hand.
 
-- [ ] **Admin loads**: tunnel, open `http://127.0.0.1:8081/`, log in with the
-      break-glass admin. Every view renders from live data.
-- [ ] **Honest version**: `curl -s 127.0.0.1:8081/version` shows the real commit.
-- [ ] **TLS + SNI + proxy** (per host):
-      `curl -sv --connect-to HOST:8843:127.0.0.1:8843 https://HOST:8843/ -o /dev/null`
-      → expect HTTP 2xx/3xx from the real backend and the correct cert in the
-      handshake.
-- [ ] **Force-SSL**: `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n'
-      --connect-to HOST:8880:127.0.0.1:8880 http://HOST:8880/` → 308 to https.
-- [ ] **HTTP/2**: confirm `http_version: 2` on the https call above.
-- [ ] **Websockets**: exercise a host that uses them (e.g. Home Assistant) and
-      confirm the upgrade works through 8843.
-- [ ] **Access lists**: a host behind `lan-only` allows your LAN IP and the
-      basic-auth user (re-set the password via `gpm hashpw` if needed), denies
-      others.
-- [ ] **REST API + git history**: edit a host in the UI; confirm a new commit in
-      the config repo authored by you (`git -C <gpm-data>/config log`), and that
-      the change takes effect live.
-- [ ] **OIDC admin login**: in Authentik, create a **new, separate** OIDC app
-      (do not reuse NPM's) with redirect URI `https://<test-host>/auth/callback`;
-      set `externalBaseURL` in Settings to match; log in via Authentik.
-- [ ] **Trusted forward-auth**: send a request through your Authentik forward-auth
-      outpost (or simulate the trusted headers from a trusted source) and confirm
-      one-click admin login; confirm an untrusted source is rejected.
-- [ ] **ACME (staging)**: add a test certificate for a throwaway subdomain with
-      `directoryURL = https://acme-staging-v02.api.letsencrypt.org/directory` and
-      your Cloudflare DNS provider; confirm issuance + the data plane picks it up.
-      Only after staging succeeds, try one prod issuance for a non-critical host.
+If it fails (`no NPM sqlite database found`): `<SNAPSHOT>` must directly contain
+`database.sqlite` (re-check `<NPM_DIR>/data`).
 
-## Phase 6 - cutover (only after Phase 5 + security review pass)
+---
 
-1. Re-create anything the import warned about (raw-nginx bits as typed middleware).
-2. Switch imported LE certs from static-custom to managed ACME (Cloudflare DNS-01)
-   and confirm renewal works.
-3. Flip ports: stop NPM (`docker stop nginx-proxy-manager` - keep it, don't
-   delete) and restart gpm on 80/443/81, or move it behind your existing entry.
-   Same server IP → no DNS change needed.
-4. Watch logs and re-run the Phase 5 host checks against the real ports.
+## Step 3 - Configure the break-glass admin
+
+Why: local admin is the anti-lockout login while you validate SSO.
+
+Run:
+```
+cp .env.example .env   # if present; otherwise set the var in your environment
+echo "GPM_LOCAL_ADMIN_PASSWORD_HASH=$(docker run --rm IMAGE hashpw '<ADMIN_PW>')" >> .env
+```
+
+Expect: `.env` has a `GPM_LOCAL_ADMIN_PASSWORD_HASH=$2a$...` line.
+
+Verify:
+```
+grep -q 'GPM_LOCAL_ADMIN_PASSWORD_HASH=\$2' .env && echo OK
+```
+-> prints `OK`. (Never commit `.env`.)
+
+---
+
+## Step 4 - Run the import
+
+Why: write the mapped config + certs into the stack's data volume.
+
+Run:
+```
+docker compose run --rm -v <SNAPSHOT>:/npm:ro gpm import --npm-data /npm
+```
+
+Expect: ends with `Imported N objects into /data/config (commit <sha>).`
+
+Verify:
+```
+docker compose run --rm gpm sh -c 'git -C /data/config log --oneline -1'
+```
+-> shows the `Import from NPM/NPMplus` commit.
+
+---
+
+## Step 5 - Start the parallel stack
+
+Why: bring the new app up on alternate ports, beside the untouched NPM.
+
+Run:
+```
+docker compose up -d
+docker compose logs -f gpm
+```
+
+Expect: `config loaded`, then both data-plane listeners and the admin server come
+up with no repeated errors. (Ctrl-C stops following; the container keeps running.)
+
+Verify:
+```
+curl -fsS http://127.0.0.1:8081/healthz && echo
+```
+-> prints `ok`.
+
+---
+
+## Step 6 - Validate every feature
+
+Why: confirm parity against production reality before trusting it. Public DNS
+still points at NPM throughout - these checks use `--connect-to` to reach the new
+app directly. Tunnel the admin: `ssh -L 8081:127.0.0.1:8081 <NPM_HOST>`.
+
+Tick each only when it passes:
+
+- [ ] **Admin login** - `http://127.0.0.1:8081/`, log in `admin` / `<ADMIN_PW>`.
+- [ ] **Honest version** - `curl -s 127.0.0.1:8081/version` shows the real commit.
+- [ ] **TLS + SNI + proxy** (per `<HOST>`):
+      `curl -sv --connect-to <HOST>:8843:127.0.0.1:8843 https://<HOST>:8843/ -o /dev/null`
+      -> 2xx/3xx; served cert matches `<HOST>`.
+- [ ] **Force-SSL** -
+      `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' --connect-to <HOST>:8880:127.0.0.1:8880 http://<HOST>:8880/`
+      -> `308 https://<HOST>/`.
+- [ ] **HTTP/2** - add `-w '%{http_version}\n'` to the TLS call -> `2`.
+- [ ] **Websockets** - a ws host upgrades through 8843.
+- [ ] **Access lists** - allow/deny by IP + basic auth behave; the denied client's
+      logged IP is its real address (proves the single-homed network is correct).
+- [ ] **REST API + git history** - edit a host in the UI; a new authored commit
+      appears in `/data/config` and the change is live.
+- [ ] **OIDC admin login** - via a **new, separate** OIDC app on your IdP; set
+      `externalBaseURL` to match the redirect.
+- [ ] **Forward-auth** - trusted source -> one-click admin; untrusted -> rejected.
+- [ ] **ACME (staging first)** - issue for a throwaway subdomain against your CA's
+      **staging** directory, confirm pickup, then one production issuance.
+
+---
+
+## Step 7 - GATE: do not proceed until both are true
+
+> **Cutover is blocked until:**
+> 1. Every box in Step 6 is checked, and
+> 2. The codebase security review is complete and its findings are resolved.
+>
+> If either is incomplete, stop. The parallel stack can run indefinitely with no
+> impact on NPM.
+
+---
+
+## Step 8 - Cut over from NPM
+
+Why: make go-proxy-manager the edge. The only disruptive step.
+
+Run:
+```
+# 1. re-create anything the import warned about; switch imported LE certs to
+#    managed ACME in the UI.
+# 2. stop NPM - keep the container for rollback, do not remove it:
+docker stop <npm-container>
+# 3. move the stack onto 80/443 (edit the ports in the compose) and:
+docker compose up -d
+```
+
+Expect: go-proxy-manager listens on 80/443; NPM is stopped but present.
+
+Verify: from an external client (real DNS), each `<HOST>` loads over HTTPS with a
+valid cert and reaches its backend.
+
+---
+
+## Step 9 - Verify after cutover
+
+Run:
+```
+docker compose logs --tail=50 gpm
+```
+
+Expect: no error churn; certs load and proxied requests succeed.
+
+Verify: re-run the Step 6 `<HOST>` checks against the real ports (plain
+`https://<HOST>/`, no `--connect-to`). Spot-check an SSO-gated and an
+access-list-gated host.
+
+---
 
 ## Rollback
 
-The NPM container is untouched and stopped, not removed. To revert: stop gpm,
-`docker start` NPM. Because the import was read-only against a copy, the original
-`/data` is byte-for-byte intact.
+```
+docker compose down
+docker start <npm-container>
+```
+The import was read-only against a copy, so NPM's `/data` is byte-for-byte intact.
 
-## Gate
+## Done when
 
-Do not begin Phase 6 until: (a) every Phase 5 box is checked, and (b) the
-security review is complete and its findings resolved.
+- All Step 6 checks pass and the security review is resolved (Step 7 gate).
+- After cutover, external clients reach every host over HTTPS via go-proxy-manager,
+  SSO and access lists behave, and NPM is stopped-but-retained for rollback.

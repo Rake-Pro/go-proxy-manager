@@ -10,7 +10,7 @@
 # 8080). Adjust the GPM_* env + ports below if any still collide.
 #
 # Quick start (see deploy/parallel-testing.md for the full runbook):
-#   export GPM_ADMIN_HASH="$(docker run --rm <image> hashpw 'choose-a-strong-pass')"
+#   cp deploy/.env.example deploy/.env   # then set GPM_LOCAL_ADMIN_PASSWORD_HASH
 #   docker compose -f deploy/compose.parallel.yaml run --rm \
 #       -v /srv/npm-data-copy:/npm:ro gpm import --npm-data /npm --dry-run
 #   docker compose -f deploy/compose.parallel.yaml up -d
@@ -34,14 +34,15 @@ services:
       GPM_HTTPS_ADDR: ":8843"
       GPM_HTTP_ADDR: ":8880"
       GPM_LOG_CONSOLE: "1"
-      # Break-glass admin for testing. Generate with: gpm hashpw '<password>'
       GPM_LOCAL_ADMIN_USER: admin
-      GPM_LOCAL_ADMIN_PASSWORD_HASH: ${GPM_ADMIN_HASH:?set GPM_ADMIN_HASH - run: gpm hashpw '<password>'}
       # Admin is reached over plain http on localhost during testing, so the
       # Secure cookie flag is off. Set to 1 once the admin is fronted by https.
       GPM_COOKIE_SECURE: "0"
-      # Only needed if you test live ACME issuance (use LE STAGING first).
-      CF_API_TOKEN: ${CF_API_TOKEN:-}
+    # Secrets (break-glass admin hash, Cloudflare token) live in .env (gitignored).
+    # env_file keeps values literal, so the bcrypt $-signs are not mangled by
+    # interpolation. Copy .env.example and fill it in.
+    env_file:
+      - .env
     ports:
       - "127.0.0.1:8081:8081" # admin - localhost only
       - "8880:8880"           # data plane http
