@@ -131,7 +131,9 @@ stars - the reasons a rewrite is worth considering.
    reused `setting`/`auth` tables and the merge-back path was uncertain. Own the
    schema; make migrations reversible and the data portable (no one-way trap).
 10. **Minimal, auditable dependencies.** The whole motivation: escape the Node
-    advisory churn. Small vendored Go dep set, no runtime pip/yarn fetches.
+    advisory churn. **Prefer the Go stdlib (and `golang.org/x/...`) wherever
+    feasible**; zerolog is the one accepted logging dep; justify and vet every
+    other import. No runtime pip/yarn fetches.
 11. **Import from an existing NPM / NPMplus install** `[GOAL]`. Best-effort,
     one-time importer that reads an existing NPM/NPMplus `/data` (SQLite DB +
     `nginx/proxy_host` confs + certs) and maps proxy/redirect/stream/404 hosts,
@@ -140,35 +142,57 @@ stars - the reasons a rewrite is worth considering.
     homelab config once and tweak by hand afterward. Lossy/unsupported fields
     should be reported, not silently dropped.
 
-## 5. Target feature set for the Go version (proposed tiers)
+## 5. Target feature set - prioritized (my needs first)
 
-**MVP (parity + the headline auth win):**
-- Proxy / redirect / stream (TCP/UDP) / 404 hosts; config generation (nginx or a
-  native Go reverse proxy - TBD in design).
-- Let's Encrypt HTTP-01 + DNS-01 wildcard, custom certs. ACME-server-agnostic
-  (LE/ZeroSSL/Google) `[from NPM+]`. Broad DNS-01 provider coverage is a backlog
-  item (pick providers per need; not AWS-specific). A Go ACME library
-  (lego/CertMagic) gives wide provider support natively.
-- Access lists: IP allow/deny + basic auth, **multiple per host/location**
-  `[from NPM+]`.
-- **First-class SSO**: OIDC login + **trusted forward-auth header login** +
-  group->role mapping + MFA delegation + **safe SSO-only mode w/ break-glass**
-  `[GOAL]`.
-- Admin UI (HTTPS) + REST API + audit log + multi-user; declarative config path.
-- HTTP/2, websockets always-on, security headers + HSTS by default.
-- Honest versioning, reversible migrations, minimal deps `[GOAL]`.
+Ordering principle: **build for the homelab/owner first** - cleanly replace the
+current NPM+OIDC fork - then layer parity + community features on top. P0 is
+architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
+"Architecture for extension").
 
-**Tier 2 (hardening / NPMplus-class):**
-- HTTP/3 (QUIC), Brotli/zstd, hardened TLS (TLS1.3, optional 1.2 off), OCSP for
-  non-LE CAs.
-- WAF hook (CrowdSec bouncer/AppSec integration), GeoIP2 geoblocking.
-- mTLS client-cert validation, proxy protocol.
-- GoAccess-style log dashboard or built-in metrics (consider **Prometheus** -
-  absent from both today).
+### P0 - homelab must-have (replace the current NPM+OIDC fork)
+- **Proxy hosts** for `*.example.com`, TLS termination, HTTP/2, websockets.
+- **Let's Encrypt wildcard via DNS-01** for the homelab DNS provider (the
+  `*.example.com` wildcard, like today's `npm-1`); custom certs.
+- **IP access lists** (LAN / VPN gating) - keep the current allow-list model.
+- **Authentik done right** (the reason this exists): native **OIDC admin login**
+  **+ trusted forward-auth header login** = one sign-in, no double prompt;
+  group->role mapping; MFA delegation; **safe SSO-only mode with a real
+  break-glass** (not an open `:81`).
+- **Import the existing NPM/NPMplus config** (one-time, best-effort) to cut over
+  (section 4 #11).
+- **First-class per-host config / middleware** escape hatch - never get blocked
+  like the forward-auth-snippet saga; composable middleware, not raw nginx text.
+- Ops hygiene: Admin UI (HTTPS) + API, **declarative/GitOps config** with secret
+  placeholders, **honest versioning**, reversible migrations, **minimal deps**,
+  GHCR multi-arch build, digest-pinned.
 
-**Tier 3 / nice-to-have:**
-- Load balancing upstreams via UI, file server / FancyIndex, PHP-FPM, ECH,
-  ML-KEM, MPTCP.
+### P1 - high-value, layer in next (parity + best community asks)
+- Redirect / stream (TCP/UDP) / 404 hosts; multiple access lists per host/location.
+- Backup / export / restore ★, rate limiting ★, dark mode, robots/no-index toggle,
+  custom timeouts, load balancing / upstream groups, access-log viewer or metrics.
+
+### P2 - hardening (NPMplus-class) + community gaps
+- HTTP/3 (QUIC), Brotli/zstd, hardened TLS (1.3; optional 1.2 off), OCSP (non-LE).
+- WAF hook (CrowdSec bouncer/AppSec), GeoIP geoblocking, mTLS, proxy protocol.
+- Lifecycle **webhooks** ★, host grouping/tagging ★, multiple ACME servers,
+  reusable DNS creds, email notifications, **SAML** + **LDAP admin login** ★.
+
+### P3 - nice-to-have
+- PHP / file server, FancyIndex, ECH, ML-KEM, MPTCP, WebAuthn/passkeys, Anubis,
+  cosign image signing (build-side).
+
+### Architecture for extension (so later tiers aren't rework/duplication)
+- Model **hosts, certs, identity providers, access rules, middleware** as
+  first-class typed config objects with a stable schema + versioned migrations
+  from day one - so P1-P3 add new types/fields, never a rewrite.
+- A **composable middleware chain** (auth -> access-list -> headers -> rate-limit
+  -> WAF hook -> proxy) so new behaviors slot in as ordered steps - never the
+  textual-collision bug that broke our forward-auth `location /`.
+- **Pluggable interfaces**: ACME/DNS provider, identity provider
+  (OIDC / forward-auth / SAML / LDAP), data store - adding one is implementing an
+  interface, not touching core.
+- The **importer reads into the same typed model** the UI/API/config use, so it
+  can't diverge from the real schema.
 
 ## 6. Comparison matrix (NPM vs NPMplus)
 
@@ -272,8 +296,10 @@ Plus our own headline (native trusted forward-auth login + safe SSO-only) and th
 config importer (section 4 #11), which no one offers as a clean path.
 
 **Note on ACME:** NPM uses certbot, NPMplus uses certbot-with-fewer-providers, and
-both have open "switch to acme.sh" asks. A Go rewrite using lego/CertMagic
-sidesteps that debate entirely with broad native DNS-01 support.
+both have open "switch to acme.sh" asks. A Go rewrite sidesteps that debate:
+`golang.org/x/crypto/acme` keeps us near-stdlib for ACME (DNS providers
+implemented in-house per need), or a vetted lib (lego/CertMagic) if broad
+provider breadth outweighs the added dependency - decide per the minimal-deps rule.
 
 ## 9. Sources
 
