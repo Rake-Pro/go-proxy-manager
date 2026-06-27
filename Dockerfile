@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 
 # Pure-Go build (modernc.org/sqlite is cgo-free).
 ENV CGO_ENABLED=0 \
