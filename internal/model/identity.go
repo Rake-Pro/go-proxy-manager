@@ -1,11 +1,15 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // Identity provider types.
 const (
 	IdPTypeOIDC        = "oidc"
 	IdPTypeForwardAuth = "forward-auth"
+	IdPTypeAuthRequest = "auth-request"
 )
 
 // OIDCSpec configures a generic OIDC provider (auth-code + PKCE, discovery).
@@ -30,12 +34,42 @@ type OIDCSpec struct {
 // X" click. Headers are honoured ONLY when the request arrives from a trusted
 // proxy CIDR, otherwise they are stripped to prevent header spoofing.
 type ForwardAuthSpec struct {
-	TrustedProxies []string `json:"trustedProxies" yaml:"trustedProxies"` // CIDRs allowed to assert identity
-	UserHeader     string   `json:"userHeader" yaml:"userHeader"`         // e.g. X-authentik-username
-	EmailHeader    string   `json:"emailHeader,omitempty" yaml:"emailHeader,omitempty"`
-	NameHeader     string   `json:"nameHeader,omitempty" yaml:"nameHeader,omitempty"`
-	GroupsHeader   string   `json:"groupsHeader,omitempty" yaml:"groupsHeader,omitempty"`
-	GroupsDelimiter string  `json:"groupsDelimiter,omitempty" yaml:"groupsDelimiter,omitempty"` // default ","
+	TrustedProxies  []string `json:"trustedProxies" yaml:"trustedProxies"` // CIDRs allowed to assert identity
+	UserHeader      string   `json:"userHeader" yaml:"userHeader"`         // e.g. X-authentik-username
+	EmailHeader     string   `json:"emailHeader,omitempty" yaml:"emailHeader,omitempty"`
+	NameHeader      string   `json:"nameHeader,omitempty" yaml:"nameHeader,omitempty"`
+	GroupsHeader    string   `json:"groupsHeader,omitempty" yaml:"groupsHeader,omitempty"`
+	GroupsDelimiter string   `json:"groupsDelimiter,omitempty" yaml:"groupsDelimiter,omitempty"` // default ","
+	// AMRHeader, when set, carries the authentication methods the upstream
+	// actually performed (space/comma separated, RFC 8176 tokens). It drives MFA
+	// delegation. When empty, no MFA is asserted - never claim mfa the upstream
+	// didn't prove.
+	AMRHeader string `json:"amrHeader,omitempty" yaml:"amrHeader,omitempty"`
+}
+
+// AuthRequestSpec delegates authentication to an external auth server using the
+// nginx auth_request pattern (e.g. an Authentik proxy outpost). Unlike
+// ForwardAuthSpec - which TRUSTS identity headers already set by a fronting proxy
+// - here gpm itself is the auth_request client: for every request it calls the
+// auth server, copies the identity headers the server returns onto the upstream,
+// and redirects unauthenticated browsers into the server's sign-in flow. This
+// reproduces the per-host Authentik "Advanced" nginx snippet as typed config.
+type AuthRequestSpec struct {
+	// OutpostURL is the base URL of the auth server reachable from gpm,
+	// e.g. http://auth-outpost:9000. Its host:port is the dial target; the
+	// browser-facing host is preserved from the original request.
+	OutpostURL string `json:"outpostURL" yaml:"outpostURL"`
+	// PathPrefix is the path namespace the auth server owns (its /auth, /start,
+	// /callback, /sign_out endpoints), proxied straight through and excluded from
+	// gating. Default "/outpost.goauthentik.io".
+	PathPrefix string `json:"pathPrefix,omitempty" yaml:"pathPrefix,omitempty"`
+	// AuthPath is the per-request authentication subrequest endpoint, relative to
+	// OutpostURL. Default PathPrefix + "/auth/nginx".
+	AuthPath string `json:"authPath,omitempty" yaml:"authPath,omitempty"`
+	// CopyHeaders are the response headers from the auth subrequest copied onto the
+	// upstream request on success (and stripped from untrusted inbound requests so
+	// a client cannot forge them). Default the Authentik X-authentik-* set.
+	CopyHeaders []string `json:"copyHeaders,omitempty" yaml:"copyHeaders,omitempty"`
 }
 
 // RoleMapping turns IdP groups/claims into local roles so SSO users become
@@ -55,9 +89,10 @@ type RoleMapping struct {
 type IdentityProvider struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 
-	Type        string           `json:"type" yaml:"type"` // oidc | forward-auth
+	Type        string           `json:"type" yaml:"type"` // oidc | forward-auth | auth-request
 	OIDC        *OIDCSpec        `json:"oidc,omitempty" yaml:"oidc,omitempty"`
 	ForwardAuth *ForwardAuthSpec `json:"forwardAuth,omitempty" yaml:"forwardAuth,omitempty"`
+	AuthRequest *AuthRequestSpec `json:"authRequest,omitempty" yaml:"authRequest,omitempty"`
 	RoleMapping *RoleMapping     `json:"roleMapping,omitempty" yaml:"roleMapping,omitempty"`
 }
 
@@ -85,8 +120,19 @@ func (p IdentityProvider) Validate() error {
 		if p.ForwardAuth.UserHeader == "" {
 			return fmt.Errorf("identity provider %q: forwardAuth.userHeader is required", p.Name)
 		}
+	case IdPTypeAuthRequest:
+		if p.AuthRequest == nil {
+			return fmt.Errorf("identity provider %q: authRequest spec required", p.Name)
+		}
+		u, err := url.Parse(p.AuthRequest.OutpostURL)
+		if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("identity provider %q: authRequest.outpostURL must be an http(s) URL with a host, got %q", p.Name, p.AuthRequest.OutpostURL)
+		}
+		if pp := p.AuthRequest.PathPrefix; pp != "" && pp[0] != '/' {
+			return fmt.Errorf("identity provider %q: authRequest.pathPrefix must start with /, got %q", p.Name, pp)
+		}
 	default:
-		return fmt.Errorf("identity provider %q: type must be oidc or forward-auth, got %q", p.Name, p.Type)
+		return fmt.Errorf("identity provider %q: type must be oidc, forward-auth or auth-request, got %q", p.Name, p.Type)
 	}
 	return nil
 }

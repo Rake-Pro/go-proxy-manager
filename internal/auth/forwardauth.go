@@ -21,6 +21,7 @@ type ForwardAuth struct {
 	emailH  string
 	nameH   string
 	groupsH string
+	amrH    string
 	delim   string
 }
 
@@ -32,6 +33,7 @@ func CompileForwardAuth(spec model.ForwardAuthSpec, idpName string) ForwardAuth 
 		emailH:  spec.EmailHeader,
 		nameH:   spec.NameHeader,
 		groupsH: spec.GroupsHeader,
+		amrH:    spec.AMRHeader,
 		delim:   spec.GroupsDelimiter,
 	}
 	if f.delim == "" {
@@ -83,9 +85,9 @@ func (f ForwardAuth) Identity(r *http.Request) (Identity, bool) {
 		Name:    headerOr(r, f.nameH, user),
 		Email:   strings.TrimSpace(r.Header.Get(f.emailH)),
 		IdP:     f.idpName,
-		// A trusted forward-auth assertion means the upstream already
-		// authenticated the user (including any MFA it enforces).
-		AMR: []string{"mfa"},
+		// AMR reflects only what the upstream actually asserted via amrH; we never
+		// fabricate "mfa" the upstream didn't prove.
+		AMR: f.amr(r),
 	}
 	if f.groupsH != "" {
 		if raw := strings.TrimSpace(r.Header.Get(f.groupsH)); raw != "" {
@@ -103,11 +105,31 @@ func (f ForwardAuth) Identity(r *http.Request) (Identity, bool) {
 // proxying any request that did not come from a trusted proxy, so a client
 // cannot inject forged identity headers to the upstream.
 func (f ForwardAuth) Strip(r *http.Request) {
-	for _, h := range []string{f.userH, f.emailH, f.nameH, f.groupsH} {
+	for _, h := range []string{f.userH, f.emailH, f.nameH, f.groupsH, f.amrH} {
 		if h != "" {
 			r.Header.Del(h)
 		}
 	}
+}
+
+// amr parses the configured AMR header into method tokens (space- or
+// comma-separated). Returns nil when no header is configured or present, so the
+// identity asserts no authentication methods rather than a fabricated one.
+func (f ForwardAuth) amr(r *http.Request) []string {
+	if f.amrH == "" {
+		return nil
+	}
+	raw := strings.TrimSpace(r.Header.Get(f.amrH))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, m := range strings.FieldsFunc(raw, func(c rune) bool { return c == ',' || c == ' ' }) {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func headerOr(r *http.Request, header, fallback string) string {

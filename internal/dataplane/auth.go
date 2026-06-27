@@ -33,6 +33,15 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		}
 		fa := auth.CompileForwardAuth(*idp.ForwardAuth, idpName)
 		return forwardAuthGate(fa, idp.RoleMapping, mw.Auth.RequiredRoles, next)
+	case model.AuthModeAuthRequest:
+		if idp.AuthRequest == nil {
+			return failClosed(hostName, "auth-request mode requires an auth-request identity provider")
+		}
+		arp, err := compileAuthRequest(*idp.AuthRequest)
+		if err != nil {
+			return failClosed(hostName, "auth-request: "+err.Error())
+		}
+		return arp.handler(hostName, next)
 	case model.AuthModeOIDC:
 		return failClosedf(hostName, "per-host OIDC gating is not yet implemented (P1); denying")
 	default:

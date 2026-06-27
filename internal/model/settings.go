@@ -5,30 +5,16 @@ import (
 	"net/url"
 )
 
-// BreakGlassSettings defines the safe emergency-access path used when SSO-only
-// mode hides local login. This is the deliberate fix for the fork's unauthed
-// plaintext :81 break-glass: never an open port, but a real escape hatch.
-type BreakGlassSettings struct {
-	// LocalhostOnly permits a local admin login only from loopback (and the CLI).
-	LocalhostOnly bool `json:"localhostOnly,omitempty" yaml:"localhostOnly,omitempty"`
-	// EmergencyTokenHash is a bcrypt hash of a time-limited break-glass token.
-	EmergencyTokenHash string `json:"emergencyTokenHash,omitempty" yaml:"emergencyTokenHash,omitempty"`
-}
-
-// Configured reports whether at least one safe break-glass mechanism exists.
-func (b BreakGlassSettings) Configured() bool {
-	return b.LocalhostOnly || b.EmergencyTokenHash != ""
-}
-
 // AdminAuthSettings governs how operators authenticate to the admin panel.
 type AdminAuthSettings struct {
 	// Providers names IdentityProvider objects allowed to log into the panel.
 	Providers []string `json:"providers,omitempty" yaml:"providers,omitempty"`
 	// LocalLoginEnabled keeps username/password login available (anti-lockout).
 	LocalLoginEnabled bool `json:"localLoginEnabled" yaml:"localLoginEnabled"`
-	// SSOOnly enforces SSO and hides the local form; requires safe BreakGlass.
-	SSOOnly    bool               `json:"ssoOnly,omitempty" yaml:"ssoOnly,omitempty"`
-	BreakGlass BreakGlassSettings `json:"breakGlass,omitempty" yaml:"breakGlass,omitempty"`
+	// SSOOnly enforces SSO and disables local login entirely. Recovery from an
+	// SSO outage is by redeploying with local login re-enabled (no in-band
+	// break-glass: a network-position-trusted local door is a spoofing risk).
+	SSOOnly bool `json:"ssoOnly,omitempty" yaml:"ssoOnly,omitempty"`
 }
 
 // Settings is the singleton app configuration, stored as config/settings.yaml.
@@ -52,13 +38,8 @@ func (s Settings) Validate() error {
 			return fmt.Errorf("settings: externalBaseURL must be an absolute URL, got %q", s.ExternalBaseURL)
 		}
 	}
-	if s.AdminAuth.SSOOnly {
-		if len(s.AdminAuth.Providers) == 0 {
-			return fmt.Errorf("settings: ssoOnly requires at least one adminAuth.providers entry")
-		}
-		if !s.AdminAuth.LocalLoginEnabled && !s.AdminAuth.BreakGlass.Configured() {
-			return fmt.Errorf("settings: ssoOnly with local login disabled requires a safe breakGlass (localhostOnly or emergencyTokenHash) - refusing to lock you out")
-		}
+	if s.AdminAuth.SSOOnly && len(s.AdminAuth.Providers) == 0 {
+		return fmt.Errorf("settings: ssoOnly requires at least one adminAuth.providers entry")
 	}
 	return nil
 }

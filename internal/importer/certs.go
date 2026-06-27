@@ -86,8 +86,12 @@ func (s *importState) importCertificates() error {
 				KeyPEM:  keyPath,
 			})
 		} else {
+			// Files are known-missing: keep the object visible to the operator but
+			// mark it Disabled so the compiled data plane skips it instead of
+			// failing to load a cert that points at a non-existent file.
+			cert.ObjectMeta.Disabled = true
 			s.warn(label, "files",
-				fmt.Sprintf("certificate files not found under %s; cert must be re-supplied", s.dataDir))
+				fmt.Sprintf("certificate files not found under %s; emitted disabled, cert must be re-supplied", s.dataDir))
 		}
 
 		if !s.add(label, "", cert) {

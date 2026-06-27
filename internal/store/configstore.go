@@ -163,8 +163,12 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	if err != nil {
 		return "", err
 	}
-	if err := withObject(&cfg, obj).Validate(); err != nil {
+	merged := withObject(&cfg, obj)
+	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("rejecting save: %w", err)
+	}
+	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
+		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
 
 	meta := obj.GetMeta()
@@ -185,6 +189,9 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := model.ValidateName(name); err != nil {
+		return "", err
+	}
 	dir, ok := kindDir[kind]
 	if !ok {
 		return "", fmt.Errorf("unknown object kind %q", kind)
@@ -228,6 +235,9 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
+	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
+		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
 
 	now := time.Now().UTC()
 	for _, o := range objs {
@@ -253,6 +263,9 @@ func (s *Store) Head(ctx context.Context) (string, error) {
 
 // History returns the git history for one object's file.
 func (s *Store) History(ctx context.Context, kind, name string, limit int) ([]Commit, error) {
+	if err := model.ValidateName(name); err != nil {
+		return nil, err
+	}
 	dir, ok := kindDir[kind]
 	if !ok {
 		return nil, fmt.Errorf("unknown object kind %q", kind)
@@ -272,6 +285,9 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 	defer s.mu.Unlock()
 	if err := settings.Validate(); err != nil {
 		return "", err
+	}
+	if lits := model.LiteralSecrets(settings); len(lits) > 0 {
+		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
 	if settings.SchemaVersion == 0 {
 		settings.SchemaVersion = model.SchemaVersion

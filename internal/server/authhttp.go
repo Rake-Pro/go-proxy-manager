@@ -2,13 +2,57 @@ package server
 
 import (
 	"html/template"
-	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/rs/zerolog/log"
 )
+
+// sameOriginGuard rejects state-changing cross-site requests as CSRF defense in
+// depth. Unsafe methods must present a same-origin Sec-Fetch-Site, or (for
+// clients that don't send it) an Origin header whose host matches the request
+// host. A same-site-but-cross-subdomain request is rejected - that is exactly
+// the sibling-subdomain gap SameSite=Lax leaves open.
+func sameOriginGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if safeMethod(r.Method) || originOK(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+	})
+}
+
+func safeMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
+func originOK(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "same-site", "cross-site":
+		return false
+	}
+	// No Sec-Fetch-Site (older browser / non-browser client): fall back to Origin.
+	// Absent Origin on a non-browser client carries no ambient-cookie CSRF risk;
+	// the /api/ CSRF token still gates those routes.
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
 
 var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><title>go-proxy-manager login</title></head>
@@ -42,7 +86,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Return    string
 	}{
 		Providers: s.authn.LoginOptions(),
-		Local:     s.authn.LocalLoginVisible(clientIP(r)),
+		Local:     s.authn.LocalLoginVisible(),
 		Return:    returnTo,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -75,7 +119,7 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	sess, err := s.authn.LocalLogin(r.Context(), r.PostForm.Get("username"), r.PostForm.Get("password"), clientIP(r))
+	sess, err := s.authn.LocalLogin(r.Context(), r.PostForm.Get("username"), r.PostForm.Get("password"))
 	if err != nil {
 		log.Warn().Err(err).Msg("local login failed")
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
@@ -101,12 +145,4 @@ func sanitizeReturnTo(p string) string {
 		return "/"
 	}
 	return p
-}
-
-func clientIP(r *http.Request) net.IP {
-	host := r.RemoteAddr
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		host = h
-	}
-	return net.ParseIP(strings.TrimSpace(host))
 }

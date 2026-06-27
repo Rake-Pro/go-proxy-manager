@@ -12,6 +12,18 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// secureCipherSuites restricts TLS 1.2 to forward-secret AEAD suites (no CBC,
+// no non-PFS), removing the weak suites Go's 1.2 defaults still permit. TLS 1.3
+// suites are fixed by the runtime and always AEAD.
+var secureCipherSuites = []uint16{
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+}
+
 // Server runs the reverse-proxy data plane. The compiled router is held in an
 // atomic pointer so config reloads swap the whole routing table (and cert set)
 // live, with no listener restart and no in-flight request disruption.
@@ -69,8 +81,9 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadHeaderTimeout: 15 * time.Second,
 		// GetCertificate reads the live router so cert changes apply on reload.
 		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"h2", "http/1.1"},
+			MinVersion:   tls.VersionTLS12,
+			CipherSuites: secureCipherSuites,
+			NextProtos:   []string{"h2", "http/1.1"},
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return s.current().certs.GetCertificate(hello)
 			},

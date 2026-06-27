@@ -78,6 +78,64 @@ func TestConfigValidate(t *testing.T) {
 			}}},
 			wantErr: `references unknown identityProvider "authentik"`,
 		},
+		{
+			name: "valid auth-request identity provider + middleware",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{{
+					ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeAuthRequest,
+					AuthRequest: &AuthRequestSpec{OutpostURL: "http://auth-outpost:9000"},
+				}},
+				Middlewares: []Middleware{{
+					ObjectMeta: ObjectMeta{Name: "sso"}, Type: MWTypeAuth,
+					Auth: &AuthMiddleware{IdentityProvider: "authentik", Mode: AuthModeAuthRequest},
+				}},
+			},
+		},
+		{
+			name: "auth-request idp requires a valid outpostURL",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeAuthRequest,
+				AuthRequest: &AuthRequestSpec{OutpostURL: "not a url"},
+			}}},
+			wantErr: "outpostURL must be an http(s) URL",
+		},
+		{
+			name: "auth-request mode rejects requiredRoles",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "sso"}, Type: MWTypeAuth,
+				Auth: &AuthMiddleware{IdentityProvider: "authentik", Mode: AuthModeAuthRequest, RequiredRoles: []string{"admin"}},
+			}}},
+			wantErr: "requiredRoles is not supported in auth-request mode",
+		},
+		{
+			name: "duplicate cert domain rejected",
+			cfg: Config{Certificates: []Certificate{
+				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},
+				{ObjectMeta: ObjectMeta{Name: "b"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "b.pem", KeyFile: "bk.pem"}},
+			}},
+			wantErr: `both claim domain "*.example.com"`,
+		},
+		{
+			name: "disabled cert does not collide",
+			cfg: Config{Certificates: []Certificate{
+				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},
+				{ObjectMeta: ObjectMeta{Name: "b", Disabled: true}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "b.pem", KeyFile: "bk.pem"}},
+			}},
+		},
+		{
+			name: "absolute custom cert path rejected",
+			cfg: Config{Certificates: []Certificate{
+				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"x.example.com"}, Custom: &CustomCertSpec{CertFile: "/etc/shadow", KeyFile: "k.pem"}},
+			}},
+			wantErr: "must be relative to the cert store",
+		},
+		{
+			name: "traversal custom cert path rejected",
+			cfg: Config{Certificates: []Certificate{
+				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"x.example.com"}, Custom: &CustomCertSpec{CertFile: "../../etc/shadow", KeyFile: "k.pem"}},
+			}},
+			wantErr: "must be relative to the cert store",
+		},
 	}
 
 	for _, tc := range tests {
@@ -109,21 +167,16 @@ func TestSettingsValidate(t *testing.T) {
 			wantErr: "absolute URL",
 		},
 		{
-			name: "sso-only without break-glass is rejected",
+			name: "sso-only without providers is rejected",
 			s: Settings{
-				AdminAuth: AdminAuthSettings{
-					SSOOnly: true, Providers: []string{"authentik"}, LocalLoginEnabled: false,
-				},
+				AdminAuth: AdminAuthSettings{SSOOnly: true},
 			},
-			wantErr: "breakGlass",
+			wantErr: "at least one adminAuth.providers",
 		},
 		{
-			name: "sso-only with localhost break-glass is allowed",
+			name: "sso-only with a provider is allowed",
 			s: Settings{
-				AdminAuth: AdminAuthSettings{
-					SSOOnly: true, Providers: []string{"authentik"}, LocalLoginEnabled: false,
-					BreakGlass: BreakGlassSettings{LocalhostOnly: true},
-				},
+				AdminAuth: AdminAuthSettings{SSOOnly: true, Providers: []string{"authentik"}},
 			},
 		},
 	}

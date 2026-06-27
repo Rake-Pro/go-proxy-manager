@@ -252,6 +252,10 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 
 	mux.HandleFunc("DELETE "+base+"/{name}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
+		if err := model.ValidateName(name); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
 		sha, err := d.Store.Delete(r.Context(), res.kind, name, d.author(r))
 		if err != nil {
 			writeErr(w, deleteStatus(err), err)
@@ -264,6 +268,10 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 
 	mux.HandleFunc("GET "+base+"/{name}/history", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
+		if err := model.ValidateName(name); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
 		commits, err := d.Store.History(r.Context(), res.kind, name, 50)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)

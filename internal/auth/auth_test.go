@@ -58,11 +58,11 @@ func TestMFASatisfied(t *testing.T) {
 
 func forwardAuthSpec() model.ForwardAuthSpec {
 	return model.ForwardAuthSpec{
-		TrustedProxies: []string{"10.0.0.0/8"},
-		UserHeader:     "X-Authentik-Username",
-		EmailHeader:    "X-Authentik-Email",
-		NameHeader:     "X-Authentik-Name",
-		GroupsHeader:   "X-Authentik-Groups",
+		TrustedProxies:  []string{"10.0.0.0/8"},
+		UserHeader:      "X-Authentik-Username",
+		EmailHeader:     "X-Authentik-Email",
+		NameHeader:      "X-Authentik-Name",
+		GroupsHeader:    "X-Authentik-Groups",
 		GroupsDelimiter: "|",
 	}
 }
@@ -94,8 +94,38 @@ func TestForwardAuthTrustBoundary(t *testing.T) {
 	if len(id.Groups) != 2 || id.Groups[0] != "proxy-admins" || id.Groups[1] != "staff" {
 		t.Fatalf("unexpected groups: %v", id.Groups)
 	}
+	// Without a configured AMR header, no MFA is asserted - we never fabricate it.
+	if MFASatisfied(id) {
+		t.Fatal("forward-auth must not assert MFA without an amrHeader")
+	}
+}
+
+func TestForwardAuthAMRHeader(t *testing.T) {
+	spec := forwardAuthSpec()
+	spec.AMRHeader = "X-Authentik-Amr"
+	fa := CompileForwardAuth(spec, "authentik")
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.1.2.3:5000"
+	r.Header.Set("X-Authentik-Username", "admin")
+	r.Header.Set("X-Authentik-Amr", "pwd, mfa")
+	id, ok := fa.Identity(r)
+	if !ok {
+		t.Fatal("expected identity from trusted peer")
+	}
+	if len(id.AMR) != 2 || id.AMR[0] != "pwd" || id.AMR[1] != "mfa" {
+		t.Fatalf("expected AMR [pwd mfa] from the header, got %v", id.AMR)
+	}
 	if !MFASatisfied(id) {
-		t.Fatal("trusted forward-auth should count as MFA-satisfied")
+		t.Fatal("an asserted mfa AMR token should satisfy MFA")
+	}
+
+	// Strip must also remove the AMR header from an untrusted request.
+	r2 := httptest.NewRequest("GET", "/", nil)
+	r2.Header.Set("X-Authentik-Amr", "mfa")
+	fa.Strip(r2)
+	if r2.Header.Get("X-Authentik-Amr") != "" {
+		t.Fatal("Strip must remove the AMR header")
 	}
 }
 

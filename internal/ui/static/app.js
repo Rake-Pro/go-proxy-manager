@@ -76,12 +76,17 @@ function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 
 // ---------- api ----------
+let csrfToken = '';
+
 async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || 'GET', headers: {}, credentials: 'same-origin' };
   if (opts.body !== undefined && opts.body !== null) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(opts.body);
+  }
+  if (init.method !== 'GET' && init.method !== 'HEAD') {
+    init.headers['X-CSRF-Token'] = csrfToken;
   }
   let res;
   try {
@@ -112,12 +117,14 @@ async function api(path, opts) {
 }
 
 // ---------- toasts ----------
-function toast(title, msg, type) {
+function toast(title, msg, type, opts) {
   const wrap = document.getElementById('toasts');
   if (!wrap) return;
   const t = document.createElement('div');
   t.className = 'toast ' + (type || '');
-  t.innerHTML = `<div class="t-title">${esc(title)}</div>` + (msg ? `<div class="t-msg">${msg}</div>` : '');
+  // msg is escaped as text by default; pass {html:true} only for deliberately
+  // built markup (the caller stays responsible for escaping any data in it).
+  t.innerHTML = `<div class="t-title">${esc(title)}</div>` + (msg ? `<div class="t-msg">${(opts && opts.html) ? msg : esc(msg)}</div>` : '');
   wrap.appendChild(t);
   setTimeout(() => {
     t.style.transition = 'opacity .3s';
@@ -127,10 +134,10 @@ function toast(title, msg, type) {
 }
 function toastSaved(commit) {
   const sha = shortSha(commit);
-  toast('Saved', sha ? `committed <span class="sha">${esc(sha)}</span>` : 'changes committed to git', 'ok');
+  toast('Saved', sha ? `committed <span class="sha">${esc(sha)}</span>` : 'changes committed to git', 'ok', { html: true });
 }
 function toastErr(e) {
-  toast('Something went wrong', esc(e && e.message ? e.message : String(e)), 'err');
+  toast('Something went wrong', e && e.message ? e.message : String(e), 'err');
 }
 
 // ---------- shell ----------
@@ -190,6 +197,7 @@ async function loadTopbar() {
     const me = (await api('/api/me')).data;
     state.me = me;
     if (me) {
+      csrfToken = me.csrfToken || '';
       const name = me.Name || me.Subject || me.Email || 'user';
       const role = me.Role || '';
       const idp = me.IdP || '';
@@ -793,7 +801,7 @@ async function hostEditor(c, name) {
       del.disabled = true;
       try {
         const r = await api('/api/proxy-hosts/' + encodeURIComponent(h.name), { method: 'DELETE' });
-        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'host removed', 'ok');
+        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'host removed', 'ok', { html: true });
         refreshHeadSha();
         location.hash = '#/hosts';
       } catch (e) { toastErr(e); del.disabled = false; }
@@ -959,7 +967,7 @@ async function certEditor(c, name) {
     del.disabled = true;
     try {
       const r = await api('/api/certificates/' + encodeURIComponent(ct.name), { method: 'DELETE' });
-      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok');
+      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
       refreshHeadSha(); location.hash = '#/certs';
     } catch (e) { toastErr(e); del.disabled = false; }
   });
@@ -1061,7 +1069,7 @@ async function genericList(c, section) {
       b.disabled = true;
       try {
         const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'DELETE' });
-        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok');
+        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
         refreshHeadSha(); route();
       } catch (err) { toastErr(err); b.disabled = false; }
     });
@@ -1115,7 +1123,7 @@ async function genericEditor(c, section, name) {
     if (!nm) { toast('Name required', 'Enter a name.', 'err'); return; }
     let body;
     try { body = JSON.parse($('#gs-json').value); }
-    catch (e) { toast('Invalid JSON', esc(e.message), 'err'); return; }
+    catch (e) { toast('Invalid JSON', e.message, 'err'); return; }
     if (!body || typeof body !== 'object' || Array.isArray(body)) { toast('Invalid object', 'JSON must be an object.', 'err'); return; }
     body.name = nm;
     const btn = $('#gs-save'); btn.disabled = true;
@@ -1132,7 +1140,7 @@ async function genericEditor(c, section, name) {
     del.disabled = true;
     try {
       const r = await api('/api/' + plural + '/' + encodeURIComponent(obj.name), { method: 'DELETE' });
-      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok');
+      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
       refreshHeadSha(); location.hash = '#/' + section;
     } catch (e) { toastErr(e); del.disabled = false; }
   });

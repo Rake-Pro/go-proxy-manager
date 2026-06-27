@@ -106,8 +106,20 @@ func (s *importState) importProxyHosts() error {
 			if alName, ok := s.alNames[alID]; ok {
 				ph.AccessLists = []string{alName}
 			} else {
+				// Fail closed: the host was gated before, so do NOT import it wide
+				// open. Synthesize a deny-all access list and attach it so the host
+				// returns 403 until an operator reassigns a valid access list.
+				lockName := s.uniqueName("AccessList", name+"-import-locked", "accesslist", id)
+				lock := model.AccessList{
+					ObjectMeta:    model.ObjectMeta{Name: lockName, DisplayName: name + " import lock"},
+					DefaultAction: model.ActionDeny,
+					Rules:         []model.IPRule{{Action: model.ActionDeny, CIDR: "0.0.0.0/0"}},
+				}
+				if s.add(label, "access_list_id", lock) {
+					ph.AccessLists = []string{lockName}
+				}
 				s.warn(label, "access_list_id",
-					fmt.Sprintf("referenced access_list #%d was not imported; access list reference dropped", alID))
+					fmt.Sprintf("referenced access_list #%d was not imported; host LOCKED with a deny-all access list (returns 403) until an operator reassigns a valid access list", alID))
 			}
 		}
 

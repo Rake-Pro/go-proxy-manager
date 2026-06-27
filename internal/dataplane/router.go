@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"crypto/tls"
+	"net"
 	"net/http"
 	"strings"
 
@@ -14,6 +15,13 @@ import (
 type router struct {
 	hosts map[string]*hostHandler
 	certs *certResolver
+
+	// identityHeaders are stripped from every inbound request whose peer is not a
+	// trusted proxy, closing the gap where a direct client forges X-* identity
+	// headers to an unprotected backend. trustedNets are the peers exempt from
+	// stripping (they legitimately assert forward-auth identities).
+	identityHeaders []string
+	trustedNets     []*net.IPNet
 }
 
 // buildRouter compiles the config into a router. certDir resolves relative
@@ -25,7 +33,12 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 	}
 	reg := buildRegistry(cfg)
 
-	rt := &router{hosts: map[string]*hostHandler{}, certs: certs}
+	rt := &router{
+		hosts:           map[string]*hostHandler{},
+		certs:           certs,
+		identityHeaders: reg.identityHeaders,
+		trustedNets:     reg.trustedNets,
+	}
 	for _, h := range cfg.ProxyHosts {
 		if h.Disabled {
 			continue
@@ -54,7 +67,22 @@ func (rt *router) tlsConfig() *tls.Config {
 	return &tls.Config{
 		GetCertificate: rt.certs.GetCertificate,
 		MinVersion:     tls.VersionTLS12,
+		CipherSuites:   secureCipherSuites,
 		NextProtos:     []string{"h2", "http/1.1"},
+	}
+}
+
+// stripUntrustedIdentity removes identity headers from a request unless its peer
+// is a trusted proxy, so a direct client can never forge an identity to a backend.
+func (rt *router) stripUntrustedIdentity(r *http.Request) {
+	if len(rt.identityHeaders) == 0 {
+		return
+	}
+	if ip := peerIP(r); ip != nil && ipInNets(ip, rt.trustedNets) {
+		return // a trusted proxy may assert identity headers
+	}
+	for _, h := range rt.identityHeaders {
+		r.Header.Del(h)
 	}
 }
 
@@ -65,6 +93,7 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such host", http.StatusNotFound)
 		return
 	}
+	rt.stripUntrustedIdentity(r)
 	hh.handler.ServeHTTP(w, r)
 }
 
@@ -87,5 +116,6 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
 		return
 	}
+	rt.stripUntrustedIdentity(r)
 	hh.handler.ServeHTTP(w, r)
 }

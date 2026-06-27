@@ -1,6 +1,10 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+)
 
 // Certificate types.
 const (
@@ -64,6 +68,14 @@ func (c Certificate) Validate() error {
 	case CertTypeCustom:
 		if c.Custom == nil || c.Custom.CertFile == "" || c.Custom.KeyFile == "" {
 			return fmt.Errorf("certificate %q: custom certFile and keyFile are required", c.Name)
+		}
+		// Confine custom cert files to the managed cert store: reject absolute
+		// paths and traversal so a config write cannot point the loader at an
+		// arbitrary host file.
+		for _, f := range []string{c.Custom.CertFile, c.Custom.KeyFile} {
+			if filepath.IsAbs(f) || strings.Contains(filepath.Clean(f), "..") {
+				return fmt.Errorf("certificate %q: custom cert path %q must be relative to the cert store (no absolute or .. paths)", c.Name, f)
+			}
 		}
 	default:
 		return fmt.Errorf("certificate %q: type must be custom or acme, got %q", c.Name, c.Type)

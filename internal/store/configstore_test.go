@@ -104,3 +104,72 @@ func TestStoreRejectsDanglingRef(t *testing.T) {
 		t.Fatalf("expected no hosts persisted, got %d", len(cfg.ProxyHosts))
 	}
 }
+
+func sampleIdP(name string, secret model.Secret) model.IdentityProvider {
+	return model.IdentityProvider{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		Type:       model.IdPTypeOIDC,
+		OIDC: &model.OIDCSpec{
+			IssuerURL:    "https://idp.example.com",
+			ClientID:     "gpm",
+			ClientSecret: secret,
+		},
+	}
+}
+
+func TestStoreRejectsLiteralSecret(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Save(ctx, sampleIdP("idp", model.Secret("plaintext-secret")), Author{}); err == nil {
+		t.Fatal("expected save to be rejected for literal secret")
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.IdentityProviders) != 0 {
+		t.Fatalf("expected no idp persisted, got %d", len(cfg.IdentityProviders))
+	}
+}
+
+func TestStoreAcceptsPlaceholderSecret(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Save(ctx, sampleIdP("idp", model.Secret("${ENV:OIDC_CLIENT_SECRET}")), Author{}); err != nil {
+		t.Fatalf("expected placeholder secret to be accepted, got %v", err)
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.IdentityProviders) != 1 {
+		t.Fatalf("expected 1 idp persisted, got %d", len(cfg.IdentityProviders))
+	}
+}
+
+func TestStoreDeleteRejectsTraversal(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	victim := filepath.Join(filepath.Dir(st.Dir()), "victim.yaml")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed victim: %v", err)
+	}
+	if _, err := st.Delete(ctx, "ProxyHost", "../../victim", Author{}); err == nil {
+		t.Fatal("expected delete to reject traversal name")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("victim file outside dir was touched: %v", err)
+	}
+}
+
+func TestStoreHistoryRejectsTraversal(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.History(context.Background(), "ProxyHost", "../../etc/x", 10); err == nil {
+		t.Fatal("expected history to reject traversal name")
+	}
+}

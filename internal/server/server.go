@@ -31,19 +31,23 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /version", s.handleVersion)
 
-	// Authentication endpoints.
+	// Authentication endpoints. The credential-bearing POSTs are wrapped in the
+	// same-origin guard so a sibling subdomain cannot force login/logout (the
+	// gap SameSite=Lax leaves); /auth/local has no session yet, so the Origin
+	// check is its only CSRF defense.
 	mux.HandleFunc("GET /auth/login", s.handleLogin)
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
-	mux.HandleFunc("POST /auth/local", s.handleLocalLogin)
-	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.Handle("POST /auth/local", sameOriginGuard(http.HandlerFunc(s.handleLocalLogin)))
+	mux.Handle("POST /auth/logout", sameOriginGuard(http.HandlerFunc(s.handleLogout)))
 
 	// Current principal (user-level): proves the session/role gate.
 	mux.Handle("GET /api/me", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleMe)))
 
 	// REST CRUD API (admin-only). The more specific /api/me above takes
-	// precedence over this subtree for that exact path.
+	// precedence over this subtree for that exact path. RequireRole enforces the
+	// CSRF token on mutating methods; sameOriginGuard is the outer belt.
 	if apiHandler != nil {
-		mux.Handle("/api/", s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler)))
+		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler))))
 	}
 
 	// The embedded SPA at the catch-all root. More specific routes above win;

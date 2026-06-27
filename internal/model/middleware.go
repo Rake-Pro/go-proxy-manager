@@ -16,6 +16,7 @@ const (
 const (
 	AuthModeOIDC        = "oidc"         // redirect the browser through the OIDC flow
 	AuthModeForwardAuth = "forward-auth" // accept a trusted forward-auth identity
+	AuthModeAuthRequest = "auth-request" // delegate to an external auth_request endpoint
 )
 
 // AuthMiddleware gates requests through a named IdentityProvider and, optionally,
@@ -62,8 +63,14 @@ func (m Middleware) Validate() error {
 		if m.Auth == nil || m.Auth.IdentityProvider == "" {
 			return fmt.Errorf("middleware %q: auth.identityProvider is required", m.Name)
 		}
-		if mode := m.Auth.Mode; mode != "" && mode != AuthModeOIDC && mode != AuthModeForwardAuth {
-			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth, got %q", m.Name, mode)
+		switch mode := m.Auth.Mode; mode {
+		case "", AuthModeOIDC, AuthModeForwardAuth:
+		case AuthModeAuthRequest:
+			if len(m.Auth.RequiredRoles) > 0 {
+				return fmt.Errorf("middleware %q: auth.requiredRoles is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", m.Name)
+			}
+		default:
+			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth|auth-request, got %q", m.Name, mode)
 		}
 	case MWTypeHeaders:
 		if m.Headers == nil {

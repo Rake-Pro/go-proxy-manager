@@ -244,6 +244,178 @@ func TestImport(t *testing.T) {
 	}
 }
 
+// buildSecurityDB creates a minimal NPM data dir with the access_list,
+// access_list_client and proxy_host tables and lets the caller seed rows.
+func buildSecurityDB(t *testing.T, setup func(exec func(string, ...any))) string {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "database.sqlite")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE certificate (
+			id INTEGER PRIMARY KEY, provider TEXT, nice_name TEXT,
+			domain_names TEXT, expires_on TEXT, meta TEXT, is_deleted INTEGER DEFAULT 0)`,
+		`CREATE TABLE access_list (
+			id INTEGER PRIMARY KEY, name TEXT, satisfy_any INTEGER, pass_auth INTEGER, is_deleted INTEGER DEFAULT 0)`,
+		`CREATE TABLE access_list_auth (
+			id INTEGER PRIMARY KEY, access_list_id INTEGER, username TEXT, password TEXT, is_deleted INTEGER DEFAULT 0)`,
+		`CREATE TABLE access_list_client (
+			id INTEGER PRIMARY KEY, access_list_id INTEGER, address TEXT, directive TEXT, is_deleted INTEGER DEFAULT 0)`,
+		`CREATE TABLE proxy_host (
+			id INTEGER PRIMARY KEY, domain_names TEXT, forward_scheme TEXT, forward_host TEXT, forward_port INTEGER,
+			access_list_id INTEGER, enabled INTEGER, is_deleted INTEGER DEFAULT 0)`,
+	}
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("create: %v\n%s", err, q)
+		}
+	}
+
+	exec := func(q string, args ...any) {
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("insert: %v\n%s", err, q)
+		}
+	}
+	setup(exec)
+	return dir
+}
+
+func TestImportAccessListSecurity(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(exec func(string, ...any))
+		verify func(t *testing.T, res *Result)
+	}{
+		{
+			name: "malformed cidr drops only that rule and keeps host protected",
+			setup: func(exec func(string, ...any)) {
+				exec(`INSERT INTO access_list (id, name, satisfy_any, pass_auth) VALUES (1,'Office',0,1)`)
+				exec(`INSERT INTO access_list_client (id, access_list_id, address, directive) VALUES (1,1,'10.0.0.0/8','allow')`)
+				exec(`INSERT INTO access_list_client (id, access_list_id, address, directive) VALUES (2,1,'not-a-cidr','allow')`)
+				exec(`INSERT INTO access_list_client (id, access_list_id, address, directive) VALUES (3,1,'1.2.3.4','deny')`)
+				exec(`INSERT INTO proxy_host (id, domain_names, forward_scheme, forward_host, forward_port, access_list_id, enabled) VALUES
+					(1,'["a.example.com"]','http','backend.local',8080,1,1)`)
+			},
+			verify: func(t *testing.T, res *Result) {
+				if res.Summary["AccessList"] != 1 {
+					t.Fatalf("AccessList count = %d, want 1 (list must survive one bad rule)", res.Summary["AccessList"])
+				}
+				al := findAccessList(t, res.Objects)
+				if len(al.Rules) != 2 {
+					t.Fatalf("rules = %+v, want only the 2 valid rules", al.Rules)
+				}
+				ph := findProxy(t, res.Objects, "a.example.com")
+				if len(ph.AccessLists) != 1 || ph.AccessLists[0] != al.Name {
+					t.Fatalf("host access lists = %v, want [%s] (host stays protected)", ph.AccessLists, al.Name)
+				}
+				assertWarning(t, res, `invalid cidr/ip "not-a-cidr"`)
+			},
+		},
+		{
+			name: "missing access list locks host deny-all instead of going public",
+			setup: func(exec func(string, ...any)) {
+				exec(`INSERT INTO proxy_host (id, domain_names, forward_scheme, forward_host, forward_port, access_list_id, enabled) VALUES
+					(1,'["b.example.com"]','http','backend.local',8080,99,1)`)
+			},
+			verify: func(t *testing.T, res *Result) {
+				ph := findProxy(t, res.Objects, "b.example.com")
+				if len(ph.AccessLists) != 1 {
+					t.Fatalf("host access lists = %v, want a single lock list (must NOT be public)", ph.AccessLists)
+				}
+				lock := findAccessListByName(t, res.Objects, ph.AccessLists[0])
+				if lock.DefaultAction != model.ActionDeny {
+					t.Errorf("lock DefaultAction = %q, want deny", lock.DefaultAction)
+				}
+				if len(lock.Rules) != 1 || lock.Rules[0].Action != model.ActionDeny || lock.Rules[0].CIDR != "0.0.0.0/0" {
+					t.Errorf("lock rules = %+v, want a single deny 0.0.0.0/0", lock.Rules)
+				}
+				assertWarning(t, res, "LOCKED")
+			},
+		},
+		{
+			name: "access list with only a malformed rule becomes deny-all not empty",
+			setup: func(exec func(string, ...any)) {
+				exec(`INSERT INTO access_list (id, name, satisfy_any, pass_auth) VALUES (1,'Office',0,1)`)
+				exec(`INSERT INTO access_list_client (id, access_list_id, address, directive) VALUES (1,1,'not-a-cidr','allow')`)
+			},
+			verify: func(t *testing.T, res *Result) {
+				al := findAccessList(t, res.Objects)
+				if len(al.Rules) != 0 || len(al.BasicAuth) != 0 {
+					t.Fatalf("list should have lost all rules/auth, got rules=%+v auth=%+v", al.Rules, al.BasicAuth)
+				}
+				if al.DefaultAction != model.ActionDeny {
+					t.Errorf("DefaultAction = %q, want deny", al.DefaultAction)
+				}
+				assertWarning(t, res, "forced to deny-all")
+			},
+		},
+		{
+			name: "cert with missing pem files is emitted disabled",
+			setup: func(exec func(string, ...any)) {
+				exec(`INSERT INTO certificate (id, provider, nice_name, domain_names, meta) VALUES
+					(1,'other','Legacy Cert','["legacy.example.com"]','{}')`)
+			},
+			verify: func(t *testing.T, res *Result) {
+				cert := findCert(t, res.Objects)
+				if !cert.Disabled {
+					t.Error("cert with missing files should be Disabled")
+				}
+				if len(res.Certs) != 0 {
+					t.Errorf("no cert copies expected for missing files, got %+v", res.Certs)
+				}
+				assertWarning(t, res, "certificate files not found")
+			},
+		},
+		{
+			name: "non-bcrypt dollar-prefixed password warns",
+			setup: func(exec func(string, ...any)) {
+				exec(`INSERT INTO access_list (id, name, satisfy_any, pass_auth) VALUES (1,'Office',0,1)`)
+				exec(`INSERT INTO access_list_auth (id, access_list_id, username, password) VALUES (1,1,'admin','$apr1$abc$def')`)
+			},
+			verify: func(t *testing.T, res *Result) {
+				al := findAccessList(t, res.Objects)
+				if len(al.BasicAuth) != 1 || al.BasicAuth[0].Username != "admin" {
+					t.Fatalf("basic auth = %+v", al.BasicAuth)
+				}
+				assertWarning(t, res, "treated as a literal password")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := buildSecurityDB(t, tc.setup)
+			res, err := Import(context.Background(), dir)
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			for _, o := range res.Objects {
+				if err := o.Validate(); err != nil {
+					t.Errorf("object %s/%s failed validation: %v", o.Kind(), o.GetMeta().Name, err)
+				}
+			}
+			tc.verify(t, res)
+		})
+	}
+}
+
+func findAccessListByName(t *testing.T, objs []model.Object, name string) model.AccessList {
+	t.Helper()
+	for _, o := range objs {
+		if al, ok := o.(model.AccessList); ok && al.Name == name {
+			return al
+		}
+	}
+	t.Fatalf("access list %q not found", name)
+	return model.AccessList{}
+}
+
 func TestImportNoDB(t *testing.T) {
 	if _, err := Import(context.Background(), t.TempDir()); err == nil {
 		t.Fatal("expected error when no sqlite DB present")
@@ -282,6 +454,17 @@ func findAccessList(t *testing.T, objs []model.Object) model.AccessList {
 	}
 	t.Fatal("access list not found")
 	return model.AccessList{}
+}
+
+func findCert(t *testing.T, objs []model.Object) model.Certificate {
+	t.Helper()
+	for _, o := range objs {
+		if c, ok := o.(model.Certificate); ok {
+			return c
+		}
+	}
+	t.Fatal("certificate not found")
+	return model.Certificate{}
 }
 
 func findRedirect(t *testing.T, objs []model.Object) model.RedirectHost {

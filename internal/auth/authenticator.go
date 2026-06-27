@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -15,9 +14,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Authenticator coordinates admin-panel authentication: OIDC login, trusted
-// forward-auth header login (one sign-in, no second click), and local /
-// break-glass login. It maps IdP identities to roles and issues sessions.
+// Authenticator coordinates admin-panel authentication: OIDC login and local
+// password login. It maps IdP identities to roles and issues sessions.
+//
+// Trusted forward-auth HEADER login for the admin panel was removed: minting an
+// admin session from X-* identity headers on peer-IP trust alone is a spoofing
+// risk if anything in the trusted CIDR forwards client headers. The data-plane
+// forward-auth that gates proxied hosts (internal/dataplane) is a separate
+// feature and is unaffected.
 type Authenticator struct {
 	store      *session.Store
 	cookieName string
@@ -199,32 +203,12 @@ func (a *Authenticator) CompleteLogin(ctx context.Context, state, code string) (
 	return sess, p.returnTo, nil
 }
 
-// --- forward-auth admin login --------------------------------------------
+// --- local login ----------------------------------------------------------
 
-// forwardAuthAdmin tries every configured admin provider of type forward-auth
-// and returns the first trusted identity asserted on the request.
-func (a *Authenticator) forwardAuthAdmin(r *http.Request) (Identity, *model.IdentityProvider, bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for _, name := range a.settings.Providers {
-		idp, ok := a.idps[name]
-		if !ok || idp.Type != model.IdPTypeForwardAuth || idp.ForwardAuth == nil {
-			continue
-		}
-		fa := CompileForwardAuth(*idp.ForwardAuth, name)
-		if id, ok := fa.Identity(r); ok {
-			return id, &idp, true
-		}
-	}
-	return Identity{}, nil, false
-}
-
-// --- local / break-glass login -------------------------------------------
-
-// LocalLogin verifies local admin credentials, subject to the SSO-only /
-// break-glass policy, and creates an admin session.
-func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string, remote net.IP) (*session.Session, error) {
-	if !a.localAllowed(remote) {
+// LocalLogin verifies local admin credentials, subject to the SSO-only policy,
+// and creates an admin session.
+func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string) (*session.Session, error) {
+	if !a.localAllowed() {
 		return nil, fmt.Errorf("local login is disabled")
 	}
 	if a.localUser == "" || a.localHash == "" {
@@ -249,20 +233,17 @@ func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string, remot
 	return sess, nil
 }
 
-// localAllowed encodes the anti-lockout policy: when not SSO-only, local login
-// follows LocalLoginEnabled; under SSO-only, local login is permitted only via a
-// safe break-glass path (loopback-only), never an open door.
-func (a *Authenticator) localAllowed(remote net.IP) bool {
+// localAllowed reports whether local password login is permitted: under SSO-only
+// it is always off (recover from lockout by redeploying with local login
+// enabled); otherwise it follows LocalLoginEnabled.
+func (a *Authenticator) localAllowed() bool {
 	a.mu.RLock()
 	s := a.settings
 	a.mu.RUnlock()
-	if !s.SSOOnly {
-		return s.LocalLoginEnabled
+	if s.SSOOnly {
+		return false
 	}
-	if s.BreakGlass.LocalhostOnly && remote != nil && remote.IsLoopback() {
-		return true
-	}
-	return false
+	return s.LocalLoginEnabled
 }
 
 // --- session middleware ---------------------------------------------------
@@ -279,6 +260,9 @@ type Principal struct {
 	Role      Role
 	IdP       string
 	SessionID string
+	// CSRFToken is the session's anti-CSRF token, surfaced to the SPA via
+	// /api/me and required back as the X-CSRF-Token header on mutating requests.
+	CSRFToken string `json:"csrfToken,omitempty"`
 }
 
 // PrincipalFrom returns the authenticated principal, if any.
@@ -287,33 +271,22 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
-// RequireRole guards a handler. It accepts an existing session cookie, or - for
-// the headline one-click path - a trusted forward-auth identity, which it turns
-// into a session transparently. Otherwise it responds 401.
+// RequireRole guards a handler: it requires a valid session cookie whose role
+// satisfies min. On unsafe (state-changing) methods it also enforces the session
+// CSRF token via the X-CSRF-Token header (double-submit). Otherwise it responds
+// 401 (no session/role) or 403 (CSRF).
 func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if p, ok := a.principalFromSession(r); ok && roleSatisfies(p.Role, min) {
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+		p, ok := a.principalFromSession(r)
+		if !ok || !roleSatisfies(p.Role, min) {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		// No valid session: try trusted forward-auth (one sign-in, no redirect).
-		if id, idp, ok := a.forwardAuthAdmin(r); ok {
-			role := MapRole(id.Groups, idp.RoleMapping)
-			if roleSatisfies(role, min) {
-				sess := &session.Session{
-					Subject: id.Subject, Email: id.Email, Name: id.Name,
-					Roles: []string{string(role)}, IdP: idp.Name, AMR: id.AMR,
-					ExpiresAt: time.Now().Add(a.sessionTTL),
-				}
-				if err := a.store.Create(r.Context(), sess); err == nil {
-					session.SetSessionCookie(w, a.cookieName, sess.ID, sess.ExpiresAt, a.secure)
-					p := principalOf(sess)
-					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
-					return
-				}
-			}
+		if !safeMethod(r.Method) && !csrfTokenValid(r, p.CSRFToken) {
+			http.Error(w, "invalid or missing CSRF token", http.StatusForbidden)
+			return
 		}
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
 	})
 }
 
@@ -361,10 +334,10 @@ func (a *Authenticator) LoginOptions() []LoginOption {
 	return opts
 }
 
-// LocalLoginVisible reports whether the local login form should be shown to a
-// client at remote, per the break-glass/SSO-only policy.
-func (a *Authenticator) LocalLoginVisible(remote net.IP) bool {
-	return a.localUser != "" && a.localAllowed(remote)
+// LocalLoginVisible reports whether the local login form should be shown, per
+// the SSO-only policy.
+func (a *Authenticator) LocalLoginVisible() bool {
+	return a.localUser != "" && a.localAllowed()
 }
 
 // --- helpers --------------------------------------------------------------
@@ -383,7 +356,26 @@ func principalOf(s *session.Session) Principal {
 	if len(s.Roles) > 0 {
 		role = Role(s.Roles[0])
 	}
-	return Principal{Subject: s.Subject, Email: s.Email, Name: s.Name, Role: role, IdP: s.IdP, SessionID: s.ID}
+	return Principal{Subject: s.Subject, Email: s.Email, Name: s.Name, Role: role, IdP: s.IdP, SessionID: s.ID, CSRFToken: s.CSRFToken}
+}
+
+// safeMethod reports whether m is a read-only HTTP method that needs no CSRF check.
+func safeMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
+// csrfTokenValid constant-time compares the request's X-CSRF-Token header against
+// the session's token. An empty session token never matches.
+func csrfTokenValid(r *http.Request, want string) bool {
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get("X-CSRF-Token")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // roleSatisfies treats admin as satisfying a user requirement.

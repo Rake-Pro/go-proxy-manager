@@ -44,18 +44,17 @@ func main() {
 	}
 
 	var (
-		configDir  = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
-		certDir    = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")
-		adminAddr  = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
-		httpsAddr  = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
-		httpAddr   = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
-		sessionDB  = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
-		localUser  = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username (break-glass)")
-		localHash  = flag.String("local-admin-hash", secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH"), "bcrypt hash of the local admin password (or GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE -> a file path)")
+		configDir    = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
+		certDir      = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")
+		adminAddr    = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
+		httpsAddr    = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
+		httpAddr     = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
+		sessionDB    = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
+		localUser    = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username")
 		cookieSecure = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
-		logLevel   = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
-		logConsole = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
-		showVer    = flag.Bool("version", false, "print version and exit")
+		logLevel     = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
+		logConsole   = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
+		showVer      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
@@ -63,6 +62,10 @@ func main() {
 		fmt.Println(version.String())
 		return
 	}
+
+	// The bcrypt admin hash is read only from the environment / _FILE secret,
+	// never a CLI flag (a flag value is visible in the process table).
+	localHash := secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH")
 
 	logging.Setup(*logLevel, *logConsole)
 	log.Info().Str("build", version.String()).Msg("starting go-proxy-manager")
@@ -107,7 +110,7 @@ func main() {
 		Store:     sessStore,
 		Secure:    *cookieSecure,
 		LocalUser: *localUser,
-		LocalHash: *localHash,
+		LocalHash: localHash,
 	})
 	authn.Configure(cfg, settings)
 

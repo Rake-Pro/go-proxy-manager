@@ -2,6 +2,7 @@ package importer
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -54,6 +55,15 @@ func (s *importState) importAccessLists() error {
 				"pass_auth differs from default; verify credential pass-through after import")
 		}
 
+		// Fail closed: a list left with no IP rules and no basic-auth users (e.g.
+		// every client row was malformed and dropped) must be unambiguously
+		// deny-all rather than relying on the data plane's empty-list default.
+		if len(al.Rules) == 0 && len(al.BasicAuth) == 0 {
+			al.DefaultAction = model.ActionDeny
+			s.warn(label, "rules",
+				"access list lost all IP rules and basic-auth users during import; forced to deny-all")
+		}
+
 		if !s.add(label, "", al) {
 			continue
 		}
@@ -89,6 +99,10 @@ func (s *importState) collectAuth() (map[int64][]model.BasicAuthUser, error) {
 
 		hash := password
 		if !looksBcrypt(password) {
+			if strings.HasPrefix(password, "$") {
+				s.warn(label, "password",
+					"stored password is not a recognized bcrypt hash but looks like a hash; it will be treated as a literal password and basic auth for this user may break")
+			}
 			h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 			if err != nil {
 				s.warn(label, "password", fmt.Sprintf("could not hash password: %v; auth user skipped", err))
@@ -127,6 +141,12 @@ func (s *importState) collectClients() (map[int64][]model.IPRule, error) {
 		}
 		if dir != model.ActionAllow && dir != model.ActionDeny {
 			s.warn(label, "directive", fmt.Sprintf("unrecognized directive %q; rule skipped", dir))
+			continue
+		}
+		// Mirror AccessList.Validate: a malformed address would fail the whole
+		// list's validation, so drop only the offending rule here instead.
+		if _, _, err := net.ParseCIDR(addr); err != nil && net.ParseIP(addr) == nil {
+			s.warn(label, "address", fmt.Sprintf("invalid cidr/ip %q; rule skipped", addr))
 			continue
 		}
 		out[listID] = append(out[listID], model.IPRule{Action: dir, CIDR: addr})

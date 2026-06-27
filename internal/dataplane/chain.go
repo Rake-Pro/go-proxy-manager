@@ -1,16 +1,31 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
+	"net/textproto"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
-// registry indexes reusable config objects by name for chain assembly.
+// registry indexes reusable config objects by name for chain assembly. It also
+// precomputes the trusted-proxy networks and the set of identity headers that
+// the data plane must not accept from untrusted peers.
 type registry struct {
 	accessLists map[string]model.AccessList
 	middlewares map[string]model.Middleware
 	idps        map[string]model.IdentityProvider
+
+	// trustedNets are the peers gpm trusts to set forwarded headers (identity +
+	// X-Forwarded-For), unioned across all forward-auth identity providers.
+	trustedNets []*net.IPNet
+	// identityHeaders is the union of every identity header a forward-auth or
+	// auth-request provider relies on; they are stripped from untrusted inbound
+	// requests so a client cannot forge an identity to a backend.
+	identityHeaders []string
+	// clientIP resolves the access-list client IP, honouring X-Forwarded-For only
+	// from trustedNets and otherwise using the connection peer.
+	clientIP func(*http.Request) net.IP
 }
 
 func buildRegistry(cfg model.Config) *registry {
@@ -25,9 +40,35 @@ func buildRegistry(cfg model.Config) *registry {
 	for _, m := range cfg.Middlewares {
 		reg.middlewares[m.Name] = m
 	}
+	hdrs := map[string]struct{}{}
 	for _, p := range cfg.IdentityProviders {
 		reg.idps[p.Name] = p
+		if fa := p.ForwardAuth; fa != nil {
+			for _, c := range fa.TrustedProxies {
+				if n := parseNet(c); n != nil {
+					reg.trustedNets = append(reg.trustedNets, n)
+				}
+			}
+			for _, h := range []string{fa.UserHeader, fa.EmailHeader, fa.NameHeader, fa.GroupsHeader, fa.AMRHeader} {
+				if h != "" {
+					hdrs[textproto.CanonicalMIMEHeaderKey(h)] = struct{}{}
+				}
+			}
+		}
+		if ar := p.AuthRequest; ar != nil {
+			ch := ar.CopyHeaders
+			if len(ch) == 0 {
+				ch = defaultAuthRequestHeaders
+			}
+			for _, h := range ch {
+				hdrs[textproto.CanonicalMIMEHeaderKey(h)] = struct{}{}
+			}
+		}
 	}
+	for h := range hdrs {
+		reg.identityHeaders = append(reg.identityHeaders, h)
+	}
+	reg.clientIP = clientIPResolver(reg.trustedNets)
 	return reg
 }
 
@@ -55,7 +96,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok {
 			continue
 		}
-		h = accessListHandler(compileAccessList(al), clientIP, h)
+		h = accessListHandler(compileAccessList(al), reg.clientIP, h)
 	}
 
 	// Outermost: authentication. forward-auth is enforced here; per-host OIDC

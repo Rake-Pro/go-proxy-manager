@@ -1,8 +1,10 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 )
@@ -27,6 +29,77 @@ func (s Secret) IsPlaceholder() bool {
 
 // IsEmpty reports whether the secret is unset.
 func (s Secret) IsEmpty() bool { return strings.TrimSpace(string(s)) == "" }
+
+// MarshalJSON redacts literal secrets so real values never leave the process in
+// an API response. A placeholder marshals verbatim (the UI needs it to
+// round-trip), an empty secret marshals as "", and any literal non-empty value
+// marshals as a fixed sentinel. UnmarshalJSON is intentionally left as the
+// default so inbound writes keep their raw value, and there is no MarshalYAML so
+// the at-rest config keeps storing real placeholders.
+func (s Secret) MarshalJSON() ([]byte, error) {
+	switch {
+	case s.IsEmpty():
+		return json.Marshal("")
+	case s.IsPlaceholder():
+		return json.Marshal(string(s))
+	default:
+		return json.Marshal("***")
+	}
+}
+
+var secretType = reflect.TypeOf(Secret(""))
+
+// LiteralSecrets walks v via reflection (structs, pointers, slices, arrays and
+// maps) and returns the dotted field paths of every Secret-typed value holding a
+// literal secret (non-placeholder, non-empty). The store uses it to refuse to
+// commit plaintext secrets to the git config.
+func LiteralSecrets(v any) []string {
+	var out []string
+	walkSecrets(reflect.ValueOf(v), "", &out)
+	return out
+}
+
+func walkSecrets(v reflect.Value, path string, out *[]string) {
+	if !v.IsValid() {
+		return
+	}
+	if v.Type() == secretType {
+		s := Secret(v.String())
+		if !s.IsPlaceholder() && !s.IsEmpty() {
+			*out = append(*out, path)
+		}
+		return
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			walkSecrets(v.Elem(), path, out)
+		}
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			if t.Field(i).PkgPath != "" {
+				continue
+			}
+			walkSecrets(v.Field(i), secretPath(path, t.Field(i).Name), out)
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			walkSecrets(v.Index(i), fmt.Sprintf("%s[%d]", path, i), out)
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			walkSecrets(v.MapIndex(k), fmt.Sprintf("%s[%v]", path, k.Interface()), out)
+		}
+	}
+}
+
+func secretPath(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
+}
 
 // Resolve expands any ${ENV:...} / ${FILE:...} placeholders to their real values.
 // Multiple placeholders within one value are supported. A missing env var or

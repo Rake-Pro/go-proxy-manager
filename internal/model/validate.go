@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Validate checks every object individually and then verifies referential
@@ -108,6 +109,25 @@ func (c Config) Validate() error {
 	for _, ct := range c.Certificates {
 		if ct.ACME != nil {
 			checkRef(&errs, "certificate", ct.Name, "dnsProvider", ct.ACME.DNSProvider, dns)
+		}
+	}
+	// Reject two enabled certificates claiming the same domain: SNI selection
+	// would otherwise be order-dependent and could silently serve the wrong cert.
+	certDomains := map[string]string{}
+	for _, ct := range c.Certificates {
+		if ct.Disabled {
+			continue
+		}
+		for _, d := range ct.Domains {
+			key := strings.ToLower(strings.TrimSpace(d))
+			if key == "" {
+				continue
+			}
+			if other, dup := certDomains[key]; dup {
+				errs = append(errs, fmt.Errorf("certificates %q and %q both claim domain %q", other, ct.Name, key))
+				continue
+			}
+			certDomains[key] = ct.Name
 		}
 	}
 	// Auth middleware -> identity provider references.

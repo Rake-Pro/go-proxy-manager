@@ -197,3 +197,23 @@ func TestConfigHistorySettings(t *testing.T) {
 		t.Fatal("settings missing X-Config-Commit")
 	}
 }
+
+func TestDeleteRejectsTraversal(t *testing.T) {
+	h, changed := newHandler(t)
+	w := do(t, h, "DELETE", "/proxy-hosts/..%2f..%2fetc%2fx", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE traversal want 400 got %d: %s", w.Code, w.Body.String())
+	}
+	if *changed != 0 {
+		t.Fatalf("OnChange should not fire, got %d", *changed)
+	}
+}
+
+func TestLiteralSecretRejectedViaAPI(t *testing.T) {
+	h, _ := newHandler(t)
+	body := `{"name":"idp","type":"oidc","oidc":{"issuerURL":"https://idp.example.com","clientID":"gpm","clientSecret":"plaintext"}}`
+	w := do(t, h, "PUT", "/identity-providers/idp", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PUT literal secret want 400 got %d: %s", w.Code, w.Body.String())
+	}
+}
