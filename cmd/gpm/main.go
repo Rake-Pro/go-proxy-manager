@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,7 +51,7 @@ func main() {
 		httpAddr   = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
 		sessionDB  = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
 		localUser  = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username (break-glass)")
-		localHash  = flag.String("local-admin-hash", os.Getenv("GPM_LOCAL_ADMIN_PASSWORD_HASH"), "bcrypt hash of the local admin password")
+		localHash  = flag.String("local-admin-hash", secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH"), "bcrypt hash of the local admin password (or GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE -> a file path)")
 		cookieSecure = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
 		logLevel   = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
@@ -189,4 +190,20 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// secretFromEnv reads a secret value, preferring <key>_FILE (a file path, e.g. a
+// mounted Docker secret) over the plain <key> env var. Reading from a file keeps
+// secrets like the bcrypt admin hash - whose $ signs are otherwise mangled by
+// shell/compose interpolation - out of the environment entirely.
+func secretFromEnv(key string) string {
+	if p := os.Getenv(key + "_FILE"); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot read %s_FILE (%s): %v\n", key, p, err)
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return os.Getenv(key)
 }
