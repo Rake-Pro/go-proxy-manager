@@ -31,9 +31,15 @@ import (
 
 func main() {
 	// Subcommands. Default (no subcommand) runs the daemon.
-	if len(os.Args) > 1 && os.Args[1] == "import" {
-		runImport(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "import":
+			runImport(os.Args[2:])
+			return
+		case "hashpw":
+			runHashpw(os.Args[2:])
+			return
+		}
 	}
 
 	var (
