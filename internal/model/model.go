@@ -51,8 +51,11 @@ type ObjectMeta struct {
 	Name string `json:"name" yaml:"name"`
 	// DisplayName is an optional human label for the UI.
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty"`
-	// Labels are free-form tags for grouping/filtering (host grouping is a P1 goal).
+	// Labels are free-form key/value metadata for grouping/filtering.
 	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// Tags are flat, free-form labels for grouping/filtering objects in the UI
+	// (host grouping/tagging). Order is preserved; duplicates are harmless.
+	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 	// Disabled keeps an object in config but excludes it from the compiled data plane.
 	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 	// CreatedAt/UpdatedAt are maintained by the store on write.

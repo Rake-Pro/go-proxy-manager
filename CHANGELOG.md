@@ -7,7 +7,40 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Security
+
+- **Forward-auth identity strip no longer breaks a proxied Authentik.** The
+  baseline identity-header denylist stripped the entire `X-Authentik-*` request
+  family from untrusted peers, which also removed Authentik's own CSRF token header
+  (`X-authentik-CSRF`, read from the `authentik_csrf` cookie and sent on every
+  flow-executor API POST). When Authentik itself is proxied through gpm, every
+  admin login failed with "CSRF Failed: CSRF token missing". `X-Authentik-Csrf` is
+  now exempt from the strip — it is a CSRF token validated against a cookie, not an
+  identity assertion, so forwarding it is no escalation risk.
+
 ### Added
+
+- **Per-host no-index toggle** (`robotsNoIndex`): emits
+  `X-Robots-Tag: noindex, nofollow` on HTTP and HTTPS responses. A headers
+  middleware that sets `X-Robots-Tag` explicitly still wins.
+- **Host tags** (`tags` on every object's metadata): free-form flat labels for
+  grouping/filtering, surfaced as chips on the Proxy Hosts list and matched by the
+  existing filter box.
+- **Per-host upstream timeouts** (`timeouts.connectSeconds` / `readSeconds`): a
+  host with an override uses its own cloned transport (its own connection pool), so
+  the override cannot affect any other host. Hosts without an override keep using
+  the shared, pooled transport unchanged. `readSeconds` bounds time-to-first-byte
+  only, so it is safe for streaming/websocket upstreams.
+- **Access-log viewer** (`GET /api/logs` + "Access Logs" view): an in-memory ring
+  of recent requests (method, host, path, status, duration, client), newest first.
+  Only filled while access logging is enabled (`--access-log` / `GPM_ACCESS_LOG`),
+  so the default off-path keeps zero per-request overhead; the buffer is bounded.
+- **Lifecycle webhooks** (`settings.webhooks`): gpm POSTs a small JSON event
+  (`action`, `kind`, `name`, `commit`, `time`) to each configured URL after every
+  config change. Delivery is asynchronous and best-effort under a 10s timeout, so a
+  slow or unreachable endpoint never blocks or fails a config write. An optional
+  per-target secret (placeholder-resolved) is sent as `X-GPM-Webhook-Secret`.
+
 
 - **Data plane**: native-Go reverse proxy with SNI-based TLS termination (exact +
   wildcard certificate selection), HTTP/2, WebSocket upgrades, and force-SSL

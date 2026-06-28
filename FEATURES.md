@@ -180,8 +180,11 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
 - Backup / export / restore ★ (✓ shipped: gzip-tar export + validated restore +
   config revert, with History-view UI), rate limiting ★ (✓ shipped: per-host,
   per-client-IP token bucket with 429 + Retry-After), dark mode,
-  robots/no-index toggle, custom timeouts, load balancing / upstream groups,
-  access-log viewer or metrics.
+  robots/no-index toggle (✓ shipped: per-host `robotsNoIndex` → `X-Robots-Tag`),
+  custom timeouts (✓ shipped: per-host `timeouts.connectSeconds`/`readSeconds`,
+  isolated per-host transport), load balancing / upstream groups,
+  access-log viewer (✓ shipped: in-memory ring + `GET /api/logs` + "Access Logs"
+  view, gated on the access-log toggle) or metrics.
 - Per-host OIDC relying-party gating on the data plane (✓ shipped: redirect →
   callback → signed SSO session cookie) and HSTS emission (✓ shipped).
 
@@ -197,8 +200,10 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   dynamic-prefix ISPs (e.g. AT&T residential, rotates on reconnect) need DDNS for
   the AAAA - a hardcoded SLAAC/EUI-64 address black-holes on every prefix change
   and breaks dual-stack clients via Happy Eyeballs while v4 silently masks it.
-- Lifecycle **webhooks** ★, host grouping/tagging ★, multiple ACME servers,
-  reusable DNS creds, email notifications, **SAML** + **LDAP admin login** ★.
+- Lifecycle **webhooks** ★ (✓ shipped: `settings.webhooks`, async best-effort POST
+  per config change), host grouping/tagging ★ (✓ shipped: `tags` on every object +
+  Proxy Hosts list chips/filter), multiple ACME servers, reusable DNS creds, email
+  notifications, **SAML** + **LDAP admin login** ★.
 
 ### P3 - nice-to-have
 - PHP / file server, FancyIndex, ECH, ML-KEM, MPTCP, WebAuthn/passkeys, Anubis,

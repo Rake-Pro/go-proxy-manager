@@ -38,10 +38,33 @@ func configureUpstreamTransport(responseHeaderTimeout time.Duration) {
 	dataplaneTransport.ResponseHeaderTimeout = responseHeaderTimeout
 }
 
+// transportFor returns the RoundTripper a host should use: the shared, pooled
+// transport when it has no timeout override (the default for every host), or a
+// per-host clone with adjusted dial/response timeouts. Cloning gives the override
+// its own connection pool, so a custom timeout on one host never affects the
+// keep-alive reuse of any other host on the shared pool.
+func transportFor(t *model.HostTimeouts) http.RoundTripper {
+	if t == nil || (t.ConnectSeconds <= 0 && t.ReadSeconds <= 0) {
+		return dataplaneTransport
+	}
+	tr := dataplaneTransport.Clone()
+	if t.ConnectSeconds > 0 {
+		tr.DialContext = (&net.Dialer{
+			Timeout:   time.Duration(t.ConnectSeconds) * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+	}
+	if t.ReadSeconds > 0 {
+		tr.ResponseHeaderTimeout = time.Duration(t.ReadSeconds) * time.Second
+	}
+	return tr
+}
+
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
-func newReverseProxy(up model.Upstream, hostName string) *httputil.ReverseProxy {
+// timeouts is nil for the shared, pooled transport, or a per-host override.
+func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts) *httputil.ReverseProxy {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
@@ -49,8 +72,8 @@ func newReverseProxy(up model.Upstream, hostName string) *httputil.ReverseProxy 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			pr.SetXForwarded()           // X-Forwarded-For / -Host / -Proto
-			pr.Out.Host = pr.In.Host     // preserve the client's Host header
+			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
+			pr.Out.Host = pr.In.Host // preserve the client's Host header
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Warn().Str("host", hostName).Str("path", r.URL.Path).Err(err).Msg("upstream error")
@@ -60,7 +83,7 @@ func newReverseProxy(up model.Upstream, hostName string) *httputil.ReverseProxy 
 			rewriteUpstreamRedirect(resp, target)
 			return nil
 		},
-		Transport: dataplaneTransport,
+		Transport: transportFor(timeouts),
 	}
 	return rp
 }
@@ -120,6 +143,10 @@ type hostHandler struct {
 	// hsts is the precomputed Strict-Transport-Security header value, or "" when
 	// HSTS is disabled for this host. Emitted only on the HTTPS listener.
 	hsts string
+
+	// robots is the precomputed X-Robots-Tag value ("noindex, nofollow"), or ""
+	// when this host should not discourage indexing. Emitted on HTTP and HTTPS.
+	robots string
 
 	// identityHeaders are the provider-configured identity headers this host
 	// asserts; trustedNets are the peers this host trusts to set them. Both are

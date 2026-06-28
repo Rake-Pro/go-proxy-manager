@@ -28,6 +28,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"github.com/Rake-Pro/go-proxy-manager/internal/ui"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
+	"github.com/Rake-Pro/go-proxy-manager/internal/webhook"
 	"github.com/rs/zerolog/log"
 )
 
@@ -45,21 +46,21 @@ func main() {
 	}
 
 	var (
-		configDir    = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
-		certDir      = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")
-		adminAddr    = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
-		httpsAddr    = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
-		httpAddr     = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
-		sessionDB    = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
-		localUser    = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username")
-		cookieSecure = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
-		logLevel     = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
-		logConsole   = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
-		accessLog    = flag.Bool("access-log", os.Getenv("GPM_ACCESS_LOG") == "1", "log every data-plane request (method, host, path, status, bytes, duration)")
-		slowReqMS    = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
-		debugHeaders = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
+		configDir     = flag.String("config-dir", envOr("GPM_CONFIG_DIR", "/data/config"), "git-backed config repository directory")
+		certDir       = flag.String("cert-dir", envOr("GPM_CERT_DIR", "/data/certs"), "certificate storage directory")
+		adminAddr     = flag.String("admin-addr", envOr("GPM_ADMIN_ADDR", ":8081"), "admin HTTP listen address")
+		httpsAddr     = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
+		httpAddr      = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
+		sessionDB     = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
+		localUser     = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username")
+		cookieSecure  = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
+		logLevel      = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
+		logConsole    = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
+		accessLog     = flag.Bool("access-log", os.Getenv("GPM_ACCESS_LOG") == "1", "log every data-plane request (method, host, path, status, bytes, duration)")
+		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
+		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
-		showVer      = flag.Bool("version", false, "print version and exit")
+		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
@@ -156,6 +157,16 @@ func main() {
 		return c, err
 	})
 
+	// Lifecycle webhooks: fire-and-forget notifications after each config change,
+	// reading the live targets from settings on every event.
+	hooks := webhook.New(func() []model.WebhookConfig {
+		_, s2, err := st.Load(ctx)
+		if err != nil {
+			return nil
+		}
+		return s2.Webhooks
+	})
+
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
 	apiHandler := api.New(api.Deps{
@@ -168,6 +179,12 @@ func main() {
 				name = p.Subject
 			}
 			return store.Author{Name: name, Email: p.Email}
+		},
+		OnEvent: func(action, kind, name, commit string) {
+			hooks.Dispatch(webhook.Event{Action: action, Kind: kind, Name: name, Commit: commit})
+		},
+		RecentLogs: func() any {
+			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
 		},
 	})
 

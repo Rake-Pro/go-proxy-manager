@@ -17,6 +17,22 @@ type AdminAuthSettings struct {
 	SSOOnly bool `json:"ssoOnly,omitempty" yaml:"ssoOnly,omitempty"`
 }
 
+// WebhookConfig is a single outbound lifecycle webhook: gpm POSTs a small JSON
+// event to URL after every successful config change (create/update/delete,
+// restore, revert, settings). Dispatch is asynchronous and best-effort, so a slow
+// or unreachable endpoint never blocks or fails the config write.
+type WebhookConfig struct {
+	// Name is a stable identifier for the target (shown in logs).
+	Name string `json:"name" yaml:"name"`
+	// URL is the absolute http(s) endpoint that receives the POST.
+	URL string `json:"url" yaml:"url"`
+	// Secret, if set, is sent as the X-GPM-Webhook-Secret header so the receiver
+	// can authenticate the call. Stored as a placeholder, resolved at dispatch.
+	Secret Secret `json:"secret,omitempty" yaml:"secret,omitempty"`
+	// Disabled keeps the target in config without firing it.
+	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+}
+
 // Settings is the singleton app configuration, stored as config/settings.yaml.
 type Settings struct {
 	SchemaVersion int `json:"schemaVersion" yaml:"schemaVersion"`
@@ -31,6 +47,9 @@ type Settings struct {
 	ExternalBaseURL string `json:"externalBaseURL" yaml:"externalBaseURL"`
 
 	AdminAuth AdminAuthSettings `json:"adminAuth,omitempty" yaml:"adminAuth,omitempty"`
+
+	// Webhooks are outbound lifecycle notifications fired after every config change.
+	Webhooks []WebhookConfig `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -44,6 +63,20 @@ func (s Settings) Validate() error {
 	}
 	if s.AdminAuth.SSOOnly && len(s.AdminAuth.Providers) == 0 {
 		return fmt.Errorf("settings: ssoOnly requires at least one adminAuth.providers entry")
+	}
+	seen := map[string]struct{}{}
+	for i, w := range s.Webhooks {
+		if err := ValidateName(w.Name); err != nil {
+			return fmt.Errorf("settings: webhook[%d]: %w", i, err)
+		}
+		if _, dup := seen[w.Name]; dup {
+			return fmt.Errorf("settings: duplicate webhook name %q", w.Name)
+		}
+		seen[w.Name] = struct{}{}
+		u, err := url.Parse(w.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("settings: webhook %q: url must be an absolute http(s) URL, got %q", w.Name, w.URL)
+		}
 	}
 	return nil
 }

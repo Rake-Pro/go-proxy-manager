@@ -37,6 +37,10 @@ type Server struct {
 	slowThreshold time.Duration
 	debugHeaders  bool
 
+	// logBuf retains the most recent access entries for the admin /api/logs viewer.
+	// It is only written while accessLog is enabled.
+	logBuf *logRing
+
 	cur atomic.Pointer[router]
 
 	streams *streamManager
@@ -60,6 +64,10 @@ type Config struct {
 	// DebugHeaders adds X-GPM-* diagnostic response headers (request id, matched
 	// host, upstream) so routing can be inspected from the client side.
 	DebugHeaders bool
+	// AccessLogBufferSize is the number of recent access entries retained in memory
+	// for the admin /api/logs viewer (0 selects a default). Only filled while
+	// AccessLog is enabled.
+	AccessLogBufferSize int
 	// UpstreamResponseHeaderTimeout caps time-to-first-byte from an upstream
 	// (0 = unbounded). Tunes the shared upstream transport.
 	UpstreamResponseHeaderTimeout time.Duration
@@ -69,6 +77,10 @@ type Config struct {
 // before Start so there is a router to serve.
 func New(c Config) *Server {
 	configureUpstreamTransport(c.UpstreamResponseHeaderTimeout)
+	bufSize := c.AccessLogBufferSize
+	if bufSize <= 0 {
+		bufSize = 1000
+	}
 	return &Server{
 		httpsAddr:     c.HTTPSAddr,
 		httpAddr:      c.HTTPAddr,
@@ -76,8 +88,22 @@ func New(c Config) *Server {
 		accessLog:     c.AccessLog,
 		slowThreshold: c.SlowRequestThreshold,
 		debugHeaders:  c.DebugHeaders,
+		logBuf:        newLogRing(bufSize),
 		streams:       newStreamManager(),
 	}
+}
+
+// AccessLogEnabled reports whether request capture is on. When false the /api/logs
+// viewer has nothing to show and the UI surfaces how to enable it.
+func (s *Server) AccessLogEnabled() bool { return s.accessLog }
+
+// RecentLogs returns the buffered access entries, newest first (nil when capture
+// has never run).
+func (s *Server) RecentLogs() []AccessEntry {
+	if s.logBuf == nil {
+		return nil
+	}
+	return s.logBuf.recent()
 }
 
 // Reload compiles cfg into a new router (HTTP/S hosts) and reconciles the raw

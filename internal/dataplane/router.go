@@ -63,12 +63,13 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		if h.Disabled {
 			continue
 		}
-		proxy := newReverseProxy(h.Upstream, h.Name)
+		proxy := newReverseProxy(h.Upstream, h.Name, h.Timeouts)
 		handler := buildChain(proxy, h, reg)
 		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upstreamLabel(h.Upstream)}
 		hh.locations = buildLocations(h, reg)
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
 		hh.hsts = hstsHeader(h.TLS.HSTS)
+		hh.robots = robotsHeader(h.RobotsNoIndex)
 		for _, d := range h.Domains {
 			rt.hosts[hostKey(d)] = hh
 		}
@@ -136,6 +137,16 @@ func hstsHeader(h model.HSTS) string {
 	return v
 }
 
+// robotsHeader returns the X-Robots-Tag value for a host that opts into
+// no-indexing, or "" otherwise. "nofollow" is included so linked pages are not
+// crawled either - the common intent for an internal/admin host.
+func robotsHeader(noIndex bool) string {
+	if !noIndex {
+		return ""
+	}
+	return "noindex, nofollow"
+}
+
 // normalizeLocationPrefix canonicalizes a configured location path for boundary
 // matching: cleaned, and with any trailing slash trimmed (root stays "/") so the
 // "prefix + \"/\"" boundary test in route() composes correctly.
@@ -169,7 +180,7 @@ func buildLocations(h model.ProxyHost, reg *registry) []locationRoute {
 		lh.Middlewares = append(append([]string{}, h.Middlewares...), loc.Middlewares...)
 		lh.AccessLists = append(append([]string{}, h.AccessLists...), loc.AccessLists...)
 		lh.Locations = nil
-		proxy := newReverseProxy(lh.Upstream, h.Name)
+		proxy := newReverseProxy(lh.Upstream, h.Name, h.Timeouts)
 		routes = append(routes, locationRoute{
 			prefix:   normalizeLocationPrefix(loc.Path),
 			handler:  buildChain(proxy, lh, reg),
@@ -261,6 +272,9 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 			// (browsers ignore HSTS received over plain HTTP anyway).
 			w.Header().Set("Strict-Transport-Security", hh.hsts)
 		}
+		if hh.robots != "" {
+			w.Header().Set("X-Robots-Tag", hh.robots)
+		}
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return
@@ -287,6 +301,9 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hh.stripUntrustedIdentity(r)
+		if hh.robots != "" {
+			w.Header().Set("X-Robots-Tag", hh.robots)
+		}
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return

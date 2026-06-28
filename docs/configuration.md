@@ -33,7 +33,8 @@ references it).
 |-------|------|----------|-------|
 | `name` | string | yes | Identity and filename. Lowercase alphanumeric plus `-_.`, must start and end alphanumeric, 1–254 chars. |
 | `displayName` | string | no | Human label for the UI. |
-| `labels` | map | no | Arbitrary key/value tags. |
+| `labels` | map | no | Arbitrary key/value metadata. |
+| `tags` | []string | no | Flat, free-form labels for grouping/filtering. On the Proxy Hosts list they render as chips and are matched by the filter box. |
 | `disabled` | bool | no | Keep the object in config but exclude it from the running data plane. |
 
 ## Secrets
@@ -72,6 +73,16 @@ Singleton application configuration.
 | `adminAuth.providers` | []string | Identity-provider names allowed to log into the admin panel. |
 | `adminAuth.localLoginEnabled` | bool | Keep username/password login available (anti-lockout). Default true. |
 | `adminAuth.ssoOnly` | bool | Disable local login entirely. Requires at least one `providers` entry. Recovery from an SSO outage is by redeploying with local login re-enabled. |
+| `webhooks` | []WebhookConfig | Outbound lifecycle notifications (below). |
+
+**WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
+absolute http/https), optional `secret` (placeholder-resolved, sent as the
+`X-GPM-Webhook-Secret` header), `disabled` (keep configured but do not fire). After
+every successful config change gpm POSTs a JSON event
+`{"action","kind","name","commit","time"}` to each enabled target. `action` is one
+of `save` | `delete` | `restore` | `revert` | `settings`. Delivery is asynchronous
+and best-effort under a 10s timeout — a slow or unreachable endpoint never blocks
+or fails the config write, it is only logged.
 
 ```yaml
 schemaVersion: 1
@@ -81,6 +92,10 @@ adminAuth:
   providers: [authentik-oidc]
   localLoginEnabled: true
   ssoOnly: false
+webhooks:
+  - name: ci
+    url: https://hooks.example.com/gpm
+    secret: ${FILE:/run/secrets/gpm_webhook_secret}
 ```
 
 ---
@@ -94,6 +109,8 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `domains` | []string | yes | One or more hostnames served by this host. |
 | `upstream` | Upstream | yes | Default backend. |
 | `websocketsUpgrade` | bool | no | Offer WebSocket upgrades. |
+| `robotsNoIndex` | bool | no | Emit `X-Robots-Tag: noindex, nofollow` (HTTP and HTTPS) to discourage search-engine indexing. A headers middleware that sets `X-Robots-Tag` explicitly still wins. |
+| `timeouts` | HostTimeouts | no | Per-host upstream timeout overrides (below). |
 | `tls` | TLSSettings | no | Certificate + TLS behaviour. |
 | `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
 | `accessLists` | []string | no | Host-wide access-list names. |
@@ -112,6 +129,15 @@ edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
 set `"1.3"` only on hosts where every client supports it (drops 1.2 — old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
 for public hosts to keep the widest client compatibility.
+
+**HostTimeouts** (`timeouts`): `connectSeconds` caps establishing the TCP/TLS
+connection to the upstream; `readSeconds` caps time awaiting the upstream's
+response headers (time-to-first-byte). Both are whole seconds (0–3600); `0`/unset
+means no override. A host with any override uses its **own** cloned transport
+(its own connection pool), so a custom timeout never affects another host's
+keep-alive reuse; hosts without an override share the default pooled transport.
+`readSeconds` bounds only time-to-first-byte, so it does not cut off a slow
+streaming / SSE / websocket body once headers have arrived.
 
 **Location**: a path-scoped override. `path` (required), optional `upstream`
 override, plus `middlewares` / `accessLists` that are **appended to** (not

@@ -9,10 +9,60 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// AccessEntry is one captured request line, surfaced by the admin /api/logs
+// endpoint for the in-UI access-log viewer.
+type AccessEntry struct {
+	Time   time.Time `json:"time"`
+	Method string    `json:"method"`
+	Host   string    `json:"host"`
+	Path   string    `json:"path"`
+	Status int       `json:"status"`
+	Bytes  int64     `json:"bytes"`
+	DurMs  int64     `json:"durMs"`
+	Client string    `json:"client"`
+}
+
+// logRing is a fixed-capacity, mutex-guarded ring buffer of recent access
+// entries. It is written only while access logging is enabled (the default
+// off-path never allocates or captures), so the memory cost is bounded and opt-in.
+type logRing struct {
+	mu  sync.Mutex
+	buf []AccessEntry
+	n   int // total entries ever written
+	cap int
+}
+
+func newLogRing(capacity int) *logRing { return &logRing{cap: capacity} }
+
+func (r *logRing) add(e AccessEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.buf) < r.cap {
+		r.buf = append(r.buf, e)
+	} else {
+		r.buf[r.n%r.cap] = e
+	}
+	r.n++
+}
+
+// recent returns up to cap entries, newest first.
+func (r *logRing) recent() []AccessEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := len(r.buf)
+	out := make([]AccessEntry, 0, count)
+	for i := 0; i < count; i++ {
+		// logical newest index is r.n-1; element j sits at buf[j%cap].
+		out = append(out, r.buf[(r.n-1-i)%r.cap])
+	}
+	return out
+}
 
 // responseObserver wraps an http.ResponseWriter to capture the status code and
 // body byte count for access logging, while transparently forwarding the
@@ -102,6 +152,26 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			status = http.StatusOK // handler wrote nothing / hijacked
 		}
 
+		var clientStr string
+		if ip := s.clientIPOf(r); ip != nil {
+			clientStr = ip.String()
+		}
+
+		// Capture into the in-memory ring for the /api/logs viewer. Only when access
+		// logging is on, so the default (off) path stays allocation-free.
+		if s.accessLog && s.logBuf != nil {
+			s.logBuf.add(AccessEntry{
+				Time:   start,
+				Method: r.Method,
+				Host:   hostOnly(r.Host),
+				Path:   r.URL.Path,
+				Status: status,
+				Bytes:  obs.bytes,
+				DurMs:  dur.Milliseconds(),
+				Client: clientStr,
+			})
+		}
+
 		ev := log.Info()
 		if slow && !s.accessLog {
 			ev = log.Warn()
@@ -114,8 +184,8 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			Int64("bytes", obs.bytes).
 			Dur("dur", dur).
 			Str("peer", peerAddr(r))
-		if ip := s.clientIPOf(r); ip != nil {
-			ev = ev.Str("client", ip.String())
+		if clientStr != "" {
+			ev = ev.Str("client", clientStr)
 		}
 		if rid != "" {
 			ev = ev.Str("rid", rid)

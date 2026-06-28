@@ -204,6 +204,23 @@ func TestSettingsValidate(t *testing.T) {
 				AdminAuth: AdminAuthSettings{SSOOnly: true, Providers: []string{"authentik"}},
 			},
 		},
+		{
+			name: "valid webhook is allowed",
+			s:    Settings{Webhooks: []WebhookConfig{{Name: "ci", URL: "https://ci.example.com/hook"}}},
+		},
+		{
+			name:    "webhook with a non-absolute url is rejected",
+			s:       Settings{Webhooks: []WebhookConfig{{Name: "ci", URL: "/relative"}}},
+			wantErr: "absolute http(s) URL",
+		},
+		{
+			name: "duplicate webhook name is rejected",
+			s: Settings{Webhooks: []WebhookConfig{
+				{Name: "ci", URL: "https://a.example.com"},
+				{Name: "ci", URL: "https://b.example.com"},
+			}},
+			wantErr: "duplicate webhook name",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

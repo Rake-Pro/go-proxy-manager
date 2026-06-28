@@ -41,6 +41,7 @@ const NAV = [
   { id: 'access', label: 'Access Lists', icon: ICON.shield },
   { id: 'middleware', label: 'Middleware', icon: ICON.layers },
   { id: 'dns', label: 'DNS Providers', icon: ICON.globe },
+  { id: 'logs', label: 'Access Logs', icon: ICON.history },
   { id: 'history', label: 'History', icon: ICON.history },
   { id: 'settings', label: 'Settings', icon: ICON.cog },
 ];
@@ -338,6 +339,7 @@ async function route() {
       case 'redirects': await genericSection(c, 'redirects', sub); break;
       case 'streams': await genericSection(c, 'streams', sub); break;
       case 'dead': await genericSection(c, 'dead', sub); break;
+      case 'logs': await viewLogs(c); break;
       case 'history': await viewHistory(c); break;
       case 'settings': await viewSettings(c); break;
       default: location.hash = '#/overview'; return;
@@ -468,8 +470,9 @@ async function listHosts(c) {
     const status = h.disabled
       ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
       : `<span class="chip ok"><span class="dot ok"></span>live</span>`;
+    const tagChips = arr(h.tags).map((t) => `<span class="chip" style="font-size:10px;padding:1px 6px">${esc(t)}</span>`).join(' ');
     return `<tr class="clickable" data-name="${esc(h.name)}">
-      <td><span class="host">${esc(primary)}${esc(extra)}</span>${h.displayName ? `<div class="faint" style="font-size:11px">${esc(h.displayName)}</div>` : ''}</td>
+      <td><span class="host">${esc(primary)}${esc(extra)}</span>${h.displayName ? `<div class="faint" style="font-size:11px">${esc(h.displayName)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
       <td class="mono">${esc(upStr)}</td>
       <td>${tls}</td>
       <td>${auth}</td>
@@ -479,7 +482,7 @@ async function listHosts(c) {
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter: domain, upstream, cert..." aria-label="Filter hosts" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter: domain, upstream, cert, tag..." aria-label="Filter hosts" /></div>
     </div>
     <div class="table-wrap">
       <table>
@@ -597,6 +600,11 @@ async function hostEditor(c, name) {
               <input class="field" id="f-display" value="${esc(h.displayName || '')}" placeholder="optional label" />
             </div>
           </div>
+          <div class="field-group" style="margin-top:10px">
+            <label>Tags</label>
+            <div class="chip-input" id="f-tags"></div>
+            <div class="hint">Free-form labels for grouping and filtering. Press Enter to add.</div>
+          </div>
           <div class="toggle-line" style="margin-top:6px">
             <div class="tl-text"><div class="nm">Disabled</div><div class="ds">Stop serving this host</div></div>
             ${switchHtml('f-disabled', !!h.disabled, 'Disabled')}
@@ -640,6 +648,25 @@ async function hostEditor(c, name) {
           <p class="section-label">Locations</p>
           <div id="f-locs"></div>
           <button class="btn ghost sm" id="addLoc" type="button" style="margin-top:6px">${ICON.plus}Add path override</button>
+        </div>
+
+        <div class="card form-section">
+          <p class="section-label">Crawling &amp; timeouts</p>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send <span class="mono">X-Robots-Tag: noindex, nofollow</span></div></div>
+            ${switchHtml('f-robots', !!h.robotsNoIndex, 'Discourage indexing')}
+          </div>
+          <div class="inline-fields" style="margin-top:10px">
+            <div class="field-group">
+              <label>Connect timeout (s)</label>
+              <input class="field mono" id="f-to-connect" type="number" min="0" max="3600" value="${esc(h.timeouts && h.timeouts.connectSeconds ? h.timeouts.connectSeconds : '')}" placeholder="default" />
+            </div>
+            <div class="field-group">
+              <label>Read timeout (s)</label>
+              <input class="field mono" id="f-to-read" type="number" min="0" max="3600" value="${esc(h.timeouts && h.timeouts.readSeconds ? h.timeouts.readSeconds : '')}" placeholder="default" />
+            </div>
+          </div>
+          <div class="hint">Blank keeps the shared pooled transport. Read timeout caps time-to-first-byte; it does not cut off slow streaming/websocket bodies.</div>
         </div>
       </div>
 
@@ -707,6 +734,7 @@ async function hostEditor(c, name) {
 
   // domains chip input
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...');
+  const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
 
   // locations
   const locsWrap = $('#f-locs');
@@ -765,8 +793,16 @@ async function hostEditor(c, name) {
     const obj = { name: nm, domains: domains, upstream: { scheme: $('#f-scheme').value, host: $('#f-uphost').value.trim(), port: portVal } };
     const display = $('#f-display').value.trim();
     if (display) obj.displayName = display;
+    const tags = tagsCtl.get(); if (tags.length) obj.tags = tags;
     if (isOn('f-disabled')) obj.disabled = true;
     if (isOn('f-ws')) obj.websocketsUpgrade = true;
+    if (isOn('f-robots')) obj.robotsNoIndex = true;
+    const toConnect = parseInt($('#f-to-connect').value, 10);
+    const toRead = parseInt($('#f-to-read').value, 10);
+    const timeouts = {};
+    if (!isNaN(toConnect) && toConnect > 0) timeouts.connectSeconds = toConnect;
+    if (!isNaN(toRead) && toRead > 0) timeouts.readSeconds = toRead;
+    if (Object.keys(timeouts).length) obj.timeouts = timeouts;
 
     const tlsObj = {};
     const cert = $('#f-cert').value;
@@ -1641,6 +1677,39 @@ const EDITORS = {
   identity: idpEditor, access: accessEditor, middleware: middlewareEditor,
 };
 
+// ---------- ACCESS LOGS ----------
+async function viewLogs(c) {
+  const data = (await api('/api/logs')).data || {};
+  const enabled = !!data.enabled;
+  const entries = arr(data.entries);
+  const statusClass = (s) => (s >= 500 ? 'err' : s >= 400 ? 'warn' : 'ok');
+  const rows = entries.map((e) => `
+    <tr>
+      <td class="mono faint" style="white-space:nowrap">${esc(fmtTime(e.time))}</td>
+      <td class="mono">${esc(e.method || '')}</td>
+      <td class="mono">${esc(e.host || '')}</td>
+      <td class="mono" style="max-width:340px;overflow:hidden;text-overflow:ellipsis">${esc(e.path || '')}</td>
+      <td><span class="chip ${statusClass(e.status)}">${esc(e.status)}</span></td>
+      <td class="mono">${esc(e.durMs)}ms</td>
+      <td class="mono faint">${esc(e.client || '')}</td>
+    </tr>`).join('');
+
+  c.innerHTML = `
+    <div class="row-between view-head">
+      <div><h2>Access Logs</h2><p>Most recent data-plane requests, newest first (in-memory buffer).</p></div>
+      <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
+    </div>
+    ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b>. Start gpm with <span class="mono">--access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to populate this view. The default off-path adds zero per-request overhead.</div></div>`}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Duration</th><th>Client</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="7" class="muted" style="font-size:13px;padding:14px">${enabled ? 'No requests captured yet.' : 'Nothing to show while access logging is off.'}</td></tr>`}</tbody>
+      </table>
+    </div>`;
+
+  $('#logsRefresh').addEventListener('click', () => viewLogs(c));
+}
+
 // ---------- HISTORY ----------
 async function viewHistory(c) {
   const items = arr((await api('/api/history')).data);
@@ -1722,6 +1791,12 @@ async function viewSettings(c) {
         <div class="toggle-line"><div class="tl-text"><div class="nm">Break-glass localhost only</div><div class="ds">Emergency local access from loopback only</div></div>${switchHtml('set-bg', !!bg.localhostOnly, 'Break-glass localhost only')}</div>
       </div>
     </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Lifecycle webhooks</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
+      <div id="set-webhooks"></div>
+      <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
+    </div>
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
@@ -1730,6 +1805,25 @@ async function viewSettings(c) {
     </div>`;
 
   const provCtl = makeChipInput($('#set-providers'), arr(admin.providers), 'add provider...');
+
+  // webhook rows
+  const whWrap = $('#set-webhooks');
+  function webhookRow(w) {
+    w = w || {};
+    const div = document.createElement('div');
+    div.className = 'loc-row';
+    div.style.marginBottom = '8px';
+    div.innerHTML = `
+      <input class="field mono wh-name" style="flex:0 0 140px" value="${esc(w.name || '')}" placeholder="name" aria-label="Webhook name" />
+      <input class="field mono wh-url" style="flex:2 1 220px" value="${esc(w.url || '')}" placeholder="https://hooks.example.com/x" aria-label="Webhook URL" />
+      <input class="field mono wh-secret" style="flex:1 1 140px" value="${esc(w.secret || '')}" placeholder="secret (\${ENV:...} optional)" aria-label="Webhook secret" />
+      <label class="check-item" style="flex:0 0 auto" title="Keep configured but do not fire"><input type="checkbox" class="wh-disabled"${w.disabled ? ' checked' : ''}/>off</label>
+      <button class="icon-btn wh-del" type="button" aria-label="Remove webhook">${ICON.x}</button>`;
+    div.querySelector('.wh-del').addEventListener('click', () => div.remove());
+    whWrap.appendChild(div);
+  }
+  arr(s.webhooks).forEach(webhookRow);
+  $('#addWebhook').addEventListener('click', () => webhookRow({}));
 
   $('#set-save').addEventListener('click', async () => {
     const body = {
@@ -1745,6 +1839,18 @@ async function viewSettings(c) {
     if (isOn('set-bg') || (bg && Object.keys(bg).length)) {
       body.adminAuth.breakGlass = Object.assign({}, bg, { localhostOnly: isOn('set-bg') });
     }
+    const webhooks = [];
+    $$('#set-webhooks .loc-row').forEach((row) => {
+      const name = row.querySelector('.wh-name').value.trim();
+      const url = row.querySelector('.wh-url').value.trim();
+      if (!name && !url) return;
+      const wh = { name, url };
+      const secret = row.querySelector('.wh-secret').value.trim();
+      if (secret) wh.secret = secret;
+      if (row.querySelector('.wh-disabled').checked) wh.disabled = true;
+      webhooks.push(wh);
+    });
+    if (webhooks.length) body.webhooks = webhooks;
     const btn = $('#set-save'); btn.disabled = true;
     try {
       const r = await api('/api/settings', { method: 'PUT', body });

@@ -52,6 +52,32 @@ func (t TLSSettings) validate() error {
 	}
 }
 
+// HostTimeouts overrides the default upstream timeouts for a single proxy host.
+// Zero fields fall back to the shared transport's defaults. A non-nil value makes
+// the host use its own cloned transport (with its own connection pool) so the
+// override cannot affect any other host. Values are whole seconds.
+type HostTimeouts struct {
+	// ConnectSeconds caps establishing the TCP/TLS connection to the upstream.
+	ConnectSeconds int `json:"connectSeconds,omitempty" yaml:"connectSeconds,omitempty"`
+	// ReadSeconds caps time awaiting the upstream's response headers
+	// (time-to-first-byte). It does not bound a slow streaming body once headers
+	// have arrived, so it stays safe for SSE / long-poll / websocket upstreams.
+	ReadSeconds int `json:"readSeconds,omitempty" yaml:"readSeconds,omitempty"`
+}
+
+func (t *HostTimeouts) validate() error {
+	if t == nil {
+		return nil
+	}
+	if t.ConnectSeconds < 0 || t.ConnectSeconds > 3600 {
+		return fmt.Errorf("timeouts.connectSeconds %d out of range (0-3600)", t.ConnectSeconds)
+	}
+	if t.ReadSeconds < 0 || t.ReadSeconds > 3600 {
+		return fmt.Errorf("timeouts.readSeconds %d out of range (0-3600)", t.ReadSeconds)
+	}
+	return nil
+}
+
 // Location is a path-scoped override within a proxy host. Locations carry their
 // own upstream and their own ordered middleware/access-list references, so
 // per-location auth and access control are first-class config, not text snippets.
@@ -71,6 +97,15 @@ type ProxyHost struct {
 	Upstream Upstream `json:"upstream" yaml:"upstream"`
 
 	WebsocketsUpgrade bool `json:"websocketsUpgrade,omitempty" yaml:"websocketsUpgrade,omitempty"`
+
+	// RobotsNoIndex emits an "X-Robots-Tag: noindex, nofollow" response header so
+	// search engines do not index this host. A headers middleware that sets
+	// X-Robots-Tag explicitly still wins (it is applied closer to the response).
+	RobotsNoIndex bool `json:"robotsNoIndex,omitempty" yaml:"robotsNoIndex,omitempty"`
+
+	// Timeouts optionally overrides upstream dial/response timeouts for this host;
+	// nil keeps the shared, pooled transport used by every host (the default).
+	Timeouts *HostTimeouts `json:"timeouts,omitempty" yaml:"timeouts,omitempty"`
 
 	TLS TLSSettings `json:"tls,omitempty" yaml:"tls,omitempty"`
 
@@ -93,6 +128,9 @@ func (h ProxyHost) Validate() error {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	if err := h.TLS.validate(); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := h.Timeouts.validate(); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	for _, l := range h.Locations {

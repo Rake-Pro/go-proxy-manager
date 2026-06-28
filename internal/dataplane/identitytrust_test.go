@@ -138,6 +138,10 @@ func TestStripBaselineIdentityNoProviders(t *testing.T) {
 	r.Header.Set("X-Auth-Request-User", "attacker")
 	r.Header.Set("X-Authentik-Groups", "proxy-admins")
 	r.Header.Set("X-Custom-App", "keep-me")
+	// Authentik's own CSRF header matches the X-Authentik- strip prefix but is not
+	// an identity assertion; it must survive so a proxied Authentik can validate it
+	// against the authentik_csrf cookie (else every login fails "CSRF token missing").
+	r.Header.Set("X-authentik-CSRF", "csrf-token-value")
 	hh.stripUntrustedIdentity(r)
 	for _, h := range []string{"Remote-User", "X-Auth-Request-User", "X-Authentik-Groups"} {
 		if r.Header.Get(h) != "" {
@@ -146,6 +150,9 @@ func TestStripBaselineIdentityNoProviders(t *testing.T) {
 	}
 	if r.Header.Get("X-Custom-App") != "keep-me" {
 		t.Fatal("non-identity header must be preserved")
+	}
+	if r.Header.Get("X-authentik-CSRF") != "csrf-token-value" {
+		t.Fatal("Authentik CSRF header must be preserved through the identity strip")
 	}
 }
 

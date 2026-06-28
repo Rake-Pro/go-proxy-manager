@@ -54,6 +54,36 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
   field editors with add/remove rows, enum selects, pickers, and secret-aware
   inputs; the raw-JSON fallback is gone).
 - [x] Confirm/complete rate-limit middleware enforcement end-to-end.
+- [x] **Per-host no-index toggle** (`robotsNoIndex`): emits
+  `X-Robots-Tag: noindex, nofollow` on HTTP/HTTPS; explicit headers-middleware
+  value still wins.
+- [x] **Host tags** (`tags` on object metadata): chips + filter on the Proxy Hosts
+  list.
+- [x] **Per-host upstream timeouts** (`timeouts.connectSeconds`/`readSeconds`):
+  isolated per-host transport so an override never affects the shared pool.
+- [x] **Access-log viewer**: in-memory ring + `GET /api/logs` + "Access Logs"
+  view, gated on the access-log toggle (zero overhead when off).
+- [x] **Lifecycle webhooks** (`settings.webhooks`): async, best-effort POST per
+  config change; optional placeholder-resolved `X-GPM-Webhook-Secret`.
+
+## Security & hardening (post-public follow-ups)
+
+- [x] **Authentik CSRF regression** (from the `d0ceb82` identity-header strip):
+  the `X-Authentik-*` prefix strip removed Authentik's own `X-authentik-CSRF`
+  token header when Authentik is itself proxied through gpm, breaking every admin
+  login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
+
+## Live-validation follow-ups
+
+These features are built and unit-tested; they still want an end-to-end check on
+the live deployment (the rest of the 2026-06-28 batch was validated live).
+
+- [x] **Stream hosts (TCP/UDP) forwarding** validated end-to-end on the live
+  `1b6eeaf` image via the `test/stream/` harness (TCP + UDP echo round-tripped
+  from an external client through a published 15432 → gpm forwarder → backend).
+- [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
+  (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
+  walk a host through redirect → callback → session).
 
 ## Code hygiene
 

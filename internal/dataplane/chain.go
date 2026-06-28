@@ -70,6 +70,17 @@ var baselineIdentityHeaders = []string{
 // oauth2-proxy's X-Auth-Request-* and authentik's X-Authentik-*.
 var baselineIdentityPrefixes = []string{"X-Auth-Request-", "X-Authentik-"}
 
+// identityPrefixExceptions are headers that match a baseline prefix but are NOT
+// identity assertions and must reach the backend unmodified. X-authentik-CSRF
+// (canonicalized to X-Authentik-Csrf) is Authentik's CSRF token header: its web
+// frontend sends it on every flow-executor API POST, read from the authentik_csrf
+// cookie. It is validated against that cookie by Authentik, so forwarding it is no
+// identity-escalation risk; stripping it makes Authentik reject every login with
+// "CSRF Failed: CSRF token missing" when Authentik is itself proxied through gpm.
+var identityPrefixExceptions = map[string]struct{}{
+	"X-Authentik-Csrf": {},
+}
+
 // stripIdentityHeaders deletes the baseline identity headers and prefix families,
 // plus any extra (provider-configured) names, from h. Header keys are already in
 // canonical form, matching the canonicalized baseline names/prefixes.
@@ -81,6 +92,9 @@ func stripIdentityHeaders(h http.Header, extra []string) {
 		h.Del(name)
 	}
 	for key := range h {
+		if _, keep := identityPrefixExceptions[key]; keep {
+			continue
+		}
 		for _, p := range baselineIdentityPrefixes {
 			if strings.HasPrefix(key, p) {
 				delete(h, key)

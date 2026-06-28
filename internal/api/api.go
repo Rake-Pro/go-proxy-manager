@@ -27,6 +27,12 @@ type Deps struct {
 	Store    *store.Store
 	OnChange func()                           // called after every successful write; may be nil
 	Author   func(*http.Request) store.Author // derives the commit author; if nil, a zero Author is used
+	// OnEvent, if set, is fired after every successful write with the change
+	// details (action/kind/name/commit), for lifecycle webhooks. May be nil.
+	OnEvent func(action, kind, name, commit string)
+	// RecentLogs, if set, returns the data-plane access-log viewer payload
+	// (marshalled as-is) for GET /logs. May be nil.
+	RecentLogs func() any
 }
 
 func (d Deps) author(r *http.Request) store.Author {
@@ -39,6 +45,12 @@ func (d Deps) author(r *http.Request) store.Author {
 func (d Deps) onChange() {
 	if d.OnChange != nil {
 		d.OnChange()
+	}
+}
+
+func (d Deps) onEvent(action, kind, name, commit string) {
+	if d.OnEvent != nil {
+		d.OnEvent(action, kind, name, commit)
 	}
 }
 
@@ -176,8 +188,18 @@ func New(d Deps) http.Handler {
 			return
 		}
 		d.onChange()
+		d.onEvent("revert", "", "", sha)
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
+	})
+
+	// Recent data-plane access entries (newest first) for the in-UI log viewer.
+	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
+		if d.RecentLogs == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
+			return
+		}
+		writeJSON(w, http.StatusOK, d.RecentLogs())
 	})
 
 	// Download a portable archive of the entire config.
@@ -207,6 +229,7 @@ func New(d Deps) http.Handler {
 			return
 		}
 		d.onChange()
+		d.onEvent("restore", "", "", sha)
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
 	})
@@ -235,6 +258,7 @@ func New(d Deps) http.Handler {
 			return
 		}
 		d.onChange()
+		d.onEvent("settings", "Settings", "", sha)
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, settings)
 	})
@@ -303,6 +327,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			return
 		}
 		d.onChange()
+		d.onEvent("save", res.kind, name, sha)
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, obj)
 	})
@@ -319,6 +344,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			return
 		}
 		d.onChange()
+		d.onEvent("delete", res.kind, name, sha)
 		w.Header().Set(commitHeader, sha)
 		w.WriteHeader(http.StatusNoContent)
 	})
