@@ -68,6 +68,84 @@ func TestProxyEndToEnd(t *testing.T) {
 	}
 }
 
+func TestProxyLocationRouting(t *testing.T) {
+	root, closeRoot := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("root:" + r.URL.Path))
+	}))
+	defer closeRoot()
+	reports, closeReports := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("reports:" + r.URL.Path))
+	}))
+	defer closeReports()
+
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "claude"},
+		Domains:    []string{"app1.example.com"},
+		Upstream:   root,
+		Locations: []model.Location{{
+			Path:     "/reports",
+			Upstream: &reports,
+		}},
+	}}}
+	rt, err := buildRouter(cfg, "")
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+
+	cases := []struct {
+		path, want string
+	}{
+		{"/", "root:/"},
+		{"/terminal", "root:/terminal"},
+		{"/reports/", "reports:/reports/"},                 // prefix routed to the sidecar
+		{"/reports/a/b.html", "reports:/reports/a/b.html"}, // path forwarded unchanged
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "https://app1.example.com"+c.path, nil)
+		req.Host = "app1.example.com"
+		rt.serveHTTPS(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d, want 200", c.path, rec.Code)
+		}
+		if rec.Body.String() != c.want {
+			t.Fatalf("%s: body %q, want %q", c.path, rec.Body.String(), c.want)
+		}
+	}
+}
+
+func TestProxyLocationInheritsHostAccessList(t *testing.T) {
+	reports, closeReports := backendUpstream(t, okHandler())
+	defer closeReports()
+
+	cfg := model.Config{
+		AccessLists: []model.AccessList{{
+			ObjectMeta:    model.ObjectMeta{Name: "deny-all"},
+			DefaultAction: model.ActionDeny,
+			Rules:         []model.IPRule{{Action: model.ActionDeny, CIDR: "0.0.0.0/0"}},
+		}},
+		ProxyHosts: []model.ProxyHost{{
+			ObjectMeta:  model.ObjectMeta{Name: "claude"},
+			Domains:     []string{"app1.example.com"},
+			Upstream:    reports,
+			AccessLists: []string{"deny-all"},
+			Locations:   []model.Location{{Path: "/reports", Upstream: &reports}},
+		}},
+	}
+	rt, err := buildRouter(cfg, "")
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "https://app1.example.com/reports/", nil)
+	req.Host = "app1.example.com"
+	req.RemoteAddr = "203.0.113.7:1234"
+	rt.serveHTTPS(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("location must inherit host access list: got %d, want 403", rec.Code)
+	}
+}
+
 func TestProxyUnknownHost(t *testing.T) {
 	rt, _ := buildRouter(model.Config{}, "")
 	rec := httptest.NewRecorder()

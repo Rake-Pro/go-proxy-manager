@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -49,13 +50,50 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		}
 		proxy := newReverseProxy(h.Upstream, h.Name)
 		handler := buildChain(proxy, h, reg)
-		upstream := h.Upstream.Scheme + "://" + net.JoinHostPort(h.Upstream.Host, strconv.Itoa(h.Upstream.Port))
-		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upstream}
+		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upstreamLabel(h.Upstream)}
+		hh.locations = buildLocations(h, reg)
 		for _, d := range h.Domains {
 			rt.hosts[strings.ToLower(strings.TrimSpace(d))] = hh
 		}
 	}
 	return rt, nil
+}
+
+// upstreamLabel renders an upstream as scheme://host:port for debug/logging.
+func upstreamLabel(up model.Upstream) string {
+	return up.Scheme + "://" + net.JoinHostPort(up.Host, strconv.Itoa(up.Port))
+}
+
+// buildLocations compiles a host's path-scoped locations into routes ordered
+// longest-prefix first, so the most specific path wins. Each location proxies to
+// its own upstream (falling back to the host upstream) and inherits the host's
+// middleware/access-list chain with its own appended, so per-location auth is
+// applied on top of the host gate rather than replacing it. The request path is
+// forwarded unchanged - the upstream sees the full prefix, matching NPM's
+// proxy_pass-without-URI behaviour.
+func buildLocations(h model.ProxyHost, reg *registry) []locationRoute {
+	if len(h.Locations) == 0 {
+		return nil
+	}
+	locs := append([]model.Location{}, h.Locations...)
+	sort.SliceStable(locs, func(i, j int) bool { return len(locs[i].Path) > len(locs[j].Path) })
+	routes := make([]locationRoute, 0, len(locs))
+	for _, loc := range locs {
+		lh := h
+		if loc.Upstream != nil {
+			lh.Upstream = *loc.Upstream
+		}
+		lh.Middlewares = append(append([]string{}, h.Middlewares...), loc.Middlewares...)
+		lh.AccessLists = append(append([]string{}, h.AccessLists...), loc.AccessLists...)
+		lh.Locations = nil
+		proxy := newReverseProxy(lh.Upstream, h.Name)
+		routes = append(routes, locationRoute{
+			prefix:   loc.Path,
+			handler:  buildChain(proxy, lh, reg),
+			upstream: upstreamLabel(lh.Upstream),
+		})
+	}
+	return routes
 }
 
 // lookup returns the handler for the request's Host (port stripped), if any.
@@ -99,7 +137,8 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.stripUntrustedIdentity(r)
-	hh.handler.ServeHTTP(w, r)
+	handler, _ := hh.route(r.URL.Path)
+	handler.ServeHTTP(w, r)
 }
 
 // serveHTTP handles plaintext requests: force-SSL hosts are redirected to https,
@@ -122,5 +161,6 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.stripUntrustedIdentity(r)
-	hh.handler.ServeHTTP(w, r)
+	handler, _ := hh.route(r.URL.Path)
+	handler.ServeHTTP(w, r)
 }

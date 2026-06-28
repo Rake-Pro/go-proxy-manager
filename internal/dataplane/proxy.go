@@ -6,6 +6,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -96,12 +97,34 @@ func rewriteUpstreamRedirect(resp *http.Response, target *url.URL) {
 	resp.Header.Set("Location", u.String())
 }
 
+// locationRoute is a path-scoped handler within a host: requests whose path has
+// the prefix are served by handler (its own upstream + chain) instead of the
+// host default. The prefix is matched with nginx-style prefix semantics.
+type locationRoute struct {
+	prefix   string
+	handler  http.Handler
+	upstream string // scheme://host:port, for debug headers/logging only
+}
+
 // hostHandler is the compiled handler for one ProxyHost: its middleware chain
 // wrapping the reverse proxy. forceSSL records whether plaintext requests should
-// be redirected to HTTPS by the HTTP listener.
+// be redirected to HTTPS by the HTTP listener. locations are path-scoped
+// overrides, ordered longest-prefix first; the host handler is the fallback.
 type hostHandler struct {
-	host     string
-	handler  http.Handler
-	forceSSL bool
-	upstream string // scheme://host:port, for debug headers/logging only
+	host      string
+	handler   http.Handler
+	forceSSL  bool
+	upstream  string // scheme://host:port, for debug headers/logging only
+	locations []locationRoute
+}
+
+// route returns the handler and upstream label for a request path: the
+// longest-matching location prefix, or the host default when none match.
+func (hh *hostHandler) route(path string) (http.Handler, string) {
+	for _, l := range hh.locations {
+		if strings.HasPrefix(path, l.prefix) {
+			return l.handler, l.upstream
+		}
+	}
+	return hh.handler, hh.upstream
 }

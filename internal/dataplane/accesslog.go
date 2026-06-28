@@ -82,8 +82,8 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			if rt := s.current(); rt != nil {
 				if hh, ok := rt.lookup(r.Host); ok {
 					w.Header().Set("X-GPM-Host", hh.host)
-					if hh.upstream != "" {
-						w.Header().Set("X-GPM-Upstream", hh.upstream)
+					if _, up := hh.route(r.URL.Path); up != "" {
+						w.Header().Set("X-GPM-Upstream", up)
 					}
 				}
 			}
