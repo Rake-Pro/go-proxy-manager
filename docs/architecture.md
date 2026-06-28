@@ -53,17 +53,24 @@ it is within 30 days of expiry. On any change it signals the data plane to reloa
 
 ## Data plane
 
-**Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+, a fixed set of
-forward-secret AEAD cipher suites, ALPN `h2,http/1.1`) and an HTTP listener.
-Certificates are chosen per-connection by SNI: an exact-domain match wins,
-otherwise the left-most label is stripped and a wildcard match is tried; an
-unknown SNI is an error (there is no default certificate to leak). Custom certs
-load from the cert store; ACME certs load from their issued artifacts, and an
-unissued ACME cert is skipped until the manager produces it.
+**Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+ by default, a
+fixed set of forward-secret AEAD cipher suites, ALPN `h2,http/1.1`) and an HTTP
+listener. A host may pin a higher minimum TLS version (`tls.minTLSVersion: "1.3"`)
+applied per-connection by SNI via `GetConfigForClient`. Certificates are chosen
+per-connection by SNI: an exact-domain match wins, otherwise the left-most label
+is stripped and a wildcard match is tried; an unknown SNI is an error (there is no
+default certificate to leak). Custom certs load from the cert store; ACME certs
+load from their issued artifacts, and an unissued ACME cert is skipped until the
+manager produces it. **Stream hosts** add their own raw TCP and/or UDP listeners
+(one per `listenPort`), reconciled on every reload — ports added are opened, ports
+removed are closed, and a changed backend is swapped without dropping the port.
 
-**Routing.** A request is dispatched by `Host` to its compiled host handler
-(unknown host → 404; no default-host leakage). On the HTTP listener, a host with
-`forceSSL` gets a 308 redirect to HTTPS. Within a host, **locations** are matched
+**Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
+**proxy hosts** run the middleware chain to a reverse proxy; **redirect hosts**
+return the configured 3xx to their target (scheme/status/path-preservation per
+config); **dead hosts** return a fixed status (default 404). An unknown host →
+404; no default-host leakage. On the HTTP listener, a host with `forceSSL` gets a
+308 redirect to HTTPS. Within a proxy host, **locations** are matched
 longest-prefix-first and fall back to the host default; a location carries its own
 upstream and a middleware/access-list chain that is appended to the host's, so it
 is always at least as restrictive.

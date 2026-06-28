@@ -434,6 +434,13 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	if err != nil {
 		return Principal{}, false
 	}
+	if sess.CSRFToken == "" {
+		// A session with no anti-CSRF token is anomalous - every session minted by
+		// store.Create has one. Treat it as invalid so a stale/legacy token-less
+		// session forces a clean re-login (401) instead of silently failing every
+		// mutating request with "invalid or missing CSRF token".
+		return Principal{}, false
+	}
 	a.maybeSlide(w, r.Context(), sess)
 	return principalOf(sess), true
 }

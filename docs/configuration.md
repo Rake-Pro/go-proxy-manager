@@ -157,11 +157,14 @@ preservePath: true
 
 ## StreamHost (`config/stream-hosts/`)
 
-Raw TCP/UDP forwarding.
+Raw TCP/UDP forwarding. The data plane opens a listener per `listenPort` (TCP, UDP,
+or both) and forwards to the backend; listeners are reconciled on every reload
+(ports added/removed, backend swapped, with no listener restart for unchanged
+ports). UDP uses per-client sessions with an idle timeout.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `listenPort` | int | yes | 1–65535. |
+| `listenPort` | int | yes | 1–65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port — a bind failure is logged and that one port is skipped, never fatal. |
 | `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
 | `forwardHost` | string | yes | Backend host. |
 | `forwardPort` | int | yes | 1–65535. |

@@ -1,0 +1,38 @@
+# Stream-host test harness for go-proxy-manager.
+#
+# Runs the gpm image with a single StreamHost that forwards a published TCP+UDP
+# port (15432) to a tiny echo backend, so you can prove raw TCP/UDP forwarding
+# end to end against the same image you deploy.
+#
+#   docker compose up --build -d
+#   ./test.sh                 # asserts TCP + UDP echo through gpm's published port
+#   docker compose logs gpm   # look for "stream: tcp/udp listener started"
+#   docker compose down -v
+name: gpm-stream-test
+
+services:
+  echo:
+    build: ./echo
+    restart: unless-stopped
+
+  gpm:
+    image: ghcr.io/rake-pro/go-proxy-manager:main
+    pull_policy: always
+    # TEST ONLY: run as root so the bind-mounted ./config is writable (the prod
+    # image runs as the non-root 'gpm' user). Do NOT copy this into production.
+    user: "0:0"
+    environment:
+      GPM_HTTPS_ADDR: ":8443"   # parked off 443 so the harness needs no privileged ports
+      GPM_HTTP_ADDR: ":8080"
+      GPM_ADMIN_ADDR: ":8081"
+      GPM_COOKIE_SECURE: "0"
+      GPM_CONFIG_DIR: /data/config
+      GPM_SESSION_DB: /data/session.db
+      GPM_LOG_CONSOLE: "1"
+    volumes:
+      - ./config:/data/config
+    ports:
+      - "15432:15432/tcp"
+      - "15432:15432/udp"
+    depends_on:
+      - echo

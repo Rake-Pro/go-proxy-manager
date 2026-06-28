@@ -39,6 +39,8 @@ type Server struct {
 
 	cur atomic.Pointer[router]
 
+	streams *streamManager
+
 	httpsSrv *http.Server
 	httpSrv  *http.Server
 }
@@ -74,17 +76,25 @@ func New(c Config) *Server {
 		accessLog:     c.AccessLog,
 		slowThreshold: c.SlowRequestThreshold,
 		debugHeaders:  c.DebugHeaders,
+		streams:       newStreamManager(),
 	}
 }
 
-// Reload compiles cfg into a new router and swaps it in atomically.
+// Reload compiles cfg into a new router (HTTP/S hosts) and reconciles the raw
+// TCP/UDP stream listeners, swapping the router in atomically.
 func (s *Server) Reload(cfg model.Config) error {
 	rt, err := buildRouter(cfg, s.certDir)
 	if err != nil {
 		return fmt.Errorf("compile data plane: %w", err)
 	}
 	s.cur.Store(rt)
-	log.Info().Int("hosts", len(rt.hosts)).Msg("data plane reloaded")
+	s.streams.reload(cfg.StreamHosts)
+	log.Info().
+		Int("proxyHosts", len(rt.hosts)).
+		Int("redirectHosts", len(rt.redirects)).
+		Int("deadHosts", len(rt.dead)).
+		Int("streamHosts", len(cfg.StreamHosts)).
+		Msg("data plane reloaded")
 	return nil
 }
 
@@ -141,6 +151,7 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		s.streams.stopAll()
 		_ = s.httpSrv.Shutdown(shutdownCtx)
 		_ = s.httpsSrv.Shutdown(shutdownCtx)
 		return nil

@@ -16,8 +16,14 @@ import (
 // handlers and the certificate resolver. A new router is built on each reload
 // and swapped in atomically.
 type router struct {
-	hosts map[string]*hostHandler
-	certs *certResolver
+	hosts     map[string]*hostHandler // proxy hosts (full middleware chain)
+	redirects map[string]*redirectHandler
+	dead      map[string]*deadHandler
+	certs     *certResolver
+
+	// tlsConfigs holds a per-domain TLS config for any host (of any type) that
+	// pins a non-default minimum TLS version; absent = the listener default.
+	tlsConfigs map[string]*tls.Config
 
 	// clientIP resolves the real client IP (XFF-aware via the access-list trusted
 	// nets) for logging. Identity-header stripping is host-scoped on each
@@ -35,10 +41,24 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 	reg := buildRegistry(cfg)
 
 	rt := &router{
-		hosts:    map[string]*hostHandler{},
-		certs:    certs,
-		clientIP: reg.clientIP,
+		hosts:      map[string]*hostHandler{},
+		redirects:  map[string]*redirectHandler{},
+		dead:       map[string]*deadHandler{},
+		certs:      certs,
+		tlsConfigs: map[string]*tls.Config{},
+		clientIP:   reg.clientIP,
 	}
+	// pinTLS records a per-host non-default TLS-min-version config for each domain.
+	pinTLS := func(domains []string, minVer string) {
+		c := hostTLSConfig(minVer, certs)
+		if c == nil {
+			return
+		}
+		for _, d := range domains {
+			rt.tlsConfigs[hostKey(d)] = c
+		}
+	}
+
 	for _, h := range cfg.ProxyHosts {
 		if h.Disabled {
 			continue
@@ -49,12 +69,41 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		hh.locations = buildLocations(h, reg)
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
 		hh.hsts = hstsHeader(h.TLS.HSTS)
-		hh.tlsConfig = hostTLSConfig(h.TLS.MinTLSVersion, certs)
 		for _, d := range h.Domains {
-			rt.hosts[strings.ToLower(strings.TrimSpace(d))] = hh
+			rt.hosts[hostKey(d)] = hh
 		}
+		pinTLS(h.Domains, h.TLS.MinTLSVersion)
+	}
+	for _, h := range cfg.RedirectHosts {
+		if h.Disabled {
+			continue
+		}
+		rh := newRedirectHandler(h)
+		for _, d := range h.Domains {
+			rt.redirects[hostKey(d)] = rh
+		}
+		pinTLS(h.Domains, h.TLS.MinTLSVersion)
+	}
+	for _, h := range cfg.DeadHosts {
+		if h.Disabled {
+			continue
+		}
+		dh := newDeadHandler(h)
+		for _, d := range h.Domains {
+			rt.dead[hostKey(d)] = dh
+		}
+		pinTLS(h.Domains, h.TLS.MinTLSVersion)
 	}
 	return rt, nil
+}
+
+// hostKey normalizes a domain or Host header to the router map key: port stripped,
+// lower-cased, trimmed.
+func hostKey(host string) string {
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(host))
 }
 
 // upstreamLabel renders an upstream as scheme://host:port for debug/logging.
@@ -150,19 +199,13 @@ func hostTLSConfig(minTLSVersion string, certs *certResolver) *tls.Config {
 // to use the listener's default. Wired to tls.Config.GetConfigForClient so a
 // host can pin a higher minimum TLS version than the global floor.
 func (rt *router) tlsConfigForSNI(serverName string) *tls.Config {
-	if hh, ok := rt.lookup(serverName); ok {
-		return hh.tlsConfig
-	}
-	return nil
+	return rt.tlsConfigs[hostKey(serverName)] // nil if not pinned
 }
 
-// lookup returns the handler for the request's Host (port stripped), if any.
+// lookup returns the proxy-host handler for the request's Host (port stripped),
+// if any. Redirect and dead hosts are dispatched separately in serveHTTP(S).
 func (rt *router) lookup(hostHeader string) (*hostHandler, bool) {
-	name := hostHeader
-	if i := strings.IndexByte(name, ':'); i >= 0 {
-		name = name[:i]
-	}
-	hh, ok := rt.hosts[strings.ToLower(strings.TrimSpace(name))]
+	hh, ok := rt.hosts[hostKey(hostHeader)]
 	return hh, ok
 }
 
@@ -206,45 +249,72 @@ func (hh *hostHandler) stripUntrustedIdentity(r *http.Request) {
 	stripIdentityHeaders(r.Header, hh.identityHeaders)
 }
 
-// serveHTTPS dispatches a TLS-terminated request to its host handler.
+// serveHTTPS dispatches a TLS-terminated request to its host by Host header:
+// proxy hosts run the middleware chain; redirect and dead hosts serve directly.
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
-	hh, ok := rt.lookup(r.Host)
-	if !ok {
-		http.Error(w, "no such host", http.StatusNotFound)
+	name := hostKey(r.Host)
+	if hh, ok := rt.hosts[name]; ok {
+		normalizeRequestPath(r)
+		hh.stripUntrustedIdentity(r)
+		if hh.hsts != "" {
+			// Set before serving so it rides the upstream's response; only on HTTPS
+			// (browsers ignore HSTS received over plain HTTP anyway).
+			w.Header().Set("Strict-Transport-Security", hh.hsts)
+		}
+		handler, _ := hh.route(r.URL.Path)
+		handler.ServeHTTP(w, r)
 		return
 	}
-	normalizeRequestPath(r)
-	hh.stripUntrustedIdentity(r)
-	if hh.hsts != "" {
-		// Set before serving so it rides the upstream's response; only on HTTPS
-		// (browsers ignore HSTS received over plain HTTP anyway).
-		w.Header().Set("Strict-Transport-Security", hh.hsts)
+	if rh, ok := rt.redirects[name]; ok {
+		rh.serve(w, r)
+		return
 	}
-	handler, _ := hh.route(r.URL.Path)
-	handler.ServeHTTP(w, r)
+	if dh, ok := rt.dead[name]; ok {
+		dh.serve(w, r)
+		return
+	}
+	http.Error(w, "no such host", http.StatusNotFound)
 }
 
-// serveHTTP handles plaintext requests: force-SSL hosts are redirected to https,
-// others are proxied in the clear.
+// serveHTTP handles plaintext requests: force-SSL hosts (of any type) are
+// redirected to https, others are served in the clear.
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	hh, ok := rt.lookup(r.Host)
-	if !ok {
-		http.Error(w, "no such host", http.StatusNotFound)
-		return
-	}
-	normalizeRequestPath(r)
-	if hh.forceSSL {
-		host := r.Host
-		if i := strings.IndexByte(host, ':'); i >= 0 {
-			host = host[:i] // redirect to the canonical https host, not the inbound port
+	name := hostKey(r.Host)
+	if hh, ok := rt.hosts[name]; ok {
+		normalizeRequestPath(r)
+		if hh.forceSSL {
+			redirectToHTTPS(w, r)
+			return
 		}
-		u := *r.URL
-		u.Scheme = "https"
-		u.Host = host
-		http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
+		hh.stripUntrustedIdentity(r)
+		handler, _ := hh.route(r.URL.Path)
+		handler.ServeHTTP(w, r)
 		return
 	}
-	hh.stripUntrustedIdentity(r)
-	handler, _ := hh.route(r.URL.Path)
-	handler.ServeHTTP(w, r)
+	if rh, ok := rt.redirects[name]; ok {
+		if rh.forceSSL {
+			redirectToHTTPS(w, r)
+			return
+		}
+		rh.serve(w, r)
+		return
+	}
+	if dh, ok := rt.dead[name]; ok {
+		if dh.forceSSL {
+			redirectToHTTPS(w, r)
+			return
+		}
+		dh.serve(w, r)
+		return
+	}
+	http.Error(w, "no such host", http.StatusNotFound)
+}
+
+// redirectToHTTPS sends a plaintext request to the canonical https URL on the
+// same host (port stripped), preserving path and query.
+func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
+	u := *r.URL
+	u.Scheme = "https"
+	u.Host = hostKey(r.Host)
+	http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
 }

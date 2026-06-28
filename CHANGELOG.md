@@ -12,8 +12,11 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 - **Data plane**: native-Go reverse proxy with SNI-based TLS termination (exact +
   wildcard certificate selection), HTTP/2, WebSocket upgrades, and force-SSL
   (HTTP→HTTPS 308 redirects).
-- **Host types**: proxy hosts, redirect hosts, raw TCP/UDP stream hosts, and dead
-  hosts (absorb unmatched vhosts; no default-host leakage).
+- **Host types served by the data plane**: proxy hosts (reverse proxy + chain),
+  **redirect hosts** (configurable scheme/status/path-preserving 3xx), **dead
+  hosts** (fixed status, default 404; absorb unmatched vhosts, no default-host
+  leakage), and **stream hosts** (raw TCP/UDP forwarding on their own per-port
+  listeners, reconciled on reload). Previously only proxy hosts routed.
 - **Path-scoped locations**: per-path upstream and middleware/access-list overrides
   on a single host (longest-prefix match, chains appended to the host's).
 - **Certificates**: ACME DNS-01 issuance and automatic renewal (Cloudflare

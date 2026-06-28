@@ -1,0 +1,5 @@
+name: echo
+listenPort: 15432
+protocol: both
+forwardHost: echo
+forwardPort: 9000

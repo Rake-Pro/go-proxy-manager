@@ -174,7 +174,9 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   GHCR multi-arch build, digest-pinned.
 
 ### P1 - high-value, layer in next (parity + best community asks)
-- Redirect / stream (TCP/UDP) / 404 hosts; multiple access lists per host/location.
+- Redirect / stream (TCP/UDP) / 404 hosts (✓ shipped: the data plane now serves
+  redirect, dead, and raw TCP/UDP stream hosts, not just proxy hosts); multiple
+  access lists per host/location.
 - Backup / export / restore ★ (✓ shipped: gzip-tar export + validated restore +
   config revert, with History-view UI), rate limiting ★ (✓ shipped: per-host,
   per-client-IP token bucket with 429 + Retry-After), dark mode,

@@ -1,7 +1,6 @@
 package dataplane
 
 import (
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -121,11 +120,6 @@ type hostHandler struct {
 	// hsts is the precomputed Strict-Transport-Security header value, or "" when
 	// HSTS is disabled for this host. Emitted only on the HTTPS listener.
 	hsts string
-
-	// tlsConfig is a per-host TLS config used during the handshake when this host
-	// pins a non-default minimum TLS version (see GetConfigForClient). nil means
-	// the listener's default config (TLS 1.2 floor) applies.
-	tlsConfig *tls.Config
 
 	// identityHeaders are the provider-configured identity headers this host
 	// asserts; trustedNets are the peers this host trusts to set them. Both are

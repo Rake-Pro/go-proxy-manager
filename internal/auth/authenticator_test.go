@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
+	_ "modernc.org/sqlite"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -227,5 +230,48 @@ func TestSlidingSessionExtendsExpiry(t *testing.T) {
 	}
 	if len(rec.Result().Cookies()) == 0 {
 		t.Fatal("sliding refresh should re-issue the session cookie")
+	}
+}
+
+func TestSessionWithoutCSRFRejected(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "s.db")
+
+	st, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := st.Create(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// Simulate a legacy/migrated session row with no CSRF token (store.Create
+	// always generates one, so blank it directly through a separate handle).
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE sessions SET csrf_token = '' WHERE id = ?`, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	st2, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	a := NewAuthenticator(Options{Store: st2})
+	a.Configure(model.Config{}, model.Settings{})
+
+	h := a.RequireRole(RoleUser, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: a.cookieName, Value: sess.ID})
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a session without a CSRF token must force re-login (401), got %d", rec.Code)
 	}
 }
