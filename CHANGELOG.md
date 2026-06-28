@@ -7,6 +7,15 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Fixed
+
+- **Duplicate `Strict-Transport-Security` on the proxied admin path.** The admin
+  server emitted its own HSTS header in addition to the one the data plane (the
+  actual TLS edge) emits for the admin host, so a request to the admin panel
+  through gpm carried two identical HSTS headers. HSTS is now set only by the data
+  plane; the admin server no longer sets it (over its direct plain-HTTP port HSTS
+  was ignored anyway, and via the proxy the edge owns it).
+
 ### Security
 
 - **Forward-auth identity strip no longer breaks a proxied Authentik.** The

@@ -65,10 +65,12 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 
 // securityHeaders sets baseline hardening headers on every admin/login response:
 // nosniff, clickjacking protection (frame-ancestors + the legacy X-Frame-Options),
-// a conservative referrer policy, and HSTS. HSTS is emitted unconditionally - the
-// admin panel is reached over TLS via the data plane, and browsers ignore an HSTS
-// header received over plain HTTP, so it is safe on the direct-HTTP admin port.
-// The CSP is intentionally limited to frame-ancestors so it cannot break the SPA.
+// and a conservative referrer policy. HSTS is deliberately NOT set here: the admin
+// panel is either reached over plain HTTP on its direct port (where browsers ignore
+// HSTS) or fronted by the data plane over TLS, which is the actual TLS edge and
+// owns the Strict-Transport-Security header for the host. Emitting it here too
+// produced a duplicate HSTS header on the proxied admin path. The CSP is
+// intentionally limited to frame-ancestors so it cannot break the SPA.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -76,7 +78,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
 		h.Set("Referrer-Policy", "same-origin")
-		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		next.ServeHTTP(w, r)
 	})
 }
