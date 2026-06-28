@@ -55,17 +55,53 @@ func originOK(r *http.Request) bool {
 }
 
 var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
-<html><head><meta charset="utf-8"><title>go-proxy-manager login</title></head>
-<body style="font-family:system-ui;max-width:24rem;margin:4rem auto">
-<h1>Sign in</h1>
-{{range .Providers}}<p><a href="/auth/login?idp={{.Name}}&return={{$.Return}}">Login with {{.Label}}</a></p>{{end}}
-{{if .Local}}<form method="post" action="/auth/local">
-<input type="hidden" name="return" value="{{.Return}}">
-<p><input name="username" placeholder="username" autocomplete="username"></p>
-<p><input name="password" type="password" placeholder="password" autocomplete="current-password"></p>
-<p><button type="submit">Log in</button></p>
-</form>{{end}}
-{{if not .Providers}}{{if not .Local}}<p>No login methods are available.</p>{{end}}{{end}}
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.AppName}} - Sign in</title>
+<style>
+  :root{--bg1:#0b1220;--bg2:#020617;--card:#0f1729;--ink:#e2e8f0;--muted:#94a3b8;
+        --line:#1e293b;--accent:#3b82f6;--accent-h:#60a5fa;--field:#0b1220}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       padding:1.5rem;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       color:var(--ink);background:radial-gradient(1200px 600px at 50% -10%,#172033,var(--bg2)),linear-gradient(135deg,var(--bg1),var(--bg2))}
+  .card{width:100%;max-width:23rem;background:var(--card);border:1px solid var(--line);border-radius:14px;
+        box-shadow:0 20px 50px rgba(0,0,0,.55);padding:2.25rem 2rem 2rem}
+  .brand{text-align:center;margin-bottom:1.5rem}
+  .brand h1{font-size:1.2rem;font-weight:650;margin:0;letter-spacing:.01em;color:#f1f5f9}
+  .brand p{margin:.4rem 0 0;color:var(--muted);font-size:.85rem}
+  .btn{display:block;width:100%;border:0;border-radius:9px;padding:.72rem 1rem;
+       font-size:.95rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none}
+  .btn-primary{background:var(--accent);color:#fff;transition:background .15s}
+  .btn-primary:hover{background:var(--accent-h)}
+  .sso{margin-bottom:.6rem}
+  .divider{display:flex;align-items:center;gap:.75rem;color:var(--muted);
+           font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;margin:1.25rem 0}
+  .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
+  label{display:block;font-size:.78rem;color:var(--muted);margin:0 0 .3rem}
+  .field{margin-bottom:.9rem}
+  input{width:100%;padding:.62rem .7rem;border:1px solid var(--line);border-radius:9px;
+        background:var(--field);font-size:.95rem;color:var(--ink)}
+  input::placeholder{color:#475569}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.25)}
+  form{margin:0}
+  .empty{color:var(--muted);text-align:center;font-size:.9rem;margin:0}
+</style></head>
+<body>
+<div class="card">
+  <div class="brand"><h1>{{.AppName}}</h1><p>Sign in to continue</p></div>
+  {{range .Providers}}<a class="btn btn-primary sso" href="/auth/login?idp={{.Name}}&return={{$.Return}}">Login with {{.Label}}</a>{{end}}
+  {{if .Local}}{{if .Providers}}<div class="divider">or</div>{{end}}
+  <form method="post" action="/auth/local">
+    <input type="hidden" name="return" value="{{.Return}}">
+    <div class="field"><label for="u">Username</label>
+      <input id="u" name="username" placeholder="admin" autocomplete="username" autofocus></div>
+    <div class="field"><label for="p">Password</label>
+      <input id="p" name="password" type="password" placeholder="Password" autocomplete="current-password"></div>
+    <button class="btn btn-primary" type="submit">Log in</button>
+  </form>{{end}}
+  {{if not .Providers}}{{if not .Local}}<p class="empty">No login methods are available.</p>{{end}}{{end}}
+</div>
 </body></html>`))
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -80,13 +116,33 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, url, http.StatusFound)
 		return
 	}
+	providers := s.authn.LoginOptions()
+	local := s.authn.LocalLoginVisible()
+
+	// SSO-only with a single provider: skip the chooser and go straight to the
+	// IdP - there is nothing to choose. ?select=1 (used by logout) forces the
+	// page so a signed-out user is not immediately bounced back into a still-live
+	// IdP session.
+	if !local && len(providers) == 1 && r.URL.Query().Get("select") == "" {
+		url, err := s.authn.BeginLogin(r.Context(), providers[0].Name, returnTo)
+		if err != nil {
+			log.Warn().Str("idp", providers[0].Name).Err(err).Msg("begin login failed")
+			http.Error(w, "login unavailable", http.StatusBadGateway)
+			return
+		}
+		http.Redirect(w, r, url, http.StatusFound)
+		return
+	}
+
 	data := struct {
+		AppName   string
 		Providers []auth.LoginOption
 		Local     bool
 		Return    string
 	}{
-		Providers: s.authn.LoginOptions(),
-		Local:     s.authn.LocalLoginVisible(),
+		AppName:   s.authn.AppName(),
+		Providers: providers,
+		Local:     local,
 		Return:    returnTo,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -131,7 +187,9 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.authn.Logout(w, r)
-	http.Redirect(w, r, "/auth/login", http.StatusFound)
+	// select=1 shows the login page instead of auto-bouncing back into the IdP,
+	// so signing out actually lands on a sign-in screen.
+	http.Redirect(w, r, "/auth/login?select=1", http.StatusFound)
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {

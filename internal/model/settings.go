@@ -21,6 +21,10 @@ type AdminAuthSettings struct {
 type Settings struct {
 	SchemaVersion int `json:"schemaVersion" yaml:"schemaVersion"`
 
+	// AppName is the brand label shown in the admin nav and the login page.
+	// Empty falls back to "Go Proxy Manager".
+	AppName string `json:"appName,omitempty" yaml:"appName,omitempty"`
+
 	// ExternalBaseURL is the canonical public URL of the admin panel. It is
 	// configured explicitly so OIDC redirect_uri is never derived from
 	// X-Forwarded-* headers (the port/scheme footgun that broke fork logins).
@@ -48,6 +52,7 @@ func (s Settings) Validate() error {
 func DefaultSettings() Settings {
 	return Settings{
 		SchemaVersion: SchemaVersion,
+		AppName:       "Go Proxy Manager",
 		AdminAuth:     AdminAuthSettings{LocalLoginEnabled: true},
 	}
 }

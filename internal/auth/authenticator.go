@@ -33,6 +33,7 @@ type Authenticator struct {
 
 	mu       sync.RWMutex
 	baseURL  string
+	appName  string
 	idps     map[string]model.IdentityProvider
 	settings model.AdminAuthSettings
 	clients  map[string]*oidc.Client // cached OIDC clients by IdP name
@@ -92,7 +93,18 @@ func (a *Authenticator) Configure(cfg model.Config, settings model.Settings) {
 	}
 	a.settings = settings.AdminAuth
 	a.baseURL = settings.ExternalBaseURL
+	a.appName = settings.AppName
 	a.clients = map[string]*oidc.Client{} // force rebuild on next use
+}
+
+// AppName is the brand label for the login page, defaulting when unset.
+func (a *Authenticator) AppName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.appName == "" {
+		return "Go Proxy Manager"
+	}
+	return a.appName
 }
 
 // --- OIDC login -----------------------------------------------------------

@@ -141,7 +141,7 @@ function toastErr(e) {
 }
 
 // ---------- shell ----------
-const state = { me: null, version: null, headSha: null, instance: 'go-proxy-manager' };
+const state = { me: null, version: null, headSha: null, instance: 'go-proxy-manager', appName: 'Go Proxy Manager' };
 
 function buildShell() {
   const app = document.getElementById('app');
@@ -151,7 +151,7 @@ function buildShell() {
       <aside class="sidebar">
         <div class="wordmark">
           <span class="logo" aria-hidden="true">${ICON.arrow}</span>
-          <span class="name">go-proxy-manager</span>
+          <span class="name">${esc(state.appName)}</span>
         </div>
         <nav class="nav" id="nav" aria-label="Primary">
           ${NAV.map((n) => `<button class="nav-item" data-view="${n.id}">${n.icon}${esc(n.label)}</button>`).join('')}
@@ -164,7 +164,7 @@ function buildShell() {
       <div class="main">
         <header class="topbar">
           <button class="menu-btn" id="menuBtn" aria-label="Open navigation">${ICON.menu}</button>
-          <h1 class="page-title" id="pageTitle">go-proxy-manager</h1>
+          <h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1>
           <div class="spacer"></div>
           <div class="ident" id="ident"></div>
         </header>
@@ -210,6 +210,12 @@ async function loadTopbar() {
     if (s && s.externalBaseURL) {
       try { state.instance = new URL(s.externalBaseURL).host || s.externalBaseURL; }
       catch (e) { state.instance = s.externalBaseURL; }
+    }
+    if (s && s.appName) {
+      state.appName = s.appName;
+      const nm = document.querySelector('.wordmark .name');
+      if (nm) nm.textContent = s.appName;
+      document.title = s.appName + ' admin';
     }
   } catch (e) { /* ignore */ }
 
@@ -305,7 +311,7 @@ async function route() {
   const sub = parts[1] ? decodeURIComponent(parts[1]) : null;
 
   setActiveNav(section);
-  $('#pageTitle').textContent = TITLES[section] || 'go-proxy-manager';
+  $('#pageTitle').textContent = TITLES[section] || state.appName;
   const c = $('#content');
   c.innerHTML = loadingHtml();
   window.scrollTo(0, 0);
