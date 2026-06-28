@@ -233,7 +233,9 @@ async function loadTopbar() {
 
 async function logout() {
   try { await api('/auth/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
-  location.href = '/auth/login?return=' + encodeURIComponent('/');
+  // select=1 keeps gpm on the login page instead of auto-redirecting back into a
+  // still-live SSO session under ssoOnly (which would silently re-log-in).
+  location.href = '/auth/login?select=1';
 }
 
 // ---------- small UI builders ----------
