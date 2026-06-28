@@ -101,3 +101,11 @@ See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts ✓, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
 (HTTP/3, Brotli/zstd, OCSP, WAF/CrowdSec, GeoIP, mTLS, IPv6, SAML/LDAP), and P3
 tiers.
+
+### Design proposals (not started)
+
+- **HTTP/3, GeoIP geoblocking, mTLS client certs** —
+  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md). Schema,
+  data-plane wiring, and the per-feature dependency decision. Suggested order:
+  mTLS (no new dep) → GeoIP (one pure-Go mmdb reader) → HTTP/3 (quic-go, gated
+  behind a build tag + runtime toggle).
