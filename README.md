@@ -1,32 +1,176 @@
-# Go Proxy Manager
+# go-proxy-manager
 
-Exploratory idea: a Go rewrite of an Nginx Proxy Manager-style reverse-proxy
-manager. **Status: idea only, not started.**
+A reverse-proxy manager written in Go: a single static binary that terminates
+TLS for many domains, reverse-proxies them to your backends, issues and renews
+Let's Encrypt certificates over DNS-01, and gates access with IP access lists,
+forward-auth, and OpenID Connect single sign-on. Configuration is declarative,
+git-backed YAML; there is a REST API and an embedded web UI.
 
-## Why consider this
+It is a clean-room reimplementation of the ideas behind
+[Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager)
+and [NPMplus](https://github.com/ZoeyVid/NPMplus), with first-class SSO and a
+small, vetted dependency set as the headline differences.
 
-Running the private NPM fork (`example/nginx-proxy-manager`, v2.15.1 + OIDC PR
-#5494) surfaced the usual Node dependency churn and a steady stream of advisory
-noise (Dependabot flagged ~29 advisories in the inherited tree). A focused Go
-implementation with a small, vendored dependency set could cut that maintenance
-and security-surface burden - if it can be done without recreating the same mess.
+## Why
 
-## Decision gate before committing
+Running an Nginx-Proxy-Manager-style edge means inheriting a large Node
+dependency surface and configuring authentication through raw nginx snippets that
+are easy to get subtly wrong. go-proxy-manager is a focused rewrite:
 
-- Is the dependency footprint genuinely smaller/cleaner in Go for this problem?
-- Ongoing security surface vs. the fork: actually better, or just different?
-- Effort to reach feature parity vs. value over maintaining the fork.
+- **One CGO-free binary.** ~7 direct dependencies, all pure-Go or `golang.org/x`.
+- **Authentication is first-class config, not text snippets.** OIDC, forward-auth,
+  and an nginx-`auth_request`-style outpost mode are typed objects with validation,
+  not hand-written directives.
+- **GitOps-native.** Every config object is a YAML file; every change is a git
+  commit. The whole graph is validated (dangling references are a load-time error,
+  not a 2 a.m. outage).
+- **Secrets never live in the config.** Values use `${ENV:...}` / `${FILE:...}`
+  placeholders; committing a literal secret is refused.
 
-## Parity targets (what NPM does today)
+## Features
 
-- Proxy hosts / streams / redirection hosts / 404 hosts, generating nginx (or a
-  native Go proxy) config.
-- Let's Encrypt issuance + renewal (DNS-01 wildcard, like the current setup).
-- Access lists (IP allow/deny) + forward-auth compatibility.
-- OIDC/SSO admin login (the feature we forked NPM to get) + local break-glass.
-- Web admin UI + API.
+**Proxying**
+- SNI-based TLS termination with exact and wildcard certificate selection
+- HTTP/2, WebSocket upgrades, force-SSL (HTTP→HTTPS 308)
+- Path-scoped **locations** (per-path upstream and middleware on one host)
+- Redirect hosts, raw TCP/UDP **stream** forwarding, and dead hosts (absorb
+  unmatched vhosts)
 
-## Notes
+**Certificates**
+- Let's Encrypt (or any ACME CA) via **DNS-01**, Cloudflare provider built in
+- Automatic renewal (30 days before expiry), ECDSA P-256
+- Bring-your-own custom certificates
 
-- Project conventions: Go, zerolog for logging (project convention).
-- Placeholder repo; revisit when there's appetite to prototype.
+**Access control & auth**
+- IP access lists (allow/deny CIDR rules, default-deny, HTTP basic-auth)
+- **OIDC** admin login (authorization code + PKCE, group→role mapping)
+- **Forward-auth** (trust upstream-asserted identity headers from trusted peers)
+- **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)
+- Request **guards** (deny by path/method/query, with CIDR exemptions)
+- Composable, ordered middleware chain per host and per location
+
+**Operations**
+- REST API + embedded single-page web UI
+- Git-backed declarative config with full referential validation
+- One-time importer from an existing Nginx-Proxy-Manager/NPMplus data directory
+- Structured logging (zerolog), optional access log, slow-request warnings
+
+See [FEATURES.md](FEATURES.md) for the full roadmap (P0–P3 tiers).
+
+## Architecture
+
+```
+                         +---------------------- gpm (one binary) -----------------------+
+   Internet -- :443/:80 -|  data plane: SNI TLS -> host routing -> middleware -> upstream |
+                         |     (force-SSL, locations, access-lists, guards, auth, headers)|
+                         |                                                                |
+   Operator -- :8081 ----|  control plane: REST API + web UI  -->  git-backed config store|
+                         |  auth: OIDC / local bcrypt          |   (per-object YAML)      |
+                         |                                     \/                         |
+                         |  ACME manager -- DNS-01 --> Let's Encrypt    certs on disk      |
+                         +----------------------------------------------------------------+
+```
+
+Two independent listeners: the **data plane** (public, ports 80/443) serves
+proxied traffic; the **control plane** (admin, port 8081) serves the API and UI
+and is meant to sit behind your own ingress or an SSH tunnel. A config change in
+the store atomically recompiles the data plane's routing table and certificate
+set. See [docs/architecture.md](docs/architecture.md).
+
+## Quick start
+
+With Docker (see [docs/deployment.md](docs/deployment.md) for the full guide):
+
+```
+# 1. Generate an admin password hash
+docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password'
+
+# 2. Minimal compose
+cat > compose.yaml <<'YAML'
+services:
+  gpm:
+    image: ghcr.io/rake-pro/go-proxy-manager
+    ports: ["80:80", "443:443", "127.0.0.1:8081:8081"]
+    environment:
+      GPM_LOCAL_ADMIN_USER: admin
+      GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_hash
+    volumes: ["gpm-data:/data"]
+    secrets: [admin_hash]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+secrets:
+  admin_hash:
+    file: ./admin_hash      # the hash from step 1; chmod 644 so the non-root user can read it
+volumes:
+  gpm-data:
+YAML
+
+docker compose up -d
+```
+
+Open `http://127.0.0.1:8081/` (tunnel to it for a remote host) and sign in. Add a
+proxy host, point it at a backend, and attach a certificate. Configuration is
+written as YAML under the `/data/config` git repo, so you can also manage it as
+code.
+
+## Configuration
+
+Everything is a typed object stored as `config/<kind>/<name>.yaml` plus a single
+`config/settings.yaml`. A minimal proxy host:
+
+```yaml
+# config/proxy-hosts/app.yaml
+name: app
+domains: [app.example.com]
+upstream: {scheme: http, host: backend, port: 8080}
+tls: {certificateRef: wildcard, forceSSL: true}
+```
+
+The complete object reference (proxy/redirect/stream/dead hosts, certificates,
+DNS providers, identity providers, access lists, middlewares, settings) with
+validation rules and examples is in **[docs/configuration.md](docs/configuration.md)**.
+
+## Building from source
+
+Requires Go 1.26+.
+
+```
+go build -o gpm ./cmd/gpm     # build the binary
+go test ./...                 # run the test suite (hermetic; needs `git` on PATH)
+```
+
+Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm import -npm-data <dir>`.
+
+## Security model
+
+- The admin/control plane is authenticated (local bcrypt and/or OIDC) and not
+  meant to be exposed directly to the internet; front it with your own ingress.
+- Identity headers are stripped from any peer that is not a configured trusted
+  proxy, so a direct client cannot forge an identity to a backend.
+- All trust decisions are rooted in the connection peer IP, never a forwarded
+  header, unless that peer is explicitly trusted.
+- Secrets are referenced, never stored: literal secret values are rejected at
+  commit time.
+
+For deployment hardening notes see [docs/deployment.md](docs/deployment.md).
+
+## Project layout
+
+```
+cmd/gpm/            entrypoint, subcommands (daemon, hashpw, import)
+internal/model/     config object types + validation
+internal/store/     git-backed config store
+internal/dataplane/ TLS, routing, middleware chain, reverse proxy
+internal/acme/      ACME DNS-01 issuance + renewal
+internal/auth/      sessions, OIDC, forward-auth, role mapping
+internal/oidc/      OIDC client (discovery, PKCE, token verification)
+internal/api/       REST API
+internal/ui/        embedded web UI (go:embed)
+internal/importer/  Nginx-Proxy-Manager importer
+```
+
+## Acknowledgements & license
+
+Nginx Proxy Manager (MIT) and NPMplus (AGPLv3) are referenced as behavioural
+inspiration only; this is a clean-room implementation with no copied code or
+configuration. See the repository license for terms.

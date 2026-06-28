@@ -1,0 +1,344 @@
+# Configuration reference
+
+go-proxy-manager is configured by a set of typed YAML objects in a git-backed
+directory (default `/data/config`). You can edit them through the web UI / REST
+API, or write the files directly and let the daemon load them on start/reload.
+
+## Layout
+
+```
+config/
+  settings.yaml            # singleton app settings
+  proxy-hosts/<name>.yaml
+  redirect-hosts/<name>.yaml
+  stream-hosts/<name>.yaml
+  dead-hosts/<name>.yaml
+  certificates/<name>.yaml
+  dns-providers/<name>.yaml
+  identity-providers/<name>.yaml
+  access-lists/<name>.yaml
+  middlewares/<name>.yaml
+```
+
+One object per file; the file's base name must equal the object's `name`. The
+directory is a git repository — every change made through the API is a commit,
+and the whole graph is validated before it is accepted (a reference to a
+non-existent certificate, middleware, access list, identity provider, or DNS
+provider is a load-time error, and an object cannot be deleted while another
+references it).
+
+## Common fields (every object)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | yes | Identity and filename. Lowercase alphanumeric plus `-_.`, must start and end alphanumeric, 1–254 chars. |
+| `displayName` | string | no | Human label for the UI. |
+| `labels` | map | no | Arbitrary key/value tags. |
+| `disabled` | bool | no | Keep the object in config but exclude it from the running data plane. |
+
+## Secrets
+
+Secret-valued fields (API tokens, client secrets, etc.) must be **placeholders**,
+not literal values:
+
+```
+${ENV:CF_API_TOKEN}        # resolved from the environment variable
+${FILE:/run/secrets/token} # resolved from a file (e.g. a Docker secret), trimmed
+```
+
+Placeholders resolve lazily, at the moment the secret is used. Committing a
+literal secret is refused with `refusing to commit literal secret(s): ...`. In
+API responses, literal secrets are redacted to `***`; placeholders are returned
+verbatim.
+
+---
+
+## Settings (`config/settings.yaml`)
+
+Singleton application configuration.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `schemaVersion` | int | Config schema version. |
+| `appName` | string | Brand label in the UI and login page. Default `Go Proxy Manager`. |
+| `externalBaseURL` | string | Canonical public URL of the admin panel. Must be an absolute URL. Used to build the OIDC `redirect_uri` so it never depends on spoofable `X-Forwarded-*` headers. |
+| `adminAuth.providers` | []string | Identity-provider names allowed to log into the admin panel. |
+| `adminAuth.localLoginEnabled` | bool | Keep username/password login available (anti-lockout). Default true. |
+| `adminAuth.ssoOnly` | bool | Disable local login entirely. Requires at least one `providers` entry. Recovery from an SSO outage is by redeploying with local login re-enabled. |
+
+```yaml
+schemaVersion: 1
+appName: Go Proxy Manager
+externalBaseURL: https://gpm.example.com
+adminAuth:
+  providers: [authentik-oidc]
+  localLoginEnabled: true
+  ssoOnly: false
+```
+
+---
+
+## ProxyHost (`config/proxy-hosts/`)
+
+Terminates TLS for one or more domains and reverse-proxies to an upstream.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `domains` | []string | yes | One or more hostnames served by this host. |
+| `upstream` | Upstream | yes | Default backend. |
+| `websocketsUpgrade` | bool | no | Offer WebSocket upgrades. |
+| `tls` | TLSSettings | no | Certificate + TLS behaviour. |
+| `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
+| `accessLists` | []string | no | Host-wide access-list names. |
+| `locations` | []Location | no | Path-scoped overrides (below). |
+
+**Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
+
+**TLSSettings**: `certificateRef` (a Certificate name), `forceSSL` (redirect
+HTTP→HTTPS), `http2`, `hsts` (`enabled`, `maxAge`, `includeSubdomains`, `preload`
+— *note: accepted in config but the `Strict-Transport-Security` header is not yet
+emitted; see BACKLOG.md*).
+
+**Location**: a path-scoped override. `path` (required), optional `upstream`
+override, plus `middlewares` / `accessLists` that are **appended to** (not
+replace) the host-wide chain — so a location is always at least as restrictive as
+its host. Matching is longest-prefix; the request path is forwarded unchanged.
+
+```yaml
+name: app
+domains: [app.example.com]
+upstream: {scheme: http, host: backend, port: 8080}
+websocketsUpgrade: true
+tls: {certificateRef: wildcard, forceSSL: true}
+middlewares: [require-sso]
+locations:
+  - path: /metrics
+    accessLists: [internal-only]      # /metrics also requires the internal CIDR
+```
+
+---
+
+## RedirectHost (`config/redirect-hosts/`)
+
+Issues HTTP redirects.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `domains` | []string | yes | Source hostnames. |
+| `targetDomain` | string | yes | Where to redirect. |
+| `targetScheme` | string | no | `http`\|`https`\|`auto`. |
+| `statusCode` | int | no | `301`\|`302`\|`307`\|`308` (0 = default). |
+| `preservePath` | bool | no | Keep the request path. |
+| `tls` | TLSSettings | no | |
+
+```yaml
+name: apex
+domains: [example.com]
+targetDomain: www.example.com
+statusCode: 301
+preservePath: true
+```
+
+---
+
+## StreamHost (`config/stream-hosts/`)
+
+Raw TCP/UDP forwarding.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `listenPort` | int | yes | 1–65535. |
+| `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
+| `forwardHost` | string | yes | Backend host. |
+| `forwardPort` | int | yes | 1–65535. |
+
+```yaml
+name: postgres
+listenPort: 5432
+protocol: tcp
+forwardHost: db.internal
+forwardPort: 5432
+```
+
+---
+
+## DeadHost (`config/dead-hosts/`)
+
+Returns a fixed status for claimed domains — useful to absorb unmatched vhosts and
+stop default-host leakage.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `domains` | []string | yes | |
+| `statusCode` | int | no | Default 404. |
+| `tls` | TLSSettings | no | |
+
+---
+
+## Certificate (`config/certificates/`)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `type` | string | yes | `custom` or `acme`. |
+| `domains` | []string | yes | Domains the cert covers (`*.example.com` for wildcard). |
+| `acme` | ACMESpec | when `type: acme` | |
+| `custom` | CustomCertSpec | when `type: custom` | |
+
+**ACMESpec**: `email` (required), `dnsProvider` (required — a DNSProvider name),
+`directoryURL` (optional, defaults to Let's Encrypt production), `keyType`
+(`ecdsa` default | `rsa`), `challenge` (only `dns-01` is supported).
+
+**CustomCertSpec**: `certFile`, `keyFile` — paths **relative to the cert store**
+(absolute paths and `..` are rejected). These are file references, not inline PEM.
+
+```yaml
+# ACME wildcard
+name: wildcard
+type: acme
+domains: ["*.example.com", example.com]
+acme:
+  email: admin@example.com
+  dnsProvider: cloudflare
+  keyType: ecdsa
+```
+```yaml
+# Bring-your-own
+name: internal
+type: custom
+domains: [internal.example.com]
+custom: {certFile: internal.crt, keyFile: internal.key}
+```
+
+Certificates are selected at TLS time by SNI: an exact-domain match wins, else a
+wildcard match on the parent domain. An ACME certificate that has not been issued
+yet is simply skipped until the manager issues it.
+
+---
+
+## DNSProvider (`config/dns-providers/`)
+
+Solves ACME `dns-01` challenges.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `provider` | string | yes | `cloudflare`. |
+| `config` | map[string]Secret | yes | Provider-specific, secret-valued. |
+
+```yaml
+name: cloudflare
+provider: cloudflare
+config:
+  apiToken: ${FILE:/run/secrets/cf_token}   # scope: Zone:DNS:Edit + Zone:Read
+```
+
+---
+
+## IdentityProvider (`config/identity-providers/`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | string | `oidc` \| `forward-auth` \| `auth-request`. |
+| `oidc` / `forwardAuth` / `authRequest` | spec | The spec matching `type`. |
+| `roleMapping` | RoleMapping | Map IdP groups → roles. |
+
+**OIDCSpec**: `issuerURL` (req), `clientID` (req), `clientSecret` (Secret),
+`scopes` (default `openid profile email groups`), `usePKCE` (default true),
+`requireVerifiedEmail`, `trustIdPMFA`.
+
+**ForwardAuthSpec**: `trustedProxies` (req, CIDRs allowed to assert identity),
+`userHeader` (req), `emailHeader`, `nameHeader`, `groupsHeader`,
+`groupsDelimiter` (default `,`), `amrHeader`.
+
+**AuthRequestSpec**: `outpostURL` (req), `pathPrefix` (default
+`/outpost.goauthentik.io`), `authPath` (default `<pathPrefix>/auth/nginx`),
+`copyHeaders` (default the Authentik `X-authentik-*` set).
+
+**RoleMapping**: `groupsClaim` (default `groups`), `adminGroups`, `userGroups`,
+`defaultRole` (`""` = deny | `user` | `admin`).
+
+```yaml
+name: authentik-oidc
+type: oidc
+oidc:
+  issuerURL: https://auth.example.com/application/o/gpm/
+  clientID: gpm
+  clientSecret: ${FILE:/run/secrets/oidc_secret}
+roleMapping:
+  adminGroups: [proxy-admins]      # no defaultRole -> anyone not in the group is denied
+```
+
+> The OIDC client reads claims from the **ID token**, so if your provider only
+> emits groups via the userinfo endpoint you must configure it to include the
+> groups claim in the ID token.
+
+---
+
+## AccessList (`config/access-lists/`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `satisfyAny` | bool | false = require both auth AND IP; true = either suffices. |
+| `basicAuth` | []BasicAuthUser | `username` + `passwordHash` (bcrypt). |
+| `rules` | []IPRule | Ordered `action` (`allow`/`deny`) + `cidr` (CIDR or bare IP). |
+| `defaultAction` | string | `allow` \| `deny` (default `deny`). |
+
+```yaml
+name: internal-only
+rules:
+  - {action: allow, cidr: 10.0.0.0/8}
+  - {action: allow, cidr: 192.168.0.0/16}
+defaultAction: deny
+```
+
+---
+
+## Middleware (`config/middlewares/`)
+
+| `type` | Spec | Purpose |
+|--------|------|---------|
+| `auth` | AuthMiddleware | Require authentication. |
+| `headers` | HeadersMiddleware | Add/remove request/response headers. |
+| `guard` | GuardMiddleware | Conditionally deny requests. |
+| `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
+
+**AuthMiddleware**: `identityProvider` (req), `mode` (`oidc`|`forward-auth`|
+`auth-request`, defaults from the IdP type), `requiredRoles` (forbidden in
+`auth-request` mode — the IdP application binding does authorization),
+`allowFrom` (CIDRs that bypass auth; `auth-request` mode only — e.g. let a LAN
+skip SSO).
+
+**HeadersMiddleware**: `setRequest`, `setResponse` (maps), `removeRequest`,
+`removeResponse` (lists).
+
+**GuardMiddleware**: `triggers` (≥1; each has `paths`, `methods`, `queryEquals`
+and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
+(default 403).
+
+**RateLimitMiddleware**: `requestsPerSecond` (req, >0), `burst` (default
+`ceil(rps)`).
+
+```yaml
+# Require SSO, but let the LAN through without it
+name: require-sso
+type: auth
+auth:
+  identityProvider: authentik-outpost
+  mode: auth-request
+  allowFrom: [10.0.0.0/8]
+```
+```yaml
+# Block POSTs to a login path except from the LAN (break-glass guard)
+name: login-lan-only
+type: guard
+guard:
+  triggers:
+    - {paths: [/login], methods: [POST]}
+  allowFrom: [10.0.0.0/8]
+```
+
+### Middleware ordering
+
+Middlewares are applied in a fixed order per request regardless of the order you
+list them: **auth → guard → access-list → headers → upstream**. Authentication is
+outermost (evaluated first); header mutations are innermost (closest to the
+backend). Host-wide middlewares run before any location-scoped ones.

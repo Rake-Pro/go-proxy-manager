@@ -1,8 +1,15 @@
 # FEATURES.md
 
-Target feature set for `go-proxy-manager`, synthesized from **NPM** (baseline),
-**NPMplus** (hardened/expanded fork), and the **lessons from our own NPM+OIDC
-fork**. Idea stage - this is a backlog/design doc, not a spec of shipped code.
+Target feature set and roadmap for `go-proxy-manager`, synthesized from **NPM**
+(baseline), **NPMplus** (hardened/expanded fork), and the **lessons from our own
+NPM+OIDC fork**.
+
+> **Status:** this is the roadmap, not a status board. The **P0** tier (proxy/
+> redirect/stream/dead hosts, DNS-01 + custom certs, IP access lists, OIDC +
+> forward-auth + auth-request, the NPM importer, typed per-host middleware, REST
+> API + web UI, git-backed config) is **implemented** today; later tiers are
+> aspirational. For what actually ships and how to use it, see
+> [README.md](README.md) and [docs/](docs/).
 
 **Legend (source):**
 `[NPM]` in upstream NPM · `[NPM+]` added by NPMplus · `[FORK]` added by our OIDC
