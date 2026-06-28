@@ -58,7 +58,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><title>go-proxy-manager login</title></head>
 <body style="font-family:system-ui;max-width:24rem;margin:4rem auto">
 <h1>Sign in</h1>
-{{range .Providers}}<p><a href="/auth/login?idp={{.Name}}&return={{$.Return}}">Continue with {{.Name}}</a></p>{{end}}
+{{range .Providers}}<p><a href="/auth/login?idp={{.Name}}&return={{$.Return}}">Login with {{.Label}}</a></p>{{end}}
 {{if .Local}}<form method="post" action="/auth/local">
 <input type="hidden" name="return" value="{{.Return}}">
 <p><input name="username" placeholder="username" autocomplete="username"></p>

@@ -316,9 +316,12 @@ func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // LoginOption describes an OIDC admin provider the user can click to log in.
+// Name is the stable provider id (used to route the login request); Label is the
+// human-facing button text (the provider's DisplayName, falling back to Name).
 type LoginOption struct {
-	Name string
-	Type string
+	Name  string
+	Label string
+	Type  string
 }
 
 // LoginOptions lists the OIDC admin providers (forward-auth needs no button).
@@ -328,7 +331,11 @@ func (a *Authenticator) LoginOptions() []LoginOption {
 	var opts []LoginOption
 	for _, name := range a.settings.Providers {
 		if idp, ok := a.idps[name]; ok && idp.Type == model.IdPTypeOIDC {
-			opts = append(opts, LoginOption{Name: name, Type: idp.Type})
+			label := idp.DisplayName
+			if label == "" {
+				label = name
+			}
+			opts = append(opts, LoginOption{Name: name, Label: label, Type: idp.Type})
 		}
 	}
 	return opts
