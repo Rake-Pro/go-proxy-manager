@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +55,10 @@ func main() {
 		cookieSecure = flag.Bool("cookie-secure", os.Getenv("GPM_COOKIE_SECURE") != "0", "set the Secure flag on session cookies (disable only for local HTTP testing)")
 		logLevel     = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole   = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
+		accessLog    = flag.Bool("access-log", os.Getenv("GPM_ACCESS_LOG") == "1", "log every data-plane request (method, host, path, status, bytes, duration)")
+		slowReqMS    = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
+		debugHeaders = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
+		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		showVer      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -94,7 +99,22 @@ func main() {
 		Str("externalBaseURL", settings.ExternalBaseURL).
 		Msg("config loaded")
 
-	dp := dataplane.New(dataplane.Config{HTTPSAddr: *httpsAddr, HTTPAddr: *httpAddr, CertDir: *certDir})
+	dp := dataplane.New(dataplane.Config{
+		HTTPSAddr:                     *httpsAddr,
+		HTTPAddr:                      *httpAddr,
+		CertDir:                       *certDir,
+		AccessLog:                     *accessLog,
+		SlowRequestThreshold:          time.Duration(*slowReqMS) * time.Millisecond,
+		DebugHeaders:                  *debugHeaders,
+		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
+	})
+	if *accessLog || *slowReqMS > 0 || *debugHeaders {
+		log.Info().
+			Bool("accessLog", *accessLog).
+			Int("slowRequestMs", *slowReqMS).
+			Bool("debugHeaders", *debugHeaders).
+			Msg("data plane debug toggles enabled")
+	}
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
@@ -191,6 +211,24 @@ func sessionGC(ctx context.Context, st *session.Store) {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envDur(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return def
 }

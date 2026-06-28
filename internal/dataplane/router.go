@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -22,6 +23,8 @@ type router struct {
 	// stripping (they legitimately assert forward-auth identities).
 	identityHeaders []string
 	trustedNets     []*net.IPNet
+	// clientIP resolves the real client IP (XFF-aware via trustedNets) for logging.
+	clientIP func(*http.Request) net.IP
 }
 
 // buildRouter compiles the config into a router. certDir resolves relative
@@ -38,6 +41,7 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		certs:           certs,
 		identityHeaders: reg.identityHeaders,
 		trustedNets:     reg.trustedNets,
+		clientIP:        reg.clientIP,
 	}
 	for _, h := range cfg.ProxyHosts {
 		if h.Disabled {
@@ -45,7 +49,8 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		}
 		proxy := newReverseProxy(h.Upstream, h.Name)
 		handler := buildChain(proxy, h, reg)
-		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL}
+		upstream := h.Upstream.Scheme + "://" + net.JoinHostPort(h.Upstream.Host, strconv.Itoa(h.Upstream.Port))
+		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upstream}
 		for _, d := range h.Domains {
 			rt.hosts[strings.ToLower(strings.TrimSpace(d))] = hh
 		}

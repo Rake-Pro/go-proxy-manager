@@ -32,23 +32,49 @@ type Server struct {
 	httpAddr  string
 	certDir   string
 
+	// Observability toggles (all off by default; zero overhead when unset).
+	accessLog     bool
+	slowThreshold time.Duration
+	debugHeaders  bool
+
 	cur atomic.Pointer[router]
 
 	httpsSrv *http.Server
 	httpSrv  *http.Server
 }
 
-// Config holds the data plane's bind addresses and cert directory.
+// Config holds the data plane's bind addresses, cert directory, and the optional
+// observability/transport tunables.
 type Config struct {
 	HTTPSAddr string
 	HTTPAddr  string
 	CertDir   string
+
+	// AccessLog logs every request (method, host, path, status, bytes, duration).
+	AccessLog bool
+	// SlowRequestThreshold, if >0, warn-logs any request at or above this duration
+	// even when AccessLog is off - a low-noise way to surface only slow requests.
+	SlowRequestThreshold time.Duration
+	// DebugHeaders adds X-GPM-* diagnostic response headers (request id, matched
+	// host, upstream) so routing can be inspected from the client side.
+	DebugHeaders bool
+	// UpstreamResponseHeaderTimeout caps time-to-first-byte from an upstream
+	// (0 = unbounded). Tunes the shared upstream transport.
+	UpstreamResponseHeaderTimeout time.Duration
 }
 
 // New constructs a data-plane Server. Reload must be called with a valid config
 // before Start so there is a router to serve.
 func New(c Config) *Server {
-	return &Server{httpsAddr: c.HTTPSAddr, httpAddr: c.HTTPAddr, certDir: c.CertDir}
+	configureUpstreamTransport(c.UpstreamResponseHeaderTimeout)
+	return &Server{
+		httpsAddr:     c.HTTPSAddr,
+		httpAddr:      c.HTTPAddr,
+		certDir:       c.CertDir,
+		accessLog:     c.AccessLog,
+		slowThreshold: c.SlowRequestThreshold,
+		debugHeaders:  c.DebugHeaders,
+	}
 }
 
 // Reload compiles cfg into a new router and swaps it in atomically.
@@ -72,12 +98,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.httpSrv = &http.Server{
 		Addr:              s.httpAddr,
-		Handler:           http.HandlerFunc(s.dispatchHTTP),
+		Handler:           s.observe(http.HandlerFunc(s.dispatchHTTP)),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 	s.httpsSrv = &http.Server{
 		Addr:              s.httpsAddr,
-		Handler:           http.HandlerFunc(s.dispatchHTTPS),
+		Handler:           s.observe(http.HandlerFunc(s.dispatchHTTPS)),
 		ReadHeaderTimeout: 15 * time.Second,
 		// GetCertificate reads the live router so cert changes apply on reload.
 		TLSConfig: &tls.Config{

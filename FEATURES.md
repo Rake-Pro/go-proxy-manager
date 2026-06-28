@@ -174,6 +174,15 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
 ### P2 - hardening (NPMplus-class) + community gaps
 - HTTP/3 (QUIC), Brotli/zstd, hardened TLS (1.3; optional 1.2 off), OCSP (non-LE).
 - WAF hook (CrowdSec bouncer/AppSec), GeoIP geoblocking, mTLS, proxy protocol.
+- **Inbound IPv6** (NPM had it, disableable): bind the data plane on v6 and make
+  it actually reachable end-to-end. Gotchas learned in the field: with Docker
+  `userland-proxy:false` you can't DNAT v6 -> a v4-only container, so the gpm
+  container needs a real v6 address (Docker IPv6 + a routed prefix), not just a
+  v4 port-map; preserve the real client v6 in access lists / X-Forwarded-For (the
+  client-IP resolver must treat v6 the same as v4); and document that
+  dynamic-prefix ISPs (e.g. AT&T residential, rotates on reconnect) need DDNS for
+  the AAAA - a hardcoded SLAAC/EUI-64 address black-holes on every prefix change
+  and breaks dual-stack clients via Happy Eyeballs while v4 silently masks it.
 - Lifecycle **webhooks** ★, host grouping/tagging ★, multiple ACME servers,
   reusable DNS creds, email notifications, **SAML** + **LDAP admin login** ★.
 
