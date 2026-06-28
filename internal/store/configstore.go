@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -277,6 +278,45 @@ func (s *Store) History(ctx context.Context, kind, name string, limit int) ([]Co
 // RepoHistory returns the repo-wide config change history.
 func (s *Store) RepoHistory(ctx context.Context, limit int) ([]Commit, error) {
 	return s.git.Log(ctx, "", limit)
+}
+
+// commitHashRe matches a git commit hash (short or full); used to keep an
+// untrusted revert target from being interpreted as a git option/path.
+var commitHashRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+
+// Revert restores the entire config to the state at commit hash and records the
+// result as a NEW commit, so forward history is preserved (a revert can itself be
+// reverted). The restored config is validated before committing; if it does not
+// load cleanly the working tree is rolled back to HEAD and an error is returned.
+// Reverting to the current HEAD is a no-op ("" hash, nil error).
+func (s *Store) Revert(ctx context.Context, hash string, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !commitHashRe.MatchString(hash) {
+		return "", fmt.Errorf("invalid commit hash %q", hash)
+	}
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.git.RestoreTree(ctx, hash); err != nil {
+		return "", fmt.Errorf("revert: restore tree %q: %w", hash, err)
+	}
+	if _, _, err := s.loadLocked(); err != nil {
+		// The restored state is invalid (e.g. schema drift): undo and report.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q does not validate: %w", hash, err)
+	}
+
+	short := hash
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return s.git.CommitAll(ctx, fmt.Sprintf("Revert config to %s", short), author)
 }
 
 // SaveSettings validates and writes the singleton settings object, then commits.

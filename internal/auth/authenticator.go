@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,23 @@ type Authenticator struct {
 
 	pmu     sync.Mutex
 	pending map[string]pendingLogin // OIDC flow state -> login context
+
+	lmu        sync.Mutex
+	loginGates map[string]*loginGate // local-login throttle, keyed by client IP
 }
+
+// loginGate tracks recent failed local-login attempts for one client key.
+type loginGate struct {
+	fails   int
+	resetAt time.Time // window/lockout expiry; after this the gate is cleared
+}
+
+const (
+	maxLoginFails    = 5                // failures within the window before lockout
+	loginLockout     = 15 * time.Minute // how long failures are remembered / locked
+	maxPendingLogins = 1024             // cap on in-flight OIDC states (anti-DoS)
+	maxLoginGates    = 4096             // cap on tracked client keys (anti-DoS)
+)
 
 type pendingLogin struct {
 	idp      string
@@ -54,7 +71,7 @@ type pendingLogin struct {
 type Options struct {
 	Store      *session.Store
 	CookieName string
-	Secure     bool
+	Secure     bool // when true, the session cookie is Secure + __Host- prefixed
 	SessionTTL time.Duration
 	LocalUser  string
 	LocalHash  string // bcrypt hash of the local admin password
@@ -69,6 +86,14 @@ func NewAuthenticator(o Options) *Authenticator {
 	if o.SessionTTL == 0 {
 		o.SessionTTL = 12 * time.Hour
 	}
+	// With Secure cookies, adopt the __Host- prefix: the browser then enforces
+	// that the cookie is TLS-only, host-locked (no Domain), and Path=/ - all of
+	// which the session cookie already satisfies. Gated on Secure (which honours
+	// the operator's GPM_COOKIE_SECURE choice), so a plain-HTTP admin deployment
+	// is unaffected - a __Host- cookie requires Secure and would be rejected.
+	if o.Secure && !strings.HasPrefix(o.CookieName, "__Host-") && !strings.HasPrefix(o.CookieName, "__Secure-") {
+		o.CookieName = "__Host-" + o.CookieName
+	}
 	return &Authenticator{
 		store:      o.Store,
 		cookieName: o.CookieName,
@@ -79,6 +104,7 @@ func NewAuthenticator(o Options) *Authenticator {
 		idps:       map[string]model.IdentityProvider{},
 		clients:    map[string]*oidc.Client{},
 		pending:    map[string]pendingLogin{},
+		loginGates: map[string]*loginGate{},
 	}
 }
 
@@ -151,28 +177,75 @@ func (a *Authenticator) oidcClient(ctx context.Context, idpName string) (*oidc.C
 	return c, &idp, nil
 }
 
-// BeginLogin returns the authorization URL to redirect the browser to.
-func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string) (string, error) {
+// oidcStateCookie holds the login state value so the callback can confirm the
+// flow was started by this same browser (CSRF/login-fixation binding). It is
+// short-lived and scoped to the auth endpoints.
+const oidcStateCookie = "gpm_oidc_state"
+
+// BeginLogin returns the authorization URL to redirect the browser to, along
+// with the opaque state value the caller must echo into a browser cookie (see
+// SetLoginStateCookie) so the callback can bind the flow to this browser.
+func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string) (string, string, error) {
 	client, _, err := a.oidcClient(ctx, idpName)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	state, err := oidc.NewState()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	nonce, err := oidc.NewNonce()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	verifier := oidc.GenerateVerifier()
 
 	a.pmu.Lock()
 	a.gcPendingLocked()
+	if len(a.pending) >= maxPendingLogins {
+		a.pmu.Unlock()
+		return "", "", fmt.Errorf("too many pending logins; try again shortly")
+	}
 	a.pending[state] = pendingLogin{idp: idpName, nonce: nonce, verifier: verifier, returnTo: returnTo, expires: time.Now().Add(10 * time.Minute)}
 	a.pmu.Unlock()
 
-	return client.AuthCodeURL(state, nonce, verifier), nil
+	return client.AuthCodeURL(state, nonce, verifier), state, nil
+}
+
+// SetLoginStateCookie stores the login state in a short-lived, SameSite=Lax
+// cookie (Lax so it survives the top-level redirect back from the IdP). The
+// callback compares it to the state query parameter to bind the flow.
+func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, state string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcStateCookie,
+		Value:    state,
+		Path:     "/auth",
+		HttpOnly: true,
+		Secure:   a.secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600,
+	})
+}
+
+// LoginStateCookie returns the login-state cookie value, or "" if absent.
+func (a *Authenticator) LoginStateCookie(r *http.Request) string {
+	if c, err := r.Cookie(oidcStateCookie); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// ClearLoginStateCookie expires the login-state cookie (single use).
+func (a *Authenticator) ClearLoginStateCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcStateCookie,
+		Value:    "",
+		Path:     "/auth",
+		HttpOnly: true,
+		Secure:   a.secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
 }
 
 // CompleteLogin handles the OIDC callback: validates state, exchanges the code,
@@ -245,6 +318,53 @@ func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string) (*ses
 	return sess, nil
 }
 
+// LoginThrottled reports whether local-login attempts from key are currently
+// locked out after too many recent failures.
+func (a *Authenticator) LoginThrottled(key string) bool {
+	a.lmu.Lock()
+	defer a.lmu.Unlock()
+	g := a.loginGates[key]
+	if g == nil {
+		return false
+	}
+	if time.Now().After(g.resetAt) {
+		delete(a.loginGates, key)
+		return false
+	}
+	return g.fails >= maxLoginFails
+}
+
+// NoteLoginResult records the outcome of a local-login attempt for throttling:
+// success clears the gate, failure increments it and (re)arms the window.
+func (a *Authenticator) NoteLoginResult(key string, ok bool) {
+	a.lmu.Lock()
+	defer a.lmu.Unlock()
+	now := time.Now()
+	if ok {
+		delete(a.loginGates, key)
+		return
+	}
+	g := a.loginGates[key]
+	if g == nil || now.After(g.resetAt) {
+		// Opportunistically evict expired entries so the map can't grow without
+		// bound; if it is still full, drop this record rather than allocate.
+		if g == nil && len(a.loginGates) >= maxLoginGates {
+			for k, gv := range a.loginGates {
+				if now.After(gv.resetAt) {
+					delete(a.loginGates, k)
+				}
+			}
+			if len(a.loginGates) >= maxLoginGates {
+				return
+			}
+		}
+		g = &loginGate{}
+		a.loginGates[key] = g
+	}
+	g.fails++
+	g.resetAt = now.Add(loginLockout)
+}
+
 // localAllowed reports whether local password login is permitted: under SSO-only
 // it is always off (recover from lockout by redeploying with local login
 // enabled); otherwise it follows LocalLoginEnabled.
@@ -289,7 +409,7 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 // 401 (no session/role) or 403 (CSRF).
 func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, ok := a.principalFromSession(r)
+		p, ok := a.authenticate(w, r)
 		if !ok || !roleSatisfies(p.Role, min) {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
@@ -302,7 +422,10 @@ func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 	})
 }
 
-func (a *Authenticator) principalFromSession(r *http.Request) (Principal, bool) {
+// authenticate resolves the session cookie to a principal and applies sliding
+// expiry: an active session past the refresh threshold is extended in the store
+// and its cookie re-issued, so continued use keeps the session alive.
+func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	c, err := r.Cookie(a.cookieName)
 	if err != nil {
 		return Principal{}, false
@@ -311,7 +434,24 @@ func (a *Authenticator) principalFromSession(r *http.Request) (Principal, bool) 
 	if err != nil {
 		return Principal{}, false
 	}
+	a.maybeSlide(w, r.Context(), sess)
 	return principalOf(sess), true
+}
+
+// maybeSlide extends a still-valid session whose remaining lifetime has dropped
+// below half the configured TTL, re-issuing the cookie with the new expiry. The
+// half-TTL threshold avoids a store write and Set-Cookie on every request.
+func (a *Authenticator) maybeSlide(w http.ResponseWriter, ctx context.Context, sess *session.Session) {
+	remaining := time.Until(sess.ExpiresAt)
+	if remaining <= 0 || remaining > a.sessionTTL/2 {
+		return
+	}
+	newExp := time.Now().Add(a.sessionTTL)
+	if err := a.store.Touch(ctx, sess.ID, newExp); err != nil {
+		return
+	}
+	sess.ExpiresAt = newExp
+	session.SetSessionCookie(w, a.cookieName, sess.ID, newExp, a.secure)
 }
 
 // IssueCookie writes the session cookie for a freshly created session.

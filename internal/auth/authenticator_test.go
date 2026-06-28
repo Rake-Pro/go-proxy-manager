@@ -158,3 +158,74 @@ func TestRequireRoleEnforcesCSRF(t *testing.T) {
 		})
 	}
 }
+
+func TestLoginThrottle(t *testing.T) {
+	a := NewAuthenticator(Options{Store: testStore(t)})
+	key := "203.0.113.7"
+	if a.LoginThrottled(key) {
+		t.Fatal("fresh key must not be throttled")
+	}
+	for i := 0; i < maxLoginFails; i++ {
+		if a.LoginThrottled(key) {
+			t.Fatalf("must not lock out before %d failures (at %d)", maxLoginFails, i)
+		}
+		a.NoteLoginResult(key, false)
+	}
+	if !a.LoginThrottled(key) {
+		t.Fatalf("must lock out after %d failures", maxLoginFails)
+	}
+	// A success clears the gate.
+	a.NoteLoginResult(key, true)
+	if a.LoginThrottled(key) {
+		t.Fatal("a successful login must reset the throttle")
+	}
+	// A different client is unaffected.
+	for i := 0; i < maxLoginFails; i++ {
+		a.NoteLoginResult(key, false)
+	}
+	if a.LoginThrottled("198.51.100.9") {
+		t.Fatal("throttle must be per-client-key")
+	}
+}
+
+func TestHostPrefixCookieWhenSecure(t *testing.T) {
+	// Secure cookies take the __Host- prefix.
+	a := NewAuthenticator(Options{Store: testStore(t), Secure: true})
+	if a.cookieName != "__Host-gpm_session" {
+		t.Fatalf("secure cookie should take the __Host- prefix, got %q", a.cookieName)
+	}
+	// A plain-HTTP deployment (e.g. GPM_COOKIE_SECURE=0) keeps the bare name and
+	// is unaffected - a __Host- cookie requires Secure and would be rejected.
+	b := NewAuthenticator(Options{Store: testStore(t), Secure: false})
+	if b.cookieName != "gpm_session" {
+		t.Fatalf("non-secure cookie must not be prefixed, got %q", b.cookieName)
+	}
+}
+
+func TestSlidingSessionExtendsExpiry(t *testing.T) {
+	st := testStore(t)
+	a := NewAuthenticator(Options{Store: st, SessionTTL: time.Hour})
+	a.Configure(model.Config{}, model.Settings{})
+
+	// A session already past the half-TTL threshold should be extended on use.
+	sess := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(10 * time.Minute)}
+	if err := st.Create(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	h := a.RequireRole(RoleAdmin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: a.cookieName, Value: sess.ID})
+	h.ServeHTTP(rec, req)
+
+	got, err := st.Get(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ExpiresAt.After(sess.ExpiresAt) {
+		t.Fatalf("session expiry should slide forward: was %v, now %v", sess.ExpiresAt, got.ExpiresAt)
+	}
+	if len(rec.Result().Cookies()) == 0 {
+		t.Fatal("sliding refresh should re-issue the session cookie")
+	}
+}

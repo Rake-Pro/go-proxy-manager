@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	maxBody       = 1 << 20 // 1MB request body cap
-	commitHeader  = "X-Config-Commit"
-	contentTypeJS = "application/json"
+	maxBody        = 1 << 20 // 1MB request body cap
+	maxArchiveBody = 8 << 20 // 8MB cap for an uploaded restore archive (gzipped)
+	commitHeader   = "X-Config-Commit"
+	contentTypeJS  = "application/json"
 )
 
 // Deps wires the API to the store and the rest of the app.
@@ -152,6 +153,62 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, nonNilCommits(commits))
+	})
+
+	// Revert the whole config to a past commit (recorded as a new commit, so the
+	// revert is itself revertible). Body: {"hash":"<commit>"}.
+	mux.HandleFunc("POST /revert", func(w http.ResponseWriter, r *http.Request) {
+		body, err := readBody(w, r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		var req struct {
+			Hash string `json:"hash"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		sha, err := d.Store.Revert(r.Context(), req.Hash, d.author(r))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		d.onChange()
+		w.Header().Set(commitHeader, sha)
+		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
+	})
+
+	// Download a portable archive of the entire config.
+	mux.HandleFunc("GET /backup", func(w http.ResponseWriter, r *http.Request) {
+		archive, err := d.Store.Export(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="gpm-config-backup.tar.gz"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(archive)
+	})
+
+	// Restore the whole config from an uploaded archive (replaces current config,
+	// validated, committed as one revision; rolled back if it does not validate).
+	mux.HandleFunc("POST /restore", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveBody))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		sha, err := d.Store.Restore(r.Context(), body, d.author(r))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		d.onChange()
+		w.Header().Set(commitHeader, sha)
+		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
 	})
 	mux.HandleFunc("GET /settings", func(w http.ResponseWriter, r *http.Request) {
 		_, settings, err := d.Store.Load(r.Context())

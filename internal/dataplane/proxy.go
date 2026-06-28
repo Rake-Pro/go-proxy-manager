@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -99,7 +100,7 @@ func rewriteUpstreamRedirect(resp *http.Response, target *url.URL) {
 
 // locationRoute is a path-scoped handler within a host: requests whose path has
 // the prefix are served by handler (its own upstream + chain) instead of the
-// host default. The prefix is matched with nginx-style prefix semantics.
+// host default. The prefix is matched on a segment boundary (see route).
 type locationRoute struct {
 	prefix   string
 	handler  http.Handler
@@ -116,13 +117,32 @@ type hostHandler struct {
 	forceSSL  bool
 	upstream  string // scheme://host:port, for debug headers/logging only
 	locations []locationRoute
+
+	// hsts is the precomputed Strict-Transport-Security header value, or "" when
+	// HSTS is disabled for this host. Emitted only on the HTTPS listener.
+	hsts string
+
+	// tlsConfig is a per-host TLS config used during the handshake when this host
+	// pins a non-default minimum TLS version (see GetConfigForClient). nil means
+	// the listener's default config (TLS 1.2 floor) applies.
+	tlsConfig *tls.Config
+
+	// identityHeaders are the provider-configured identity headers this host
+	// asserts; trustedNets are the peers this host trusts to set them. Both are
+	// scoped to this host (see hostIdentityTrust); the baseline denylist is always
+	// stripped on top, regardless of these.
+	identityHeaders []string
+	trustedNets     []*net.IPNet
 }
 
 // route returns the handler and upstream label for a request path: the
-// longest-matching location prefix, or the host default when none match.
+// longest-matching location prefix, or the host default when none match. The
+// path is matched on a segment boundary (exact, or prefix followed by "/") so
+// "/reports" does not capture "/reports-evil"; callers pass an already-cleaned
+// path (see normalizeRequestPath) so dot-segments cannot dodge the match.
 func (hh *hostHandler) route(path string) (http.Handler, string) {
 	for _, l := range hh.locations {
-		if strings.HasPrefix(path, l.prefix) {
+		if l.prefix == "/" || path == l.prefix || strings.HasPrefix(path, l.prefix+"/") {
 			return l.handler, l.upstream
 		}
 	}

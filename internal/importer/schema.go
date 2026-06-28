@@ -74,10 +74,16 @@ func (s *importState) selectAvailable(table string, want []string) (cols []strin
 	return cols, missing, true, nil
 }
 
+// maxImportRows caps the rows read from any single source table so a malformed or
+// hostile NPM database cannot exhaust memory during import. It is far above any
+// realistic NPM deployment; exceeding it fails the import loudly.
+const maxImportRows = 100_000
+
 // queryRows runs SELECT <cols> FROM <table> and returns each row as a
 // column->value map. Soft-deleted rows (is_deleted=1) are filtered out when that
 // column exists. Values are kept as the driver's native types (int64, string,
-// []byte, nil) and read via the row helpers below.
+// []byte, nil) and read via the row helpers below. The query is bounded by
+// maxImportRows+1 so memory stays capped and an over-large table is reported.
 func (s *importState) queryRows(table string, cols []string) ([]map[string]any, error) {
 	have, err := s.columnsOf(table)
 	if err != nil {
@@ -91,7 +97,7 @@ func (s *importState) queryRows(table string, cols []string) ([]map[string]any, 
 	if have["id"] {
 		order = ` ORDER BY "id"`
 	}
-	q := fmt.Sprintf("SELECT %s FROM %q%s", strings.Join(sel, ", "), table, order)
+	q := fmt.Sprintf("SELECT %s FROM %q%s LIMIT %d", strings.Join(sel, ", "), table, order, maxImportRows+1)
 	rows, err := s.db.QueryContext(s.ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("query %q: %w", table, err)
@@ -99,7 +105,12 @@ func (s *importState) queryRows(table string, cols []string) ([]map[string]any, 
 	defer rows.Close()
 
 	var out []map[string]any
+	fetched := 0
 	for rows.Next() {
+		fetched++
+		if fetched > maxImportRows {
+			return nil, fmt.Errorf("table %q exceeds the import row cap of %d", table, maxImportRows)
+		}
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {

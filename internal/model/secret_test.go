@@ -2,8 +2,39 @@ package model
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestSecretResolveFileConfinement(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(secretPath, []byte("s3cr3t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPM_SECRET_FILE_ROOTS", dir)
+
+	// In-root read succeeds and is trimmed.
+	got, err := Secret("${FILE:" + secretPath + "}").Resolve()
+	if err != nil {
+		t.Fatalf("in-root resolve: %v", err)
+	}
+	if got != "s3cr3t" {
+		t.Fatalf("got %q want %q", got, "s3cr3t")
+	}
+
+	// Traversal out of the root is rejected before any read.
+	escape := filepath.Join(dir, "..", "etc", "shadow")
+	if _, err := (Secret("${FILE:" + escape + "}")).Resolve(); err == nil {
+		t.Fatal("expected traversal out of secret root to be rejected")
+	}
+
+	// An absolute path under a different root is rejected.
+	if _, err := (Secret("${FILE:/etc/shadow}")).Resolve(); err == nil {
+		t.Fatal("expected out-of-root absolute path to be rejected")
+	}
+}
 
 func TestSecretMarshalJSONRedacts(t *testing.T) {
 	cases := []struct {

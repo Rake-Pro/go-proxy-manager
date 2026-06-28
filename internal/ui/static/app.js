@@ -986,7 +986,6 @@ const SECTION_META = {
   identity: {
     title: 'Identity', sub: 'Single sign-on providers and admin authentication.',
     singular: 'identity provider', addLabel: 'Add identity provider',
-    template: { name: '', type: 'oidc', oidc: { issuerURL: '', clientID: '', scopes: ['openid', 'profile', 'email'] }, roleMapping: { groupsClaim: 'groups', adminGroups: [], userGroups: [], defaultRole: 'user' } },
     summary: (o) => `<span class="k">Type</span><span class="v">${esc(o.type || '')}</span>` +
       (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span><span class="k">Client ID</span><span class="v">${esc(o.oidc.clientID || '')}</span>` : '') +
       (o.forwardAuth ? `<span class="k">User header</span><span class="v">${esc(o.forwardAuth.userHeader || '')}</span>` : ''),
@@ -994,7 +993,6 @@ const SECTION_META = {
   access: {
     title: 'Access Lists', sub: 'Reusable IP and basic-auth rules attached to hosts via the chain.',
     singular: 'access list', addLabel: 'Add access list',
-    template: { name: '', satisfyAny: false, rules: [{ action: 'allow', cidr: '10.0.0.0/8' }, { action: 'deny', cidr: '0.0.0.0/0' }], defaultAction: 'deny' },
     summary: (o) => `<span class="k">Satisfy</span><span class="v">${o.satisfyAny ? 'any' : 'all'}</span>` +
       `<span class="k">Rules</span><span class="v">${arr(o.rules).length}</span>` +
       `<span class="k">Basic auth</span><span class="v">${arr(o.basicAuth).length} user(s)</span>` +
@@ -1003,7 +1001,6 @@ const SECTION_META = {
   middleware: {
     title: 'Middleware', sub: 'Reusable, composable objects you drop into any host chain.',
     singular: 'middleware', addLabel: 'Add middleware',
-    template: { name: '', type: 'headers', headers: { setResponse: {}, setRequest: {}, removeRequest: [], removeResponse: [] } },
     summary: (o) => `<span class="k">Type</span><span class="v">${esc(o.type || '')}</span>` +
       (o.auth ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider || '')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${esc(o.rateLimit.requestsPerSecond)} r/s</span>` : ''),
@@ -1011,37 +1008,33 @@ const SECTION_META = {
   dns: {
     title: 'DNS Providers', sub: 'Credentials used for ACME dns-01 challenges.',
     singular: 'DNS provider', addLabel: 'Add DNS provider',
-    template: { name: '', provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } },
     summary: (o) => `<span class="k">Provider</span><span class="v">${esc(o.provider || '')}</span>` +
       (o.config ? `<span class="k">Config keys</span><span class="v">${esc(Object.keys(o.config).join(', '))}</span>` : ''),
   },
   redirects: {
     title: 'Redirects', sub: '301/302 redirect rules for legacy or vanity hostnames.',
     singular: 'redirect', addLabel: 'Add redirect',
-    template: { name: '', domains: [], forwardScheme: 'https', forwardDomain: '', statusCode: 301 },
     summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>` +
-      (o.forwardDomain ? `<span class="k">To</span><span class="v">${esc((o.forwardScheme ? o.forwardScheme + '://' : '') + o.forwardDomain)}</span>` : '') +
+      (o.targetDomain ? `<span class="k">To</span><span class="v">${esc(((o.targetScheme && o.targetScheme !== 'auto') ? o.targetScheme + '://' : '') + o.targetDomain)}</span>` : '') +
       (o.statusCode ? `<span class="k">Code</span><span class="v">${esc(o.statusCode)}</span>` : ''),
   },
   streams: {
     title: 'Streams', sub: 'Raw TCP/UDP forwarding for non-HTTP services.',
     singular: 'stream', addLabel: 'Add stream',
-    template: { name: '', listenPort: 0, forward: { host: '', port: 0 }, protocol: 'tcp' },
     summary: (o) => (o.listenPort != null ? `<span class="k">Listen</span><span class="v">:${esc(o.listenPort)}</span>` : '') +
-      (o.forward ? `<span class="k">Forward</span><span class="v">${esc((o.forward.host || '') + ':' + (o.forward.port != null ? o.forward.port : ''))}</span>` : '') +
+      (o.forwardHost ? `<span class="k">Forward</span><span class="v">${esc((o.forwardHost || '') + ':' + (o.forwardPort != null ? o.forwardPort : ''))}</span>` : '') +
       (o.protocol ? `<span class="k">Protocol</span><span class="v">${esc(o.protocol)}</span>` : ''),
   },
   dead: {
     title: 'Dead hosts', sub: 'Hosts kept for 404 handling or scheduled decommission.',
     singular: 'dead host', addLabel: 'Add dead host',
-    template: { name: '', domains: [] },
     summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>`,
   },
 };
 
 async function genericSection(c, section, sub) {
-  if (sub === '_new') return genericEditor(c, section, null);
-  if (sub) return genericEditor(c, section, sub);
+  if (sub === '_new') return EDITORS[section](c, null);
+  if (sub) return EDITORS[section](c, sub);
   return genericList(c, section);
 }
 
@@ -1084,75 +1077,559 @@ async function genericList(c, section) {
   });
 }
 
-async function genericEditor(c, section, name) {
-  const meta = SECTION_META[section];
-  const plural = PLURAL[section];
-  const isNew = !name;
-  let obj;
-  if (isNew) obj = JSON.parse(JSON.stringify(meta.template));
-  else obj = (await api('/api/' + plural + '/' + encodeURIComponent(name)).then((r) => r.data)) || {};
-
-  c.innerHTML = `
-    <div class="row-between view-head">
-      <div>
-        <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/${section}">${esc(meta.title)}</a> / ${isNew ? 'new' : 'edit'}</div>
-        <h2 style="font-family:var(--display)">${esc(isNew ? 'New ' + meta.singular : name)}</h2>
-        <p>Edit common fields, or the full object as JSON below. JSON is authoritative on save.</p>
-      </div>
+// ---------- editor scaffolding shared by the typed object editors ----------
+function editorHead(section, meta, isNew, name) {
+  return `<div class="row-between view-head"><div>
+    <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/${section}">${esc(meta.title)}</a> / ${isNew ? 'new' : 'edit'}</div>
+    <h2 style="font-family:var(--display)">${esc(isNew ? 'New ' + meta.singular : name)}</h2>
+    <p>${esc(meta.sub)}</p>
+  </div></div>`;
+}
+function saveBar(section, isNew, addLabel) {
+  return `<div class="panel save-bar">
+    <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+    <div style="display:flex;gap:10px">
+      ${isNew ? '' : `<button class="btn danger" id="ed-delete" type="button">${ICON.trash}Delete</button>`}
+      <a class="btn ghost" href="#/${section}">Cancel</a>
+      <button class="btn primary" id="ed-save" type="button">${esc(isNew ? addLabel : 'Save changes')}</button>
     </div>
-
-    <div class="card form-section" style="margin-bottom:16px">
-      <div class="inline-fields">
-        <div class="field-group">
-          <label>Name</label>
-          <input class="field mono" id="gs-name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="name" />
-          <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
-        </div>
-      </div>
+  </div>`;
+}
+function nameCard(obj, isNew) {
+  return `<div class="card form-section">
+    <p class="section-label">Identity</p>
+    <div class="inline-fields">
+      <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="internal-name" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
+      <div class="field-group"><label>Display name</label><input class="field" id="ed-display" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
     </div>
-
-    <div class="card form-section">
-      <p class="section-label">Object (JSON)</p>
-      <textarea class="field mono" id="gs-json" spellcheck="false" aria-label="Object JSON">${esc(JSON.stringify(obj, null, 2))}</textarea>
-      <div class="hint">Full-fidelity editor. Validated with JSON.parse before save. The Name field above overrides the JSON name.</div>
+    <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the compiled data plane</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled')}</div>
+  </div>`;
+}
+function tlsCard(tls, certs, certDomains) {
+  tls = tls || {}; const hsts = tls.hsts || {};
+  return `<div class="card form-section">
+    <p class="section-label">TLS</p>
+    <div class="field-group"><label>Certificate</label>
+      <select class="field mono" id="ed-cert"><option value="">none (no TLS)</option>
+        ${certs.map((ct) => `<option value="${esc(ct.name)}"${tls.certificateRef === ct.name ? ' selected' : ''}>${esc(ct.name)}${certDomains[ct.name] ? ' (' + esc(certDomains[ct.name]) + ')' : ''}</option>`).join('')}
+      </select></div>
+    <div style="margin-top:6px">
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS</div></div>${switchHtml('ed-forcessl', !!tls.forceSSL, 'Force SSL')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">HTTP/2</div></div>${switchHtml('ed-http2', !!tls.http2, 'HTTP/2')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">HSTS</div><div class="ds">Send <span class="mono">Strict-Transport-Security</span></div></div>${switchHtml('ed-hsts', !!hsts.enabled, 'HSTS')}</div>
     </div>
+    <div id="ed-hsts-fields" style="margin-top:12px;${hsts.enabled ? '' : 'display:none'}">
+      <div class="inline-fields"><div class="field-group"><label>Max age (s)</label><input class="field mono" id="ed-hsts-max" type="number" value="${esc(hsts.maxAge != null ? hsts.maxAge : 31536000)}" /></div></div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Include subdomains</div></div>${switchHtml('ed-hsts-sub', !!hsts.includeSubdomains, 'Include subdomains')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Preload</div></div>${switchHtml('ed-hsts-preload', !!hsts.preload, 'Preload')}</div>
+    </div>
+  </div>`;
+}
+function wireTls() {
+  const h = $('#ed-hsts');
+  if (h) h.addEventListener('switchchange', () => { $('#ed-hsts-fields').style.display = isOn('ed-hsts') ? '' : 'none'; });
+}
+function readTls() {
+  const tls = {};
+  const cert = $('#ed-cert').value; if (cert) tls.certificateRef = cert;
+  if (isOn('ed-forcessl')) tls.forceSSL = true;
+  if (isOn('ed-http2')) tls.http2 = true;
+  if (isOn('ed-hsts')) tls.hsts = { enabled: true, maxAge: parseInt($('#ed-hsts-max').value, 10) || 0, includeSubdomains: isOn('ed-hsts-sub'), preload: isOn('ed-hsts-preload') };
+  return Object.keys(tls).length ? tls : null;
+}
 
-    <div class="panel save-bar">
-      <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
-      <div style="display:flex;gap:10px">
-        ${isNew ? '' : `<button class="btn danger" id="gs-delete" type="button">${ICON.trash}Delete</button>`}
-        <a class="btn ghost" href="#/${section}">Cancel</a>
-        <button class="btn primary" id="gs-save" type="button">${isNew ? meta.addLabel : 'Save changes'}</button>
-      </div>
-    </div>`;
+// Key/value map editor. secret=true masks nothing locally but flags ***-masked
+// values so a save cannot silently clobber a real secret.
+function makeKVRows(wrap, initial, kPlace, vPlace, secret) {
+  function addRow(k, v) {
+    const div = document.createElement('div');
+    div.className = 'loc-row';
+    div.innerHTML = `<input class="field mono kv-k" style="flex:1 1 130px" value="${esc(k == null ? '' : k)}" placeholder="${esc(kPlace || 'key')}" aria-label="key" />
+      <input class="field mono kv-v" style="flex:2 1 170px" value="${esc(v == null ? '' : v)}" placeholder="${esc(vPlace || 'value')}" aria-label="value" />
+      <button class="icon-btn kv-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    div.querySelector('.kv-del').addEventListener('click', () => div.remove());
+    wrap.appendChild(div);
+    return div;
+  }
+  Object.keys(initial || {}).forEach((k) => addRow(k, initial[k]));
+  return {
+    addRow,
+    get() {
+      const out = {};
+      wrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+        const k = r.querySelector('.kv-k').value.trim();
+        if (!k) return;
+        out[k] = r.querySelector('.kv-v').value;
+      });
+      return out;
+    },
+    masked() {
+      let m = false;
+      wrap.querySelectorAll(':scope > .loc-row').forEach((r) => { if (secret && r.querySelector('.kv-v').value === '***') m = true; });
+      return m;
+    },
+  };
+}
 
-  $('#gs-save').addEventListener('click', async () => {
-    const nm = isNew ? $('#gs-name').value.trim() : obj.name;
+// Wire the Save/Delete buttons. buildBody(name) returns the object to PUT (common
+// meta is applied here) or null to abort after showing its own toast.
+function wireEditor(section, plural, meta, isNew, origName, buildBody) {
+  $('#ed-save').addEventListener('click', async () => {
+    const nm = isNew ? $('#ed-name').value.trim() : origName;
     if (!nm) { toast('Name required', 'Enter a name.', 'err'); return; }
-    let body;
-    try { body = JSON.parse($('#gs-json').value); }
-    catch (e) { toast('Invalid JSON', e.message, 'err'); return; }
-    if (!body || typeof body !== 'object' || Array.isArray(body)) { toast('Invalid object', 'JSON must be an object.', 'err'); return; }
+    const body = buildBody(nm);
+    if (!body) return;
     body.name = nm;
-    const btn = $('#gs-save'); btn.disabled = true;
+    const disp = $('#ed-display'); if (disp && disp.value.trim()) body.displayName = disp.value.trim();
+    if (isOn('ed-disabled')) body.disabled = true;
+    const btn = $('#ed-save'); btn.disabled = true;
     try {
       const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'PUT', body });
       toastSaved(r.commit); refreshHeadSha();
       location.hash = '#/' + section;
     } catch (e) { toastErr(e); btn.disabled = false; }
   });
-
-  const del = $('#gs-delete');
+  const del = $('#ed-delete');
   if (del) del.addEventListener('click', async () => {
-    if (!confirm(`Delete ${meta.singular} "${obj.name}"?`)) return;
+    if (!confirm(`Delete ${meta.singular} "${origName}"?`)) return;
     del.disabled = true;
     try {
-      const r = await api('/api/' + plural + '/' + encodeURIComponent(obj.name), { method: 'DELETE' });
+      const r = await api('/api/' + plural + '/' + encodeURIComponent(origName), { method: 'DELETE' });
       toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
       refreshHeadSha(); location.hash = '#/' + section;
     } catch (e) { toastErr(e); del.disabled = false; }
   });
 }
+
+// ---------- REDIRECT HOST EDITOR ----------
+async function redirectEditor(c, name) {
+  const meta = SECTION_META.redirects; const isNew = !name;
+  const [certsR, objR] = await Promise.all([
+    api('/api/certificates').catch(() => ({ data: [] })),
+    isNew ? Promise.resolve({ data: {} }) : api('/api/redirect-hosts/' + encodeURIComponent(name)),
+  ]);
+  const certs = arr(certsR.data); const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
+  const o = objR.data || {};
+  c.innerHTML = editorHead('redirects', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
+    <div class="card form-section"><p class="section-label">Redirect target</p>
+      <div class="inline-fields">
+        <div class="field-group"><label>Target scheme</label><select class="field mono" id="ed-tscheme">
+          ${['auto', 'http', 'https'].map((s) => `<option value="${s}"${(o.targetScheme || 'auto') === s ? ' selected' : ''}>${s}</option>`).join('')}
+        </select></div>
+        <div class="field-group" style="flex:2"><label>Target domain</label><input class="field mono" id="ed-tdomain" value="${esc(o.targetDomain || '')}" placeholder="example.com" /></div>
+        <div class="field-group"><label>Status code</label><select class="field mono" id="ed-status">
+          ${[301, 302, 307, 308].map((s) => `<option value="${s}"${(o.statusCode || 301) === s ? ' selected' : ''}>${s}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Preserve path</div><div class="ds">Append the original request path to the target</div></div>${switchHtml('ed-preserve', !!o.preservePath, 'Preserve path')}</div>
+    </div>
+  </div><div class="stack">${tlsCard(o.tls, certs, certDomains)}</div></div>` + saveBar('redirects', isNew, meta.addLabel);
+  const domainsCtl = makeChipInput($('#ed-domains'), arr(o.domains), 'add domain...');
+  wireTls();
+  wireEditor('redirects', 'redirect-hosts', meta, isNew, name || o.name, (nm) => {
+    const domains = domainsCtl.get();
+    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return null; }
+    const td = $('#ed-tdomain').value.trim();
+    if (!td) { toast('Target required', 'Set the target domain.', 'err'); return null; }
+    const body = { domains, targetScheme: $('#ed-tscheme').value, targetDomain: td, statusCode: parseInt($('#ed-status').value, 10) };
+    if (isOn('ed-preserve')) body.preservePath = true;
+    const tls = readTls(); if (tls) body.tls = tls;
+    return body;
+  });
+}
+
+// ---------- STREAM HOST EDITOR ----------
+async function streamEditor(c, name) {
+  const meta = SECTION_META.streams; const isNew = !name;
+  const o = isNew ? {} : ((await api('/api/stream-hosts/' + encodeURIComponent(name))).data || {});
+  c.innerHTML = editorHead('streams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Forwarding</p>
+      <div class="inline-fields">
+        <div class="field-group"><label>Listen port</label><input class="field mono" id="ed-listen" type="number" value="${esc(o.listenPort != null ? o.listenPort : '')}" placeholder="5353" /></div>
+        <div class="field-group"><label>Protocol</label><select class="field mono" id="ed-proto">
+          ${['tcp', 'udp', 'both'].map((p) => `<option value="${p}"${(o.protocol || 'tcp') === p ? ' selected' : ''}>${p}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="inline-fields" style="margin-top:14px">
+        <div class="field-group" style="flex:2"><label>Forward host</label><input class="field mono" id="ed-fhost" value="${esc(o.forwardHost || '')}" placeholder="10.0.0.5" /></div>
+        <div class="field-group"><label>Forward port</label><input class="field mono" id="ed-fport" type="number" value="${esc(o.forwardPort != null ? o.forwardPort : '')}" placeholder="53" /></div>
+      </div>
+    </div>
+  </div></div>` + saveBar('streams', isNew, meta.addLabel);
+  wireEditor('streams', 'stream-hosts', meta, isNew, name || o.name, () => {
+    const lp = parseInt($('#ed-listen').value, 10); const fp = parseInt($('#ed-fport').value, 10); const fh = $('#ed-fhost').value.trim();
+    if (isNaN(lp)) { toast('Listen port required', 'Enter a listen port.', 'err'); return null; }
+    if (!fh || isNaN(fp)) { toast('Forward target required', 'Set forward host and port.', 'err'); return null; }
+    return { listenPort: lp, protocol: $('#ed-proto').value, forwardHost: fh, forwardPort: fp };
+  });
+}
+
+// ---------- DEAD HOST EDITOR ----------
+async function deadEditor(c, name) {
+  const meta = SECTION_META.dead; const isNew = !name;
+  const [certsR, objR] = await Promise.all([
+    api('/api/certificates').catch(() => ({ data: [] })),
+    isNew ? Promise.resolve({ data: {} }) : api('/api/dead-hosts/' + encodeURIComponent(name)),
+  ]);
+  const certs = arr(certsR.data); const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
+  const o = objR.data || {};
+  c.innerHTML = editorHead('dead', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
+    <div class="card form-section"><p class="section-label">Response</p>
+      <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Returned for every request to these domains. Default 404.</div></div>
+    </div>
+  </div><div class="stack">${tlsCard(o.tls, certs, certDomains)}</div></div>` + saveBar('dead', isNew, meta.addLabel);
+  const domainsCtl = makeChipInput($('#ed-domains'), arr(o.domains), 'add domain...');
+  wireTls();
+  wireEditor('dead', 'dead-hosts', meta, isNew, name || o.name, () => {
+    const domains = domainsCtl.get();
+    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return null; }
+    const body = { domains };
+    const sc = parseInt($('#ed-status').value, 10); if (!isNaN(sc)) body.statusCode = sc;
+    const tls = readTls(); if (tls) body.tls = tls;
+    return body;
+  });
+}
+
+// ---------- DNS PROVIDER EDITOR ----------
+async function dnsEditor(c, name) {
+  const meta = SECTION_META.dns; const isNew = !name;
+  const o = isNew ? { provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } } : ((await api('/api/dns-providers/' + encodeURIComponent(name))).data || {});
+  c.innerHTML = editorHead('dns', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Provider</p>
+      <div class="field-group"><label>Provider</label>
+        <input class="field mono" id="ed-provider" list="dns-provider-list" value="${esc(o.provider || 'cloudflare')}" placeholder="cloudflare" />
+        <datalist id="dns-provider-list"><option value="cloudflare"></option></datalist>
+        <div class="hint">P0 ships cloudflare.</div>
+      </div>
+    </div>
+    <div class="card form-section"><p class="section-label">Credentials</p>
+      <div id="ed-config"></div>
+      <button class="btn ghost sm" id="ed-addcfg" type="button" style="margin-top:6px">${ICON.plus}Add credential</button>
+      <div class="hint" style="margin-top:8px">Use a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so no secret is committed. A masked secret reads <span class="mono">***</span>.</div>
+    </div>
+  </div></div>` + saveBar('dns', isNew, meta.addLabel);
+  const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:CF_API_TOKEN}', true);
+  $('#ed-addcfg').addEventListener('click', () => cfgCtl.addRow('', ''));
+  wireEditor('dns', 'dns-providers', meta, isNew, name || o.name, () => {
+    const prov = $('#ed-provider').value.trim();
+    if (!prov) { toast('Provider required', 'Enter a provider.', 'err'); return null; }
+    if (cfgCtl.masked()) { toast('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', 'err'); return null; }
+    const body = { provider: prov };
+    const cfg = cfgCtl.get(); if (Object.keys(cfg).length) body.config = cfg;
+    return body;
+  });
+}
+
+// ---------- ACCESS LIST EDITOR ----------
+async function accessEditor(c, name) {
+  const meta = SECTION_META.access; const isNew = !name;
+  const o = isNew ? {} : ((await api('/api/access-lists/' + encodeURIComponent(name))).data || {});
+  c.innerHTML = editorHead('access', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Policy</p>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Satisfy any</div><div class="ds">Pass if EITHER basic-auth or IP matches (off = require both)</div></div>${switchHtml('ed-satisfy', !!o.satisfyAny, 'Satisfy any')}</div>
+      <div class="field-group" style="margin-top:12px"><label>Default action</label><select class="field mono" id="ed-default">
+        ${['deny', 'allow'].map((a) => `<option value="${a}"${(o.defaultAction || 'deny') === a ? ' selected' : ''}>${a}</option>`).join('')}
+      </select><div class="hint">Applied when no IP rule matches.</div></div>
+    </div>
+    <div class="card form-section"><p class="section-label">IP rules</p><div id="ed-rules"></div>
+      <button class="btn ghost sm" id="ed-addrule" type="button" style="margin-top:6px">${ICON.plus}Add rule</button>
+      <div class="hint" style="margin-top:6px">Evaluated top-down. CIDR or bare IP.</div>
+    </div>
+  </div><div class="stack">
+    <div class="card form-section"><p class="section-label">Basic auth users</p><div id="ed-basic"></div>
+      <button class="btn ghost sm" id="ed-addbasic" type="button" style="margin-top:6px">${ICON.plus}Add user</button>
+      <div class="hint" style="margin-top:6px">Password must be a bcrypt hash.</div>
+    </div>
+  </div></div>` + saveBar('access', isNew, meta.addLabel);
+  const rulesWrap = $('#ed-rules');
+  function ruleRow(r) {
+    r = r || {}; const d = document.createElement('div'); d.className = 'loc-row';
+    d.innerHTML = `<select class="field mono rule-action" style="flex:0 0 100px">${['allow', 'deny'].map((a) => `<option value="${a}"${r.action === a ? ' selected' : ''}>${a}</option>`).join('')}</select>
+      <input class="field mono rule-cidr" style="flex:1 1 160px" value="${esc(r.cidr || '')}" placeholder="10.0.0.0/8" aria-label="CIDR" />
+      <button class="icon-btn rule-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    d.querySelector('.rule-del').addEventListener('click', () => d.remove());
+    rulesWrap.appendChild(d);
+  }
+  arr(o.rules).forEach(ruleRow);
+  $('#ed-addrule').addEventListener('click', () => ruleRow({ action: 'allow' }));
+  const basicWrap = $('#ed-basic');
+  function basicRow(u) {
+    u = u || {}; const d = document.createElement('div'); d.className = 'loc-row';
+    d.innerHTML = `<input class="field mono basic-user" style="flex:1 1 110px" value="${esc(u.username || '')}" placeholder="username" aria-label="Username" />
+      <input class="field mono basic-hash" style="flex:2 1 180px" value="${esc(u.passwordHash || '')}" placeholder="bcrypt hash" aria-label="Password hash" />
+      <button class="icon-btn basic-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    d.querySelector('.basic-del').addEventListener('click', () => d.remove());
+    basicWrap.appendChild(d);
+  }
+  arr(o.basicAuth).forEach(basicRow);
+  $('#ed-addbasic').addEventListener('click', () => basicRow({}));
+  wireEditor('access', 'access-lists', meta, isNew, name || o.name, () => {
+    const body = {};
+    if (isOn('ed-satisfy')) body.satisfyAny = true;
+    body.defaultAction = $('#ed-default').value;
+    const rules = [];
+    rulesWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+      const cidr = r.querySelector('.rule-cidr').value.trim();
+      if (!cidr) return;
+      rules.push({ action: r.querySelector('.rule-action').value, cidr });
+    });
+    if (rules.length) body.rules = rules;
+    const basic = []; let bad = false;
+    basicWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+      const u = r.querySelector('.basic-user').value.trim(); const h = r.querySelector('.basic-hash').value.trim();
+      if (!u && !h) return;
+      if (!u || !h) bad = true;
+      basic.push({ username: u, passwordHash: h });
+    });
+    if (bad) { toast('Basic auth incomplete', 'Each user needs a username and a password hash.', 'err'); return null; }
+    if (basic.length) body.basicAuth = basic;
+    return body;
+  });
+}
+
+// ---------- IDENTITY PROVIDER EDITOR (polymorphic) ----------
+async function idpEditor(c, name) {
+  const meta = SECTION_META.identity; const isNew = !name;
+  const o = isNew ? { type: 'oidc' } : ((await api('/api/identity-providers/' + encodeURIComponent(name))).data || {});
+  const type = o.type || 'oidc';
+  const oidc = o.oidc || {}; const fa = o.forwardAuth || {}; const ar = o.authRequest || {}; const rm = o.roleMapping || {};
+  c.innerHTML = editorHead('identity', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Type</p>
+      <div class="field-group"><label>Provider type</label><select class="field mono" id="ed-type">
+        ${[['oidc', 'OIDC'], ['forward-auth', 'Forward-auth (trusted headers)'], ['auth-request', 'Auth-request (external)']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="oidc" style="${type === 'oidc' ? '' : 'display:none'}"><p class="section-label">OIDC</p>
+      <div class="field-group"><label>Issuer URL</label><input class="field mono" id="oidc-issuer" value="${esc(oidc.issuerURL || '')}" placeholder="https://idp.example.com/application/o/app/" /></div>
+      <div class="field-group"><label>Client ID</label><input class="field mono" id="oidc-clientid" value="${esc(oidc.clientID || '')}" placeholder="client-id" /></div>
+      <div class="field-group"><label>Client secret</label><input class="field mono" id="oidc-secret" value="${esc(oidc.clientSecret || '')}" placeholder="\${ENV:OIDC_CLIENT_SECRET}" /><div class="hint">Use a <span class="mono">\${ENV:...}</span> placeholder. A masked secret reads <span class="mono">***</span>; replace it to change.</div></div>
+      <div class="field-group"><label>Scopes</label><div class="chip-input" id="oidc-scopes"></div><div class="hint">Default openid, profile, email, groups.</div></div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Use PKCE</div><div class="ds">Recommended; public clients can run with no secret</div></div>${switchHtml('oidc-pkce', oidc.usePKCE !== false, 'Use PKCE')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Require verified email</div></div>${switchHtml('oidc-verify', !!oidc.requireVerifiedEmail, 'Require verified email')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Trust IdP MFA</div><div class="ds">Trust acr/amr instead of a second local prompt</div></div>${switchHtml('oidc-mfa', !!oidc.trustIdPMFA, 'Trust IdP MFA')}</div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="forward-auth" style="${type === 'forward-auth' ? '' : 'display:none'}"><p class="section-label">Forward-auth</p>
+      <div class="field-group"><label>Trusted proxies (CIDRs)</label><div class="chip-input" id="fa-trusted"></div><div class="hint">Identity headers are honoured only from these. Required.</div></div>
+      <div class="inline-fields">
+        <div class="field-group"><label>User header</label><input class="field mono" id="fa-user" value="${esc(fa.userHeader || '')}" placeholder="X-authentik-username" /></div>
+        <div class="field-group"><label>Email header</label><input class="field mono" id="fa-email" value="${esc(fa.emailHeader || '')}" placeholder="X-authentik-email" /></div>
+      </div>
+      <div class="inline-fields">
+        <div class="field-group"><label>Name header</label><input class="field mono" id="fa-name" value="${esc(fa.nameHeader || '')}" placeholder="X-authentik-name" /></div>
+        <div class="field-group"><label>Groups header</label><input class="field mono" id="fa-groups" value="${esc(fa.groupsHeader || '')}" placeholder="X-authentik-groups" /></div>
+      </div>
+      <div class="inline-fields">
+        <div class="field-group"><label>Groups delimiter</label><input class="field mono" id="fa-delim" value="${esc(fa.groupsDelimiter || '')}" placeholder="," /></div>
+        <div class="field-group"><label>AMR header</label><input class="field mono" id="fa-amr" value="${esc(fa.amrHeader || '')}" placeholder="X-authentik-auth-method" /></div>
+      </div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="auth-request" style="${type === 'auth-request' ? '' : 'display:none'}"><p class="section-label">Auth-request</p>
+      <div class="field-group"><label>Outpost URL</label><input class="field mono" id="ar-outpost" value="${esc(ar.outpostURL || '')}" placeholder="http://auth-outpost:9000" /></div>
+      <div class="inline-fields">
+        <div class="field-group"><label>Path prefix</label><input class="field mono" id="ar-prefix" value="${esc(ar.pathPrefix || '')}" placeholder="/outpost.goauthentik.io" /></div>
+        <div class="field-group"><label>Auth path</label><input class="field mono" id="ar-authpath" value="${esc(ar.authPath || '')}" placeholder="/outpost.goauthentik.io/auth/nginx" /></div>
+      </div>
+      <div class="field-group"><label>Copy headers</label><div class="chip-input" id="ar-copy"></div><div class="hint">Response headers copied to the upstream on success.</div></div>
+    </div>
+  </div><div class="stack">
+    <div class="card form-section"><p class="section-label">Role mapping</p>
+      <div class="field-group"><label>Groups claim</label><input class="field mono" id="rm-claim" value="${esc(rm.groupsClaim || '')}" placeholder="groups" /></div>
+      <div class="field-group"><label>Admin groups</label><div class="chip-input" id="rm-admin"></div></div>
+      <div class="field-group"><label>User groups</label><div class="chip-input" id="rm-user"></div></div>
+      <div class="field-group"><label>Default role</label><select class="field mono" id="rm-default">
+        ${[['', 'deny (no match)'], ['user', 'user'], ['admin', 'admin']].map(([v, l]) => `<option value="${v}"${(rm.defaultRole || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></div>
+    </div>
+  </div></div>` + saveBar('identity', isNew, meta.addLabel);
+  const scopesCtl = makeChipInput($('#oidc-scopes'), arr(oidc.scopes), 'add scope...');
+  const trustedCtl = makeChipInput($('#fa-trusted'), arr(fa.trustedProxies), 'add CIDR...');
+  const copyCtl = makeChipInput($('#ar-copy'), arr(ar.copyHeaders), 'add header...');
+  const adminCtl = makeChipInput($('#rm-admin'), arr(rm.adminGroups), 'add group...');
+  const userCtl = makeChipInput($('#rm-user'), arr(rm.userGroups), 'add group...');
+  $('#ed-type').addEventListener('change', () => { const t = $('#ed-type').value; $$('.ed-sub').forEach((el) => { el.style.display = el.dataset.type === t ? '' : 'none'; }); });
+  wireEditor('identity', 'identity-providers', meta, isNew, name || o.name, () => {
+    const t = $('#ed-type').value; const body = { type: t };
+    if (t === 'oidc') {
+      const issuer = $('#oidc-issuer').value.trim(); const cid = $('#oidc-clientid').value.trim();
+      if (!issuer || !cid) { toast('OIDC incomplete', 'Issuer URL and client ID are required.', 'err'); return null; }
+      const sec = $('#oidc-secret').value.trim();
+      if (sec === '***') { toast('Secret masked', 'The client secret is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', 'err'); return null; }
+      const spec = { issuerURL: issuer, clientID: cid, usePKCE: isOn('oidc-pkce') };
+      if (sec) spec.clientSecret = sec;
+      const sc = scopesCtl.get(); if (sc.length) spec.scopes = sc;
+      if (isOn('oidc-verify')) spec.requireVerifiedEmail = true;
+      if (isOn('oidc-mfa')) spec.trustIdPMFA = true;
+      body.oidc = spec;
+    } else if (t === 'forward-auth') {
+      const tp = trustedCtl.get(); const uh = $('#fa-user').value.trim();
+      if (!tp.length) { toast('Trusted proxies required', 'Add at least one trusted proxy CIDR.', 'err'); return null; }
+      if (!uh) { toast('User header required', 'Set the user header.', 'err'); return null; }
+      const spec = { trustedProxies: tp, userHeader: uh };
+      const fields = { emailHeader: 'fa-email', nameHeader: 'fa-name', groupsHeader: 'fa-groups', groupsDelimiter: 'fa-delim', amrHeader: 'fa-amr' };
+      Object.keys(fields).forEach((k) => { const v = $('#' + fields[k]).value.trim(); if (v) spec[k] = v; });
+      body.forwardAuth = spec;
+    } else {
+      const out = $('#ar-outpost').value.trim();
+      if (!out) { toast('Outpost URL required', 'Set the outpost URL.', 'err'); return null; }
+      const spec = { outpostURL: out };
+      const pp = $('#ar-prefix').value.trim(); if (pp) spec.pathPrefix = pp;
+      const ap = $('#ar-authpath').value.trim(); if (ap) spec.authPath = ap;
+      const ch = copyCtl.get(); if (ch.length) spec.copyHeaders = ch;
+      body.authRequest = spec;
+    }
+    const rmBody = {}; const claim = $('#rm-claim').value.trim(); if (claim) rmBody.groupsClaim = claim;
+    const ag = adminCtl.get(); if (ag.length) rmBody.adminGroups = ag;
+    const ug = userCtl.get(); if (ug.length) rmBody.userGroups = ug;
+    const dr = $('#rm-default').value; if (dr) rmBody.defaultRole = dr;
+    if (Object.keys(rmBody).length) body.roleMapping = rmBody;
+    return body;
+  });
+}
+
+// ---------- MIDDLEWARE EDITOR (polymorphic) ----------
+async function middlewareEditor(c, name) {
+  const meta = SECTION_META.middleware; const isNew = !name;
+  const [idpR, objR] = await Promise.all([
+    api('/api/identity-providers').catch(() => ({ data: [] })),
+    isNew ? Promise.resolve({ data: { type: 'headers' } }) : api('/api/middlewares/' + encodeURIComponent(name)),
+  ]);
+  const idps = arr(idpR.data);
+  const o = objR.data || {}; const type = o.type || 'headers';
+  const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {};
+  c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Type</p>
+      <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type">
+        ${[['auth', 'Auth'], ['headers', 'Headers'], ['guard', 'Guard'], ['rate-limit', 'Rate limit']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="auth" style="${type === 'auth' ? '' : 'display:none'}"><p class="section-label">Auth</p>
+      <div class="field-group"><label>Identity provider</label><select class="field mono" id="mw-idp">
+        <option value="">select provider...</option>
+        ${idps.map((p) => `<option value="${esc(p.name)}"${auth.identityProvider === p.name ? ' selected' : ''}>${esc(p.name)}${p.type ? ' (' + esc(p.type) + ')' : ''}</option>`).join('')}
+      </select>${idps.length ? '' : '<div class="hint">No identity providers yet. Add one under Identity.</div>'}</div>
+      <div class="field-group"><label>Mode</label><select class="field mono" id="mw-mode">
+        ${[['', '(from IdP type)'], ['oidc', 'oidc'], ['forward-auth', 'forward-auth'], ['auth-request', 'auth-request']].map(([v, l]) => `<option value="${v}"${(auth.mode || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></div>
+      <div class="field-group"><label>Required roles</label><div class="chip-input" id="mw-roles"></div><div class="hint">Not supported in auth-request mode.</div></div>
+      <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="mw-allow"></div><div class="hint">Client CIDRs that bypass auth entirely.</div></div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="headers" style="${type === 'headers' ? '' : 'display:none'}"><p class="section-label">Headers</p>
+      <div class="field-group"><label>Set request headers</label><div id="hdr-setreq"></div><button class="btn ghost sm hdr-add" data-wrap="hdr-setreq" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>
+      <div class="field-group"><label>Set response headers</label><div id="hdr-setresp"></div><button class="btn ghost sm hdr-add" data-wrap="hdr-setresp" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>
+      <div class="field-group"><label>Remove request headers</label><div class="chip-input" id="hdr-rmreq"></div></div>
+      <div class="field-group"><label>Remove response headers</label><div class="chip-input" id="hdr-rmresp"></div></div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="guard" style="${type === 'guard' ? '' : 'display:none'}"><p class="section-label">Guard</p>
+      <div id="guard-triggers"></div>
+      <button class="btn ghost sm" id="guard-addtrig" type="button" style="margin-top:6px">${ICON.plus}Add trigger</button>
+      <div class="inline-fields" style="margin-top:14px">
+        <div class="field-group"><label>Deny status</label><input class="field mono" id="guard-deny" type="number" value="${esc(guard.denyStatus != null ? guard.denyStatus : '')}" placeholder="403" /></div>
+      </div>
+      <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="guard-allow"></div><div class="hint">Client CIDRs exempt from the deny.</div></div>
+    </div>
+
+    <div class="card form-section ed-sub" data-type="rate-limit" style="${type === 'rate-limit' ? '' : 'display:none'}"><p class="section-label">Rate limit</p>
+      <div class="inline-fields">
+        <div class="field-group"><label>Requests / second</label><input class="field mono" id="rl-rps" type="number" step="0.1" value="${esc(rl.requestsPerSecond != null ? rl.requestsPerSecond : '')}" placeholder="10" /></div>
+        <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(rps)" /></div>
+      </div>
+    </div>
+  </div></div>` + saveBar('middleware', isNew, meta.addLabel);
+
+  const rolesCtl = makeChipInput($('#mw-roles'), arr(auth.requiredRoles), 'add role...');
+  const mwAllowCtl = makeChipInput($('#mw-allow'), arr(auth.allowFrom), 'add CIDR...');
+  const setReqCtl = makeKVRows($('#hdr-setreq'), headers.setRequest || {}, 'Header', 'value', false);
+  const setRespCtl = makeKVRows($('#hdr-setresp'), headers.setResponse || {}, 'Header', 'value', false);
+  const rmReqCtl = makeChipInput($('#hdr-rmreq'), arr(headers.removeRequest), 'add header...');
+  const rmRespCtl = makeChipInput($('#hdr-rmresp'), arr(headers.removeResponse), 'add header...');
+  const guardAllowCtl = makeChipInput($('#guard-allow'), arr(guard.allowFrom), 'add CIDR...');
+  $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
+
+  const trigWrap = $('#guard-triggers'); const trigCtls = [];
+  function trigRow(t) {
+    t = t || {}; const d = document.createElement('div'); d.className = 'card form-section'; d.style.marginBottom = '8px';
+    d.innerHTML = `<div class="row-between" style="margin-bottom:8px"><span class="ci-ty">trigger</span><button class="icon-btn trig-del" type="button" aria-label="Remove trigger">${ICON.x}</button></div>
+      <div class="field-group"><label>Paths</label><div class="chip-input trig-paths"></div></div>
+      <div class="field-group"><label>Methods</label><div class="chip-input trig-methods"></div></div>
+      <div class="field-group"><label>Query equals</label><div class="trig-query"></div><button class="btn ghost sm trig-addq" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>`;
+    trigWrap.appendChild(d);
+    const pathsCtl = makeChipInput(d.querySelector('.trig-paths'), arr(t.paths), 'add path...');
+    const methodsCtl = makeChipInput(d.querySelector('.trig-methods'), arr(t.methods), 'add method...');
+    const queryCtl = makeKVRows(d.querySelector('.trig-query'), t.queryEquals || {}, 'arg', 'value', false);
+    d.querySelector('.trig-addq').addEventListener('click', () => queryCtl.addRow('', ''));
+    const ctl = { pathsCtl, methodsCtl, queryCtl };
+    d.querySelector('.trig-del').addEventListener('click', () => { d.remove(); const i = trigCtls.indexOf(ctl); if (i >= 0) trigCtls.splice(i, 1); });
+    trigCtls.push(ctl);
+  }
+  arr(guard.triggers).forEach(trigRow);
+  $('#guard-addtrig').addEventListener('click', () => trigRow({}));
+
+  $('#ed-type').addEventListener('change', () => { const t = $('#ed-type').value; $$('.ed-sub').forEach((el) => { el.style.display = el.dataset.type === t ? '' : 'none'; }); });
+
+  wireEditor('middleware', 'middlewares', meta, isNew, name || o.name, () => {
+    const t = $('#ed-type').value; const body = { type: t };
+    if (t === 'auth') {
+      const idp = $('#mw-idp').value;
+      if (!idp) { toast('Identity provider required', 'Select an identity provider.', 'err'); return null; }
+      const mode = $('#mw-mode').value; const roles = rolesCtl.get(); const allow = mwAllowCtl.get();
+      if (mode === 'auth-request' && roles.length) { toast('Roles unsupported', 'Required roles are not supported in auth-request mode.', 'err'); return null; }
+      const spec = { identityProvider: idp };
+      if (mode) spec.mode = mode;
+      if (roles.length) spec.requiredRoles = roles;
+      if (allow.length) spec.allowFrom = allow;
+      body.auth = spec;
+    } else if (t === 'headers') {
+      const spec = {};
+      const sr = setReqCtl.get(); if (Object.keys(sr).length) spec.setRequest = sr;
+      const sp = setRespCtl.get(); if (Object.keys(sp).length) spec.setResponse = sp;
+      const rr = rmReqCtl.get(); if (rr.length) spec.removeRequest = rr;
+      const rp = rmRespCtl.get(); if (rp.length) spec.removeResponse = rp;
+      body.headers = spec;
+    } else if (t === 'guard') {
+      const triggers = [];
+      trigCtls.forEach((ctl) => {
+        const tr = {}; const p = ctl.pathsCtl.get(); const m = ctl.methodsCtl.get(); const q = ctl.queryCtl.get();
+        if (p.length) tr.paths = p;
+        if (m.length) tr.methods = m;
+        if (Object.keys(q).length) tr.queryEquals = q;
+        if (Object.keys(tr).length) triggers.push(tr);
+      });
+      if (!triggers.length) { toast('Trigger required', 'Add at least one guard trigger.', 'err'); return null; }
+      const spec = { triggers };
+      const allow = guardAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
+      const ds = parseInt($('#guard-deny').value, 10); if (!isNaN(ds)) spec.denyStatus = ds;
+      body.guard = spec;
+    } else {
+      const rps = parseFloat($('#rl-rps').value);
+      if (isNaN(rps) || rps <= 0) { toast('Rate required', 'Requests per second must be > 0.', 'err'); return null; }
+      const spec = { requestsPerSecond: rps };
+      const burst = parseInt($('#rl-burst').value, 10); if (!isNaN(burst)) spec.burst = burst;
+      body.rateLimit = spec;
+    }
+    return body;
+  });
+}
+
+// section -> editor dispatch for the typed object editors
+const EDITORS = {
+  redirects: redirectEditor, streams: streamEditor, dead: deadEditor, dns: dnsEditor,
+  identity: idpEditor, access: accessEditor, middleware: middlewareEditor,
+};
 
 // ---------- HISTORY ----------
 async function viewHistory(c) {
@@ -1162,14 +1639,50 @@ async function viewHistory(c) {
       <h2>History</h2>
       <p>Every change is a git commit. Reviewable, attributable, and reversible.</p>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Backup &amp; restore</p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn" id="backupBtn">Download backup</button>
+        <button class="btn" id="restoreBtn">Restore from archive…</button>
+        <input type="file" id="restoreFile" accept=".gz,.tar.gz,application/gzip" style="display:none" />
+        <span class="hint">A portable archive of the whole config. Restore replaces everything as one commit.</span>
+      </div>
+    </div>
     <div class="card">
-      ${items.length ? `<div class="timeline">${items.map((h) => `
+      ${items.length ? `<div class="timeline">${items.map((h, i) => `
         <div class="tl-item">
           <div class="tl-meta">${esc(fmtTime(h.when))} · ${esc(h.author || 'unknown')}${h.email ? ` <span class="muted">&lt;${esc(h.email)}&gt;</span>` : ''}</div>
           <div class="tl-msg">${esc(h.message || '(no message)')}</div>
-          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span><span class="revert disabled" title="Revert is coming soon">revert</span></div>
+          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${i === 0 ? '<span class="revert disabled" title="Already the current config">current</span>' : `<span class="revert" data-revert="${esc(h.hash)}" title="Revert the whole config to this commit">revert</span>`}</div>
         </div>`).join('')}</div>` : '<div class="muted" style="font-size:13px">No commits yet.</div>'}
     </div>`;
+
+  $('#backupBtn').addEventListener('click', () => { window.location.href = '/api/backup'; });
+  const fileInput = $('#restoreFile');
+  $('#restoreBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    if (!confirm(`Restore config from "${f.name}"? This REPLACES the entire current configuration (recorded as one commit).`)) { fileInput.value = ''; return; }
+    try {
+      const res = await fetch('/api/restore', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': csrfToken }, body: f });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((data && data.error) || `Restore failed (${res.status})`);
+      toast('Restored', data && data.commit ? `committed <span class="sha">${esc(shortSha(data.commit))}</span>` : 'configuration restored', 'ok', { html: true });
+      await viewHistory(c);
+    } catch (e) { toastErr(e); } finally { fileInput.value = ''; }
+  });
+  c.querySelectorAll('[data-revert]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const hash = el.getAttribute('data-revert');
+      if (!confirm(`Revert the entire config to ${shortSha(hash)}? This is recorded as a new commit, so it can be undone.`)) return;
+      try {
+        const r = await api('/api/revert', { method: 'POST', body: { hash } });
+        toast('Reverted', r.data && r.data.commit ? `committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : 'config reverted', 'ok', { html: true });
+        await viewHistory(c);
+      } catch (e) { toastErr(e); }
+    });
+  });
 }
 
 // ---------- SETTINGS ----------

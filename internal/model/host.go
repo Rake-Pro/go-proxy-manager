@@ -37,6 +37,19 @@ type TLSSettings struct {
 	ForceSSL       bool   `json:"forceSSL,omitempty" yaml:"forceSSL,omitempty"` // redirect http->https
 	HTTP2          bool   `json:"http2,omitempty" yaml:"http2,omitempty"`
 	HSTS           HSTS   `json:"hsts,omitempty" yaml:"hsts,omitempty"`
+	// MinTLSVersion is the lowest TLS version this host accepts: "1.2" (default,
+	// empty) or "1.3". Set "1.3" only where every client supports it; the edge
+	// otherwise negotiates 1.2 or 1.3 per client with a 1.2 floor.
+	MinTLSVersion string `json:"minTLSVersion,omitempty" yaml:"minTLSVersion,omitempty"`
+}
+
+func (t TLSSettings) validate() error {
+	switch t.MinTLSVersion {
+	case "", "1.2", "1.3":
+		return nil
+	default:
+		return fmt.Errorf(`tls.minTLSVersion must be "1.2" or "1.3", got %q`, t.MinTLSVersion)
+	}
 }
 
 // Location is a path-scoped override within a proxy host. Locations carry their
@@ -77,6 +90,9 @@ func (h ProxyHost) Validate() error {
 		return fmt.Errorf("proxy host %q: at least one domain is required", h.Name)
 	}
 	if err := h.Upstream.validate(); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := h.TLS.validate(); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	for _, l := range h.Locations {

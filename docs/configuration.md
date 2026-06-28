@@ -51,6 +51,13 @@ literal secret is refused with `refusing to commit literal secret(s): ...`. In
 API responses, literal secrets are redacted to `***`; placeholders are returned
 verbatim.
 
+`${FILE:...}` reads are confined to an allowlisted root, defaulting to
+`/run/secrets`. A path that is relative, or outside the allowed root (including
+via `..`), is refused — so a config write cannot turn a file-backed secret into
+an arbitrary host-file read. Override the allowed roots with the
+`GPM_SECRET_FILE_ROOTS` environment variable (a list of absolute directories,
+separated by the OS path-list separator, e.g. `:` on Linux).
+
 ---
 
 ## Settings (`config/settings.yaml`)
@@ -95,9 +102,16 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 **Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
 
 **TLSSettings**: `certificateRef` (a Certificate name), `forceSSL` (redirect
-HTTP→HTTPS), `http2`, `hsts` (`enabled`, `maxAge`, `includeSubdomains`, `preload`
-— *note: accepted in config but the `Strict-Transport-Security` header is not yet
-emitted; see BACKLOG.md*).
+HTTP→HTTPS), `http2`, `hsts` (`enabled`, `maxAge` — seconds, default one year when
+unset, `includeSubdomains`, `preload`), `minTLSVersion` (`"1.2"` default | `"1.3"`).
+When `hsts.enabled` is set, the data plane emits `Strict-Transport-Security` on
+HTTPS responses for the host (never over plain HTTP).
+
+`minTLSVersion` is a **per-host** floor selected by SNI at handshake time. The
+edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
+set `"1.3"` only on hosts where every client supports it (drops 1.2 — old smart
+TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
+for public hosts to keep the widest client compatibility.
 
 **Location**: a path-scoped override. `path` (required), optional `upstream`
 override, plus `middlewares` / `accessLists` that are **appended to** (not
@@ -307,6 +321,15 @@ defaultAction: deny
 `allowFrom` (CIDRs that bypass auth; `auth-request` mode only — e.g. let a LAN
 skip SSO).
 
+In `oidc` mode gpm is itself the OIDC relying party for the host: an
+unauthenticated request is redirected to the IdP, the reserved callback path
+`/__gpm/oidc/callback` exchanges the code (PKCE + nonce) and sets a signed,
+stateless SSO session cookie, and `requiredRoles` (via the IdP's `roleMapping`)
+is enforced; with no role mapping or required roles the gate just requires a
+valid login. Register `https://<host>/__gpm/oidc/callback` as a redirect URI on
+the IdP, and set `GPM_SSO_SIGNING_KEY` to keep SSO sessions valid across restarts
+(otherwise an ephemeral per-process key is used).
+
 **HeadersMiddleware**: `setRequest`, `setResponse` (maps), `removeRequest`,
 `removeResponse` (lists).
 
@@ -315,7 +338,14 @@ and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
 (default 403).
 
 **RateLimitMiddleware**: `requestsPerSecond` (req, >0), `burst` (default
-`ceil(rps)`).
+`ceil(rps)`). Enforced as a per-host, per-client-IP token bucket (capacity =
+`burst`, refill = `requestsPerSecond`/sec). Over-limit requests get `429 Too Many
+Requests` with a `Retry-After` header; the request is not proxied. The client IP
+is resolved the same XFF-aware way as access lists; a request whose client IP
+cannot be resolved falls back to a single shared bucket (fail-safe, never
+unlimited). The middleware sits **outermost** in the chain (evaluated first) so a
+flood is shed before it can drive an auth subrequest or any other per-request
+work: rate-limit → auth → guard → access-list → headers → upstream.
 
 ```yaml
 # Require SSO, but let the LAN through without it
@@ -339,6 +369,7 @@ guard:
 ### Middleware ordering
 
 Middlewares are applied in a fixed order per request regardless of the order you
-list them: **auth → guard → access-list → headers → upstream**. Authentication is
-outermost (evaluated first); header mutations are innermost (closest to the
-backend). Host-wide middlewares run before any location-scoped ones.
+list them: **rate-limit → auth → guard → access-list → headers → upstream**. Rate
+limiting is outermost (evaluated first, so floods are shed before any work);
+header mutations are innermost (closest to the backend). Host-wide middlewares run
+before any location-scoped ones.

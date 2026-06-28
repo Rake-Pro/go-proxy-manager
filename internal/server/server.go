@@ -57,10 +57,28 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	}
 	s.http = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
+}
+
+// securityHeaders sets baseline hardening headers on every admin/login response:
+// nosniff, clickjacking protection (frame-ancestors + the legacy X-Frame-Options),
+// a conservative referrer policy, and HSTS. HSTS is emitted unconditionally - the
+// admin panel is reached over TLS via the data plane, and browsers ignore an HSTS
+// header received over plain HTTP, so it is safe on the direct-HTTP admin port.
+// The CSP is intentionally limited to frame-ancestors so it cannot break the SPA.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "same-origin")
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start runs the server until ctx is cancelled, then shuts it down gracefully.

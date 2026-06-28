@@ -37,7 +37,10 @@ func compileGuard(g model.GuardMiddleware) guard {
 		if len(t.Paths) > 0 {
 			gt.paths = map[string]struct{}{}
 			for _, p := range t.Paths {
-				gt.paths[p] = struct{}{}
+				// Match against the same canonical form the router produces, so a
+				// request cannot present "/login/." or "/x/../login" to slip past
+				// a guard whose trigger is "/login".
+				gt.paths[cleanPath(p)] = struct{}{}
 			}
 		}
 		if len(t.Methods) > 0 {

@@ -55,33 +55,52 @@ func TestClientIPResolver(t *testing.T) {
 	}
 }
 
-func forwardAuthRouter(t *testing.T) *router {
+// forwardAuthHost builds a host gated by a forward-auth IdP (trusted 10/8) and
+// returns its compiled hostHandler so the per-host strip can be exercised.
+func forwardAuthHost(t *testing.T) *hostHandler {
 	t.Helper()
-	cfg := model.Config{IdentityProviders: []model.IdentityProvider{{
-		ObjectMeta: model.ObjectMeta{Name: "authentik"},
-		Type:       model.IdPTypeForwardAuth,
-		ForwardAuth: &model.ForwardAuthSpec{
-			TrustedProxies: []string{"10.0.0.0/8"},
-			UserHeader:     "X-Authentik-Username",
-			GroupsHeader:   "X-Authentik-Groups",
-		},
-	}}}
+	cfg := model.Config{
+		IdentityProviders: []model.IdentityProvider{{
+			ObjectMeta: model.ObjectMeta{Name: "authentik"},
+			Type:       model.IdPTypeForwardAuth,
+			ForwardAuth: &model.ForwardAuthSpec{
+				TrustedProxies: []string{"10.0.0.0/8"},
+				UserHeader:     "X-Authentik-Username",
+				GroupsHeader:   "X-Authentik-Groups",
+			},
+		}},
+		Middlewares: []model.Middleware{{
+			ObjectMeta: model.ObjectMeta{Name: "sso"},
+			Type:       model.MWTypeAuth,
+			Auth:       &model.AuthMiddleware{IdentityProvider: "authentik", Mode: model.AuthModeForwardAuth},
+		}},
+		ProxyHosts: []model.ProxyHost{{
+			ObjectMeta:  model.ObjectMeta{Name: "app"},
+			Domains:     []string{"app2.example.com"},
+			Upstream:    model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9},
+			Middlewares: []string{"sso"},
+		}},
+	}
 	rt, err := buildRouter(cfg, "")
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
-	return rt
+	hh, ok := rt.hosts["app2.example.com"]
+	if !ok {
+		t.Fatal("compiled host not found")
+	}
+	return hh
 }
 
 func TestStripUntrustedIdentity(t *testing.T) {
-	rt := forwardAuthRouter(t)
+	hh := forwardAuthHost(t)
 
 	// Untrusted peer: forged identity headers are stripped.
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "203.0.113.9:5000"
 	r.Header.Set("X-Authentik-Username", "attacker")
 	r.Header.Set("X-Authentik-Groups", "proxy-admins")
-	rt.stripUntrustedIdentity(r)
+	hh.stripUntrustedIdentity(r)
 	if r.Header.Get("X-Authentik-Username") != "" || r.Header.Get("X-Authentik-Groups") != "" {
 		t.Fatalf("forged identity headers must be stripped from an untrusted peer, got %v", r.Header)
 	}
@@ -90,22 +109,76 @@ func TestStripUntrustedIdentity(t *testing.T) {
 	r = httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "10.1.2.3:5000"
 	r.Header.Set("X-Authentik-Username", "admin")
-	rt.stripUntrustedIdentity(r)
+	hh.stripUntrustedIdentity(r)
 	if r.Header.Get("X-Authentik-Username") != "admin" {
 		t.Fatal("a trusted proxy's identity headers must be preserved")
 	}
 }
 
-func TestStripUntrustedIdentityNoProvidersIsNoop(t *testing.T) {
-	rt, err := buildRouter(model.Config{}, "")
+// TestStripBaselineIdentityNoProviders proves the baseline denylist is stripped
+// from an untrusted peer even when the host configures no IdP, while a benign
+// header is left intact.
+func TestStripBaselineIdentityNoProviders(t *testing.T) {
+	up, closeFn := backendUpstream(t, okHandler())
+	defer closeFn()
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Domains:    []string{"app2.example.com"},
+		Upstream:   up,
+	}}}
+	rt, err := buildRouter(cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	hh := rt.hosts["app2.example.com"]
+
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("X-Authentik-Username", "x")
-	rt.stripUntrustedIdentity(r)
-	if r.Header.Get("X-Authentik-Username") != "x" {
-		t.Fatal("with no identity providers configured, nothing should be stripped")
+	r.RemoteAddr = "203.0.113.9:5000"
+	r.Header.Set("Remote-User", "attacker")
+	r.Header.Set("X-Auth-Request-User", "attacker")
+	r.Header.Set("X-Authentik-Groups", "proxy-admins")
+	r.Header.Set("X-Custom-App", "keep-me")
+	hh.stripUntrustedIdentity(r)
+	for _, h := range []string{"Remote-User", "X-Auth-Request-User", "X-Authentik-Groups"} {
+		if r.Header.Get(h) != "" {
+			t.Fatalf("baseline header %q must be stripped from an untrusted peer with no IdP", h)
+		}
+	}
+	if r.Header.Get("X-Custom-App") != "keep-me" {
+		t.Fatal("non-identity header must be preserved")
+	}
+}
+
+// TestIdentityTrustNotSharedAcrossHosts proves a proxy trusted by host A's IdP is
+// not implicitly trusted to assert identity headers to host B (no global union).
+func TestIdentityTrustNotSharedAcrossHosts(t *testing.T) {
+	cfg := model.Config{
+		IdentityProviders: []model.IdentityProvider{{
+			ObjectMeta:  model.ObjectMeta{Name: "authentik"},
+			Type:        model.IdPTypeForwardAuth,
+			ForwardAuth: &model.ForwardAuthSpec{TrustedProxies: []string{"10.0.0.0/8"}, UserHeader: "X-Authentik-Username"},
+		}},
+		Middlewares: []model.Middleware{{
+			ObjectMeta: model.ObjectMeta{Name: "sso"},
+			Type:       model.MWTypeAuth,
+			Auth:       &model.AuthMiddleware{IdentityProvider: "authentik", Mode: model.AuthModeForwardAuth},
+		}},
+		ProxyHosts: []model.ProxyHost{
+			{ObjectMeta: model.ObjectMeta{Name: "a"}, Domains: []string{"a.example.com"}, Upstream: model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9}, Middlewares: []string{"sso"}},
+			{ObjectMeta: model.ObjectMeta{Name: "b"}, Domains: []string{"b.example.com"}, Upstream: model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9}},
+		},
+	}
+	rt, err := buildRouter(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The 10/8 proxy is trusted for host A (its IdP) but NOT for host B.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.1.2.3:5000"
+	r.Header.Set("X-Authentik-Username", "admin")
+	rt.hosts["b.example.com"].stripUntrustedIdentity(r)
+	if r.Header.Get("X-Authentik-Username") != "" {
+		t.Fatal("host B must not trust host A's IdP proxy to assert identity")
 	}
 }
 

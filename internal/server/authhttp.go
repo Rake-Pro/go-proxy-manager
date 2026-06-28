@@ -1,7 +1,9 @@
 package server
 
 import (
+	"crypto/subtle"
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,16 +106,24 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 </div>
 </body></html>`))
 
+// startLogin begins an OIDC flow: it sets the state-binding cookie and redirects
+// the browser to the IdP. The callback verifies the cookie against the returned
+// state to reject flows not started by this browser.
+func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, idp, returnTo string) {
+	authURL, state, err := s.authn.BeginLogin(r.Context(), idp, returnTo)
+	if err != nil {
+		log.Warn().Str("idp", idp).Err(err).Msg("begin login failed")
+		http.Error(w, "login unavailable", http.StatusBadGateway)
+		return
+	}
+	s.authn.SetLoginStateCookie(w, state)
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.URL.Query().Get("return"))
 	if idp := r.URL.Query().Get("idp"); idp != "" {
-		url, err := s.authn.BeginLogin(r.Context(), idp, returnTo)
-		if err != nil {
-			log.Warn().Str("idp", idp).Err(err).Msg("begin login failed")
-			http.Error(w, "login unavailable", http.StatusBadGateway)
-			return
-		}
-		http.Redirect(w, r, url, http.StatusFound)
+		s.startLogin(w, r, idp, returnTo)
 		return
 	}
 	providers := s.authn.LoginOptions()
@@ -124,13 +134,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// page so a signed-out user is not immediately bounced back into a still-live
 	// IdP session.
 	if !local && len(providers) == 1 && r.URL.Query().Get("select") == "" {
-		url, err := s.authn.BeginLogin(r.Context(), providers[0].Name, returnTo)
-		if err != nil {
-			log.Warn().Str("idp", providers[0].Name).Err(err).Msg("begin login failed")
-			http.Error(w, "login unavailable", http.StatusBadGateway)
-			return
-		}
-		http.Redirect(w, r, url, http.StatusFound)
+		s.startLogin(w, r, providers[0].Name, returnTo)
 		return
 	}
 
@@ -160,6 +164,15 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing state or code", http.StatusBadRequest)
 		return
 	}
+	// Bind the flow to this browser: the state echoed by the IdP must match the
+	// cookie set at login start. This blocks login-CSRF / session-fixation where
+	// an attacker injects a callback URL carrying their own (server-valid) state.
+	cookieState := s.authn.LoginStateCookie(r)
+	s.authn.ClearLoginStateCookie(w)
+	if cookieState == "" || subtle.ConstantTimeCompare([]byte(cookieState), []byte(state)) != 1 {
+		http.Error(w, "invalid login state", http.StatusBadRequest)
+		return
+	}
 	sess, returnTo, err := s.authn.CompleteLogin(r.Context(), state, code)
 	if err != nil {
 		log.Warn().Err(err).Msg("oidc callback failed")
@@ -175,7 +188,13 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	key := clientIPKey(r)
+	if s.authn.LoginThrottled(key) {
+		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
 	sess, err := s.authn.LocalLogin(r.Context(), r.PostForm.Get("username"), r.PostForm.Get("password"))
+	s.authn.NoteLoginResult(key, err == nil)
 	if err != nil {
 		log.Warn().Err(err).Msg("local login failed")
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
@@ -183,6 +202,16 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.authn.IssueCookie(w, sess)
 	http.Redirect(w, r, sanitizeReturnTo(r.PostForm.Get("return")), http.StatusFound)
+}
+
+// clientIPKey is the throttle key for a login attempt: the connection peer IP
+// (admin is reached directly, so RemoteAddr is the real client). Falls back to
+// the raw RemoteAddr if it has no port.
+func clientIPKey(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -198,8 +227,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // sanitizeReturnTo prevents open redirects: only same-site absolute paths pass.
+// It must reject anything a browser could read as another origin: protocol-
+// relative forms ("//evil.com") and backslash variants ("/\evil.com", "\evil"),
+// since browsers normalize "\" to "/". A control char (CR/LF/NUL) also voids it.
 func sanitizeReturnTo(p string) string {
-	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+	if p == "" || p[0] != '/' {
+		return "/"
+	}
+	if strings.ContainsAny(p, "\\\r\n\x00") {
+		return "/"
+	}
+	if strings.HasPrefix(p, "//") {
 		return "/"
 	}
 	return p

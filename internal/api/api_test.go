@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -215,5 +216,75 @@ func TestLiteralSecretRejectedViaAPI(t *testing.T) {
 	w := do(t, h, "PUT", "/identity-providers/idp", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("PUT literal secret want 400 got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBackupRestoreAndRevertViaAPI(t *testing.T) {
+	h, changed := newHandler(t)
+
+	// Seed a host, then download a backup of that state.
+	if w := do(t, h, "PUT", "/proxy-hosts/app", validProxyHost); w.Code != http.StatusOK {
+		t.Fatalf("PUT host want 200 got %d", w.Code)
+	}
+	w := do(t, h, "GET", "/backup", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("backup want 200 got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("backup content-type = %q", ct)
+	}
+	archive := w.Body.Bytes()
+	if len(archive) == 0 {
+		t.Fatal("empty backup archive")
+	}
+
+	// Add a second host, then restore the earlier backup -> second host gone.
+	second := `{"name":"two","domains":["two.example.com"],"upstream":{"scheme":"http","host":"10.0.0.6","port":80}}`
+	if w := do(t, h, "PUT", "/proxy-hosts/two", second); w.Code != http.StatusOK {
+		t.Fatalf("PUT second want 200 got %d", w.Code)
+	}
+	*changed = 0
+	rr := httptest.NewRequest("POST", "/restore", bytes.NewReader(archive))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore want 200 got %d: %s", rec.Code, rec.Body.String())
+	}
+	if *changed != 1 {
+		t.Fatalf("restore OnChange want 1 got %d", *changed)
+	}
+	w = do(t, h, "GET", "/config", "")
+	var cfg model.Config
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].Name != "app" {
+		t.Fatalf("restore did not roll back to the backup: %+v", cfg.ProxyHosts)
+	}
+
+	// Revert to the first commit (before any host) using the repo history tail.
+	w = do(t, h, "GET", "/history", "")
+	var commits []store.Commit
+	if err := json.Unmarshal(w.Body.Bytes(), &commits); err != nil {
+		t.Fatal(err)
+	}
+	first := commits[len(commits)-1].Hash
+	w = do(t, h, "POST", "/revert", `{"hash":"`+first+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("revert want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	w = do(t, h, "GET", "/config", "")
+	cfg = model.Config{}
+	_ = json.Unmarshal(w.Body.Bytes(), &cfg)
+	if len(cfg.ProxyHosts) != 0 {
+		t.Fatalf("revert to initial commit should leave no hosts, got %d", len(cfg.ProxyHosts))
+	}
+}
+
+func TestRevertRejectsBadHashViaAPI(t *testing.T) {
+	h, _ := newHandler(t)
+	w := do(t, h, "POST", "/revert", `{"hash":"../nope"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad hash want 400 got %d: %s", w.Code, w.Body.String())
 	}
 }

@@ -1,0 +1,27 @@
+package server
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestSecurityHeaders(t *testing.T) {
+	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/auth/login", nil))
+
+	want := map[string]string{
+		"X-Content-Type-Options":    "nosniff",
+		"X-Frame-Options":           "DENY",
+		"Content-Security-Policy":   "frame-ancestors 'none'",
+		"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+	}
+	for k, v := range want {
+		if got := rec.Header().Get(k); got != v {
+			t.Errorf("header %s = %q, want %q", k, got, v)
+		}
+	}
+}

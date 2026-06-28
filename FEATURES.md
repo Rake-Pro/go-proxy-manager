@@ -175,8 +175,13 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
 
 ### P1 - high-value, layer in next (parity + best community asks)
 - Redirect / stream (TCP/UDP) / 404 hosts; multiple access lists per host/location.
-- Backup / export / restore ★, rate limiting ★, dark mode, robots/no-index toggle,
-  custom timeouts, load balancing / upstream groups, access-log viewer or metrics.
+- Backup / export / restore ★ (✓ shipped: gzip-tar export + validated restore +
+  config revert, with History-view UI), rate limiting ★ (✓ shipped: per-host,
+  per-client-IP token bucket with 429 + Retry-After), dark mode,
+  robots/no-index toggle, custom timeouts, load balancing / upstream groups,
+  access-log viewer or metrics.
+- Per-host OIDC relying-party gating on the data plane (✓ shipped: redirect →
+  callback → signed SSO session cookie) and HSTS emission (✓ shipped).
 
 ### P2 - hardening (NPMplus-class) + community gaps
 - HTTP/3 (QUIC), Brotli/zstd, hardened TLS (1.3; optional 1.2 off), OCSP (non-LE).

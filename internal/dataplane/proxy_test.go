@@ -114,6 +114,97 @@ func TestProxyLocationRouting(t *testing.T) {
 	}
 }
 
+func TestProxyLocationPathNormalization(t *testing.T) {
+	root, closeRoot := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("root:" + r.URL.Path))
+	}))
+	defer closeRoot()
+	reports, closeReports := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("reports:" + r.URL.Path))
+	}))
+	defer closeReports()
+
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "claude"},
+		Domains:    []string{"app1.example.com"},
+		Upstream:   root,
+		Locations:  []model.Location{{Path: "/reports", Upstream: &reports}},
+	}}}
+	rt, err := buildRouter(cfg, "")
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+
+	cases := []struct {
+		name, rawTarget, want string
+	}{
+		{"exact prefix routes to location", "/reports", "reports:/reports"},
+		{"boundary blocks sibling over-match", "/reports-evil", "root:/reports-evil"},
+		{"dot-segment cleaned then routed", "/x/../reports/a", "reports:/reports/a"},
+		{"dot-segment cleaned at root", "/a/../b", "root:/b"},
+		{"encoded traversal decoded and cleaned", "/%2e%2e/reports/z", "reports:/reports/z"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "https://app1.example.com"+c.rawTarget, nil)
+			req.Host = "app1.example.com"
+			rt.serveHTTPS(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: got %d, want 200 (body %q)", c.rawTarget, rec.Code, rec.Body.String())
+			}
+			if rec.Body.String() != c.want {
+				t.Fatalf("%s: body %q, want %q", c.rawTarget, rec.Body.String(), c.want)
+			}
+		})
+	}
+}
+
+func TestProxyHSTS(t *testing.T) {
+	up, closeFn := backendUpstream(t, okHandler())
+	defer closeFn()
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{
+		{
+			ObjectMeta: model.ObjectMeta{Name: "secure"},
+			Domains:    []string{"secure.example.com"},
+			Upstream:   up,
+			TLS:        model.TLSSettings{HSTS: model.HSTS{Enabled: true, IncludeSubdomains: true, Preload: true}},
+		},
+		{
+			ObjectMeta: model.ObjectMeta{Name: "plain"},
+			Domains:    []string{"plain.example.com"},
+			Upstream:   up,
+		},
+	}}
+	rt, err := buildRouter(cfg, "")
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+
+	serve := func(host string) string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		req.Host = host
+		rt.serveHTTPS(rec, req)
+		return rec.Header().Get("Strict-Transport-Security")
+	}
+	if got := serve("secure.example.com"); got != "max-age=31536000; includeSubDomains; preload" {
+		t.Fatalf("HSTS header = %q, want default with includeSubDomains+preload", got)
+	}
+	if got := serve("plain.example.com"); got != "" {
+		t.Fatalf("HSTS must not be sent when disabled, got %q", got)
+	}
+
+	// HSTS is not emitted over plain HTTP.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://secure.example.com/", nil)
+	req.Host = "secure.example.com"
+	rt.serveHTTP(rec, req)
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("HSTS must not be sent over plain HTTP, got %q", got)
+	}
+}
+
 func TestProxyLocationInheritsHostAccessList(t *testing.T) {
 	reports, closeReports := backendUpstream(t, okHandler())
 	defer closeReports()

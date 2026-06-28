@@ -13,8 +13,9 @@ import (
 //
 //   - forward-auth: accept a trusted forward-auth identity (header-spoof safe),
 //     map groups to a role, and enforce the middleware's RequiredRoles.
-//   - oidc: per-host OIDC relying-party gating is a P1 feature; until then it
-//     fails closed so the host is never left unintentionally open.
+//   - oidc: gpm acts as the OIDC relying party for the host - unauthenticated
+//     requests are redirected to the IdP and a signed SSO session cookie admits
+//     subsequent ones (see oidcgate.go).
 func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, next http.Handler) http.Handler {
 	idpName := mw.Auth.IdentityProvider
 	idp, ok := reg.idps[idpName]
@@ -50,7 +51,14 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		}
 		return arp.handler(reg.clientIP, allowNets, hostName, next)
 	case model.AuthModeOIDC:
-		return failClosedf(hostName, "per-host OIDC gating is not yet implemented (P1); denying")
+		if idp.OIDC == nil {
+			return failClosed(hostName, "oidc mode requires an oidc identity provider")
+		}
+		gate, err := compileDataOIDC(idp, mw.Auth.RequiredRoles, hostName)
+		if err != nil {
+			return failClosed(hostName, "oidc: "+err.Error())
+		}
+		return gate.handler(next)
 	default:
 		return failClosed(hostName, "unknown auth mode "+mode)
 	}
@@ -97,12 +105,5 @@ func failClosed(host, msg string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		log.Warn().Str("host", host).Msg(msg)
 		http.Error(w, "authentication not available", http.StatusServiceUnavailable)
-	})
-}
-
-func failClosedf(host, msg string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		log.Warn().Str("host", host).Msg(msg)
-		http.Error(w, "authentication not available", http.StatusNotImplemented)
 	})
 }

@@ -44,7 +44,9 @@ container deployments).
 | `-https-addr` | `GPM_HTTPS_ADDR` | `:443` | Data-plane HTTPS |
 | `-http-addr` | `GPM_HTTP_ADDR` | `:80` | Data-plane HTTP |
 | `-local-admin-user` | `GPM_LOCAL_ADMIN_USER` | (none) | Break-glass admin username |
-| `-cookie-secure` | `GPM_COOKIE_SECURE` | `true` | Session-cookie `Secure` flag; set `0` only for local plain-HTTP testing |
+| `-cookie-secure` | `GPM_COOKIE_SECURE` | `true` | Session-cookie `Secure` flag; set `0` only for local/LAN plain-HTTP admin access. When Secure, the session cookie also gets the `__Host-` prefix |
+| (env only) | `GPM_SECRET_FILE_ROOTS` | `/run/secrets` | Allowlisted root dir(s) for `${FILE:...}` secret resolution; OS-path-list separated |
+| (env only) | `GPM_SSO_SIGNING_KEY` | (ephemeral) | HMAC key signing data-plane per-host OIDC session cookies; set a stable value to keep SSO sessions across restarts |
 | `-log-level` | `GPM_LOG_LEVEL` | `info` | trace/debug/info/warn/error |
 | `-log-console` | `GPM_LOG_CONSOLE` | `false` | Human-readable console logs |
 | `-access-log` | `GPM_ACCESS_LOG` | `false` | Log every data-plane request |

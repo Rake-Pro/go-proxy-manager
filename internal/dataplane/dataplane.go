@@ -106,12 +106,17 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.observe(http.HandlerFunc(s.dispatchHTTPS)),
 		ReadHeaderTimeout: 15 * time.Second,
 		// GetCertificate reads the live router so cert changes apply on reload.
+		// GetConfigForClient lets a host pin a higher minimum TLS version than the
+		// 1.2 floor: it returns that host's config (by SNI) or nil for the default.
 		TLSConfig: &tls.Config{
 			MinVersion:   tls.VersionTLS12,
 			CipherSuites: secureCipherSuites,
 			NextProtos:   []string{"h2", "http/1.1"},
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return s.current().certs.GetCertificate(hello)
+			},
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				return s.current().tlsConfigForSNI(hello.ServerName), nil
 			},
 		},
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -101,6 +102,42 @@ func secretPath(path, name string) string {
 	return path + "." + name
 }
 
+// secretFileRoots are the directories a ${FILE:...} secret may be read from.
+// It defaults to the Docker secret mount; override with GPM_SECRET_FILE_ROOTS,
+// a list of absolute directories separated by the OS path-list separator.
+func secretFileRoots() []string {
+	if v := strings.TrimSpace(os.Getenv("GPM_SECRET_FILE_ROOTS")); v != "" {
+		var roots []string
+		for _, r := range filepath.SplitList(v) {
+			if r = strings.TrimSpace(r); r != "" {
+				roots = append(roots, r)
+			}
+		}
+		if len(roots) > 0 {
+			return roots
+		}
+	}
+	return []string{"/run/secrets"}
+}
+
+// allowedSecretFile confines ${FILE:...} resolution to an allowlisted root so a
+// config write cannot point the reader at an arbitrary host file (e.g.
+// /etc/shadow). The path must be absolute and, once cleaned (which removes any
+// "..") fall within one of secretFileRoots.
+func allowedSecretFile(ref string) error {
+	if !filepath.IsAbs(ref) {
+		return fmt.Errorf("secret file %q must be an absolute path", ref)
+	}
+	clean := filepath.Clean(ref)
+	for _, root := range secretFileRoots() {
+		root = filepath.Clean(root)
+		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("secret file %q is outside the allowed secret roots (set GPM_SECRET_FILE_ROOTS to permit it)", ref)
+}
+
 // Resolve expands any ${ENV:...} / ${FILE:...} placeholders to their real values.
 // Multiple placeholders within one value are supported. A missing env var or
 // unreadable file is an error so misconfiguration fails loud, not silent.
@@ -119,6 +156,10 @@ func (s Secret) Resolve() (string, error) {
 			}
 			return v
 		case "FILE":
+			if err := allowedSecretFile(ref); err != nil {
+				resErr = err
+				return match
+			}
 			b, err := os.ReadFile(ref)
 			if err != nil {
 				resErr = fmt.Errorf("secret file %q: %w", ref, err)

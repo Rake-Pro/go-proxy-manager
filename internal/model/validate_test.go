@@ -234,3 +234,16 @@ func TestSecretResolve(t *testing.T) {
 		t.Fatal("expected placeholder detection")
 	}
 }
+
+func TestProxyHostMinTLSVersion(t *testing.T) {
+	for _, v := range []string{"", "1.2", "1.3"} {
+		h := proxyHost("app", func(h *ProxyHost) { h.TLS.MinTLSVersion = v })
+		if err := h.Validate(); err != nil {
+			t.Errorf("minTLSVersion %q should be valid, got %v", v, err)
+		}
+	}
+	h := proxyHost("app", func(h *ProxyHost) { h.TLS.MinTLSVersion = "1.1" })
+	if err := h.Validate(); err == nil {
+		t.Fatal("minTLSVersion 1.1 must be rejected")
+	}
+}

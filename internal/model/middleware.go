@@ -21,7 +21,7 @@ const (
 	MWTypeAuth      = "auth"
 	MWTypeHeaders   = "headers"
 	MWTypeGuard     = "guard"
-	MWTypeRateLimit = "rate-limit" // defined now, enforced in P1
+	MWTypeRateLimit = "rate-limit" // per-host, per-client-IP token bucket
 )
 
 // AuthMode selects how an auth middleware authenticates.
@@ -73,7 +73,9 @@ type GuardTrigger struct {
 	QueryEquals map[string]string `json:"queryEquals,omitempty" yaml:"queryEquals,omitempty"`
 }
 
-// RateLimitMiddleware is defined in the schema now so P1 enforcement is additive.
+// RateLimitMiddleware throttles a host's requests with a per-client-IP token
+// bucket: steady-state RequestsPerSecond with a Burst allowance (default
+// ceil(rps)). Enforced on the data plane (internal/dataplane/ratelimit.go).
 type RateLimitMiddleware struct {
 	RequestsPerSecond float64 `json:"requestsPerSecond" yaml:"requestsPerSecond"`
 	Burst             int     `json:"burst,omitempty" yaml:"burst,omitempty"`

@@ -72,7 +72,7 @@ is always at least as restrictive.
 to a handler that wraps the reverse proxy in a fixed order:
 
 ```
-request → auth → guard → access-list → headers → reverse proxy → upstream
+request → rate-limit → auth → guard → access-list → headers → reverse proxy → upstream
 ```
 
 Authentication is outermost; header mutation is innermost (closest to the

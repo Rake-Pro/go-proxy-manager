@@ -62,6 +62,11 @@ type GitRepo interface {
 	Log(ctx context.Context, path string, limit int) ([]Commit, error)
 	// Head returns the current HEAD commit hash (empty for an unborn branch).
 	Head(ctx context.Context) (string, error)
+	// RestoreTree makes the index and working tree match treeish exactly (files
+	// absent from treeish are removed). It does NOT create a commit. Used to
+	// roll the config back to a past commit (the caller then commits the result)
+	// and to undo a failed restore.
+	RestoreTree(ctx context.Context, treeish string) error
 	// IsClean reports whether the working tree has no uncommitted changes.
 	IsClean(ctx context.Context) (bool, error)
 	// PullFFOnly fast-forwards from the configured remote; it never merges or
@@ -165,6 +170,16 @@ func (g *execGit) Head(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+func (g *execGit) RestoreTree(ctx context.Context, treeish string) error {
+	// read-tree --reset -u sets the index AND working tree to match treeish,
+	// removing files that are not in it - the plumbing equivalent of a hard reset
+	// to that tree, scoped to this repo. No commit is made.
+	if _, err := g.run(ctx, nil, "read-tree", "--reset", "-u", treeish); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (g *execGit) IsClean(ctx context.Context) (bool, error) {
