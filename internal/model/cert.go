@@ -71,9 +71,11 @@ func (c Certificate) Validate() error {
 		}
 		// Confine custom cert files to the managed cert store: reject absolute
 		// paths and traversal so a config write cannot point the loader at an
-		// arbitrary host file.
+		// arbitrary host file. The leading-slash/backslash checks make this
+		// OS-agnostic: filepath.IsAbs only recognises a leading "/" on Unix, so a
+		// Windows build would otherwise accept "/etc/shadow" or a "\"-rooted path.
 		for _, f := range []string{c.Custom.CertFile, c.Custom.KeyFile} {
-			if filepath.IsAbs(f) || strings.Contains(filepath.Clean(f), "..") {
+			if filepath.IsAbs(f) || strings.HasPrefix(f, "/") || strings.HasPrefix(f, `\`) || strings.Contains(filepath.Clean(f), "..") {
 				return fmt.Errorf("certificate %q: custom cert path %q must be relative to the cert store (no absolute or .. paths)", c.Name, f)
 			}
 		}
