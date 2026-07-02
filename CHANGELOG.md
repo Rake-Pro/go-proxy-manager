@@ -18,6 +18,38 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Session database created 0600 in a 0700 directory.** The SQLite session
+  store (`session.db`) was previously created with default OS permissions (typically
+  0644 dir / 0644 file), making session IDs and CSRF tokens world-readable. The
+  parent directory is now created 0700 and the file is pre-created 0600 (and
+  `chmod`'d on open to tighten pre-existing deployments).
+
+- **`GET /version` no longer exposes the config-repo HEAD commit.** The response
+  previously included a `configCommit` field containing the current HEAD SHA of the
+  git-backed config repository, leaking internal state to any authenticated caller.
+  The field has been removed; the response now contains only the binary version info.
+
+- **`roleMapping.defaultRole: "admin"` now requires explicit opt-in.** Setting
+  `defaultRole` to `"admin"` without also setting `roleMapping.allowDefaultAdmin:
+  true` is rejected at validation time. Without group gating, `defaultRole: "admin"`
+  grants full admin to every user the IdP authenticates; the new required field stops
+  that from happening silently by config typo. Unknown `defaultRole` values are also
+  rejected (previously silently treated as deny).
+
+- **Per-IP rate limit on OIDC admin login starts.** A client IP may initiate at
+  most 30 OIDC login flows within any 10-minute window. Attempts beyond the cap
+  receive a 502 immediately, before any redirect to the IdP. This prevents a single
+  client from exhausting the global pending-login budget and blocking OIDC logins for
+  all users. Legitimate flows behind shared NAT are unaffected by the generous cap.
+
+- **Data-plane SSO signing key is now persisted across restarts.** When
+  `GPM_SSO_SIGNING_KEY` is not set, gpm previously generated a random ephemeral key
+  per process, invalidating all per-host OIDC sessions on every restart. The key is
+  now generated once and written to `<cert-dir>/sso_signing.key` (0600) on first
+  use, so sessions survive restarts. If the file is found corrupt on startup it is
+  renamed to `sso_signing.key.corrupt` and a fresh key is generated and persisted.
+  `GPM_SSO_SIGNING_KEY` still takes precedence when set.
+
 - **Forward-auth identity strip no longer breaks a proxied Authentik.** The
   baseline identity-header denylist stripped the entire `X-Authentik-*` request
   family from untrusted peers, which also removed Authentik's own CSRF token header

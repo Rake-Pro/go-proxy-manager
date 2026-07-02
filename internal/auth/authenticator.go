@@ -44,6 +44,9 @@ type Authenticator struct {
 
 	lmu        sync.Mutex
 	loginGates map[string]*loginGate // local-login throttle, keyed by client IP
+
+	pgmu         sync.Mutex
+	pendingGates map[string]*loginGate // OIDC begin-login throttle, keyed by client IP
 }
 
 // loginGate tracks recent failed local-login attempts for one client key.
@@ -57,6 +60,13 @@ const (
 	loginLockout     = 15 * time.Minute // how long failures are remembered / locked
 	maxPendingLogins = 1024             // cap on in-flight OIDC states (anti-DoS)
 	maxLoginGates    = 4096             // cap on tracked client keys (anti-DoS)
+
+	// maxPendingPerIP caps how many OIDC logins one client IP may start within
+	// pendingLoginWindow, so a client looping GET /auth/login cannot exhaust the
+	// global maxPendingLogins budget for everyone. Kept generous so many users
+	// behind a shared NAT are unaffected; a completed callback never counts here.
+	maxPendingPerIP    = 30
+	pendingLoginWindow = 10 * time.Minute
 )
 
 type pendingLogin struct {
@@ -95,16 +105,17 @@ func NewAuthenticator(o Options) *Authenticator {
 		o.CookieName = "__Host-" + o.CookieName
 	}
 	return &Authenticator{
-		store:      o.Store,
-		cookieName: o.CookieName,
-		secure:     o.Secure,
-		sessionTTL: o.SessionTTL,
-		localUser:  o.LocalUser,
-		localHash:  o.LocalHash,
-		idps:       map[string]model.IdentityProvider{},
-		clients:    map[string]*oidc.Client{},
-		pending:    map[string]pendingLogin{},
-		loginGates: map[string]*loginGate{},
+		store:        o.Store,
+		cookieName:   o.CookieName,
+		secure:       o.Secure,
+		sessionTTL:   o.SessionTTL,
+		localUser:    o.LocalUser,
+		localHash:    o.LocalHash,
+		idps:         map[string]model.IdentityProvider{},
+		clients:      map[string]*oidc.Client{},
+		pending:      map[string]pendingLogin{},
+		loginGates:   map[string]*loginGate{},
+		pendingGates: map[string]*loginGate{},
 	}
 }
 
@@ -185,7 +196,12 @@ const oidcStateCookie = "gpm_oidc_state"
 // BeginLogin returns the authorization URL to redirect the browser to, along
 // with the opaque state value the caller must echo into a browser cookie (see
 // SetLoginStateCookie) so the callback can bind the flow to this browser.
-func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string) (string, string, error) {
+// clientKey (the client IP) is rate-limited so a client cannot fill the pending
+// map and block OIDC logins for everyone.
+func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo, clientKey string) (string, string, error) {
+	if a.pendingLoginAtCap(clientKey) {
+		return "", "", fmt.Errorf("too many login attempts; try again shortly")
+	}
 	client, _, err := a.oidcClient(ctx, idpName)
 	if err != nil {
 		return "", "", err
@@ -208,6 +224,11 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string
 	}
 	a.pending[state] = pendingLogin{idp: idpName, nonce: nonce, verifier: verifier, returnTo: returnTo, expires: time.Now().Add(10 * time.Minute)}
 	a.pmu.Unlock()
+
+	// Count the attempt only now that a login state was actually created and
+	// stored, so retries against a down/misconfigured IdP (which fail in
+	// oidcClient above) don't burn the user's per-IP budget.
+	a.recordPendingLogin(clientKey)
 
 	return client.AuthCodeURL(state, nonce, verifier), state, nil
 }
@@ -363,6 +384,51 @@ func (a *Authenticator) NoteLoginResult(key string, ok bool) {
 	}
 	g.fails++
 	g.resetAt = now.Add(loginLockout)
+}
+
+// pendingLoginAtCap reports whether key has already hit its per-IP pending-login
+// budget, without recording an attempt. BeginLogin checks this before the
+// failure-prone IdP discovery (oidcClient) so a user's own retries against a
+// down/misconfigured IdP don't burn their budget; the attempt is only counted
+// via recordPendingLogin once a login state is actually created. The tiny
+// check-then-record gap under concurrency is acceptable for rate limiting.
+func (a *Authenticator) pendingLoginAtCap(key string) bool {
+	a.pgmu.Lock()
+	defer a.pgmu.Unlock()
+	g := a.pendingGates[key]
+	if g == nil || time.Now().After(g.resetAt) {
+		return false
+	}
+	return g.fails >= maxPendingPerIP
+}
+
+// recordPendingLogin counts one started OIDC login against key's per-IP budget.
+// It mirrors the local-login gate: a per-IP counter over a rolling window. Only
+// login starts (BeginLogin) are counted - a successful callback goes through
+// CompleteLogin and never touches this gate.
+func (a *Authenticator) recordPendingLogin(key string) {
+	a.pgmu.Lock()
+	defer a.pgmu.Unlock()
+	now := time.Now()
+	g := a.pendingGates[key]
+	if g == nil || now.After(g.resetAt) {
+		// Opportunistically evict expired entries so the map can't grow without
+		// bound; if it is still full, skip recording rather than allocate.
+		if g == nil && len(a.pendingGates) >= maxLoginGates {
+			for k, gv := range a.pendingGates {
+				if now.After(gv.resetAt) {
+					delete(a.pendingGates, k)
+				}
+			}
+			if len(a.pendingGates) >= maxLoginGates {
+				return
+			}
+		}
+		g = &loginGate{}
+		a.pendingGates[key] = g
+	}
+	g.fails++
+	g.resetAt = now.Add(pendingLoginWindow)
 }
 
 // localAllowed reports whether local password login is permitted: under SSO-only

@@ -100,6 +100,48 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "outpostURL must be an http(s) URL",
 		},
 		{
+			name: "defaultRole admin without opt-in is rejected",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeOIDC,
+				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+				RoleMapping: &RoleMapping{DefaultRole: "admin"},
+			}}},
+			wantErr: "set roleMapping.allowDefaultAdmin: true",
+		},
+		{
+			name: "defaultRole admin with explicit opt-in is allowed",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeOIDC,
+				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+				RoleMapping: &RoleMapping{DefaultRole: "admin", AllowDefaultAdmin: true},
+			}}},
+		},
+		{
+			name: "defaultRole user needs no opt-in",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeOIDC,
+				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+				RoleMapping: &RoleMapping{DefaultRole: "user"},
+			}}},
+		},
+		{
+			name: "empty defaultRole is valid",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeOIDC,
+				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+				RoleMapping: &RoleMapping{AdminGroups: []string{"proxy-admins"}},
+			}}},
+		},
+		{
+			name: "unknown defaultRole is rejected",
+			cfg: Config{IdentityProviders: []IdentityProvider{{
+				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeOIDC,
+				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+				RoleMapping: &RoleMapping{DefaultRole: "superuser"},
+			}}},
+			wantErr: `defaultRole must be "", "user", or "admin"`,
+		},
+		{
 			name: "auth-request mode rejects requiredRoles",
 			cfg: Config{Middlewares: []Middleware{{
 				ObjectMeta: ObjectMeta{Name: "sso"}, Type: MWTypeAuth,

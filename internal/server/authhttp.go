@@ -110,7 +110,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 // the browser to the IdP. The callback verifies the cookie against the returned
 // state to reject flows not started by this browser.
 func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, idp, returnTo string) {
-	authURL, state, err := s.authn.BeginLogin(r.Context(), idp, returnTo)
+	authURL, state, err := s.authn.BeginLogin(r.Context(), idp, returnTo, clientIPKey(r))
 	if err != nil {
 		log.Warn().Str("idp", idp).Err(err).Msg("begin login failed")
 		http.Error(w, "login unavailable", http.StatusBadGateway)

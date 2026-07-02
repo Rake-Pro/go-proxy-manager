@@ -107,17 +107,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	resp := struct {
-		version.Info
-		ConfigCommit string `json:"configCommit,omitempty"`
-	}{Info: version.Get()}
-	if s.store != nil {
-		if head, err := s.store.Head(r.Context()); err == nil {
-			resp.ConfigCommit = head
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, version.Get())
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

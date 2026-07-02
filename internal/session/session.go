@@ -52,9 +52,21 @@ func newToken() (string, error) {
 // pragmas, and runs the idempotent migration.
 func Open(dbPath string) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("session: create db dir: %w", err)
 		}
+	}
+
+	// Session IDs and CSRF tokens must not be world-readable. Pre-create the
+	// file 0600 so SQLite (and its -wal/-shm sidecars) inherit that mode, and
+	// tighten any pre-existing file.
+	if f, err := os.OpenFile(dbPath, os.O_CREATE, 0o600); err != nil {
+		return nil, fmt.Errorf("session: create db file: %w", err)
+	} else {
+		f.Close()
+	}
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return nil, fmt.Errorf("session: chmod db file: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", dbPath)

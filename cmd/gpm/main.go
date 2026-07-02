@@ -109,6 +109,9 @@ func main() {
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
 	})
+	// Persist the data-plane SSO signing key under the cert dir when the operator
+	// has not pinned one via GPM_SSO_SIGNING_KEY, so SSO sessions survive restarts.
+	dataplane.SetSSOKeyDir(*certDir)
 	if *accessLog || *slowReqMS > 0 || *debugHeaders {
 		log.Info().
 			Bool("accessLog", *accessLog).

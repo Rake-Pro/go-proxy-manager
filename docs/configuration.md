@@ -297,7 +297,9 @@ config:
 `copyHeaders` (default the Authentik `X-authentik-*` set).
 
 **RoleMapping**: `groupsClaim` (default `groups`), `adminGroups`, `userGroups`,
-`defaultRole` (`""` = deny | `user` | `admin`).
+`defaultRole` (`""` = deny | `user` | `admin`), `allowDefaultAdmin` (bool; must be
+`true` when `defaultRole` is `"admin"` — prevents silently granting admin to every
+authenticated user when no group gating is configured).
 
 ```yaml
 name: authentik-oidc
@@ -356,8 +358,10 @@ unauthenticated request is redirected to the IdP, the reserved callback path
 stateless SSO session cookie, and `requiredRoles` (via the IdP's `roleMapping`)
 is enforced; with no role mapping or required roles the gate just requires a
 valid login. Register `https://<host>/__gpm/oidc/callback` as a redirect URI on
-the IdP, and set `GPM_SSO_SIGNING_KEY` to keep SSO sessions valid across restarts
-(otherwise an ephemeral per-process key is used).
+the IdP. The signing key is auto-generated and persisted at
+`<cert-dir>/sso_signing.key` (0600) on first use, so sessions survive restarts
+without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
+own key (useful when rotating or sharing a key across instances).
 
 **HeadersMiddleware**: `setRequest`, `setResponse` (maps), `removeRequest`,
 `removeResponse` (lists).

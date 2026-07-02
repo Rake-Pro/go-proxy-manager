@@ -7,11 +7,15 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
@@ -36,13 +40,35 @@ const (
 	oidcStateTTL      = 10 * time.Minute
 )
 
+// ssoKeyFile is the name of the persisted SSO signing key under the state dir.
+const ssoKeyFile = "sso_signing.key"
+
+// ssoKeyDir, set once at startup via SetSSOKeyDir, is the directory used to
+// persist an auto-generated SSO signing key when GPM_SSO_SIGNING_KEY is unset.
+// Empty means "do not persist" (ephemeral per-process key).
+var ssoKeyDir atomic.Pointer[string]
+
+// SetSSOKeyDir configures where a generated data-plane SSO signing key is
+// persisted (so sessions survive restarts) when GPM_SSO_SIGNING_KEY is not set.
+// Call once at startup before serving; the env var always takes precedence.
+func SetSSOKeyDir(dir string) { ssoKeyDir.Store(&dir) }
+
 // ssoSigningKey is the process-wide HMAC key for data-plane SSO cookies. It is
-// taken from GPM_SSO_SIGNING_KEY when set (so sessions survive restarts) and is
-// otherwise a random per-process key. Resolved once, lazily, so a deployment
-// without any OIDC-gated host never logs the ephemeral-key notice.
+// taken from GPM_SSO_SIGNING_KEY when set; otherwise, if a state dir was
+// configured (SetSSOKeyDir), it is loaded from (or generated into) a persisted
+// key file so sessions survive restarts; failing both it falls back to a random
+// per-process key. Resolved once, lazily, so a deployment without any
+// OIDC-gated host never touches the key file or logs the ephemeral-key notice.
 var ssoSigningKey = sync.OnceValue(func() []byte {
 	if v := strings.TrimSpace(os.Getenv("GPM_SSO_SIGNING_KEY")); v != "" {
 		return []byte(v)
+	}
+	if d := ssoKeyDir.Load(); d != nil && *d != "" {
+		if k, err := loadOrCreateSSOKey(*d); err == nil {
+			return k
+		} else {
+			log.Warn().Err(err).Msg("data-plane OIDC: cannot persist SSO signing key; using an ephemeral key for this process")
+		}
 	}
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
@@ -51,6 +77,65 @@ var ssoSigningKey = sync.OnceValue(func() []byte {
 	log.Warn().Msg("data-plane OIDC: using an ephemeral SSO signing key; set GPM_SSO_SIGNING_KEY to persist sessions across restarts")
 	return k
 })
+
+// loadOrCreateSSOKey reads the persisted 32-byte SSO signing key (hex-encoded)
+// from dir, generating and atomically writing it on first use. The file is 0600
+// inside a 0700 dir, mirroring internal/acme/store.go's key handling.
+func loadOrCreateSSOKey(dir string) ([]byte, error) {
+	path := filepath.Join(dir, ssoKeyFile)
+	if b, err := os.ReadFile(path); err == nil {
+		k, derr := hex.DecodeString(strings.TrimSpace(string(b)))
+		if derr == nil && len(k) == 32 {
+			return k, nil
+		}
+		// The file exists but is corrupt (bad hex or wrong length). Self-heal:
+		// quarantine it and fall through to generate a fresh key. Refusing here
+		// would fall back to an ephemeral per-process key that silently
+		// invalidates every SSO session on each restart, since the bad file would
+		// never be replaced. Clients re-authenticate once. A rename failure is a
+		// genuine I/O error: refuse without deleting anything.
+		if rerr := os.Rename(path, path+".corrupt"); rerr != nil {
+			return nil, fmt.Errorf("malformed SSO signing key at %s could not be quarantined: %w", path, rerr)
+		}
+		log.Error().Str("path", path).Msg("data-plane OIDC: malformed SSO signing key quarantined to .corrupt; generating a new key, clients will re-authenticate once")
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomic(path, []byte(hex.EncodeToString(k)), 0o600); err != nil {
+		return nil, err
+	}
+	log.Info().Str("path", path).Msg("data-plane OIDC: generated persistent SSO signing key")
+	return k, nil
+}
+
+// writeFileAtomic writes data to a temp file in the target dir and renames it
+// into place, so a concurrent reader never sees a partial file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
 
 // signToken returns payload as base64url(payload).base64url(HMAC-SHA256(payload)).
 func signToken(payload []byte) string {

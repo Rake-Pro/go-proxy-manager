@@ -82,6 +82,11 @@ type RoleMapping struct {
 	UserGroups  []string `json:"userGroups,omitempty" yaml:"userGroups,omitempty"`
 	// DefaultRole applies when no group matches: "" (deny), "user", or "admin".
 	DefaultRole string `json:"defaultRole,omitempty" yaml:"defaultRole,omitempty"`
+	// AllowDefaultAdmin must be true to permit defaultRole: "admin". Without it,
+	// defaultRole: "admin" fails validation: it would grant full admin to EVERY
+	// user the IdP authenticates, with no group gating. Requiring an explicit
+	// opt-in stops that from happening silently by config typo.
+	AllowDefaultAdmin bool `json:"allowDefaultAdmin,omitempty" yaml:"allowDefaultAdmin,omitempty"`
 }
 
 // IdentityProvider is a first-class auth source. One IdP can drive admin-panel
@@ -133,6 +138,17 @@ func (p IdentityProvider) Validate() error {
 		}
 	default:
 		return fmt.Errorf("identity provider %q: type must be oidc, forward-auth or auth-request, got %q", p.Name, p.Type)
+	}
+	if rm := p.RoleMapping; rm != nil {
+		switch rm.DefaultRole {
+		case "", "user":
+		case "admin":
+			if !rm.AllowDefaultAdmin {
+				return fmt.Errorf("identity provider %q: roleMapping.defaultRole %q grants admin to EVERY authenticated user with no group gating; set roleMapping.allowDefaultAdmin: true to confirm this is intended, or use adminGroups instead", p.Name, rm.DefaultRole)
+			}
+		default:
+			return fmt.Errorf("identity provider %q: roleMapping.defaultRole must be \"\", \"user\", or \"admin\", got %q", p.Name, rm.DefaultRole)
+		}
 	}
 	return nil
 }
