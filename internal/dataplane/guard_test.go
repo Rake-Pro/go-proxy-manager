@@ -34,11 +34,11 @@ func TestGuardNextcloudBreakGlass(t *testing.T) {
 		remote         string
 		want           int
 	}{
-		{"external POST /login denied", "POST", "http://c/login", "203.0.113.9:1", http.StatusForbidden},
-		{"external ?direct=1 denied", "GET", "http://c/login?direct=1", "203.0.113.9:1", http.StatusForbidden},
-		{"external plain GET /login allowed", "GET", "http://c/login", "203.0.113.9:1", http.StatusOK},
-		{"external POST elsewhere allowed", "POST", "http://c/files", "203.0.113.9:1", http.StatusOK},
-		{"index.php variant denied external", "POST", "http://c/index.php/login", "203.0.113.9:1", http.StatusForbidden},
+		{"external POST /login denied", "POST", "http://c/login", "198.18.0.9:1", http.StatusForbidden},
+		{"external ?direct=1 denied", "GET", "http://c/login?direct=1", "198.18.0.9:1", http.StatusForbidden},
+		{"external plain GET /login allowed", "GET", "http://c/login", "198.18.0.9:1", http.StatusOK},
+		{"external POST elsewhere allowed", "POST", "http://c/files", "198.18.0.9:1", http.StatusOK},
+		{"index.php variant denied external", "POST", "http://c/index.php/login", "198.18.0.9:1", http.StatusForbidden},
 		{"LAN POST /login allowed", "POST", "http://c/login", "192.0.2.5:1", http.StatusOK},
 		{"LAN ?direct=1 allowed", "GET", "http://c/login?direct=1", "203.0.113.7:1", http.StatusOK},
 	}

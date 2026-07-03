@@ -9,6 +9,12 @@
 .env
 deploy/.env
 
+# Real test values - never commit; test/local.env.example is tracked
+test/local.env
+
+# Deployment doc referencing a private repo - keep local only
+deploy/parallel-testing.md
+
 # Go test / coverage artifacts
 *.test
 *.out

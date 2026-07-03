@@ -15,7 +15,8 @@ small, vetted dependency set as the headline differences.
 
 Running an Nginx-Proxy-Manager-style edge means inheriting a large Node
 dependency surface and configuring authentication through raw nginx snippets that
-are easy to get subtly wrong. go-proxy-manager is a focused rewrite:
+are easy to get subtly wrong. go-proxy-manager takes the same feature set and
+builds it with a narrower, more focused design:
 
 - **One CGO-free binary.** ~7 direct dependencies, all pure-Go or `golang.org/x`.
 - **Authentication is first-class config, not text snippets.** OIDC, forward-auth,

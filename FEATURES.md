@@ -1,8 +1,8 @@
 # FEATURES.md
 
 Target feature set and roadmap for `go-proxy-manager`, synthesized from **NPM**
-(baseline), **NPMplus** (hardened/expanded fork), and the **lessons from our own
-NPM+OIDC fork**.
+(baseline), **NPMplus** (hardened/expanded fork), and **lessons from running an
+OIDC-enabled reverse proxy in production**.
 
 > **Status:** this is the roadmap, not a status board. The **P0** tier (proxy/
 > redirect/stream/dead hosts, DNS-01 + custom certs, IP access lists, OIDC +
@@ -12,8 +12,9 @@ NPM+OIDC fork**.
 > [README.md](README.md) and [docs/](docs/).
 
 **Legend (source):**
-`[NPM]` in upstream NPM · `[NPM+]` added by NPMplus · `[FORK]` added by our OIDC
-fork · `[GOAL]` net-new design goal for the Go version (gap we want to close).
+`[NPM]` in upstream NPM · `[NPM+]` added by NPMplus · `[FORK]` added by an
+earlier OIDC-enabled iteration of this idea · `[GOAL]` net-new design goal for
+the Go version (gap we want to close).
 
 ---
 
@@ -92,7 +93,7 @@ fork · `[GOAL]` net-new design goal for the Go version (gap we want to close).
   loadable nginx modules via env, `network_mode: host` for CrowdSec.
 - `[NPM+]` Note: Cloudflare proxy discouraged (overrides HSTS/H3/TLS); DNS-only OK.
 
-## 3. Our OIDC fork additions `[FORK]`
+## 3. Earlier OIDC-enabled iteration `[FORK]`
 
 - `[FORK]` Native **generic OIDC admin login** (auth-code + PKCE, discovery,
   encrypted secret at rest), **account linking** to existing local accounts,
@@ -102,8 +103,9 @@ fork · `[GOAL]` net-new design goal for the Go version (gap we want to close).
 
 ## 4. Lessons / gaps to close `[GOAL]`
 
-Distilled from running the fork against Authentik. These are the design north
-stars - the reasons a rewrite is worth considering.
+Distilled from running an OIDC-enabled reverse proxy against Authentik in
+production. These are the design north stars - the reasons this project is
+worth building.
 
 1. **Native trusted forward-auth login.** NPM ignores `X-authentik-*` headers, so
    forward-auth can gate the page but can't log you in - forcing OIDC *and*
@@ -114,29 +116,30 @@ stars - the reasons a rewrite is worth considering.
    mapping**, so SSO users become admins by claim - replacing manual account
    linking and the "auto-provisioned = role user only" limit.
 3. **Real SSO-only mode with safe break-glass.** NPM can't hide the local form
-   (anti-lockout), and our break-glass was an unauthenticated plaintext `:81`.
+   (anti-lockout), and the break-glass in an earlier iteration was an unauthenticated plaintext `:81`.
    `[GOAL]` Enforce SSO-only while providing a *proper* break-glass:
    localhost-only admin / time-limited emergency token / CLI reset - never an open
    port. (NPMplus's `OIDC_DISABLE_PASSWORD` is the blunt version; do it safely.)
 4. **MFA delegation.** Don't double-prompt (NPM TOTP + Authentik MFA). Trust IdP
    `acr/amr`; keep local TOTP only for local/break-glass accounts.
 5. **Explicit external base URL.** Stop deriving origin from `X-Forwarded-*` (the
-   redirect_uri port/scheme footgun that broke our login). Configure the canonical
-   public URL once.
+   redirect_uri port/scheme footgun that broke login in an earlier iteration).
+   Configure the canonical public URL once.
 6. **Auth / middleware as native config, not raw nginx snippet injection.** The
    duplicate `location /` collision broke TLS while `nginx -t` still passed.
    `[GOAL]` Forward-auth, access lists, headers = first-class config objects with
    no textual-collision class of bug.
 7. **Declarative, GitOps-friendly provider/host config** (file+env with secret
-   placeholders) as a supported path, not DB/UI-only. Keep the good part of the
-   fork.
+   placeholders) as a supported path, not DB/UI-only. Keep the good part of that
+   approach.
 8. **Honest version + working update check.** The false "v2.15.1 available" came
    from a hardcoded `package.json`. `[GOAL]` Report the real build version;
    configurable (or disable-able) upstream check that's correct for self-built
    images.
-9. **Clean, reversible, documented DB migrations + backup/restore.** The fork
-   reused `setting`/`auth` tables and the merge-back path was uncertain. Own the
-   schema; make migrations reversible and the data portable (no one-way trap).
+9. **Clean, reversible, documented DB migrations + backup/restore.** An earlier
+   iteration reused `setting`/`auth` tables and the merge-back path was
+   uncertain. Own the schema; make migrations reversible and the data portable
+   (no one-way trap).
 10. **Minimal, auditable dependencies.** The whole motivation: escape the Node
     advisory churn. **Prefer the Go stdlib (and `golang.org/x/...`) wherever
     feasible**; zerolog is the one accepted logging dep; justify and vet every
@@ -151,15 +154,15 @@ stars - the reasons a rewrite is worth considering.
 
 ## 5. Target feature set - prioritized (my needs first)
 
-Ordering principle: **build for the homelab/owner first** - cleanly replace the
-current NPM+OIDC fork - then layer parity + community features on top. P0 is
-architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
-"Architecture for extension").
+Ordering principle: **build for the homelab/owner first** - match and extend the
+feature set of a typical NPM-based setup - then layer parity + community
+features on top. P0 is architected so nothing in P1-P3 requires reworking
+earlier tiers or duplicating work (see "Architecture for extension").
 
-### P0 - homelab must-have (replace the current NPM+OIDC fork)
+### P0 - homelab must-have
 - **Proxy hosts** for `*.example.com`, TLS termination, HTTP/2, websockets.
 - **Let's Encrypt wildcard via DNS-01** for the homelab DNS provider (the
-  `*.example.com` wildcard, like today's `npm-1`); custom certs.
+  `*.example.com` wildcard, like the existing wildcard cert); custom certs.
 - **IP access lists** (LAN / VPN gating) - keep the current allow-list model.
 - **Authentik done right** (the reason this exists): native **OIDC admin login**
   **+ trusted forward-auth header login** = one sign-in, no double prompt;
@@ -206,7 +209,7 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   container needs a real v6 address (Docker IPv6 + a routed prefix), not just a
   v4 port-map; preserve the real client v6 in access lists / X-Forwarded-For (the
   client-IP resolver must treat v6 the same as v4); and document that
-  dynamic-prefix ISPs (e.g. AT&T residential, rotates on reconnect) need DDNS for
+  dynamic-prefix ISPs (e.g. a residential ISP that rotates the prefix on reconnect) need DDNS for
   the AAAA - a hardcoded SLAAC/EUI-64 address black-holes on every prefix change
   and breaks dual-stack clients via Happy Eyeballs while v4 silently masks it.
 - Lifecycle **webhooks** ★ (✓ shipped: `settings.webhooks`, async best-effort POST
@@ -301,7 +304,7 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
 - **Broad arch + no surprise CPU baseline** (NPMplus needs x86-64-v2).
 - **Cloudflare-proxy interplay** - if proxied, document what it overrides; we run
   DNS-only today.
-- **DNS-01 wildcard via the homelab's existing setup** (shared `npm-1` wildcard).
+- **DNS-01 wildcard via the homelab's existing setup** (the existing wildcard cert).
 
 ## 8. Community-demanded features (issue-mined)
 
@@ -350,7 +353,7 @@ Plus our own headline (native trusted forward-auth login + safe SSO-only) and th
 config importer (section 4 #11), which no one offers as a clean path.
 
 **Note on ACME:** NPM uses certbot, NPMplus uses certbot-with-fewer-providers, and
-both have open "switch to acme.sh" asks. A Go rewrite sidesteps that debate:
+both have open "switch to acme.sh" asks. A Go implementation sidesteps that debate:
 `golang.org/x/crypto/acme` keeps us near-stdlib for ACME (DNS providers
 implemented in-house per need), or a vetted lib (lego/CertMagic) if broad
 provider breadth outweighs the added dependency - decide per the minimal-deps rule.
@@ -359,4 +362,4 @@ provider breadth outweighs the added dependency - decide per the minimal-deps ru
 
 - NPM README + advanced-config/setup docs (`NginxProxyManager/nginx-proxy-manager`)
 - NPMplus README + compose.yaml (`ZoeyVid/NPMplus`)
-- This homelab's NPM+OIDC fork experience (`example/nginx-proxy-manager`)
+- Operational experience running a self-hosted, OIDC-gated reverse proxy in production

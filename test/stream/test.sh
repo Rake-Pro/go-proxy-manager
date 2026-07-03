@@ -2,9 +2,19 @@
 # Verifies TCP + UDP echo through gpm's published stream port.
 # Usage: ./test.sh            (defaults to 127.0.0.1:15432)
 #        HOST=192.0.2.10 PORT=15432 ./test.sh
+#
+# Target host/port default from test/local.env if present (gitignored, real
+# infra values for local/live runs), else test/local.env.example (synthetic
+# defaults, committed). Either can be overridden per-invocation with HOST=/PORT=.
 set -euo pipefail
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-15432}"
+cd "$(dirname "$0")"
+if [ -f ../local.env ]; then
+  . ../local.env
+elif [ -f ../local.env.example ]; then
+  . ../local.env.example
+fi
+HOST="${HOST:-${STREAM_TEST_HOST:-127.0.0.1}}"
+PORT="${PORT:-${STREAM_TEST_PORT:-15432}}"
 
 python3 - "$HOST" "$PORT" <<'PY'
 import socket, sys

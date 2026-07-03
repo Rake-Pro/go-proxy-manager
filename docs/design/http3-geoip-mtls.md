@@ -9,7 +9,7 @@ implementation can start from a settled plan.
 
 ## Dependency posture (the deciding lens)
 
-The whole rewrite exists to escape dependency/advisory churn, so every new import
+This project exists in large part to escape dependency/advisory churn, so every new import
 is a deliberate cost. Summary for these three:
 
 | Feature | New dependency | Verdict |

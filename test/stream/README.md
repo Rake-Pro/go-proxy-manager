@@ -22,8 +22,8 @@ docker compose down -v
 
 `test.sh` opens a TCP connection and a UDP datagram to `127.0.0.1:15432`, sends a
 marker, and asserts the echo comes back through gpm. Override the target with
-`HOST=... PORT=... ./test.sh` (e.g. to hit a remote homelab that has the port
-published).
+`HOST=... PORT=... ./test.sh` (e.g. to hit a remote homelab host that has the
+port published).
 
 ## Notes
 

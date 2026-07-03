@@ -6,8 +6,8 @@
 #   Admin UI/API : 127.0.0.1:8081  (localhost-only by design - not exposed)
 #   Data plane   : 8880 (http) / 8843 (https)
 #
-# Ports are chosen to avoid existing services on this host (e.g. service-x on
-# 8080). Adjust the GPM_* env + ports below if any still collide.
+# Ports are chosen to avoid existing services on this host (e.g. another
+# service on 8080). Adjust the GPM_* env + ports below if any still collide.
 #
 # Quick start (see deploy/parallel-testing.md for the full runbook):
 #   cp deploy/.env.example deploy/.env   # then set GPM_LOCAL_ADMIN_PASSWORD_HASH
