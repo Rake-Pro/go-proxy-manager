@@ -179,7 +179,9 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   access lists per host/location.
 - Backup / export / restore ★ (✓ shipped: gzip-tar export + validated restore +
   config revert, with History-view UI), rate limiting ★ (✓ shipped: per-host,
-  per-client-IP token bucket with 429 + Retry-After), dark mode,
+  per-client-IP token bucket with 429 + Retry-After), dark mode (✓ shipped: the
+  UI is dark-only by default, satisfying the original ask; remaining gap is an
+  optional light-theme toggle),
   robots/no-index toggle (✓ shipped: per-host `robotsNoIndex` → `X-Robots-Tag`),
   custom timeouts (✓ shipped: per-host `timeouts.connectSeconds`/`readSeconds`,
   isolated per-host transport), load balancing / upstream groups,
@@ -202,8 +204,11 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   and breaks dual-stack clients via Happy Eyeballs while v4 silently masks it.
 - Lifecycle **webhooks** ★ (✓ shipped: `settings.webhooks`, async best-effort POST
   per config change), host grouping/tagging ★ (✓ shipped: `tags` on every object +
-  Proxy Hosts list chips/filter), multiple ACME servers, reusable DNS creds, email
-  notifications, **SAML** + **LDAP admin login** ★.
+  Proxy Hosts list chips/filter), multiple ACME servers (partial: per-cert
+  `directoryURL` already works for any non-EAB CA; EAB support for ZeroSSL /
+  Google Public CA still open), reusable DNS creds (✓ shipped: DNS providers are
+  shared first-class objects; certificates reference one credential set by
+  name), email notifications, **SAML** + **LDAP admin login** ★.
 
 ### P3 - nice-to-have
 - PHP / file server, FancyIndex, ECH, ML-KEM, MPTCP, WebAuthn/passkeys, Anubis,
