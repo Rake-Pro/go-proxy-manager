@@ -1,9 +1,11 @@
 # Design: HTTP/3, GeoIP geoblocking, mTLS client certs
 
-Status: **proposal** (not started). Scope: three P2 edge features from
-[FEATURES.md](../../FEATURES.md). This document records the intended design,
-the schema/wiring, and — critically for this project — the **dependency
-decision** for each, so implementation can start from a settled plan.
+Status: **mixed.** mTLS (phase 1) and GeoIP geoblocking are **implemented**
+(see CHANGELOG.md / FEATURES.md); HTTP/3 remains a **proposal** (not
+started). Scope: three P2 edge features from [FEATURES.md](../../FEATURES.md).
+This document records the intended design, the schema/wiring, and —
+critically for this project — the **dependency decision** for each, so
+implementation can start from a settled plan.
 
 ## Dependency posture (the deciding lens)
 
@@ -23,6 +25,19 @@ data-plane handler) rather than reworking the core.
 ---
 
 ## 1. mTLS client-cert validation
+
+> **Status: IMPLEMENTED (phase 1).** Shipped as designed below, with one
+> enforcement detail firmed up during implementation: `tls.clientAuth`
+> requires `forceSSL: true` and a resolvable `caRef` at config-validation
+> time, and `require`/`optional` are enforced not just at the TLS handshake
+> but **per request** - the negotiated SNI must resolve to the host's own
+> `tls.Config` (closing an SNI != Host dodge, where a client handshakes
+> against a different host's config and then targets the mTLS host by `Host`
+> header) and, in `require` mode, the handshake must have produced a verified
+> client-certificate chain; either failure gets `421 Misdirected Request`. An
+> mTLS host is also redirected off the plaintext `:80` listener. Phase 2
+> (CRL/OCSP revocation, identity-passthrough header) is **not implemented** -
+> the open questions below still apply as written.
 
 **Goal.** Require (or optionally accept) a client certificate per host, verified
 against an operator-supplied CA, enforced at the TLS handshake. Community ask
@@ -101,6 +116,15 @@ parse to ≥1 cert at load; `mode` ∈ {require, optional}.
 
 ## 2. GeoIP geoblocking
 
+> **Status: IMPLEMENTED.** Shipped as designed below, on `AccessList.geo`
+> (`countryAllow`/`countryDeny`/`onUnknown`), consulting `GPM_GEOIP_DB` /
+> `-geoip-db` with a 5-minute mtime watch (picks up an out-of-band
+> `geoipupdate` refresh with no restart). New `GET /api/capabilities`
+> (`{"geoip":{"dbLoaded":bool}}`) lets the admin SPA grey out geo controls
+> when no database is loaded. The fail-closed gate landed at a different
+> (stronger) layer than first proposed - see the correction under "Security /
+> open questions" below.
+
 **Goal.** Allow/deny requests by client-IP country. Community ask #46 (51👍,
 128 comments); NPMplus #730 is its most-commented open issue. "Do it cleanly /
 native" per FEATURES.
@@ -150,10 +174,20 @@ Private/loopback/link-local IPs have no country ⇒ governed by `onUnknown`
   Injected into `compileAccessList` alongside `clientIP`.
 - The compiled access-list handler, after IP/CIDR rules, looks up the country for
   the already-resolved client IP and applies allow/deny.
-- **Fail-closed config gate:** if any AccessList carries `geo` rules but no DB is
-  loaded, **`Config.Validate` (or reload) refuses** with a clear error, rather
-  than silently fail-open (a deny list that does nothing) or fail-closed (an
-  allow list that locks everyone out). You cannot half-configure geo.
+- **Fail-closed, final shape (corrected from the proposal above):** the gate
+  is not in `Config.Validate` - validation and reload never fail solely
+  because a geo rule has no database (a boot with the DB missing does not
+  `log.Fatal`; the affected hosts just start out denying). Instead there are
+  two independent fail-closed layers: (1) **reject-at-write** -
+  `store.Store.Save`/`SaveBatch`/`Restore`/`Revert` refuse (surfaced as HTTP
+  400) to commit any config with `geo` rules while `GPM_GEOIP_DB` has no
+  database loaded, so such a rule can never land in git; (2) **live
+  fail-closed evaluation** - `accessList.ipAllowed` checks database
+  availability at request-evaluation time, not baked into the compiled
+  access list at build time, denying all traffic on the affected hosts while
+  unavailable and auto-recovering the instant the watch loads a database,
+  with no restart or config change. You still cannot half-configure geo; the
+  enforcement point just moved from validate-time to write-time + eval-time.
 
 ### Security / open questions
 

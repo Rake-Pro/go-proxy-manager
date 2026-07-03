@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,5 +172,55 @@ func TestStoreHistoryRejectsTraversal(t *testing.T) {
 	st := newTestStore(t)
 	if _, err := st.History(context.Background(), "ProxyHost", "../../etc/x", 10); err == nil {
 		t.Fatal("expected history to reject traversal name")
+	}
+}
+
+func geoAccessList(name string) model.AccessList {
+	return model.AccessList{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		Geo:        &model.AccessListGeo{CountryDeny: []string{"CN"}},
+	}
+}
+
+// TestSaveRejectsGeoRuleWithoutDB is the reject-at-write gate: with the geo
+// predicate reporting "no database", a Save of an AccessList carrying geo rules
+// must be refused (ErrGeoDBUnavailable) and commit NOTHING - HEAD is unchanged.
+func TestSaveRejectsGeoRuleWithoutDB(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	st.SetGeoAvailability(func() bool { return false }) // no DB loaded
+
+	head, _ := st.Head(ctx)
+
+	_, err := st.Save(ctx, geoAccessList("geoblock"), Author{})
+	if err == nil {
+		t.Fatal("Save must refuse a geo rule while no GeoIP database is loaded")
+	}
+	if !errors.Is(err, ErrGeoDBUnavailable) {
+		t.Fatalf("want ErrGeoDBUnavailable, got %v", err)
+	}
+	if after, _ := st.Head(ctx); after != head {
+		t.Fatalf("nothing must be committed on reject: head moved %q -> %q", head, after)
+	}
+}
+
+// TestSaveAllowsGeoRuleWithDB proves the gate does not over-reach: with the
+// predicate reporting a loaded database, the identical geo Save succeeds.
+func TestSaveAllowsGeoRuleWithDB(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	st.SetGeoAvailability(func() bool { return true }) // DB loaded
+
+	if _, err := st.Save(ctx, geoAccessList("geoblock"), Author{}); err != nil {
+		t.Fatalf("Save of a geo rule with a loaded DB should succeed: %v", err)
+	}
+}
+
+// TestSaveGeoRuleNoPredicateSkipsGate confirms an unwired store (nil predicate,
+// e.g. the CLI importer) is unaffected by the gate.
+func TestSaveGeoRuleNoPredicateSkipsGate(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.Save(context.Background(), geoAccessList("geoblock"), Author{}); err != nil {
+		t.Fatalf("with no geo predicate wired the gate must be a no-op: %v", err)
 	}
 }

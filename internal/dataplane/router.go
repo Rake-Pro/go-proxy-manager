@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"net"
 	"net/http"
 	"path"
@@ -25,16 +27,39 @@ type router struct {
 	// pins a non-default minimum TLS version; absent = the listener default.
 	tlsConfigs map[string]*tls.Config
 
+	// clientAuth records, per domain, a host's mTLS requirement so it can be
+	// re-checked per REQUEST at dispatch. mTLS is negotiated in the per-SNI
+	// tls.Config, but Go does not enforce that the request's Host header matches
+	// the handshake SNI - so without this gate a client could handshake with a
+	// non-mTLS SNI (or none) and then target an mTLS host by Host header,
+	// reaching the protected backend with no verified client certificate.
+	clientAuth map[string]*clientAuthReq
+
 	// clientIP resolves the real client IP (XFF-aware via the access-list trusted
 	// nets) for logging. Identity-header stripping is host-scoped on each
 	// hostHandler (see hostHandler.stripUntrustedIdentity).
 	clientIP func(*http.Request) net.IP
 }
 
+// clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
+// own per-SNI tls.Config (the one carrying its ClientCAs and any min-version pin);
+// a request is only allowed to reach this host if the handshake actually used that
+// config, i.e. the negotiated SNI resolves to this same config pointer - proving
+// SNI==Host at the routing layer. requireChain additionally demands a verified
+// client-certificate chain (require mode); optional mode leaves it false.
+type clientAuthReq struct {
+	cfg          *tls.Config
+	requireChain bool
+}
+
 // buildRouter compiles the config into a router. certDir resolves relative
 // custom-certificate paths.
 func buildRouter(cfg model.Config, certDir string) (*router, error) {
 	certs, err := buildCertResolver(cfg.Certificates, certDir)
+	if err != nil {
+		return nil, err
+	}
+	clientCAs, err := buildClientCAPools(cfg.ClientCAs)
 	if err != nil {
 		return nil, err
 	}
@@ -46,17 +71,32 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		dead:       map[string]*deadHandler{},
 		certs:      certs,
 		tlsConfigs: map[string]*tls.Config{},
+		clientAuth: map[string]*clientAuthReq{},
 		clientIP:   reg.clientIP,
 	}
-	// pinTLS records a per-host non-default TLS-min-version config for each domain.
-	pinTLS := func(domains []string, minVer string) {
-		c := hostTLSConfig(minVer, certs)
+	// pinTLS records the per-host TLS config (min-version pin and/or mTLS) for each
+	// domain. It composes both dimensions into one config, since a host with both a
+	// version pin and client-cert auth needs a single tls.Config carrying both.
+	pinTLS := func(domains []string, tlsSettings model.TLSSettings) error {
+		c, err := hostSNIConfig(tlsSettings, clientCAs, certs)
+		if err != nil {
+			return err
+		}
 		if c == nil {
-			return
+			return nil
 		}
 		for _, d := range domains {
 			rt.tlsConfigs[hostKey(d)] = c
 		}
+		if tlsSettings.ClientAuth != nil {
+			// require is the fail-closed default; only an explicit "optional" mode
+			// waives the verified-chain requirement (matching clientAuthType).
+			req := &clientAuthReq{cfg: c, requireChain: tlsSettings.ClientAuth.Mode != "optional"}
+			for _, d := range domains {
+				rt.clientAuth[hostKey(d)] = req
+			}
+		}
+		return nil
 	}
 
 	for _, h := range cfg.ProxyHosts {
@@ -73,7 +113,9 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		for _, d := range h.Domains {
 			rt.hosts[hostKey(d)] = hh
 		}
-		pinTLS(h.Domains, h.TLS.MinTLSVersion)
+		if err := pinTLS(h.Domains, h.TLS); err != nil {
+			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
 	}
 	for _, h := range cfg.RedirectHosts {
 		if h.Disabled {
@@ -83,7 +125,9 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		for _, d := range h.Domains {
 			rt.redirects[hostKey(d)] = rh
 		}
-		pinTLS(h.Domains, h.TLS.MinTLSVersion)
+		if err := pinTLS(h.Domains, h.TLS); err != nil {
+			return nil, fmt.Errorf("redirect host %q: %w", h.Name, err)
+		}
 	}
 	for _, h := range cfg.DeadHosts {
 		if h.Disabled {
@@ -93,9 +137,34 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		for _, d := range h.Domains {
 			rt.dead[hostKey(d)] = dh
 		}
-		pinTLS(h.Domains, h.TLS.MinTLSVersion)
+		if err := pinTLS(h.Domains, h.TLS); err != nil {
+			return nil, fmt.Errorf("dead host %q: %w", h.Name, err)
+		}
 	}
 	return rt, nil
+}
+
+// buildClientCAPools resolves each ClientCA object's PEM (inline or via a
+// ${FILE:...}/${ENV:...} placeholder) into an x509 pool keyed by name. A CA whose
+// PEM resolves but parses to zero certificates is a hard error so a host requiring
+// mTLS never compiles against an empty trust anchor (which would reject everyone).
+func buildClientCAPools(cas []model.ClientCA) (map[string]*x509.CertPool, error) {
+	pools := map[string]*x509.CertPool{}
+	for _, ca := range cas {
+		if ca.Disabled {
+			continue
+		}
+		pem, err := model.Secret(ca.CAPEM).Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("client CA %q: %w", ca.Name, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(pem)) {
+			return nil, fmt.Errorf("client CA %q: caPEM parsed to no certificates", ca.Name)
+		}
+		pools[ca.Name] = pool
+	}
+	return pools, nil
 }
 
 // hostKey normalizes a domain or Host header to the router map key: port stripped,
@@ -190,20 +259,58 @@ func buildLocations(h model.ProxyHost, reg *registry) []locationRoute {
 	return routes
 }
 
-// hostTLSConfig returns a per-host TLS config pinning a non-default minimum
-// version, or nil when the host uses the listener default (TLS 1.2 floor). The
-// returned config carries the shared cert resolver, AEAD cipher suites, and h2
-// ALPN, so it is a complete drop-in for the handshake via GetConfigForClient.
-func hostTLSConfig(minTLSVersion string, certs *certResolver) *tls.Config {
-	if minTLSVersion != "1.3" {
-		return nil // "", "1.2", or unknown -> default listener config (1.2 floor)
-	}
+// baseHostTLSConfig returns a per-host TLS config with the shared cert resolver,
+// AEAD cipher suites, h2 ALPN, and the default 1.2 floor - a complete drop-in for
+// the handshake via GetConfigForClient that callers then specialise.
+func baseHostTLSConfig(certs *certResolver) *tls.Config {
 	return &tls.Config{
-		MinVersion:     tls.VersionTLS13,
+		MinVersion:     tls.VersionTLS12,
 		CipherSuites:   secureCipherSuites, // ignored for 1.3 (suites are fixed), kept for consistency
 		NextProtos:     []string{"h2", "http/1.1"},
 		GetCertificate: certs.GetCertificate,
 	}
+}
+
+// hostTLSConfig returns a per-host TLS config pinning a non-default minimum
+// version, or nil when the host uses the listener default (TLS 1.2 floor).
+func hostTLSConfig(minTLSVersion string, certs *certResolver) *tls.Config {
+	if minTLSVersion != "1.3" {
+		return nil // "", "1.2", or unknown -> default listener config (1.2 floor)
+	}
+	c := baseHostTLSConfig(certs)
+	c.MinVersion = tls.VersionTLS13
+	return c
+}
+
+// clientAuthType maps a ClientAuth mode to the tls.ClientAuthType. An empty mode
+// defaults to require, the fail-closed choice for a host that opted into mTLS.
+func clientAuthType(mode string) tls.ClientAuthType {
+	if mode == "optional" {
+		return tls.VerifyClientCertIfGiven
+	}
+	return tls.RequireAndVerifyClientCert
+}
+
+// hostSNIConfig composes a host's per-SNI TLS config from its version pin and
+// optional mTLS client-auth. It returns nil when the host needs neither (the
+// listener default applies). A clientAuth referencing a CA that did not compile
+// into a pool is a hard error, so the host fails closed rather than serving
+// without the client-certificate check.
+func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*x509.CertPool, certs *certResolver) (*tls.Config, error) {
+	c := hostTLSConfig(t.MinTLSVersion, certs)
+	if t.ClientAuth == nil {
+		return c, nil // version pin only (may be nil)
+	}
+	if c == nil {
+		c = baseHostTLSConfig(certs)
+	}
+	pool := clientCAs[t.ClientAuth.CARef]
+	if pool == nil {
+		return nil, fmt.Errorf("clientAuth references client CA %q with no usable certificates", t.ClientAuth.CARef)
+	}
+	c.ClientCAs = pool
+	c.ClientAuth = clientAuthType(t.ClientAuth.Mode)
+	return c, nil
 }
 
 // tlsConfigForSNI returns the per-host TLS config for the SNI server name, or nil
@@ -260,10 +367,38 @@ func (hh *hostHandler) stripUntrustedIdentity(r *http.Request) {
 	stripIdentityHeaders(r.Header, hh.identityHeaders)
 }
 
+// clientAuthSatisfied reports whether a request may reach an mTLS-protected host.
+// It requires (a) the handshake used this host's own per-SNI tls.Config - i.e. the
+// negotiated SNI resolves to the same config pointer, so SNI==Host and the host's
+// client-cert requirement (and any pinned min-TLS version) actually applied - and
+// (b) for require mode, a client certificate verified during the handshake. An
+// empty or foreign SNI resolves to a different (or nil) config and fails (a), which
+// is also what closes the min-TLS-version-by-SNI dodge for any mTLS host.
+func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool {
+	if r.TLS == nil {
+		return false
+	}
+	if rt.tlsConfigForSNI(r.TLS.ServerName) != req.cfg {
+		return false
+	}
+	if req.requireChain && len(r.TLS.VerifiedChains) == 0 {
+		return false
+	}
+	return true
+}
+
 // serveHTTPS dispatches a TLS-terminated request to its host by Host header:
 // proxy hosts run the middleware chain; redirect and dead hosts serve directly.
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	name := hostKey(r.Host)
+	// mTLS is enforced per REQUEST here, not only by the SNI-selected tls.Config:
+	// reject any request whose Host targets an mTLS host unless the handshake used
+	// that host's own config (SNI==Host) and, for require mode, actually verified a
+	// client certificate. Hosts without mTLS take no new rejection path.
+	if req := rt.clientAuth[name]; req != nil && !rt.clientAuthSatisfied(req, r) {
+		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
+		return
+	}
 	if hh, ok := rt.hosts[name]; ok {
 		normalizeRequestPath(r)
 		hh.stripUntrustedIdentity(r)
@@ -294,6 +429,15 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 // redirected to https, others are served in the clear.
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	name := hostKey(r.Host)
+	// An mTLS-required host must never be served in the clear: redirect to HTTPS so
+	// the client re-arrives on the TLS listener, where serveHTTPS enforces the
+	// per-request client-cert gate. Config validation forces forceSSL:true for any
+	// mTLS host, so this only fires for a config that bypassed validation (e.g.
+	// hand-edited or imported) - defense in depth that fails closed regardless.
+	if rt.clientAuth[name] != nil {
+		redirectToHTTPS(w, r)
+		return
+	}
 	if hh, ok := rt.hosts[name]; ok {
 		normalizeRequestPath(r)
 		if hh.forceSSL {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +23,7 @@ func newHandler(t *testing.T) (http.Handler, *int) {
 		t.Fatalf("store init: %v", err)
 	}
 	changed := 0
-	h := api.New(api.Deps{Store: st, OnChange: func() { changed++ }})
+	h := api.New(api.Deps{Store: st, OnChange: func() error { changed++; return nil }})
 	return h, &changed
 }
 
@@ -286,5 +287,78 @@ func TestRevertRejectsBadHashViaAPI(t *testing.T) {
 	w := do(t, h, "POST", "/revert", `{"hash":"../nope"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad hash want 400 got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSaveSurfacesApplyFailure proves a write that commits but cannot be applied
+// to the running config (OnChange/reload error, e.g. a geo rule saved while no
+// GeoIP database is loaded) returns 5xx, not a misleading 200.
+func TestSaveSurfacesApplyFailure(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	h := api.New(api.Deps{Store: st, OnChange: func() error {
+		return errors.New("no GeoIP database is loaded")
+	}})
+
+	w := do(t, h, "PUT", "/proxy-hosts/app", validProxyHost)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("apply failure want 500 got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "could not be applied") {
+		t.Fatalf("response should explain the apply failure, got %s", w.Body.String())
+	}
+}
+
+// TestCapabilitiesGeoIP verifies the read-only capability probe reflects the
+// injected GeoDBLoaded predicate and shapes the JSON the UI builds against.
+func TestCapabilitiesGeoIP(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		loaded bool
+	}{
+		{"db-loaded", true},
+		{"db-missing", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loaded := tc.loaded
+			h := api.New(api.Deps{Store: st, GeoDBLoaded: func() bool { return loaded }})
+			w := do(t, h, "GET", "/capabilities", "")
+			if w.Code != http.StatusOK {
+				t.Fatalf("GET /capabilities want 200 got %d", w.Code)
+			}
+			var got struct {
+				GeoIP struct {
+					DBLoaded bool `json:"dbLoaded"`
+				} `json:"geoip"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v; body=%s", err, w.Body.String())
+			}
+			if got.GeoIP.DBLoaded != tc.loaded {
+				t.Fatalf("geoip.dbLoaded want %v got %v", tc.loaded, got.GeoIP.DBLoaded)
+			}
+		})
+	}
+}
+
+// TestCapabilitiesNilPredicate confirms a nil GeoDBLoaded reports not-loaded
+// rather than panicking.
+func TestCapabilitiesNilPredicate(t *testing.T) {
+	h, _ := newHandler(t)
+	w := do(t, h, "GET", "/capabilities", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"dbLoaded": false`) {
+		t.Fatalf("nil predicate should report dbLoaded=false, got %s", w.Body.String())
 	}
 }

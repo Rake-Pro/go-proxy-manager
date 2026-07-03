@@ -142,7 +142,17 @@ function toastErr(e) {
 }
 
 // ---------- shell ----------
-const state = { me: null, version: null, headSha: null, instance: 'go-proxy-manager', appName: 'Go Proxy Manager' };
+const state = { me: null, version: null, headSha: null, instance: 'go-proxy-manager', appName: 'Go Proxy Manager', capabilities: null };
+
+// GET /api/capabilities probe (e.g. { geoip: { dbLoaded } }), cached on state the
+// same way loadTopbar caches /api/me and /api/settings. Call from anywhere that
+// needs a capability check; the network fetch only happens once.
+async function loadCapabilities() {
+  if (state.capabilities) return state.capabilities;
+  try { state.capabilities = (await api('/api/capabilities')).data || {}; }
+  catch (e) { state.capabilities = {}; }
+  return state.capabilities;
+}
 
 function buildShell() {
   const app = document.getElementById('app');
@@ -207,6 +217,9 @@ async function loadTopbar() {
     }
   } catch (e) { /* ignore */ }
   try {
+    await loadCapabilities();
+  } catch (e) { /* ignore */ }
+  try {
     const s = (await api('/api/settings')).data;
     if (s && s.externalBaseURL) {
       try { state.instance = new URL(s.externalBaseURL).host || s.externalBaseURL; }
@@ -244,6 +257,28 @@ function switchHtml(id, checked, label) {
   return `<button class="switch" type="button" role="switch" id="${id}" aria-checked="${checked ? 'true' : 'false'}"${label ? ` aria-label="${esc(label)}"` : ''}></button>`;
 }
 function isOn(id) { const el = document.getElementById(id); return el && el.getAttribute('aria-checked') === 'true'; }
+
+// ---------- capability gating ----------
+// Reads a dotted path out of the cached /api/capabilities probe, e.g.
+// hasCapability('geoip.dbLoaded'). Missing/unloaded capabilities read as false.
+function hasCapability(path) {
+  let v = state.capabilities;
+  for (const k of path.split('.')) { if (v == null) return false; v = v[k]; }
+  return !!v;
+}
+// Greys out el (a field/select/button, or a composite wrapper such as a
+// chip-input div) and attaches a tooltip explaining why, when a runtime
+// capability is unavailable. Reusable for any future capability-gated control -
+// just pass the element(s), the capability's boolean, and the reason text.
+// No-ops (and clears the disabled state) when available.
+function gateControl(el, available, reason) {
+  if (!el) return;
+  el.classList.toggle('cap-disabled', !available);
+  el.setAttribute('aria-disabled', available ? 'false' : 'true');
+  if ('disabled' in el) el.disabled = !available;
+  if (!available) el.title = reason; else el.removeAttribute('title');
+  el.querySelectorAll('input, select, button').forEach((child) => { child.disabled = !available; });
+}
 function loadingHtml(label) {
   return `<div class="loading"><span class="spinner"></span>${esc(label || 'Loading...')}</div>`;
 }
@@ -1376,6 +1411,10 @@ async function dnsEditor(c, name) {
 async function accessEditor(c, name) {
   const meta = SECTION_META.access; const isNew = !name;
   const o = isNew ? {} : ((await api('/api/access-lists/' + encodeURIComponent(name))).data || {});
+  await loadCapabilities();
+  const geoAvailable = hasCapability('geoip.dbLoaded');
+  const geoReason = 'GeoIP database not loaded (set GPM_GEOIP_DB) - geo rules are unavailable.';
+  const geo = o.geo || {};
   c.innerHTML = editorHead('access', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew)}
     <div class="card form-section"><p class="section-label">Policy</p>
@@ -1387,6 +1426,18 @@ async function accessEditor(c, name) {
     <div class="card form-section"><p class="section-label">IP rules</p><div id="ed-rules"></div>
       <button class="btn ghost sm" id="ed-addrule" type="button" style="margin-top:6px">${ICON.plus}Add rule</button>
       <div class="hint" style="margin-top:6px">Evaluated top-down. CIDR or bare IP.</div>
+    </div>
+    <div class="card form-section" id="ed-geo-card"><p class="section-label">Geo rules</p>
+      ${geoAvailable ? '' : `<div class="field-group"><div class="hint warn" id="ed-geo-hint">${esc(geoReason)}</div></div>`}
+      <div class="field-group"><label>Country allow</label>
+        <div class="chip-input" id="ed-geo-allow"></div>
+        <div class="hint">ISO-3166-1 alpha-2 codes (e.g. US). Non-empty allow list takes priority over deny.</div>
+      </div>
+      <div class="field-group"><label>Country deny</label><div class="chip-input" id="ed-geo-deny"></div></div>
+      <div class="field-group"><label>On unknown country</label><select class="field mono" id="ed-geo-unknown">
+        <option value="">(default: allow)</option>
+        ${['allow', 'deny'].map((a) => `<option value="${a}"${geo.onUnknown === a ? ' selected' : ''}>${a}</option>`).join('')}
+      </select><div class="hint">Applied to an IP with no country in the database (private/reserved ranges, DB misses).</div></div>
     </div>
   </div><div class="stack">
     <div class="card form-section"><p class="section-label">Basic auth users</p><div id="ed-basic"></div>
@@ -1416,6 +1467,17 @@ async function accessEditor(c, name) {
   }
   arr(o.basicAuth).forEach(basicRow);
   $('#ed-addbasic').addEventListener('click', () => basicRow({}));
+
+  // geo rules - country allow/deny + on-unknown, gated on the GeoIP DB being
+  // loaded (GET /api/capabilities). Disabled controls stay visible with a
+  // tooltip/inline note rather than being hidden; the server still enforces
+  // this independently at write time.
+  const geoAllowCtl = makeChipInput($('#ed-geo-allow'), arr(geo.countryAllow), 'add country code...');
+  const geoDenyCtl = makeChipInput($('#ed-geo-deny'), arr(geo.countryDeny), 'add country code...');
+  gateControl($('#ed-geo-allow'), geoAvailable, geoReason);
+  gateControl($('#ed-geo-deny'), geoAvailable, geoReason);
+  gateControl($('#ed-geo-unknown'), geoAvailable, geoReason);
+
   wireEditor('access', 'access-lists', meta, isNew, name || o.name, () => {
     const body = {};
     if (isOn('ed-satisfy')) body.satisfyAny = true;
@@ -1436,6 +1498,12 @@ async function accessEditor(c, name) {
     });
     if (bad) { toast('Basic auth incomplete', 'Each user needs a username and a password hash.', 'err'); return null; }
     if (basic.length) body.basicAuth = basic;
+    const geoAllow = geoAllowCtl.get(); const geoDeny = geoDenyCtl.get(); const onUnknown = $('#ed-geo-unknown').value;
+    const geoBody = {};
+    if (geoAllow.length) geoBody.countryAllow = geoAllow;
+    if (geoDeny.length) geoBody.countryDeny = geoDeny;
+    if (onUnknown) geoBody.onUnknown = onUnknown;
+    if (Object.keys(geoBody).length) body.geo = geoBody;
     return body;
   });
 }

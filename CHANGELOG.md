@@ -61,6 +61,37 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **mTLS (phase 1): per-host client-certificate auth** (`tls.clientAuth`): a
+  proxy/redirect/dead host can require or accept a client certificate verified
+  against a new `ClientCA` trust-anchor object (`caPEM`, inline or
+  `${FILE:...}`, confined to `GPM_SECRET_FILE_ROOTS`). `mode: require`
+  (default) rejects the handshake without a valid client cert; `mode:
+  optional` verifies a presented cert but lets certless requests through.
+  Enforced per request, not just per handshake: the negotiated SNI must
+  resolve to the host's own `tls.Config` (closing an SNI != Host dodge) and,
+  in `require` mode, carry a verified chain, or the request gets `421
+  Misdirected Request`; an mTLS host is also redirected off the plaintext
+  `:80` listener. `clientAuth` requires `forceSSL: true` and a resolvable
+  `caRef` at validation time. Revocation (CRL/OCSP) and identity-passthrough
+  headers are not implemented yet (phase 2).
+- **GeoIP geoblocking** (`geo` on `AccessList`): `countryAllow` /
+  `countryDeny` (ISO-3166-1 alpha-2) plus `onUnknown: allow|deny` for IPs with
+  no country (private/LAN, or a stale/missing database). Reuses the existing
+  access-list client-IP resolution. New runtime dependency
+  `github.com/oschwald/maxminddb-golang/v2` (pure Go, no CGO) reads an
+  operator-supplied MaxMind GeoLite2/GeoIP2 `.mmdb` (not bundled - GeoLite2
+  licensing) via `GPM_GEOIP_DB` / `-geoip-db`, hot-reloaded on a 5-minute
+  mtime watch so an out-of-band `geoipupdate` refresh takes effect without a
+  restart. Fail-closed throughout: saving an access list with geo rules while
+  no database is loaded is rejected at write (`400`, nothing committed); a
+  geo list evaluated with no database loaded denies all traffic on its hosts
+  rather than allowing, evaluated live per request so it self-heals the
+  moment the database loads, no restart or config change needed; startup no
+  longer fatals on a geo config with no database - the edge boots with the
+  affected hosts denying.
+- **`GET /api/capabilities`**: read-only, admin-session-gated probe
+  (`{"geoip":{"dbLoaded":bool}}`) the admin SPA uses to grey out/disable geo
+  access-list controls when no GeoIP database is loaded.
 - **Per-host no-index toggle** (`robotsNoIndex`): emits
   `X-Robots-Tag: noindex, nofollow` on HTTP and HTTPS responses. A headers
   middleware that sets `X-Robots-Tag` explicitly still wins.
@@ -151,6 +182,12 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Changed
 
+- **Lifecycle webhooks now fire only after a config change is applied to the
+  running data plane, not merely committed to git** - a write that commits
+  but fails to apply (e.g. a geo rule saved the instant its GeoIP database
+  goes missing) emits no webhook. The event payload
+  (`action`/`kind`/`name`/`commit`/`time`) is unchanged; the delivered event
+  now means "applied and live," not just "committed."
 - **Admin UI**: replaced the labelled raw-JSON editor with full field-level forms
   for every remaining object kind - redirect hosts, stream hosts, dead hosts, DNS
   providers, identity providers, access lists, and middleware. Each form has typed

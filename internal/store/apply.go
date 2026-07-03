@@ -33,6 +33,8 @@ func withObject(cfg *model.Config, obj model.Object) model.Config {
 		c.DeadHosts = upsert(c.DeadHosts, o)
 	case model.Certificate:
 		c.Certificates = upsert(c.Certificates, o)
+	case model.ClientCA:
+		c.ClientCAs = upsert(c.ClientCAs, o)
 	case model.DNSProvider:
 		c.DNSProviders = upsert(c.DNSProviders, o)
 	case model.IdentityProvider:
@@ -60,6 +62,8 @@ func withoutObject(cfg *model.Config, kind, name string) model.Config {
 		c.DeadHosts = dropNamed(c.DeadHosts, name)
 	case "Certificate":
 		c.Certificates = dropNamed(c.Certificates, name)
+	case "ClientCA":
+		c.ClientCAs = dropNamed(c.ClientCAs, name)
 	case "DNSProvider":
 		c.DNSProviders = dropNamed(c.DNSProviders, name)
 	case "IdentityProvider":
@@ -106,6 +110,9 @@ func stampTimes(obj model.Object, now time.Time) any {
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.Certificate:
+		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		return o
+	case model.ClientCA:
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.DNSProvider:

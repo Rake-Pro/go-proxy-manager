@@ -99,13 +99,17 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts ✓, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
-(HTTP/3, Brotli/zstd, OCSP, WAF/CrowdSec, GeoIP, mTLS, IPv6, SAML/LDAP), and P3
-tiers.
+(HTTP/3, hardened TLS, proxy protocol, IPv6, multi-ACME EAB - GeoIP
+geoblocking and mTLS client certs phase 1 are now ✓ shipped, see FEATURES.md),
+P3 (local-admin passkeys + TOTP for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd, OCSP,
+WAF/CrowdSec, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM,
+MPTCP, Anubis, cosign signing).
 
-### Design proposals (not started)
+### Design proposals
 
-- **HTTP/3, GeoIP geoblocking, mTLS client certs** —
-  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md). Schema,
-  data-plane wiring, and the per-feature dependency decision. Suggested order:
-  mTLS (no new dep) → GeoIP (one pure-Go mmdb reader) → HTTP/3 (quic-go, gated
-  behind a build tag + runtime toggle).
+- **HTTP/3** — [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
+  (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
+  from the same document are now ✓ shipped - see FEATURES.md and
+  CHANGELOG.md. Remaining mTLS follow-up: **phase 2** (CRL/OCSP revocation,
+  identity-passthrough header) - still open, see
+  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) §1.

@@ -306,3 +306,21 @@ func TestProxyHostMinTLSVersion(t *testing.T) {
 		t.Fatal("minTLSVersion 1.1 must be rejected")
 	}
 }
+
+func TestClientAuthRequiresForceSSL(t *testing.T) {
+	// mTLS without forceSSL must be rejected so the host can never be served in the clear.
+	noForce := proxyHost("app", func(h *ProxyHost) {
+		h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "require"}
+	})
+	if err := noForce.Validate(); err == nil {
+		t.Fatal("clientAuth without forceSSL must be rejected")
+	}
+	// With forceSSL:true the same host validates.
+	withForce := proxyHost("app", func(h *ProxyHost) {
+		h.TLS.ForceSSL = true
+		h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "require"}
+	})
+	if err := withForce.Validate(); err != nil {
+		t.Fatalf("clientAuth with forceSSL:true should be valid, got %v", err)
+	}
+}

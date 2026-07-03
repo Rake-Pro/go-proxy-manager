@@ -41,15 +41,46 @@ type TLSSettings struct {
 	// empty) or "1.3". Set "1.3" only where every client supports it; the edge
 	// otherwise negotiates 1.2 or 1.3 per client with a 1.2 floor.
 	MinTLSVersion string `json:"minTLSVersion,omitempty" yaml:"minTLSVersion,omitempty"`
+	// ClientAuth opts this host into mTLS: presented client certificates are
+	// verified at the TLS handshake against a referenced ClientCA. nil (default)
+	// means no client-certificate requirement.
+	ClientAuth *ClientAuth `json:"clientAuth,omitempty" yaml:"clientAuth,omitempty"`
+}
+
+// ClientAuth configures per-host mTLS client-certificate verification. CARef
+// names the ClientCA trust anchor; Mode selects handshake enforcement.
+type ClientAuth struct {
+	// CARef names the ClientCA object whose bundle verifies client certificates.
+	CARef string `json:"caRef" yaml:"caRef"`
+	// Mode is "require" (default) or "optional". require rejects the handshake
+	// unless a certificate valid against CARef is presented; optional verifies a
+	// presented certificate but lets certless requests proceed (so mTLS can be a
+	// fallback alongside SSO/forward-auth).
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
 }
 
 func (t TLSSettings) validate() error {
 	switch t.MinTLSVersion {
 	case "", "1.2", "1.3":
-		return nil
 	default:
 		return fmt.Errorf(`tls.minTLSVersion must be "1.2" or "1.3", got %q`, t.MinTLSVersion)
 	}
+	if t.ClientAuth != nil {
+		// mTLS must never be servable in the clear: require forceSSL so the plaintext
+		// listener redirects to HTTPS where the per-request client-cert gate applies.
+		if !t.ForceSSL {
+			return fmt.Errorf("tls.clientAuth requires forceSSL: true")
+		}
+		if t.ClientAuth.CARef == "" {
+			return fmt.Errorf("tls.clientAuth.caRef is required when clientAuth is set")
+		}
+		switch t.ClientAuth.Mode {
+		case "", "require", "optional":
+		default:
+			return fmt.Errorf(`tls.clientAuth.mode must be "require" or "optional", got %q`, t.ClientAuth.Mode)
+		}
+	}
+	return nil
 }
 
 // HostTimeouts overrides the default upstream timeouts for a single proxy host.

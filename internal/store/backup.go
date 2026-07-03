@@ -137,11 +137,20 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 		}
 		return "", err
 	}
-	if _, _, err := s.loadLocked(); err != nil {
+	restored, _, err := s.loadLocked()
+	if err != nil {
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", fmt.Errorf("restore refused, archive does not validate: %w", err)
+	}
+	if err := s.checkGeoAvailable(restored); err != nil {
+		// The archive carries a geo rule with no database to evaluate it: undo
+		// and refuse, so the fail-closed contract holds at the write boundary too.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("restore refused: %w", err)
 	}
 	return s.git.CommitAll(ctx, "Restore configuration from archive", author)
 }

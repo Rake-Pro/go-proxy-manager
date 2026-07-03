@@ -15,6 +15,7 @@ func (c Config) Validate() error {
 	var errs []error
 
 	certs := map[string]bool{}
+	clientCAs := map[string]bool{}
 	mws := map[string]bool{}
 	als := map[string]bool{}
 	idps := map[string]bool{}
@@ -36,6 +37,12 @@ func (c Config) Validate() error {
 			errs = append(errs, err)
 		}
 		register("certificate", o.Name, certs)
+	}
+	for _, o := range c.ClientCAs {
+		if err := o.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+		register("clientCA", o.Name, clientCAs)
 	}
 	for _, o := range c.DNSProviders {
 		if err := o.Validate(); err != nil {
@@ -69,6 +76,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "proxy host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkClientAuthRef(&errs, "proxy host", h.Name, h.TLS, clientCAs)
 		for _, m := range h.Middlewares {
 			checkRef(&errs, "proxy host", h.Name, "middleware", m, mws)
 		}
@@ -90,6 +98,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "redirect host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkClientAuthRef(&errs, "redirect host", h.Name, h.TLS, clientCAs)
 	}
 	for _, h := range c.DeadHosts {
 		if err := h.Validate(); err != nil {
@@ -97,6 +106,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "dead host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkClientAuthRef(&errs, "dead host", h.Name, h.TLS, clientCAs)
 	}
 	for _, h := range c.StreamHosts {
 		if err := h.Validate(); err != nil {
@@ -138,6 +148,16 @@ func (c Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// checkClientAuthRef verifies a host's mTLS trust anchor resolves to a known
+// ClientCA, so a host opted into client-cert verification can never compile
+// against a missing CA (which would fail closed, refusing every client).
+func checkClientAuthRef(errs *[]error, ownerKind, ownerName string, tlsSettings TLSSettings, set map[string]bool) {
+	if tlsSettings.ClientAuth == nil {
+		return
+	}
+	checkRef(errs, ownerKind, ownerName, "clientCA", tlsSettings.ClientAuth.CARef, set)
 }
 
 func checkRef(errs *[]error, ownerKind, ownerName, refKind, ref string, set map[string]bool) {

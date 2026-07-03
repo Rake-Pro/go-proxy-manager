@@ -20,6 +20,12 @@ type accessList struct {
 	users        map[string]string // username -> bcrypt hash
 	hasIP        bool
 	hasAuth      bool
+
+	// Geo rules, evaluated after nets and before defaultAllow (see ipAllowed).
+	hasGeo            bool
+	geoCountryAllow   map[string]bool // non-nil => whitelist mode; countryDeny is ignored
+	geoCountryDeny    map[string]bool
+	geoOnUnknownAllow bool
 }
 
 func compileAccessList(al model.AccessList) accessList {
@@ -52,20 +58,76 @@ func compileAccessList(al model.AccessList) accessList {
 	}
 	c.hasIP = len(c.nets) > 0
 	c.hasAuth = len(c.users) > 0
+
+	c.hasGeo = al.Geo.HasRules()
+	if c.hasGeo {
+		if len(al.Geo.CountryAllow) > 0 {
+			c.geoCountryAllow = map[string]bool{}
+			for _, cc := range al.Geo.CountryAllow {
+				c.geoCountryAllow[strings.ToUpper(cc)] = true
+			}
+		} else {
+			c.geoCountryDeny = map[string]bool{}
+			for _, cc := range al.Geo.CountryDeny {
+				c.geoCountryDeny[strings.ToUpper(cc)] = true
+			}
+		}
+		c.geoOnUnknownAllow = al.Geo.OnUnknown != model.ActionDeny // default allow
+	}
 	return c
 }
 
-// ipAllowed evaluates the ordered IP rules; the first matching net wins,
-// otherwise the default action applies. A nil (unparseable) client IP is denied
-// so a malformed peer can never satisfy a default-allow gate.
-func (c accessList) ipAllowed(ip net.IP) bool {
+// ipAllowed evaluates, in order: the explicit IP/CIDR rules (first match
+// wins), then - if configured - the geo country rules, then the list's
+// defaultAction. A nil (unparseable) client IP is denied outright so a
+// malformed peer can never satisfy a default-allow gate.
+//
+// geoLookup resolves ip to an ISO-3166-1 alpha-2 country code (see
+// geoip.Resolver.Country); it may be nil when no database is configured, in
+// which case every IP is treated as unknown and geoOnUnknownAllow governs.
+//
+// geoLoaded reports, LIVE (at evaluation time, not at compile time), whether a
+// GeoIP database is currently loaded - see registry.geoLoaded in chain.go. It
+// is consulted only when c.hasGeo, so this compiled accessList automatically
+// honours a database that loads (or unloads) after it was compiled, without
+// needing to be rebuilt.
+func (c accessList) ipAllowed(ip net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) bool {
 	if ip == nil {
+		return false
+	}
+	// Geo rules configured but no database currently loaded to evaluate them:
+	// fail CLOSED. This short-circuits before the explicit IP rules too, so a
+	// list whose operator intended geo filtering never serves at all while that
+	// filtering is blind - deny is the only safe verdict, never a default-allow
+	// or onUnknown=allow. A nil geoLoaded is treated the same as "not loaded"
+	// (fail closed by default) rather than silently skipping the check.
+	if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
 		return false
 	}
 	for i, n := range c.nets {
 		if n.Contains(ip) {
 			return c.netActions[i]
 		}
+	}
+	if c.hasGeo {
+		var country string
+		var found bool
+		if geoLookup != nil {
+			country, found = geoLookup(ip)
+		}
+		if !found {
+			return c.geoOnUnknownAllow
+		}
+		country = strings.ToUpper(country)
+		if c.geoCountryAllow != nil {
+			return c.geoCountryAllow[country]
+		}
+		if c.geoCountryDeny[country] {
+			return false
+		}
+		// Known country, not on the deny list: geo has no verdict here, fall
+		// through to defaultAllow (deny-list mode only narrows, it does not
+		// itself grant access - see AccessListGeo's doc comment).
 	}
 	return c.defaultAllow
 }
@@ -91,20 +153,26 @@ func (c accessList) authOK(r *http.Request) bool {
 }
 
 // accessListHandler gates next behind a compiled access list. ipOf extracts the
-// client IP used for rule evaluation. The gate fails closed: a misconfigured or
-// unmatched request is denied, never allowed by default.
-func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, next http.Handler) http.Handler {
+// client IP used for rule evaluation; geoLookup resolves that IP to a country
+// for geo rules (nil if no GeoIP database is configured); geoLoaded reports,
+// live, whether a GeoIP database is currently loaded (see
+// accessList.ipAllowed). The gate fails closed: a misconfigured or unmatched
+// request is denied, never allowed by default.
+func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// An empty access list imposes no restriction.
-		if !c.hasIP && !c.hasAuth {
+		if !c.hasIP && !c.hasAuth && !c.hasGeo {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ipOK := !c.hasIP || c.ipAllowed(ipOf(r))
+		ipOK := true
+		if c.hasIP || c.hasGeo {
+			ipOK = c.ipAllowed(ipOf(r), geoLookup, geoLoaded)
+		}
 		authOK := !c.hasAuth || c.authOK(r)
 
 		var pass bool
-		if c.satisfyAny && c.hasIP && c.hasAuth {
+		if c.satisfyAny && (c.hasIP || c.hasGeo) && c.hasAuth {
 			pass = ipOK || authOK
 		} else {
 			pass = ipOK && authOK

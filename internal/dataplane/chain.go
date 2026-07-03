@@ -24,6 +24,18 @@ type registry struct {
 	// clientIP resolves the access-list client IP, honouring X-Forwarded-For only
 	// from trustedNets and otherwise using the connection peer.
 	clientIP func(*http.Request) net.IP
+	// geoCountry resolves a client IP to an ISO-3166-1 alpha-2 country code for
+	// AccessList geo rules (see internal/geoip). Never nil, but reports every IP
+	// as not-found when no GeoIP database is configured.
+	geoCountry func(net.IP) (string, bool)
+	// geoLoaded reports, LIVE, whether a GeoIP database is currently loaded. It
+	// is consulted at request-evaluation time by accessList.ipAllowed, not baked
+	// into the compiled accessList at build time - so a database that loads (or
+	// is later swapped out) after this registry/router was built takes effect on
+	// the very next request, no config change or restart needed (see
+	// internal/geoip.Resolver.Watch). A list with geo rules but no loaded
+	// database still fails CLOSED (deny), never treats every IP as unknown.
+	geoLoaded func() bool
 }
 
 func buildRegistry(cfg model.Config) *registry {
@@ -49,6 +61,8 @@ func buildRegistry(cfg model.Config) *registry {
 		}
 	}
 	reg.clientIP = clientIPResolver(reg.trustedNets)
+	reg.geoCountry = currentGeoDB().Country
+	reg.geoLoaded = currentGeoDB().Loaded
 	return reg
 }
 
@@ -185,7 +199,12 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok {
 			continue
 		}
-		h = accessListHandler(compileAccessList(al), reg.clientIP, h)
+		cal := compileAccessList(al)
+		// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
+		// here: accessListHandler/ipAllowed consult it live, at request time, so
+		// a database that (un)loads after this chain is built takes effect
+		// without a rebuild (see accessList.ipAllowed).
+		h = accessListHandler(cal, reg.clientIP, reg.geoCountry, reg.geoLoaded, h)
 	}
 
 	// Guards (conditional deny rules), in the access-control tier.

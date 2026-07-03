@@ -30,6 +30,7 @@ type Config struct {
 	StreamHosts       []StreamHost       `json:"streamHosts,omitempty" yaml:"streamHosts,omitempty"`
 	DeadHosts         []DeadHost         `json:"deadHosts,omitempty" yaml:"deadHosts,omitempty"`
 	Certificates      []Certificate      `json:"certificates,omitempty" yaml:"certificates,omitempty"`
+	ClientCAs         []ClientCA         `json:"clientCAs,omitempty" yaml:"clientCAs,omitempty"`
 	DNSProviders      []DNSProvider      `json:"dnsProviders,omitempty" yaml:"dnsProviders,omitempty"`
 	IdentityProviders []IdentityProvider `json:"identityProviders,omitempty" yaml:"identityProviders,omitempty"`
 	AccessLists       []AccessList       `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`

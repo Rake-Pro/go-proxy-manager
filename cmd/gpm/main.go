@@ -21,6 +21,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
+	"github.com/Rake-Pro/go-proxy-manager/internal/geoip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
@@ -60,6 +61,7 @@ func main() {
 		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
+		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -119,6 +121,32 @@ func main() {
 			Bool("debugHeaders", *debugHeaders).
 			Msg("data plane debug toggles enabled")
 	}
+
+	// GeoIP: no database is bundled (GeoLite2 licensing forbids redistribution),
+	// so a load failure here is not fatal - it just means access lists with geo
+	// rules deny all traffic on their hosts (live fail-closed evaluation in the
+	// access-list chain, see dataplane/accesslist.go's ipAllowed) and the store
+	// refuses to commit any new geo rule (see Store.SetGeoAvailability below)
+	// until the operator fixes GPM_GEOIP_DB. Watch keeps picking up an
+	// out-of-band refresh (e.g. a geoipupdate cron) without requiring a gpm
+	// config change or restart.
+	geoResolver := &geoip.Resolver{}
+	if *geoDBPath != "" {
+		if err := geoResolver.Reload(*geoDBPath); err != nil {
+			log.Error().Err(err).Str("path", *geoDBPath).
+				Msg("failed to load initial GeoIP database; access lists with geo rules will refuse to activate until this is fixed")
+		} else {
+			log.Info().Str("path", *geoDBPath).Msg("GeoIP database loaded")
+		}
+		go geoResolver.Watch(ctx, *geoDBPath, geoip.DefaultWatchInterval)
+	}
+	dataplane.SetGeoDB(geoResolver)
+	// Reject-at-write: the store refuses to commit an AccessList with geo rules
+	// while no GeoIP database is loaded, so such a rule never lands in git. The
+	// data-plane compile fails closed (deny) for any geo rule already committed
+	// before the DB went missing, so a geo host can never boot-loop or serve open.
+	st.SetGeoAvailability(geoResolver.Loaded)
+
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
@@ -141,20 +169,26 @@ func main() {
 	// reload re-reads the config and applies it to both the auth layer and the
 	// data plane. It is the single path used after any config or certificate
 	// change (API writes, ACME issuance) so the running state never drifts.
-	reload := func() {
+	reload := func() error {
 		c, st2, err := st.Load(ctx)
 		if err != nil {
 			log.Error().Err(err).Msg("reload: failed to load config")
-			return
+			return err
 		}
-		authn.Configure(c, st2)
+		// Reload the data plane FIRST: only reconfigure the auth layer once the
+		// data plane has accepted the new config, so a rejected reload never
+		// leaves auth and dataplane drifted against each other.
 		if err := dp.Reload(c); err != nil {
 			log.Error().Err(err).Msg("reload: failed to reload data plane")
+			return err
 		}
+		authn.Configure(c, st2)
+		return nil
 	}
 
 	// ACME manager: issues/renews DNS-01 certs and reloads on certificate change.
-	acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: reload})
+	// The reload error is already logged; ACME has no caller to surface it to.
+	acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: func() { _ = reload() }})
 	go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
 		c, _, err := st.Load(ctx)
 		return c, err
@@ -189,6 +223,7 @@ func main() {
 		RecentLogs: func() any {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
 		},
+		GeoDBLoaded: geoResolver.Loaded,
 	})
 
 	uiHandler, err := ui.Handler()

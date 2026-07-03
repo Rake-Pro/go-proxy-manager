@@ -191,8 +191,15 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   callback → signed SSO session cookie) and HSTS emission (✓ shipped).
 
 ### P2 - hardening (NPMplus-class) + community gaps
-- HTTP/3 (QUIC), Brotli/zstd, hardened TLS (1.3; optional 1.2 off), OCSP (non-LE).
-- WAF hook (CrowdSec bouncer/AppSec), GeoIP geoblocking, mTLS, proxy protocol.
+- HTTP/3 (QUIC), hardened TLS (1.3; optional 1.2 off).
+- GeoIP geoblocking (✓ shipped: `geo` on `AccessList` -
+  `countryAllow`/`countryDeny`/`onUnknown`, fail-closed at write and at live
+  evaluation, `GPM_GEOIP_DB` with a 5-minute hot-reload watch, `GET
+  /api/capabilities` gates the SPA controls), mTLS client certs (✓ shipped,
+  phase 1: per-host `tls.clientAuth` `require`/`optional` against a
+  `ClientCA` trust anchor, enforced per request via SNI==Host + verified
+  chain, `421` on mismatch; CRL/OCSP revocation and identity-passthrough
+  headers are phase 2, still open), proxy protocol.
 - **Inbound IPv6** (NPM had it, disableable): bind the data plane on v6 and make
   it actually reachable end-to-end. Gotchas learned in the field: with Docker
   `userland-proxy:false` you can't DNAT v6 -> a v4-only container, so the gpm
@@ -208,11 +215,25 @@ architected so nothing in P1-P3 becomes a rewrite or duplicated work (see
   `directoryURL` already works for any non-EAB CA; EAB support for ZeroSSL /
   Google Public CA still open), reusable DNS creds (✓ shipped: DNS providers are
   shared first-class objects; certificates reference one credential set by
-  name), email notifications, **SAML** + **LDAP admin login** ★.
+  name).
 
 ### P3 - nice-to-have
-- PHP / file server, FancyIndex, ECH, ML-KEM, MPTCP, WebAuthn/passkeys, Anubis,
-  cosign image signing (build-side).
+- WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
+  capped at TOTP + WebAuthn, not applicable with OIDC.
+
+### Not planned at this time
+- Brotli/zstd compression (was P2)
+- OCSP stapling (was P2)
+- WAF/CrowdSec hook (was P2)
+- Email notifications (was P2)
+- SAML/LDAP login (was P2)
+- PHP / file server (was P3)
+- FancyIndex (was P3)
+- ECH (was P3)
+- ML-KEM (was P3)
+- MPTCP (was P3)
+- Anubis (was P3)
+- cosign image signing (build-side) (was P3)
 
 ### Architecture for extension (so later tiers aren't rework/duplication)
 - Model **hosts, certs, identity providers, access rules, middleware** as

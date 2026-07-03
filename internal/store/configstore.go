@@ -21,6 +21,7 @@ var kindDir = map[string]string{
 	"StreamHost":       "stream-hosts",
 	"DeadHost":         "dead-hosts",
 	"Certificate":      "certificates",
+	"ClientCA":         "client-cas",
 	"DNSProvider":      "dns-providers",
 	"IdentityProvider": "identity-providers",
 	"AccessList":       "access-lists",
@@ -35,6 +36,11 @@ var (
 	ErrNotFound = errors.New("object not found")
 	// ErrDanglingRef is returned when a delete would leave a dangling reference.
 	ErrDanglingRef = errors.New("delete would leave a dangling reference")
+	// ErrGeoDBUnavailable is returned by a write that would commit an AccessList
+	// with geo rules while no GeoIP database is loaded to evaluate them. Rejecting
+	// at the write boundary keeps such a rule out of git entirely (fail closed),
+	// rather than committing a config that can only be served as deny-all.
+	ErrGeoDBUnavailable = errors.New("geo rules configured but no GeoIP database is loaded")
 )
 
 // Store reads and writes the typed config objects as per-object YAML files in a
@@ -43,11 +49,42 @@ type Store struct {
 	dir string
 	git GitRepo
 	mu  sync.RWMutex
+
+	// geoLoaded reports whether a GeoIP database is currently loaded. It is the
+	// only coupling between the store and the geo subsystem: a plain predicate
+	// injected from main (geoResolver.Loaded), never a dataplane import. When nil
+	// (e.g. the CLI importer, or a test) the geo-availability gate is skipped, so
+	// the store stays usable without a geo wiring.
+	geoLoaded func() bool
 }
 
 // New returns a Store rooted at dir using the given GitRepo.
 func New(dir string, git GitRepo) *Store {
 	return &Store{dir: dir, git: git}
+}
+
+// SetGeoAvailability injects the predicate the store consults to reject a write
+// that configures geo rules while no GeoIP database is loaded (fail closed at
+// the write boundary). Passing nil disables the gate.
+func (s *Store) SetGeoAvailability(loaded func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.geoLoaded = loaded
+}
+
+// checkGeoAvailable rejects cfg when it configures geo rules but no GeoIP
+// database is loaded, so such a config is never committed. With no predicate
+// wired the gate is a no-op. Callers hold s.mu.
+func (s *Store) checkGeoAvailable(cfg model.Config) error {
+	if s.geoLoaded == nil || s.geoLoaded() {
+		return nil
+	}
+	for _, a := range cfg.AccessLists {
+		if a.Geo.HasRules() {
+			return fmt.Errorf("access list %q: %w (set GPM_GEOIP_DB)", a.Name, ErrGeoDBUnavailable)
+		}
+	}
+	return nil
 }
 
 // Dir returns the config repo root.
@@ -112,6 +149,9 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	if cfg.Certificates, err = loadDir[model.Certificate](s.dir, "certificates"); err != nil {
 		return cfg, model.Settings{}, err
 	}
+	if cfg.ClientCAs, err = loadDir[model.ClientCA](s.dir, "client-cas"); err != nil {
+		return cfg, model.Settings{}, err
+	}
 	if cfg.DNSProviders, err = loadDir[model.DNSProvider](s.dir, "dns-providers"); err != nil {
 		return cfg, model.Settings{}, err
 	}
@@ -167,6 +207,9 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("rejecting save: %w", err)
+	}
+	if err := s.checkGeoAvailable(merged); err != nil {
+		return "", err
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
@@ -236,6 +279,9 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
+	if err := s.checkGeoAvailable(merged); err != nil {
+		return "", err
+	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
@@ -304,12 +350,21 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 	if err := s.git.RestoreTree(ctx, hash); err != nil {
 		return "", fmt.Errorf("revert: restore tree %q: %w", hash, err)
 	}
-	if _, _, err := s.loadLocked(); err != nil {
+	restored, _, err := s.loadLocked()
+	if err != nil {
 		// The restored state is invalid (e.g. schema drift): undo and report.
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", fmt.Errorf("revert refused, config at %q does not validate: %w", hash, err)
+	}
+	if err := s.checkGeoAvailable(restored); err != nil {
+		// The target config would re-introduce a geo rule with no database to
+		// evaluate it: undo the tree change and refuse, committing nothing.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
 	}
 
 	short := hash

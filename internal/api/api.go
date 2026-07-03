@@ -8,6 +8,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -24,8 +25,12 @@ const (
 
 // Deps wires the API to the store and the rest of the app.
 type Deps struct {
-	Store    *store.Store
-	OnChange func()                           // called after every successful write; may be nil
+	Store *store.Store
+	// OnChange applies the just-committed config to the running state (reload). It
+	// returns an error when the write committed but could not take effect (e.g. a
+	// geo rule saved while no GeoIP database is loaded), so the mutation response
+	// surfaces the failure instead of a silent 200. May be nil.
+	OnChange func() error
 	Author   func(*http.Request) store.Author // derives the commit author; if nil, a zero Author is used
 	// OnEvent, if set, is fired after every successful write with the change
 	// details (action/kind/name/commit), for lifecycle webhooks. May be nil.
@@ -33,6 +38,23 @@ type Deps struct {
 	// RecentLogs, if set, returns the data-plane access-log viewer payload
 	// (marshalled as-is) for GET /logs. May be nil.
 	RecentLogs func() any
+	// GeoDBLoaded reports whether a GeoIP database is currently loaded, for the
+	// read-only GET /capabilities probe the UI uses to enable/grey-out geo
+	// controls. May be nil (reported as not loaded).
+	GeoDBLoaded func() bool
+}
+
+// capabilities is the read-only runtime feature-availability payload returned by
+// GET /capabilities. It is intentionally an object-of-objects so new capability
+// groups can be added without breaking existing clients.
+type capabilities struct {
+	GeoIP geoIPCapability `json:"geoip"`
+}
+
+type geoIPCapability struct {
+	// DBLoaded is true when a GeoIP database is loaded and geo access-list rules
+	// can be evaluated (and saved). When false the UI should grey out geo controls.
+	DBLoaded bool `json:"dbLoaded"`
 }
 
 func (d Deps) author(r *http.Request) store.Author {
@@ -42,16 +64,35 @@ func (d Deps) author(r *http.Request) store.Author {
 	return store.Author{}
 }
 
-func (d Deps) onChange() {
+// onChange applies the committed config to the running state. A non-nil error
+// means the change was committed but could not be applied, which callers surface
+// to the client rather than reporting a misleading success.
+func (d Deps) onChange() error {
 	if d.OnChange != nil {
-		d.OnChange()
+		return d.OnChange()
 	}
+	return nil
 }
 
 func (d Deps) onEvent(action, kind, name, commit string) {
 	if d.OnEvent != nil {
 		d.OnEvent(action, kind, name, commit)
 	}
+}
+
+// applyChange reloads the running state after a committed write. When the reload
+// fails the write is durably committed but not live (e.g. a geo rule saved while
+// no GeoIP database is loaded), so it responds 500 with a message saying exactly
+// that and returns false to stop the handler - never a misleading 200. On success
+// it fires the lifecycle event and returns true.
+func (d Deps) applyChange(w http.ResponseWriter, action, kind, name, sha string) bool {
+	if err := d.onChange(); err != nil {
+		writeErr(w, http.StatusInternalServerError,
+			fmt.Errorf("change committed as %s but could not be applied to the running configuration: %w", sha, err))
+		return false
+	}
+	d.onEvent(action, kind, name, sha)
+	return true
 }
 
 // New returns an http.Handler with all API routes registered without any "/api"
@@ -109,6 +150,16 @@ func New(d Deps) http.Handler {
 			return v, err
 		},
 	})
+	register(mux, d, "client-cas", resource[model.ClientCA]{
+		kind: "ClientCA",
+		list: func(c model.Config) []model.ClientCA { return c.ClientCAs },
+		decode: func(b []byte, name string) (model.ClientCA, error) {
+			var v model.ClientCA
+			err := json.Unmarshal(b, &v)
+			v.Name = name
+			return v, err
+		},
+	})
 	register(mux, d, "dns-providers", resource[model.DNSProvider]{
 		kind: "DNSProvider",
 		list: func(c model.Config) []model.DNSProvider { return c.DNSProviders },
@@ -150,6 +201,15 @@ func New(d Deps) http.Handler {
 		},
 	})
 
+	// Read-only runtime capability probe: lets the SPA discover which optional
+	// features are currently usable (e.g. geo rules need a loaded GeoIP DB). Auth
+	// is whatever the admin server applies to every other GET route on this mux.
+	mux.HandleFunc("GET /capabilities", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, capabilities{
+			GeoIP: geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
+		})
+	})
+
 	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {
 		cfg, _, err := d.Store.Load(r.Context())
 		if err != nil {
@@ -187,8 +247,9 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		d.onChange()
-		d.onEvent("revert", "", "", sha)
+		if !d.applyChange(w, "revert", "", "", sha) {
+			return
+		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
 	})
@@ -228,8 +289,9 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		d.onChange()
-		d.onEvent("restore", "", "", sha)
+		if !d.applyChange(w, "restore", "", "", sha) {
+			return
+		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
 	})
@@ -257,8 +319,9 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		d.onChange()
-		d.onEvent("settings", "Settings", "", sha)
+		if !d.applyChange(w, "settings", "Settings", "", sha) {
+			return
+		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, settings)
 	})
@@ -326,8 +389,9 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		d.onChange()
-		d.onEvent("save", res.kind, name, sha)
+		if !d.applyChange(w, "save", res.kind, name, sha) {
+			return
+		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, obj)
 	})
@@ -343,8 +407,9 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, deleteStatus(err), err)
 			return
 		}
-		d.onChange()
-		d.onEvent("delete", res.kind, name, sha)
+		if !d.applyChange(w, "delete", res.kind, name, sha) {
+			return
+		}
 		w.Header().Set(commitHeader, sha)
 		w.WriteHeader(http.StatusNoContent)
 	})
