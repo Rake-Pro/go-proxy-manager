@@ -42,17 +42,85 @@ type Authenticator struct {
 	pmu     sync.Mutex
 	pending map[string]pendingLogin // OIDC flow state -> login context
 
-	lmu        sync.Mutex
-	loginGates map[string]*loginGate // local-login throttle, keyed by client IP
-
-	pgmu         sync.Mutex
-	pendingGates map[string]*loginGate // OIDC begin-login throttle, keyed by client IP
+	loginGate   *rateGate // local-login failure throttle, keyed by client IP
+	pendingGate *rateGate // OIDC begin-login throttle, keyed by client IP
 }
 
-// loginGate tracks recent failed local-login attempts for one client key.
-type loginGate struct {
+// rateGate is a per-key rolling-window rate gate: it counts events for each key
+// (a client IP) within a window and reports when a key has reached its limit. The
+// map of keys is bounded (maxKeys) with opportunistic eviction of expired keys, so
+// a flood of distinct keys cannot grow it without bound. It backs both the
+// local-login failure throttle and the OIDC begin-login throttle, which differ
+// only in their window and limit.
+type rateGate struct {
+	mu      sync.Mutex
+	entries map[string]*gateEntry
+	window  time.Duration // rolling window / lockout duration
+	limit   int           // events within the window before the gate is "at limit"
+	maxKeys int           // cap on tracked keys (anti-DoS)
+}
+
+// gateEntry tracks recent counted events for one key.
+type gateEntry struct {
 	fails   int
-	resetAt time.Time // window/lockout expiry; after this the gate is cleared
+	resetAt time.Time // window/lockout expiry; after this the entry is cleared
+}
+
+func newRateGate(window time.Duration, limit, maxKeys int) *rateGate {
+	return &rateGate{entries: map[string]*gateEntry{}, window: window, limit: limit, maxKeys: maxKeys}
+}
+
+// atLimit reports whether key has reached its limit within the current window.
+// When evictExpired is set, an entry found past its window is deleted on the way
+// out (opportunistic read-path cleanup); otherwise the entry is left untouched.
+func (g *rateGate) atLimit(key string, evictExpired bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.entries[key]
+	if e == nil {
+		return false
+	}
+	if time.Now().After(e.resetAt) {
+		if evictExpired {
+			delete(g.entries, key)
+		}
+		return false
+	}
+	return e.fails >= g.limit
+}
+
+// record counts one event against key over a fresh window. It opportunistically
+// evicts expired entries so the map can't grow without bound; if the map is still
+// at capacity when a new key would be added, it skips recording rather than
+// allocate (fail-open on the record path under a distinct-key flood).
+func (g *rateGate) record(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	e := g.entries[key]
+	if e == nil || now.After(e.resetAt) {
+		if e == nil && len(g.entries) >= g.maxKeys {
+			for k, ev := range g.entries {
+				if now.After(ev.resetAt) {
+					delete(g.entries, k)
+				}
+			}
+			if len(g.entries) >= g.maxKeys {
+				return
+			}
+		}
+		e = &gateEntry{}
+		g.entries[key] = e
+	}
+	e.fails++
+	e.resetAt = now.Add(g.window)
+}
+
+// clear removes key's entry, e.g. a successful login resets its gate.
+func (g *rateGate) clear(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.entries, key)
 }
 
 const (
@@ -105,17 +173,17 @@ func NewAuthenticator(o Options) *Authenticator {
 		o.CookieName = "__Host-" + o.CookieName
 	}
 	return &Authenticator{
-		store:        o.Store,
-		cookieName:   o.CookieName,
-		secure:       o.Secure,
-		sessionTTL:   o.SessionTTL,
-		localUser:    o.LocalUser,
-		localHash:    o.LocalHash,
-		idps:         map[string]model.IdentityProvider{},
-		clients:      map[string]*oidc.Client{},
-		pending:      map[string]pendingLogin{},
-		loginGates:   map[string]*loginGate{},
-		pendingGates: map[string]*loginGate{},
+		store:       o.Store,
+		cookieName:  o.CookieName,
+		secure:      o.Secure,
+		sessionTTL:  o.SessionTTL,
+		localUser:   o.LocalUser,
+		localHash:   o.LocalHash,
+		idps:        map[string]model.IdentityProvider{},
+		clients:     map[string]*oidc.Client{},
+		pending:     map[string]pendingLogin{},
+		loginGate:   newRateGate(loginLockout, maxLoginFails, maxLoginGates),
+		pendingGate: newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
 	}
 }
 
@@ -342,48 +410,17 @@ func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string) (*ses
 // LoginThrottled reports whether local-login attempts from key are currently
 // locked out after too many recent failures.
 func (a *Authenticator) LoginThrottled(key string) bool {
-	a.lmu.Lock()
-	defer a.lmu.Unlock()
-	g := a.loginGates[key]
-	if g == nil {
-		return false
-	}
-	if time.Now().After(g.resetAt) {
-		delete(a.loginGates, key)
-		return false
-	}
-	return g.fails >= maxLoginFails
+	return a.loginGate.atLimit(key, true)
 }
 
 // NoteLoginResult records the outcome of a local-login attempt for throttling:
 // success clears the gate, failure increments it and (re)arms the window.
 func (a *Authenticator) NoteLoginResult(key string, ok bool) {
-	a.lmu.Lock()
-	defer a.lmu.Unlock()
-	now := time.Now()
 	if ok {
-		delete(a.loginGates, key)
+		a.loginGate.clear(key)
 		return
 	}
-	g := a.loginGates[key]
-	if g == nil || now.After(g.resetAt) {
-		// Opportunistically evict expired entries so the map can't grow without
-		// bound; if it is still full, drop this record rather than allocate.
-		if g == nil && len(a.loginGates) >= maxLoginGates {
-			for k, gv := range a.loginGates {
-				if now.After(gv.resetAt) {
-					delete(a.loginGates, k)
-				}
-			}
-			if len(a.loginGates) >= maxLoginGates {
-				return
-			}
-		}
-		g = &loginGate{}
-		a.loginGates[key] = g
-	}
-	g.fails++
-	g.resetAt = now.Add(loginLockout)
+	a.loginGate.record(key)
 }
 
 // pendingLoginAtCap reports whether key has already hit its per-IP pending-login
@@ -393,13 +430,7 @@ func (a *Authenticator) NoteLoginResult(key string, ok bool) {
 // via recordPendingLogin once a login state is actually created. The tiny
 // check-then-record gap under concurrency is acceptable for rate limiting.
 func (a *Authenticator) pendingLoginAtCap(key string) bool {
-	a.pgmu.Lock()
-	defer a.pgmu.Unlock()
-	g := a.pendingGates[key]
-	if g == nil || time.Now().After(g.resetAt) {
-		return false
-	}
-	return g.fails >= maxPendingPerIP
+	return a.pendingGate.atLimit(key, false)
 }
 
 // recordPendingLogin counts one started OIDC login against key's per-IP budget.
@@ -407,28 +438,7 @@ func (a *Authenticator) pendingLoginAtCap(key string) bool {
 // login starts (BeginLogin) are counted - a successful callback goes through
 // CompleteLogin and never touches this gate.
 func (a *Authenticator) recordPendingLogin(key string) {
-	a.pgmu.Lock()
-	defer a.pgmu.Unlock()
-	now := time.Now()
-	g := a.pendingGates[key]
-	if g == nil || now.After(g.resetAt) {
-		// Opportunistically evict expired entries so the map can't grow without
-		// bound; if it is still full, skip recording rather than allocate.
-		if g == nil && len(a.pendingGates) >= maxLoginGates {
-			for k, gv := range a.pendingGates {
-				if now.After(gv.resetAt) {
-					delete(a.pendingGates, k)
-				}
-			}
-			if len(a.pendingGates) >= maxLoginGates {
-				return
-			}
-		}
-		g = &loginGate{}
-		a.pendingGates[key] = g
-	}
-	g.fails++
-	g.resetAt = now.Add(pendingLoginWindow)
+	a.pendingGate.record(key)
 }
 
 // localAllowed reports whether local password login is permitted: under SSO-only

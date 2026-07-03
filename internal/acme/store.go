@@ -18,10 +18,16 @@ func issuedDir(certDir, name string) string {
 
 // IssuedCertPath / IssuedKeyPath expose where an ACME certificate's PEM files
 // live so the data plane can load them into its SNI resolver.
-func IssuedCertPath(certDir, name string) string { return filepath.Join(issuedDir(certDir, name), "fullchain.pem") }
-func IssuedKeyPath(certDir, name string) string  { return filepath.Join(issuedDir(certDir, name), "privkey.pem") }
+func IssuedCertPath(certDir, name string) string {
+	return filepath.Join(issuedDir(certDir, name), "fullchain.pem")
+}
+func IssuedKeyPath(certDir, name string) string {
+	return filepath.Join(issuedDir(certDir, name), "privkey.pem")
+}
 
-func metaPath(certDir, name string) string { return filepath.Join(issuedDir(certDir, name), "meta.json") }
+func metaPath(certDir, name string) string {
+	return filepath.Join(issuedDir(certDir, name), "meta.json")
+}
 
 // Meta is the renewal-relevant state for an issued certificate.
 type Meta struct {

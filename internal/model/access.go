@@ -76,8 +76,8 @@ func (g *AccessListGeo) validate(listName string) error {
 
 // AccessList combines HTTP basic auth, ordered IP allow/deny rules, and
 // optional GeoIP country rules. It can be attached to a host or an individual
-// location. SatisfyAny mirrors NPM's "satisfy any": when true, passing EITHER
-// auth or IP/geo is enough; when false both must pass.
+// location. SatisfyAny selects OR- vs AND-evaluation across the list's checks:
+// when true, passing EITHER auth or IP/geo is enough; when false both must pass.
 type AccessList struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 

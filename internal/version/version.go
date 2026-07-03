@@ -21,12 +21,12 @@ var (
 
 // Info is the structured build identity surfaced by the /version endpoint.
 type Info struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	Date      string `json:"date"`
-	Go        string `json:"go"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Date    string `json:"date"`
+	Go      string `json:"go"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
 }
 
 // Get returns the current build identity.

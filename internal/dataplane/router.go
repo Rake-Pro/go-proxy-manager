@@ -232,8 +232,7 @@ func normalizeLocationPrefix(p string) string {
 // its own upstream (falling back to the host upstream) and inherits the host's
 // middleware/access-list chain with its own appended, so per-location auth is
 // applied on top of the host gate rather than replacing it. The request path is
-// forwarded unchanged - the upstream sees the full prefix, matching NPM's
-// proxy_pass-without-URI behaviour.
+// forwarded unchanged - the upstream receives the full request path unmodified.
 func buildLocations(h model.ProxyHost, reg *registry) []locationRoute {
 	if len(h.Locations) == 0 {
 		return nil

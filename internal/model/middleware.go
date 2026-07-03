@@ -38,8 +38,8 @@ type AuthMiddleware struct {
 	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth | auth-request (defaults from IdP type)
 	RequiredRoles    []string `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
 	// AllowFrom lists client CIDRs that bypass authentication entirely and are
-	// proxied straight through (no auth subrequest, no identity headers). The
-	// typed form of NPM "satisfy any; allow <LAN>; deny all" - LAN skips SSO.
+	// proxied straight through (no auth subrequest, no identity headers). An
+	// any-of, network-exempt bypass so trusted networks (e.g. LAN) can skip SSO.
 	// Applies to auth-request mode.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 }
@@ -53,8 +53,9 @@ type HeadersMiddleware struct {
 	RemoveResponse []string          `json:"removeResponse,omitempty" yaml:"removeResponse,omitempty"`
 }
 
-// GuardMiddleware is the typed form of NPM's conditional nginx "if" blocks: it
-// denies a matching request unless the client is in an allow-list of networks.
+// GuardMiddleware expresses conditional deny rules (block a path/method unless
+// the client is in an allow-list): it denies a matching request unless the
+// client is in an allow-list of networks.
 // It fires when ANY Trigger matches; a request that matches and whose client IP
 // is not in AllowFrom gets DenyStatus. This expresses rules the whole-host/
 // location AccessList cannot - e.g. "POST to /login is LAN-only" (break-glass).

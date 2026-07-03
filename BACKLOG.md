@@ -4,8 +4,7 @@ Outstanding, actionable work. The long-range feature roadmap (P0–P3 tiers) liv
 in [FEATURES.md](FEATURES.md); this file tracks concrete near-term tasks.
 
 > Note: items under *Security & hardening* derive from an internal security
-> review. Descriptions are kept at the remediation level on purpose. Review this
-> section before making the repository public.
+> review. Descriptions are kept at the remediation level on purpose.
 
 ## Security & hardening
 

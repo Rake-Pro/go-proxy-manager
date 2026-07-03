@@ -191,6 +191,136 @@ func TestLoginThrottle(t *testing.T) {
 	}
 }
 
+func TestRateGateWithinAndOverLimit(t *testing.T) {
+	g := newRateGate(time.Hour, 3, 100)
+	key := "203.0.113.7"
+	cases := []struct {
+		recordFirst bool // record one event before checking
+		wantAtLimit bool
+	}{
+		{false, false}, // fresh key: not at limit
+		{true, false},  // 1 event: under limit
+		{true, false},  // 2 events: under limit
+		{true, true},   // 3 events: at limit
+		{true, true},   // 4 events: still at limit
+	}
+	for i, tc := range cases {
+		if tc.recordFirst {
+			g.record(key)
+		}
+		if got := g.atLimit(key, false); got != tc.wantAtLimit {
+			t.Fatalf("step %d: atLimit=%v want %v", i, got, tc.wantAtLimit)
+		}
+	}
+	// A different key is unaffected by another key's count.
+	if g.atLimit("198.51.100.9", false) {
+		t.Fatal("rate gate must be per-key")
+	}
+}
+
+func TestRateGateWindowReset(t *testing.T) {
+	g := newRateGate(time.Hour, 2, 100)
+	key := "203.0.113.7"
+	g.record(key)
+	g.record(key)
+	if !g.atLimit(key, false) {
+		t.Fatal("must be at limit after reaching the limit")
+	}
+	// Force the window to expire.
+	g.entries[key].resetAt = time.Now().Add(-time.Minute)
+	if g.atLimit(key, false) {
+		t.Fatal("expired window must no longer be at limit")
+	}
+	// Recording after expiry starts a fresh window at one event, not accumulating.
+	g.record(key)
+	if g.entries[key].fails != 1 {
+		t.Fatalf("expired entry should reset to 1 fail, got %d", g.entries[key].fails)
+	}
+	if g.atLimit(key, false) {
+		t.Fatal("one event in a fresh window must be under a limit of 2")
+	}
+}
+
+func TestRateGateAtLimitEviction(t *testing.T) {
+	// atLimit(evictExpired=false) leaves an expired entry in place; evictExpired=true
+	// deletes it. Both return false (not at limit) for the expired key.
+	for _, evict := range []bool{false, true} {
+		g := newRateGate(time.Hour, 1, 100)
+		key := "203.0.113.7"
+		g.record(key)
+		g.entries[key].resetAt = time.Now().Add(-time.Minute)
+		if g.atLimit(key, evict) {
+			t.Fatalf("evict=%v: expired key must not be at limit", evict)
+		}
+		_, present := g.entries[key]
+		if present == evict {
+			t.Fatalf("evict=%v: entry present=%v (want deletion only when evict)", evict, present)
+		}
+	}
+}
+
+func TestRateGateEvictsStaleKeysOnRecord(t *testing.T) {
+	g := newRateGate(time.Hour, 5, 4)
+	// Fill to capacity with expired entries.
+	past := time.Now().Add(-time.Minute)
+	for _, k := range []string{"a", "b", "c", "d"} {
+		g.record(k)
+		g.entries[k].resetAt = past
+	}
+	if len(g.entries) != 4 {
+		t.Fatalf("setup: want 4 entries, got %d", len(g.entries))
+	}
+	// A new key at capacity triggers eviction of the expired entries, then records.
+	g.record("new")
+	if _, ok := g.entries["new"]; !ok {
+		t.Fatal("new key must be recorded after stale entries are evicted")
+	}
+	if g.entries["new"].fails != 1 {
+		t.Fatalf("new key should have 1 fail, got %d", g.entries["new"].fails)
+	}
+}
+
+func TestRateGateMapFullSkipsRecord(t *testing.T) {
+	g := newRateGate(time.Hour, 5, 4)
+	// Fill to capacity with LIVE (non-expired) entries; nothing is evictable.
+	for _, k := range []string{"a", "b", "c", "d"} {
+		g.record(k)
+	}
+	if len(g.entries) != 4 {
+		t.Fatalf("setup: want 4 entries, got %d", len(g.entries))
+	}
+	// A new key must be skipped (fail-open on the record path) rather than grow
+	// the bounded map past capacity.
+	g.record("new")
+	if _, ok := g.entries["new"]; ok {
+		t.Fatal("new key must be skipped when the map is full of live entries")
+	}
+	if len(g.entries) != 4 {
+		t.Fatalf("map must stay at capacity, got %d", len(g.entries))
+	}
+	// An EXISTING key at capacity is still counted (no new allocation needed).
+	g.record("a")
+	if g.entries["a"].fails != 2 {
+		t.Fatalf("existing key must still increment when map is full, got %d", g.entries["a"].fails)
+	}
+}
+
+func TestRateGateClear(t *testing.T) {
+	g := newRateGate(time.Hour, 1, 100)
+	key := "203.0.113.7"
+	g.record(key)
+	if !g.atLimit(key, false) {
+		t.Fatal("must be at limit after reaching limit of 1")
+	}
+	g.clear(key)
+	if g.atLimit(key, false) {
+		t.Fatal("clear must reset the gate")
+	}
+	if _, ok := g.entries[key]; ok {
+		t.Fatal("clear must remove the entry")
+	}
+}
+
 func TestHostPrefixCookieWhenSecure(t *testing.T) {
 	// Secure cookies take the __Host- prefix.
 	a := NewAuthenticator(Options{Store: testStore(t), Secure: true})

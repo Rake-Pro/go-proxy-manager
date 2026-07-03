@@ -12,8 +12,8 @@ import (
 
 func TestDNSName(t *testing.T) {
 	cases := map[string]string{
-		"example.com":     "_acme-challenge.example.com",
-		"*.example.com":   "_acme-challenge.example.com",
+		"example.com":      "_acme-challenge.example.com",
+		"*.example.com":    "_acme-challenge.example.com",
 		"app2.example.com": "_acme-challenge.app2.example.com",
 	}
 	for in, want := range cases {

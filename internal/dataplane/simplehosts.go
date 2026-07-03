@@ -19,7 +19,7 @@ type redirectHandler struct {
 func newRedirectHandler(h model.RedirectHost) *redirectHandler {
 	status := h.StatusCode
 	if status == 0 {
-		status = http.StatusMovedPermanently // 301, matching NPM's default
+		status = http.StatusMovedPermanently // 301, the conventional default for a permanent redirect
 	}
 	return &redirectHandler{
 		forceSSL:     h.TLS.ForceSSL,

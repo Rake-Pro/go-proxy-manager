@@ -17,8 +17,8 @@ import (
 // defaultOutpostPrefix is Authentik's canonical proxy-outpost path namespace.
 const defaultOutpostPrefix = "/outpost.goauthentik.io"
 
-// defaultAuthRequestHeaders mirrors the X-authentik-* headers the per-host NPM
-// "Advanced" snippet copies from the auth subrequest onto the upstream.
+// defaultAuthRequestHeaders mirrors the X-authentik-* headers an Authentik
+// forward-auth outpost sends.
 var defaultAuthRequestHeaders = []string{
 	"X-authentik-username",
 	"X-authentik-groups",
@@ -106,7 +106,8 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 
 		// AllowFrom networks (e.g. the LAN) bypass SSO entirely: proxied straight
 		// through with no auth subrequest and no identity headers (they were just
-		// stripped above). Matches NPM "satisfy any; allow <LAN>; deny all".
+		// stripped above). An any-of, network-exempt bypass so trusted networks
+		// can skip SSO.
 		if len(allowNets) > 0 {
 			if ip := clientIP(r); ip != nil && ipInNets(ip, allowNets) {
 				next.ServeHTTP(w, r)
