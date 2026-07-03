@@ -150,6 +150,10 @@ the commit hash, and warnings for anything it could not translate (e.g. raw
 `advanced_config` nginx snippets — re-express those as typed middlewares). Use
 `-dry-run` first to review the mapping without writing anything.
 
+For a full walkthrough — running gpm alongside a live NPM install, validating
+parity before any traffic moves, then cutting over — see
+[migrating-from-npm.md](migrating-from-npm.md).
+
 ## Hardening notes
 
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
