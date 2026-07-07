@@ -166,12 +166,17 @@ func verifyToken(tok string) ([]byte, bool) {
 	return payload, true
 }
 
-// oidcSession is the signed end-user session cookie payload.
+// oidcSession is the signed end-user session cookie payload. Host binds the
+// cookie to the gate that issued it: the HMAC key is process-wide across every
+// OIDC-gated host, so without this a valid cookie from host A (or an IdP that
+// host A trusts) could be replayed to host B and re-evaluated against B's role
+// mapping using A's groups. The gate rejects a cookie whose Host is not its own.
 type oidcSession struct {
 	Sub    string   `json:"sub"`
 	Email  string   `json:"email,omitempty"`
 	Name   string   `json:"name,omitempty"`
 	Groups []string `json:"groups,omitempty"`
+	Host   string   `json:"host"`
 	Exp    int64    `json:"exp"`
 }
 
@@ -297,7 +302,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 			return
 		}
 		var sess oidcSession
-		if readSignedCookie(r, oidcSessionCookie, &sess) && sess.Exp > time.Now().Unix() {
+		if readSignedCookie(r, oidcSessionCookie, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName {
 			if !d.authorized(sess.Groups) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -364,7 +369,8 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	setSignedCookie(w, oidcSessionCookie, oidcSession{
 		Sub: claims.Subject, Email: claims.Email, Name: claims.Name,
-		Groups: claims.Groups, Exp: time.Now().Add(oidcSessionTTL).Unix(),
+		Groups: claims.Groups, Host: d.hostName,
+		Exp: time.Now().Add(oidcSessionTTL).Unix(),
 	}, oidcSessionTTL)
 	http.Redirect(w, r, sanitizeSSOReturn(st.Return), http.StatusFound)
 }

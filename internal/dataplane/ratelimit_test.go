@@ -182,3 +182,49 @@ func TestRateLimitRunsBeforeAuth(t *testing.T) {
 		t.Fatalf("over-limit request must be shed with 429 ahead of auth, got %d", rec.Code)
 	}
 }
+
+// TestAccessListRunsBeforeAuth proves the access-list is wrapped outside auth: an
+// IP the list denies is dropped with 403 before the auth tier runs, so it never
+// drives a forward-auth subrequest to the IdP (GPM-L1). The forward-auth host
+// would 401 an untrusted peer that reaches auth; a denied IP getting 403 instead
+// of 401 shows the access-list short-circuited ahead of auth. An allowed peer
+// still falls through to auth (401), proving the list did not wholesale replace it.
+func TestAccessListRunsBeforeAuth(t *testing.T) {
+	base := model.Config{
+		IdentityProviders: []model.IdentityProvider{{
+			ObjectMeta:  model.ObjectMeta{Name: "fa"},
+			Type:        model.IdPTypeForwardAuth,
+			ForwardAuth: &model.ForwardAuthSpec{TrustedProxies: []string{"10.0.0.0/8"}, UserHeader: "X-User"},
+		}},
+		Middlewares: []model.Middleware{
+			{ObjectMeta: model.ObjectMeta{Name: "sso"}, Type: model.MWTypeAuth, Auth: &model.AuthMiddleware{IdentityProvider: "fa", Mode: model.AuthModeForwardAuth}},
+		},
+	}
+
+	serve := func(al model.AccessList) int {
+		cfg := base
+		cfg.AccessLists = []model.AccessList{al}
+		reg := buildRegistry(cfg)
+		host := model.ProxyHost{
+			ObjectMeta:  model.ObjectMeta{Name: "app"},
+			Middlewares: []string{"sso"},
+			AccessLists: []string{al.Name},
+		}
+		h := buildChain(okHandler(), host, reg)
+		return serveRL(h, "203.0.113.5:1", "http://app/").Code
+	}
+
+	// Deny-all list: the untrusted peer is dropped by the access-list (403) before
+	// auth can 401 it.
+	deny := model.AccessList{ObjectMeta: model.ObjectMeta{Name: "deny-all"}, DefaultAction: model.ActionDeny}
+	if code := serve(deny); code != http.StatusForbidden {
+		t.Fatalf("denied IP must be dropped by the access-list (403) ahead of auth, got %d", code)
+	}
+
+	// Allow-all list: the access-list passes, so the untrusted peer falls through
+	// to auth and is rejected there (401) - auth still runs behind the list.
+	allow := model.AccessList{ObjectMeta: model.ObjectMeta{Name: "allow-all"}, DefaultAction: model.ActionAllow}
+	if code := serve(allow); code != http.StatusUnauthorized {
+		t.Fatalf("allowed IP must fall through the access-list to auth (401), got %d", code)
+	}
+}

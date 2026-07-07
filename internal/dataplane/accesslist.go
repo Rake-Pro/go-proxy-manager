@@ -15,6 +15,12 @@ type accessList struct {
 	name         string
 	satisfyAny   bool
 	defaultAllow bool
+	// explicitDeny is true when DefaultAction was explicitly set to "deny".
+	// A list with no IP/auth/geo dimension has nothing to match on; when the
+	// operator explicitly asked to deny by default (a deliberate "locked down,
+	// allow rules to follow"), such a list must deny rather than silently pass.
+	// An unset or "allow" default keeps the historical open behavior.
+	explicitDeny bool
 	nets         []*net.IPNet
 	netActions   []bool            // parallel to nets: true=allow, false=deny
 	users        map[string]string // username -> bcrypt hash
@@ -33,6 +39,7 @@ func compileAccessList(al model.AccessList) accessList {
 		name:         al.Name,
 		satisfyAny:   al.SatisfyAny,
 		defaultAllow: al.DefaultAction == model.ActionAllow,
+		explicitDeny: al.DefaultAction == model.ActionDeny,
 		users:        map[string]string{},
 	}
 	for _, r := range al.Rules {
@@ -72,7 +79,20 @@ func compileAccessList(al model.AccessList) accessList {
 				c.geoCountryDeny[strings.ToUpper(cc)] = true
 			}
 		}
-		c.geoOnUnknownAllow = al.Geo.OnUnknown != model.ActionDeny // default allow
+		// Default for an IP the database cannot place in a country. An explicit
+		// onUnknown always wins. When unset, whitelist mode (countryAllow) fails
+		// CLOSED - otherwise any IP absent from the operator's GeoIP database
+		// (unallocated ranges, stale-DB gaps, some cloud/VPN space) would slip
+		// past a "only these countries" gate. Deny-list mode stays open on
+		// unknown (it only ever narrows a default-allow posture).
+		switch al.Geo.OnUnknown {
+		case model.ActionAllow:
+			c.geoOnUnknownAllow = true
+		case model.ActionDeny:
+			c.geoOnUnknownAllow = false
+		default:
+			c.geoOnUnknownAllow = len(al.Geo.CountryAllow) == 0
+		}
 	}
 	return c
 }
@@ -160,8 +180,15 @@ func (c accessList) authOK(r *http.Request) bool {
 // request is denied, never allowed by default.
 func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// An empty access list imposes no restriction.
+		// A list with no IP, auth, or geo dimension has nothing to match on.
+		// Honor an explicit defaultAction: deny (a deliberate "deny all") rather
+		// than silently passing; an unset or "allow" default imposes no
+		// restriction, as before.
 		if !c.hasIP && !c.hasAuth && !c.hasGeo {
+			if c.explicitDeny {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -79,11 +79,13 @@ is always at least as restrictive.
 to a handler that wraps the reverse proxy in a fixed order:
 
 ```
-request → rate-limit → auth → guard → access-list → headers → reverse proxy → upstream
+request → rate-limit → access-list → auth → guard → headers → reverse proxy → upstream
 ```
 
-Authentication is outermost; header mutation is innermost (closest to the
-backend). The reverse proxy sets `X-Forwarded-*`, preserves the client `Host`, and
+Rate limiting is outermost; header mutation is innermost (closest to the
+backend). The access-list sits ahead of auth, so an IP the list would deny is
+dropped before any auth work runs (no forward-auth subrequest to the IdP, no
+OIDC redirect). The reverse proxy sets `X-Forwarded-*`, preserves the client `Host`, and
 carries WebSocket upgrades transparently. Redirects that an upstream emits to its
 own address are rewritten to the public scheme/host.
 

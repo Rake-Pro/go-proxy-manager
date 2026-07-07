@@ -41,7 +41,10 @@ type AccessListGeo struct {
 	// CountryAllow is empty.
 	CountryDeny []string `json:"countryDeny,omitempty" yaml:"countryDeny,omitempty"`
 	// OnUnknown governs an IP with no country in the database - private,
-	// loopback, link-local, or simply absent: allow (default) | deny.
+	// loopback, link-local, or simply absent: allow | deny. When unset the
+	// default depends on mode: whitelist (CountryAllow) fails closed (deny) so
+	// an unresolvable IP cannot slip past a "these countries only" gate;
+	// deny-list (CountryDeny) defaults to allow, since it only ever narrows.
 	OnUnknown string `json:"onUnknown,omitempty" yaml:"onUnknown,omitempty"`
 }
 

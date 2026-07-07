@@ -18,6 +18,46 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Access lists are evaluated ahead of authentication.** The middleware chain now
+  runs `rate-limit → access-list → auth → guard → headers → upstream` (previously
+  the access-list sat inside auth). An IP the access-list would deny is now dropped
+  before any auth work runs, so a non-allowed client hitting an OIDC/forward-auth
+  host no longer drives a forward-auth subrequest to the IdP or receives an OIDC
+  redirect/401 that discloses the auth flow. IP/geo access policy is enforced as an
+  edge control, before identity, as intended (GPM-L1).
+
+- **Access lists reject `\` and `;` in the request path.** Path matching for
+  path-scoped locations and guard triggers is exact after `path.Clean`, which does
+  not treat a backslash or a `;` matrix parameter as path structure. A request like
+  `/admin;x` or `/admin\..\x` therefore failed to match a location/guard keyed on
+  `/admin` yet could be re-collapsed onto `/admin` by a backend that strips
+  `;`-parameters (Servlet containers) or treats `\` as a separator (IIS/Windows),
+  slipping past that path's auth. The data plane now rejects any request whose
+  canonical path still contains `\` or `;` with `400 Bad Request`, keeping the
+  matched path and the forwarded path byte-identical.
+
+- **Data-plane SSO session cookies are bound to their issuing host.** The `gpm_sso`
+  cookie is HMAC-signed with a process-wide key, so a valid session minted for one
+  OIDC-gated host verified on every other. With two hosts fronted by different IdPs
+  that share a group name, a cookie copied from host A would be re-evaluated against
+  host B's role mapping using A's groups (cross-IdP privilege confusion). The signed
+  payload now carries the issuing host and a gate rejects any cookie whose host is
+  not its own (a mismatched cookie triggers a fresh login).
+
+- **Geo whitelist (`countryAllow`) fails closed on unknown IPs by default.**
+  Previously `onUnknown` defaulted to `allow` in all modes, so an IP the GeoIP
+  database could not place in a country - unallocated space, stale-DB gaps, some
+  cloud/VPN ranges - was admitted even by a `countryAllow: [US]` whitelist,
+  defeating it. When `onUnknown` is unset, whitelist mode now defaults to `deny`;
+  deny-list mode keeps `allow` (it only narrows). An explicit `onUnknown` still
+  wins.
+
+- **`defaultAction: deny` on a rule-less access list now denies.** An access list
+  with no IP, basic-auth, or geo rules but an explicit `defaultAction: deny` (a
+  deliberate "lock this host down") was treated as an empty, unrestricted list and
+  silently allowed all traffic. Such a list now denies; an unset or `allow` default
+  remains open, as before.
+
 - **Session database created 0600 in a 0700 directory.** The SQLite session
   store (`session.db`) was previously created with default OS permissions (typically
   0644 dir / 0644 file), making session IDs and CSRF tokens world-readable. The

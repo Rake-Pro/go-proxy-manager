@@ -378,7 +378,7 @@ is resolved the same XFF-aware way as access lists; a request whose client IP
 cannot be resolved falls back to a single shared bucket (fail-safe, never
 unlimited). The middleware sits **outermost** in the chain (evaluated first) so a
 flood is shed before it can drive an auth subrequest or any other per-request
-work: rate-limit → auth → guard → access-list → headers → upstream.
+work: rate-limit → access-list → auth → guard → headers → upstream.
 
 ```yaml
 # Require SSO, but let the LAN through without it
@@ -402,7 +402,8 @@ guard:
 ### Middleware ordering
 
 Middlewares are applied in a fixed order per request regardless of the order you
-list them: **rate-limit → auth → guard → access-list → headers → upstream**. Rate
-limiting is outermost (evaluated first, so floods are shed before any work);
+list them: **rate-limit → access-list → auth → guard → headers → upstream**. Rate
+limiting is outermost (evaluated first, so floods are shed before any work); the
+access-list is evaluated ahead of auth, so a denied IP never reaches the IdP;
 header mutations are innermost (closest to the backend). Host-wide middlewares run
 before any location-scoped ones.

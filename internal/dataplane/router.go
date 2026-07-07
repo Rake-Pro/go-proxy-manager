@@ -350,9 +350,23 @@ func cleanPath(p string) string {
 // a request cannot present "/x/../admin" (or an encoded "%2e%2e") to dodge a
 // location's auth and then reach the upstream's "/admin". RawPath is cleared so
 // the cleaned, decoded Path is what gets forwarded.
-func normalizeRequestPath(r *http.Request) {
-	r.URL.Path = cleanPath(r.URL.Path)
+//
+// It returns false (caller replies 400) when the path contains a backslash or a
+// ';' matrix parameter. path.Clean treats neither as path structure, so a
+// request like "/admin;x" or "/admin\..\x" survives normalization unchanged and
+// fails to match a path-scoped location's auth or a guard trigger keyed on
+// "/admin" - yet some upstreams re-collapse it onto the protected path (IIS
+// treats '\' as a separator; Servlet containers strip ';jsessionid'). Rejecting
+// these keeps gpm's matched path and the forwarded path byte-identical, so no
+// such matcher/backend divergence exists.
+func normalizeRequestPath(r *http.Request) bool {
+	p := cleanPath(r.URL.Path)
+	if strings.ContainsAny(p, `\;`) {
+		return false
+	}
+	r.URL.Path = p
 	r.URL.RawPath = ""
+	return true
 }
 
 // stripUntrustedIdentity removes identity headers from a request unless its peer
@@ -399,7 +413,10 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hh, ok := rt.hosts[name]; ok {
-		normalizeRequestPath(r)
+		if !normalizeRequestPath(r) {
+			http.Error(w, "bad request path", http.StatusBadRequest)
+			return
+		}
 		hh.stripUntrustedIdentity(r)
 		if hh.hsts != "" {
 			// Set before serving so it rides the upstream's response; only on HTTPS
@@ -438,7 +455,10 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hh, ok := rt.hosts[name]; ok {
-		normalizeRequestPath(r)
+		if !normalizeRequestPath(r) {
+			http.Error(w, "bad request path", http.StatusBadRequest)
+			return
+		}
 		if hh.forceSSL {
 			redirectToHTTPS(w, r)
 			return

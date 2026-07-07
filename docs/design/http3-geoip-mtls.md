@@ -164,8 +164,13 @@ geo:
 ```
 
 Evaluation order within a list: explicit IP/CIDR rules → geo → `defaultAction`.
-Private/loopback/link-local IPs have no country ⇒ governed by `onUnknown`
-(default `allow`, so LAN is never geo-blocked by accident).
+Private/loopback/link-local IPs have no country ⇒ governed by `onUnknown`. When
+`onUnknown` is unset the default is **mode-dependent**: deny-list (`countryDeny`)
+defaults to `allow` (it only ever narrows a default-allow posture, so the LAN is
+never geo-blocked by accident); whitelist (`countryAllow`) defaults to `deny`
+(fail closed) so an IP absent from the database - unallocated space, a stale-DB
+gap, some cloud/VPN ranges - cannot slip past a "these countries only" gate. Set
+`onUnknown` explicitly to override either default.
 
 ### Data-plane wiring
 

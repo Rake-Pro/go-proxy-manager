@@ -176,11 +176,13 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 // buildChain wraps the terminal proxy handler in the host's middleware chain.
 // Steps run in a fixed canonical order regardless of reference order:
 //
-//	rate-limit -> auth -> guard -> access-list -> headers -> (WAF ... later) -> proxy
+//	rate-limit -> access-list -> auth -> guard -> headers -> (WAF ... later) -> proxy
 //
 // so new behaviours slot into defined positions instead of colliding as text.
 // Rate limiting is outermost so a flood is shed before it can drive work in the
-// auth/access-control tiers (notably a forward-auth subrequest to the IdP).
+// auth/access-control tiers (notably a forward-auth subrequest to the IdP). The
+// access-list sits just inside rate-limit, ahead of auth, so an IP the list would
+// deny is dropped before any auth work (forward-auth subrequest, OIDC redirect).
 func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Handler {
 	h := proxy
 
@@ -191,20 +193,6 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 			continue
 		}
 		h = headersHandler(*mw.Headers, h)
-	}
-
-	// Access lists (host-level), applied outside the headers stage.
-	for _, name := range host.AccessLists {
-		al, ok := reg.accessLists[name]
-		if !ok {
-			continue
-		}
-		cal := compileAccessList(al)
-		// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
-		// here: accessListHandler/ipAllowed consult it live, at request time, so
-		// a database that (un)loads after this chain is built takes effect
-		// without a rebuild (see accessList.ipAllowed).
-		h = accessListHandler(cal, reg.clientIP, reg.geoCountry, reg.geoLoaded, h)
 	}
 
 	// Guards (conditional deny rules), in the access-control tier.
@@ -223,6 +211,22 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 			continue
 		}
 		h = authMiddlewareHandler(mw, reg, host.Name, h)
+	}
+
+	// Access lists (host-level), wrapped outside auth so an IP the list would
+	// deny is dropped before any auth work runs (no forward-auth subrequest to
+	// the IdP, no OIDC redirect/401 disclosing the auth flow).
+	for _, name := range host.AccessLists {
+		al, ok := reg.accessLists[name]
+		if !ok {
+			continue
+		}
+		cal := compileAccessList(al)
+		// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
+		// here: accessListHandler/ipAllowed consult it live, at request time, so
+		// a database that (un)loads after this chain is built takes effect
+		// without a rebuild (see accessList.ipAllowed).
+		h = accessListHandler(cal, reg.clientIP, reg.geoCountry, reg.geoLoaded, h)
 	}
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a

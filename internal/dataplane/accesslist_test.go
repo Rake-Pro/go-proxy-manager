@@ -114,6 +114,22 @@ func TestAccessListEmptyIsOpen(t *testing.T) {
 	}
 }
 
+// A list with no rules but an explicit defaultAction: deny is a deliberate
+// "deny all" (lock the host down, add allow rules later); it must deny rather
+// than being treated as an empty, unrestricted list.
+func TestAccessListEmptyDefaultDenyIsClosed(t *testing.T) {
+	al := model.AccessList{
+		ObjectMeta:    model.ObjectMeta{Name: "locked"},
+		DefaultAction: model.ActionDeny,
+	}
+	h := accessListHandler(compileAccessList(al), ipFrom("8.8.8.8"), nil, nil, okHandler())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("no-rule list with defaultAction:deny must deny, got %d", rec.Code)
+	}
+}
+
 // geoLookupFrom builds a fake geo resolver for tests: it maps an IP string to
 // a country code; any IP not present is reported unknown (not found), like a
 // private IP or one absent from a real database.
@@ -193,6 +209,54 @@ func TestAccessListGeoCountryAllow(t *testing.T) {
 				t.Fatalf("ip %s: got %d want %d", c.ip, rec.Code, c.want)
 			}
 		})
+	}
+}
+
+// TestAccessListGeoWhitelistUnknownDefaultsClosed proves the M4 fix: in
+// whitelist (countryAllow) mode with onUnknown unset, an IP the database cannot
+// place in a country must be DENIED - otherwise any address absent from the
+// operator's GeoIP DB slips past a "these countries only" gate.
+func TestAccessListGeoWhitelistUnknownDefaultsClosed(t *testing.T) {
+	al := model.AccessList{
+		ObjectMeta:    model.ObjectMeta{Name: "us-only-default"},
+		DefaultAction: model.ActionDeny,
+		Geo:           &model.AccessListGeo{CountryAllow: []string{"US"}}, // no onUnknown
+	}
+	geo := geoLookupFrom(map[string]string{"1.1.1.1": "US"})
+	cases := []struct {
+		ip   string
+		want int
+	}{
+		{"1.1.1.1", http.StatusOK},        // allow-listed country
+		{"9.9.9.9", http.StatusForbidden}, // absent from DB: fail closed by default
+	}
+	for _, c := range cases {
+		t.Run(c.ip, func(t *testing.T) {
+			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, okHandler())
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+			if rec.Code != c.want {
+				t.Fatalf("ip %s: got %d want %d", c.ip, rec.Code, c.want)
+			}
+		})
+	}
+}
+
+// Deny-list (countryDeny) mode with onUnknown unset keeps the historical
+// allow-on-unknown behavior: it only ever narrows a default-allow posture, so a
+// missing-from-DB IP is not the thing it is trying to block.
+func TestAccessListGeoDenyListUnknownDefaultsOpen(t *testing.T) {
+	al := model.AccessList{
+		ObjectMeta:    model.ObjectMeta{Name: "not-cn-default"},
+		DefaultAction: model.ActionAllow,
+		Geo:           &model.AccessListGeo{CountryDeny: []string{"CN"}}, // no onUnknown
+	}
+	geo := geoLookupFrom(map[string]string{"1.2.3.4": "CN"})
+	h := accessListHandler(compileAccessList(al), ipFrom("9.9.9.9"), geo, geoLoadedTrue, okHandler())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deny-list unknown IP with onUnknown unset should be allowed, got %d", rec.Code)
 	}
 }
 

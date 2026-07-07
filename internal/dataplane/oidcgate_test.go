@@ -213,3 +213,50 @@ func TestDataOIDCEndToEnd(t *testing.T) {
 		t.Fatalf("callback without state cookie: got %d, want 400", rec4.Code)
 	}
 }
+
+// TestDataOIDCSessionBoundToHost proves the M2 fix: the process-wide HMAC key
+// means a session cookie minted for one gated host verifies on another, so the
+// gate must additionally reject a cookie whose signed Host is not its own -
+// otherwise a copied cookie carrying host A's groups would be re-evaluated
+// against host B's role mapping.
+func TestDataOIDCSessionBoundToHost(t *testing.T) {
+	idpSrv := newMockIdP(t)
+	newGate := func(host string) http.Handler {
+		g, err := compileDataOIDC(model.IdentityProvider{
+			ObjectMeta: model.ObjectMeta{Name: "idp"},
+			Type:       model.IdPTypeOIDC,
+			OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client"},
+		}, nil, host)
+		if err != nil {
+			t.Fatalf("compile %s: %v", host, err)
+		}
+		return g.handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("upstream"))
+		}))
+	}
+
+	// A valid session cookie bound to host "app".
+	payload, _ := json.Marshal(oidcSession{Sub: "u", Host: "app", Exp: time.Now().Add(time.Hour).Unix()})
+	appCookie := &http.Cookie{Name: oidcSessionCookie, Value: signToken(payload)}
+
+	// Its own host admits it.
+	recSame := httptest.NewRecorder()
+	rSame := httptest.NewRequest("GET", "https://app.example.com/x", nil)
+	rSame.AddCookie(appCookie)
+	newGate("app").ServeHTTP(recSame, rSame)
+	if recSame.Code != http.StatusOK || recSame.Body.String() != "upstream" {
+		t.Fatalf("cookie must be honored by its own host: got %d %q", recSame.Code, recSame.Body.String())
+	}
+
+	// A different host must not honor the replayed cookie; it starts a fresh login.
+	recCross := httptest.NewRecorder()
+	rCross := httptest.NewRequest("GET", "https://other.example.com/x", nil)
+	rCross.AddCookie(appCookie)
+	newGate("other").ServeHTTP(recCross, rCross)
+	if recCross.Code == http.StatusOK {
+		t.Fatalf("cookie bound to host \"app\" must not be honored by host \"other\"")
+	}
+	if recCross.Code != http.StatusFound {
+		t.Fatalf("cross-host replay should trigger a fresh login redirect, got %d", recCross.Code)
+	}
+}
