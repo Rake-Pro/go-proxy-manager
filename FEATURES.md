@@ -242,9 +242,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - Model **hosts, certs, identity providers, access rules, middleware** as
   first-class typed config objects with a stable schema + versioned migrations
   from day one - so P1-P3 add new types/fields, never a rewrite.
-- A **composable middleware chain** (auth -> access-list -> headers -> rate-limit
-  -> WAF hook -> proxy) so new behaviors slot in as ordered steps - never the
-  textual-collision bug that broke our forward-auth `location /`.
+- A **composable middleware chain** (rate-limit -> access-list -> auth -> guard
+  -> headers -> WAF hook -> proxy) so new behaviors slot in as ordered steps -
+  never the textual-collision bug that broke our forward-auth `location /`.
 - **Pluggable interfaces**: ACME/DNS provider, identity provider
   (OIDC / forward-auth / SAML / LDAP), data store - adding one is implementing an
   interface, not touching core.

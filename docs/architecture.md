@@ -91,10 +91,12 @@ own address are rewritten to the public scheme/host.
 
 ## Trust model
 
-- **Peer-rooted trust.** Access-control and identity decisions use the connection
-  peer IP (`RemoteAddr`), never a forwarded header — unless that peer is an
-  explicitly configured trusted proxy, in which case `X-Forwarded-For` is honored
-  right-to-left.
+- **Peer-rooted, per-host trust.** Access-control and identity decisions use the
+  connection peer IP (`RemoteAddr`), never a forwarded header — unless that peer is
+  a trusted proxy *for that host*, in which case `X-Forwarded-For` is honored
+  right-to-left. The trusted-proxy set is per-host (the forward-auth
+  `trustedProxies` of the IdPs the host references), not a global union across all
+  hosts, so a proxy trusted by one host cannot spoof another host's client IP.
 - **Identity-header stripping.** Headers that carry an asserted identity are
   stripped from any untrusted peer before the request reaches a backend, so a
   direct client cannot forge an identity. Forward-auth and auth-request handlers

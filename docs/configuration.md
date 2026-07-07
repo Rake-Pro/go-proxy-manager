@@ -344,7 +344,7 @@ roleMapping:
 > groups claim in the ID token.
 
 > **SSO session lifetime / offboarding.** For `type: oidc` hosts, gpm mints a
-> signed `gpm_sso` session cookie with a **1-hour absolute TTL** (not a sliding
+> signed `__Host-gpm_sso` session cookie with a **1-hour absolute TTL** (not a sliding
 > window — it is not extended by activity). On expiry the next request re-runs the
 > OIDC flow against the IdP, which is silent when the IdP session is still valid
 > and re-checks group membership. This bounds the offboarding window: a user
