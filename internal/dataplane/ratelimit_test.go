@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -87,6 +88,37 @@ func TestRateLimiterEvictsIdleAtCap(t *testing.T) {
 	l.allow("fresh")
 	if len(l.buckets) > maxRateLimitBuckets {
 		t.Fatalf("bucket map exceeded cap: %d", len(l.buckets))
+	}
+}
+
+func TestRateLimiterEvictsLRUNotRecentlyUsed(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 100})
+	l.now = func() time.Time { return now }
+
+	// Fill to capacity; insertion order makes seed-0 the LRU, seed-(N-1) the MRU.
+	keys := make([]string, maxRateLimitBuckets)
+	for i := range keys {
+		keys[i] = "seed-" + strconv.Itoa(i)
+		l.allow(keys[i])
+	}
+	// Touch the current LRU so it becomes most-recently-used; seed-1 is now the LRU.
+	l.allow(keys[0])
+
+	// A new key evicts exactly one bucket - the LRU (seed-1), not the just-touched
+	// seed-0 nor the new key.
+	l.allow("fresh")
+	if _, ok := l.buckets[keys[1]]; ok {
+		t.Fatal("the least-recently-used bucket must be evicted")
+	}
+	if _, ok := l.buckets[keys[0]]; !ok {
+		t.Fatal("a recently-used bucket must survive eviction")
+	}
+	if _, ok := l.buckets["fresh"]; !ok {
+		t.Fatal("the newly inserted bucket must be present")
+	}
+	if len(l.buckets) != maxRateLimitBuckets {
+		t.Fatalf("map must stay at cap, got %d", len(l.buckets))
 	}
 }
 

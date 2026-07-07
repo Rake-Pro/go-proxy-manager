@@ -190,9 +190,16 @@ func TestIdentityTrustNotSharedAcrossHosts(t *testing.T) {
 }
 
 func TestAccessListTrustedProxyXFF(t *testing.T) {
-	// A host with a forward-auth IdP (trusted 10/8) and an access list allowing
-	// only 9.9.9.9. A request from the trusted proxy carrying XFF=9.9.9.9 is
-	// allowed; the same allow-list rejects a forged XFF from an untrusted peer.
+	// Client-IP resolution for an access list honours X-Forwarded-For only from a
+	// proxy THIS host trusts, and that trust is per-host: the trusted-proxy set is
+	// the forward-auth TrustedProxies of the IdPs the host references, not a global
+	// union across every IdP (GPM-L4).
+	//
+	// Two hosts share the allow-only-9.9.9.9 access list. Host "app-auth" references
+	// a forward-auth IdP trusting 10/8, so 10/8 is its trusted proxy; host "app-open"
+	// references no IdP, so it trusts no proxy. The access list runs ahead of auth
+	// (GPM-L1), so its verdict is visible as 403 (denied) vs a later 401 (allowed by
+	// the list, then rejected by auth for lack of identity).
 	up, closeFn := backendUpstream(t, okHandler())
 	defer closeFn()
 
@@ -202,27 +209,41 @@ func TestAccessListTrustedProxyXFF(t *testing.T) {
 			Type:        model.IdPTypeForwardAuth,
 			ForwardAuth: &model.ForwardAuthSpec{TrustedProxies: []string{"10.0.0.0/8"}, UserHeader: "X-User"},
 		}},
+		Middlewares: []model.Middleware{{
+			ObjectMeta: model.ObjectMeta{Name: "sso"},
+			Type:       model.MWTypeAuth,
+			Auth:       &model.AuthMiddleware{IdentityProvider: "authentik", Mode: model.AuthModeForwardAuth},
+		}},
 		AccessLists: []model.AccessList{{
 			ObjectMeta:    model.ObjectMeta{Name: "only-bob"},
 			DefaultAction: model.ActionDeny,
 			Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "9.9.9.9/32"}},
 		}},
-		ProxyHosts: []model.ProxyHost{{
-			ObjectMeta:  model.ObjectMeta{Name: "app"},
-			Domains:     []string{"app2.example.com"},
-			Upstream:    up,
-			AccessLists: []string{"only-bob"},
-		}},
+		ProxyHosts: []model.ProxyHost{
+			{
+				ObjectMeta:  model.ObjectMeta{Name: "app-auth"},
+				Domains:     []string{"auth.example.com"},
+				Upstream:    up,
+				Middlewares: []string{"sso"},
+				AccessLists: []string{"only-bob"},
+			},
+			{
+				ObjectMeta:  model.ObjectMeta{Name: "app-open"},
+				Domains:     []string{"open.example.com"},
+				Upstream:    up,
+				AccessLists: []string{"only-bob"},
+			},
+		},
 	}
 	rt, err := buildRouter(cfg, "")
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
 
-	serve := func(remote, xff string) int {
+	serve := func(host, remote, xff string) int {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "https://app2.example.com/", nil)
-		req.Host = "app2.example.com"
+		req := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		req.Host = host
 		req.RemoteAddr = remote
 		if xff != "" {
 			req.Header.Set("X-Forwarded-For", xff)
@@ -231,10 +252,18 @@ func TestAccessListTrustedProxyXFF(t *testing.T) {
 		return rec.Code
 	}
 
-	if code := serve("10.0.0.1:1", "9.9.9.9"); code != http.StatusOK {
-		t.Fatalf("trusted proxy forwarding allowed client should pass, got %d", code)
+	// app-auth trusts 10/8: XFF=9.9.9.9 from that proxy resolves to the allowed
+	// client, passing the access list (then 401 at auth for lack of identity).
+	if code := serve("auth.example.com", "10.0.0.1:1", "9.9.9.9"); code != http.StatusUnauthorized {
+		t.Fatalf("trusted-proxy XFF should pass the access list (then 401 at auth), got %d", code)
 	}
-	if code := serve("203.0.113.1:1", "9.9.9.9"); code != http.StatusForbidden {
+	// Forged XFF from an untrusted peer is ignored; the peer itself is denied.
+	if code := serve("auth.example.com", "203.0.113.1:1", "9.9.9.9"); code != http.StatusForbidden {
 		t.Fatalf("forged XFF from untrusted peer must be denied, got %d", code)
+	}
+	// app-open trusts no proxy: the SAME 10.0.0.1+XFF=9.9.9.9 is no longer honoured
+	// (no global union), so the peer 10.0.0.1 is denied by the access list.
+	if code := serve("open.example.com", "10.0.0.1:1", "9.9.9.9"); code != http.StatusForbidden {
+		t.Fatalf("host with no trusted proxy must ignore XFF and deny the peer, got %d", code)
 	}
 }

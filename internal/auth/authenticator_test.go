@@ -289,14 +289,20 @@ func TestRateGateMapFullSkipsRecord(t *testing.T) {
 	if len(g.entries) != 4 {
 		t.Fatalf("setup: want 4 entries, got %d", len(g.entries))
 	}
-	// A new key must be skipped (fail-open on the record path) rather than grow
-	// the bounded map past capacity.
+	// A new key must be skipped (not recorded) rather than grow the bounded map
+	// past capacity.
 	g.record("new")
 	if _, ok := g.entries["new"]; ok {
 		t.Fatal("new key must be skipped when the map is full of live entries")
 	}
 	if len(g.entries) != 4 {
 		t.Fatalf("map must stay at capacity, got %d", len(g.entries))
+	}
+	// That skip must NOT be a bypass: atLimit fails closed for an untracked key
+	// while the map is saturated, so a distinct-key flood becomes a lockout, not an
+	// unthrottled brute-force (GPM-L2).
+	if !g.atLimit("new", false) {
+		t.Fatal("untracked key must be reported at-limit while the map is saturated")
 	}
 	// An EXISTING key at capacity is still counted (no new allocation needed).
 	g.record("a")

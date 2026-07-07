@@ -46,6 +46,7 @@ container deployments).
 | `-local-admin-user` | `GPM_LOCAL_ADMIN_USER` | (none) | Break-glass admin username |
 | `-cookie-secure` | `GPM_COOKIE_SECURE` | `true` | Session-cookie `Secure` flag; set `0` only for local/LAN plain-HTTP admin access. When Secure, the session cookie also gets the `__Host-` prefix |
 | (env only) | `GPM_SECRET_FILE_ROOTS` | `/run/secrets` | Allowlisted root dir(s) for `${FILE:...}` secret resolution; OS-path-list separated |
+| (env only) | `GPM_SECRET_ENV_PREFIXES` | (none) | Comma-separated allowlist of `${ENV:...}` name prefixes. Unset: any non-reserved var resolves. Set: only names with a listed prefix resolve. `GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH` are never resolvable regardless |
 | (env only) | `GPM_SSO_SIGNING_KEY` | (auto-persisted) | HMAC key signing data-plane per-host OIDC session cookies; auto-generated on first use and saved to `<cert-dir>/sso_signing.key` (0600) so sessions survive restarts; set explicitly to supply your own key or share one across instances |
 | `-log-level` | `GPM_LOG_LEVEL` | `info` | trace/debug/info/warn/error |
 | `-log-console` | `GPM_LOG_CONSOLE` | `false` | Human-readable console logs |

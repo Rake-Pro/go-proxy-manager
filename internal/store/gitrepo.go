@@ -174,9 +174,17 @@ func (g *execGit) Head(ctx context.Context) (string, error) {
 
 func (g *execGit) RestoreTree(ctx context.Context, treeish string) error {
 	// read-tree --reset -u sets the index AND working tree to match treeish,
-	// removing files that are not in it - the plumbing equivalent of a hard reset
-	// to that tree, scoped to this repo. No commit is made.
+	// removing tracked files that are not in it. No commit is made.
 	if _, err := g.run(ctx, nil, "read-tree", "--reset", "-u", treeish); err != nil {
+		return err
+	}
+	// read-tree leaves UNTRACKED files in place. A refused Restore writes the
+	// uploaded archive's files to the working tree before staging (see
+	// replaceConfigFiles); without this clean they would survive the rollback and
+	// be picked up by the next disk load - e.g. a plaintext secret the restore was
+	// refused for. clean -fd purges them so the working tree exactly matches
+	// treeish (the hard-reset semantics this method promises).
+	if _, err := g.run(ctx, nil, "clean", "-fd"); err != nil {
 		return err
 	}
 	return nil

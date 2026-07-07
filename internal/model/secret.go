@@ -138,6 +138,54 @@ func allowedSecretFile(ref string) error {
 	return fmt.Errorf("secret file %q is outside the allowed secret roots (set GPM_SECRET_FILE_ROOTS to permit it)", ref)
 }
 
+// reservedSecretEnv are gpm's own sensitive process env vars. A config
+// ${ENV:...} reference may never resolve them: the configuration never
+// legitimately needs gpm's admin password hash or SSO signing key, and an
+// admin-authored value must not be able to exfiltrate them (e.g. as a webhook
+// secret posted to an attacker-chosen URL). Resolving these always fails.
+var reservedSecretEnv = map[string]bool{
+	"GPM_LOCAL_ADMIN_PASSWORD_HASH": true,
+	"GPM_SSO_SIGNING_KEY":           true,
+}
+
+// secretEnvPrefixes returns the operator-configured strict allowlist of ${ENV:}
+// name prefixes (GPM_SECRET_ENV_PREFIXES, comma-separated). Empty (the default)
+// means no prefix restriction beyond the reserved denylist, preserving configs
+// that reference arbitrarily named env vars.
+func secretEnvPrefixes() []string {
+	v := strings.TrimSpace(os.Getenv("GPM_SECRET_ENV_PREFIXES"))
+	if v == "" {
+		return nil
+	}
+	var ps []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			ps = append(ps, p)
+		}
+	}
+	return ps
+}
+
+// allowedSecretEnv gates ${ENV:...} resolution, mirroring allowedSecretFile.
+// gpm's reserved secrets are always refused. When GPM_SECRET_ENV_PREFIXES is set,
+// resolution is further confined to names carrying one of those prefixes (strict
+// allowlist mode); unset, any non-reserved name resolves.
+func allowedSecretEnv(ref string) error {
+	if reservedSecretEnv[ref] {
+		return fmt.Errorf("secret env var %q is reserved by gpm and cannot be resolved via ${ENV:...}", ref)
+	}
+	prefixes := secretEnvPrefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(ref, p) {
+			return nil
+		}
+	}
+	return fmt.Errorf("secret env var %q is outside the allowed ${ENV:...} prefixes (set GPM_SECRET_ENV_PREFIXES to permit it)", ref)
+}
+
 // Resolve expands any ${ENV:...} / ${FILE:...} placeholders to their real values.
 // Multiple placeholders within one value are supported. A missing env var or
 // unreadable file is an error so misconfiguration fails loud, not silent.
@@ -149,6 +197,10 @@ func (s Secret) Resolve() (string, error) {
 		kind, ref := m[1], strings.TrimSpace(m[2])
 		switch kind {
 		case "ENV":
+			if err := allowedSecretEnv(ref); err != nil {
+				resErr = err
+				return match
+			}
 			v, ok := os.LookupEnv(ref)
 			if !ok {
 				resErr = fmt.Errorf("secret env var %q is not set", ref)

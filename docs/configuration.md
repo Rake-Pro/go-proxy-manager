@@ -48,9 +48,11 @@ ${FILE:/run/secrets/token} # resolved from a file (e.g. a Docker secret), trimme
 ```
 
 Placeholders resolve lazily, at the moment the secret is used. Committing a
-literal secret is refused with `refusing to commit literal secret(s): ...`. In
-API responses, literal secrets are redacted to `***`; placeholders are returned
-verbatim.
+literal secret is refused with `refusing to commit literal secret(s): ...` — on
+`Save`, on `SaveSettings`, **and on `Restore`** (an uploaded backup archive cannot
+smuggle a plaintext secret onto disk or into git history; a refused restore rolls
+the working tree back and commits nothing). In API responses, literal secrets are
+redacted to `***`; placeholders are returned verbatim.
 
 `${FILE:...}` reads are confined to an allowlisted root, defaulting to
 `/run/secrets`. A path that is relative, or outside the allowed root (including
@@ -58,6 +60,15 @@ via `..`), is refused — so a config write cannot turn a file-backed secret int
 an arbitrary host-file read. Override the allowed roots with the
 `GPM_SECRET_FILE_ROOTS` environment variable (a list of absolute directories,
 separated by the OS path-list separator, e.g. `:` on Linux).
+
+`${ENV:...}` resolution has two guards. gpm's own sensitive process env vars —
+`GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH` — are **never**
+resolvable via a `${ENV:...}` placeholder, so an admin-authored config value
+cannot exfiltrate them (e.g. as a webhook secret posted to an attacker URL). By
+default any other env var name resolves. To lock this down further, set
+`GPM_SECRET_ENV_PREFIXES` to a comma-separated list of allowed name prefixes
+(e.g. `GPM_SECRET_,APP_`); then only `${ENV:...}` names carrying one of those
+prefixes resolve and everything else is refused.
 
 ---
 
@@ -292,6 +303,15 @@ config:
 `userHeader` (req), `emailHeader`, `nameHeader`, `groupsHeader`,
 `groupsDelimiter` (default `,`), `amrHeader`.
 
+> `trustedProxies` is also the per-host source of truth for **client-IP
+> resolution**. `X-Forwarded-For` is honoured (for access-list, rate-limit, geo,
+> and auth-request `allowFrom`) only for proxies a host actually trusts — the
+> `trustedProxies` of the forward-auth IdPs *that host* references — not a global
+> union across every IdP. A host with no forward-auth IdP in front therefore trusts
+> no `XFF` and keys IP controls off the connection peer. If you IP-filter a host
+> that sits behind a real proxy, give that host a forward-auth IdP declaring the
+> proxy CIDR so its forwarded client IP is trusted.
+
 **AuthRequestSpec**: `outpostURL` (req), `pathPrefix` (default
 `/outpost.goauthentik.io`), `authPath` (default `<pathPrefix>/auth/nginx`),
 `copyHeaders` (default the Authentik `X-authentik-*` set).
@@ -315,6 +335,16 @@ roleMapping:
 > The OIDC client reads claims from the **ID token**, so if your provider only
 > emits groups via the userinfo endpoint you must configure it to include the
 > groups claim in the ID token.
+
+> **SSO session lifetime / offboarding.** For `type: oidc` hosts, gpm mints a
+> signed `gpm_sso` session cookie with a **1-hour absolute TTL** (not a sliding
+> window — it is not extended by activity). On expiry the next request re-runs the
+> OIDC flow against the IdP, which is silent when the IdP session is still valid
+> and re-checks group membership. This bounds the offboarding window: a user
+> removed from a group or disabled at the IdP loses data-plane access within an
+> hour, without gpm holding server-side session state. There is no per-request
+> revocation — if you need instant cutoff, revoke at the IdP and, where it matters,
+> restart is not required but access ends at the next hourly re-auth.
 
 ---
 

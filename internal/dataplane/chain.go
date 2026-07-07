@@ -186,6 +186,16 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Handler {
 	h := proxy
 
+	// Per-host client-IP resolver for the IP-based controls (access-list, guard,
+	// rate-limit, auth-request allow-from): X-Forwarded-For is honoured only from
+	// the proxies THIS host actually trusts (the forward-auth TrustedProxies of the
+	// IdPs it references), mirroring the host-scoped identity-strip model - not the
+	// global union of every IdP's proxies. A host with no trusted proxy in front
+	// falls back to the connection peer, so a proxy trusted by some other host can
+	// no longer spoof this host's client IP via XFF (see GPM-L4).
+	_, hostTrusted := hostIdentityTrust(host, reg)
+	clientIP := clientIPResolver(hostTrusted)
+
 	// Innermost: header mutations (closest to the upstream).
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
@@ -201,7 +211,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeGuard || mw.Guard == nil {
 			continue
 		}
-		h = guardHandler(compileGuard(*mw.Guard), reg.clientIP, h)
+		h = guardHandler(compileGuard(*mw.Guard), clientIP, h)
 	}
 
 	// Authentication: forward-auth / auth-request / per-host OIDC gating.
@@ -210,7 +220,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authMiddlewareHandler(mw, reg, host.Name, h)
+		h = authMiddlewareHandler(mw, reg, host.Name, clientIP, h)
 	}
 
 	// Access lists (host-level), wrapped outside auth so an IP the list would
@@ -226,7 +236,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		// here: accessListHandler/ipAllowed consult it live, at request time, so
 		// a database that (un)loads after this chain is built takes effect
 		// without a rebuild (see accessList.ipAllowed).
-		h = accessListHandler(cal, reg.clientIP, reg.geoCountry, reg.geoLoaded, h)
+		h = accessListHandler(cal, clientIP, reg.geoCountry, reg.geoLoaded, h)
 	}
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
@@ -237,7 +247,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeRateLimit || mw.RateLimit == nil {
 			continue
 		}
-		h = rateLimitHandler(*mw.RateLimit, reg.clientIP, h)
+		h = rateLimitHandler(*mw.RateLimit, clientIP, h)
 	}
 
 	return h

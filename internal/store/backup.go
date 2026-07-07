@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
 // maxRestoreBytes bounds an uploaded restore archive (uncompressed, per entry and
@@ -137,7 +139,7 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 		}
 		return "", err
 	}
-	restored, _, err := s.loadLocked()
+	restored, restoredSettings, err := s.loadLocked()
 	if err != nil {
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
@@ -151,6 +153,16 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", fmt.Errorf("restore refused: %w", err)
+	}
+	// Mirror the Save/SaveSettings no-literal-secrets guard at the restore
+	// boundary: an uploaded archive must not smuggle a plaintext secret onto disk
+	// and into permanent git history, bypassing the ${ENV:}/${FILE:} contract.
+	lits := append(model.LiteralSecrets(restored), model.LiteralSecrets(restoredSettings)...)
+	if len(lits) > 0 {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("restore refused, archive carries literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
 	return s.git.CommitAll(ctx, "Restore configuration from archive", author)
 }

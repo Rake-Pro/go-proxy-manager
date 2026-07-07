@@ -26,6 +26,49 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   redirect/401 that discloses the auth flow. IP/geo access policy is enforced as an
   edge control, before identity, as intended (GPM-L1).
 
+- **Client-IP resolution for IP-based controls is now per-host, not a global
+  union.** `X-Forwarded-For` is honoured (for access-list, rate-limit, geo, and
+  auth-request `allowFrom`) only for proxies the target host actually trusts — the
+  `trustedProxies` of the forward-auth IdPs that host references — mirroring the
+  host-scoped identity-header trust. Previously the trusted-proxy set was the union
+  across every IdP, so a proxy trusted by one host could have its `XFF` honoured
+  when resolving another host's client IP. A host with no forward-auth IdP in front
+  now keys IP controls off the connection peer (GPM-L4).
+
+- **Data-plane SSO sessions use a 1-hour absolute TTL (was 12h).** The `gpm_sso`
+  cookie is no longer valid for 12h with no revocation path; it now expires 1h after
+  login and is not extended by activity. On expiry the gate re-runs the OIDC flow
+  (silent while the IdP session is valid) and re-checks group membership, bounding
+  the offboarding window for a deprivileged or disabled user to ~1h without
+  server-side session state (GPM-L3).
+
+- **Login/OIDC-begin rate gate fails closed under a distinct-key flood.** When the
+  gate's per-IP map is saturated with live entries, a new key could previously go
+  unrecorded and thus never reach its limit (a brute-force bypass). The read path
+  now treats an untracked key as at-limit while the map is saturated, so a flood
+  degrades login into a lockout rather than an unthrottled guess (GPM-L2).
+
+- **`Restore` enforces the no-literal-secrets guard.** An uploaded backup archive is
+  now checked for literal (non-placeholder) secrets after load, matching `Save`/
+  `SaveSettings`; a violation rolls the working tree back and commits nothing, so a
+  crafted archive cannot land a plaintext secret on disk or in git history. The
+  rollback itself was hardened: `RestoreTree` now also removes untracked files
+  (`git clean -fd`), closing a gap where a refused restore's newly-written files
+  survived on disk and would be picked up by the next config load (GPM-L6).
+
+- **`${ENV:...}` cannot resolve gpm's own reserved secrets, and can be prefix-gated.**
+  `GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH` are never resolvable via
+  an `${ENV:...}` placeholder, so an admin-authored value cannot exfiltrate the SSO
+  signing key or admin password hash (e.g. via a webhook secret). Operators can
+  further restrict resolution to an allowlist of name prefixes with
+  `GPM_SECRET_ENV_PREFIXES`, mirroring `${FILE:...}` confinement (GPM-L7).
+
+- **Rate-limiter bucket eviction is now O(1) (LRU) instead of an O(n) map scan.**
+  At the 16 384-bucket cap, a rotating-source-IP flood forced a full-map scan under
+  the limiter mutex per new key, serializing rate-limit checks for the host (a DoS
+  amplifier). Buckets are held in an LRU list and the least-recently-used one is
+  evicted in constant time; memory stays bounded as before (GPM-L5).
+
 - **Access lists reject `\` and `;` in the request path.** Path matching for
   path-scoped locations and guard triggers is exact after `path.Clean`, which does
   not treat a backslash or a `;` matrix parameter as path structure. A request like

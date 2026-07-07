@@ -73,12 +73,18 @@ func newRateGate(window time.Duration, limit, maxKeys int) *rateGate {
 // atLimit reports whether key has reached its limit within the current window.
 // When evictExpired is set, an entry found past its window is deleted on the way
 // out (opportunistic read-path cleanup); otherwise the entry is left untouched.
+//
+// Fail-closed under saturation: when the map is full of live entries, record()
+// can no longer count new keys, so an untracked key is treated as at-limit rather
+// than admitted unthrottled. This turns a distinct-key flood (an attacker holding
+// maxKeys entries live) into a login lockout instead of a brute-force bypass -
+// the safe failure mode for a credential gate.
 func (g *rateGate) atLimit(key string, evictExpired bool) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.entries[key]
 	if e == nil {
-		return false
+		return len(g.entries) >= g.maxKeys
 	}
 	if time.Now().After(e.resetAt) {
 		if evictExpired {
@@ -92,7 +98,8 @@ func (g *rateGate) atLimit(key string, evictExpired bool) bool {
 // record counts one event against key over a fresh window. It opportunistically
 // evicts expired entries so the map can't grow without bound; if the map is still
 // at capacity when a new key would be added, it skips recording rather than
-// allocate (fail-open on the record path under a distinct-key flood).
+// allocate. That skip is not a bypass: atLimit treats an untracked key as
+// at-limit while the map is saturated, so the gate fails closed (see atLimit).
 func (g *rateGate) record(key string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

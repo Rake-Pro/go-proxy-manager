@@ -16,7 +16,7 @@ import (
 //   - oidc: gpm acts as the OIDC relying party for the host - unauthenticated
 //     requests are redirected to the IdP and a signed SSO session cookie admits
 //     subsequent ones (see oidcgate.go).
-func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, next http.Handler) http.Handler {
+func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, clientIP func(*http.Request) net.IP, next http.Handler) http.Handler {
 	idpName := mw.Auth.IdentityProvider
 	idp, ok := reg.idps[idpName]
 	if !ok {
@@ -49,7 +49,7 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 				allowNets = append(allowNets, n)
 			}
 		}
-		return arp.handler(reg.clientIP, allowNets, hostName, next)
+		return arp.handler(clientIP, allowNets, hostName, next)
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {
 			return failClosed(hostName, "oidc mode requires an oidc identity provider")

@@ -36,8 +36,15 @@ const (
 	oidcCallbackPath  = "/__gpm/oidc/callback"
 	oidcSessionCookie = "gpm_sso"
 	oidcStateCookie   = "gpm_sso_state"
-	oidcSessionTTL    = 12 * time.Hour
-	oidcStateTTL      = 10 * time.Minute
+	// oidcSessionTTL is an ABSOLUTE cap, not a sliding window: the cookie is not
+	// re-issued on activity, so it expires 1h after login regardless of use. On
+	// expiry the gate falls through to beginLogin, which round-trips the IdP again
+	// (silent when the IdP session is still alive) and re-checks group membership
+	// on the callback. That bounds the offboarding window - a deprivileged or
+	// disabled user loses data-plane access within 1h - without server-side
+	// session state. See the SSO session note in docs/configuration.md (GPM-L3).
+	oidcSessionTTL = 1 * time.Hour
+	oidcStateTTL   = 10 * time.Minute
 )
 
 // ssoKeyFile is the name of the persisted SSO signing key under the state dir.

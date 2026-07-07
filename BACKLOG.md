@@ -87,7 +87,8 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 ## Code hygiene
 
 - [x] Fix the stale middleware-order comment in `internal/dataplane/chain.go`
-  (order is rate-limit → auth → guard → access-list → headers).
+  (order is rate-limit → access-list → auth → guard → headers; access-list moved
+  ahead of auth per GPM-L1).
 - [x] Remove or keep-in-sync the unused `router.tlsConfig()` (the server builds an
   equivalent `tls.Config` separately).
 - [x] TLS 1.3 floor: implemented as an opt-in **per-host** `tls.minTLSVersion`
