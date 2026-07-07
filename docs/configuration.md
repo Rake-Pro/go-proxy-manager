@@ -199,6 +199,13 @@ or both) and forwards to the backend; listeners are reconciled on every reload
 (ports added/removed, backend swapped, with no listener restart for unchanged
 ports). UDP uses per-client sessions with an idle timeout.
 
+> **No access control at L4.** Stream hosts blind-forward: access lists, geo rules,
+> rate limits, and identity/SSO are HTTP-layer controls and do **not** apply here.
+> The only built-in bound is `maxUDPSessions` (4096), which caps spoofed-source UDP
+> memory. Expose a stream port only on a trusted network, or put IP filtering in
+> front of it at the firewall / host level. Do not publish a stream port to the
+> public internet expecting gpm to gate it.
+
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `listenPort` | int | yes | 1–65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port — a bind failure is logged and that one port is skipped, never fatal. |

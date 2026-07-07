@@ -101,6 +101,17 @@ func TestClientAuthValidation(t *testing.T) {
 			wantErr: "caRef is required",
 		},
 		{
+			name: "disabled clientCA ref rejected",
+			cfg: Config{
+				ClientCAs: []ClientCA{{ObjectMeta: ObjectMeta{Name: "corp", Disabled: true}, CAPEM: "x"}},
+				ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
+					h.TLS.ForceSSL = true
+					h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "require"}
+				})},
+			},
+			wantErr: `references clientCA "corp", which is disabled`,
+		},
+		{
 			name: "bad mode rejected",
 			cfg: Config{
 				ClientCAs: []ClientCA{clientCA},

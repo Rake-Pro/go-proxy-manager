@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +193,14 @@ func TestDataOIDCEndToEnd(t *testing.T) {
 	sessCookie := cookieByName(rec2.Result(), oidcSessionCookie)
 	if sessCookie == nil {
 		t.Fatal("callback must set the SSO session cookie")
+	}
+	// GPM-I2: the cookie carries the __Host- prefix and satisfies its invariants
+	// (Secure, Path=/, no Domain), so a sibling subdomain cannot shadow it.
+	if !strings.HasPrefix(sessCookie.Name, "__Host-") {
+		t.Fatalf("SSO cookie must use the __Host- prefix, got %q", sessCookie.Name)
+	}
+	if !sessCookie.Secure || sessCookie.Path != "/" || sessCookie.Domain != "" {
+		t.Fatalf("__Host- cookie invariants violated: secure=%v path=%q domain=%q", sessCookie.Secure, sessCookie.Path, sessCookie.Domain)
 	}
 
 	// 3. A request bearing the session cookie is admitted and gets identity headers.

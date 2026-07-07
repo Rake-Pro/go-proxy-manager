@@ -247,20 +247,36 @@ func TestSettingsValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "valid webhook is allowed",
-			s:    Settings{Webhooks: []WebhookConfig{{Name: "ci", URL: "https://ci.example.com/hook"}}},
+			name: "no admin login method is rejected",
+			s: Settings{
+				AdminAuth: AdminAuthSettings{LocalLoginEnabled: false},
+			},
+			wantErr: "no admin login method",
 		},
 		{
-			name:    "webhook with a non-absolute url is rejected",
-			s:       Settings{Webhooks: []WebhookConfig{{Name: "ci", URL: "/relative"}}},
+			name: "valid webhook is allowed",
+			s: Settings{
+				AdminAuth: AdminAuthSettings{LocalLoginEnabled: true},
+				Webhooks:  []WebhookConfig{{Name: "ci", URL: "https://ci.example.com/hook"}},
+			},
+		},
+		{
+			name: "webhook with a non-absolute url is rejected",
+			s: Settings{
+				AdminAuth: AdminAuthSettings{LocalLoginEnabled: true},
+				Webhooks:  []WebhookConfig{{Name: "ci", URL: "/relative"}},
+			},
 			wantErr: "absolute http(s) URL",
 		},
 		{
 			name: "duplicate webhook name is rejected",
-			s: Settings{Webhooks: []WebhookConfig{
-				{Name: "ci", URL: "https://a.example.com"},
-				{Name: "ci", URL: "https://b.example.com"},
-			}},
+			s: Settings{
+				AdminAuth: AdminAuthSettings{LocalLoginEnabled: true},
+				Webhooks: []WebhookConfig{
+					{Name: "ci", URL: "https://a.example.com"},
+					{Name: "ci", URL: "https://b.example.com"},
+				},
+			},
 			wantErr: "duplicate webhook name",
 		},
 	}

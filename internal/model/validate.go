@@ -16,6 +16,7 @@ func (c Config) Validate() error {
 
 	certs := map[string]bool{}
 	clientCAs := map[string]bool{}
+	disabledClientCAs := map[string]bool{}
 	mws := map[string]bool{}
 	als := map[string]bool{}
 	idps := map[string]bool{}
@@ -43,6 +44,9 @@ func (c Config) Validate() error {
 			errs = append(errs, err)
 		}
 		register("clientCA", o.Name, clientCAs)
+		if o.Disabled {
+			disabledClientCAs[o.Name] = true
+		}
 	}
 	for _, o := range c.DNSProviders {
 		if err := o.Validate(); err != nil {
@@ -76,7 +80,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "proxy host", h.Name, "certificate", h.TLS.CertificateRef, certs)
-		checkClientAuthRef(&errs, "proxy host", h.Name, h.TLS, clientCAs)
+		checkClientAuthRef(&errs, "proxy host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 		for _, m := range h.Middlewares {
 			checkRef(&errs, "proxy host", h.Name, "middleware", m, mws)
 		}
@@ -98,7 +102,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "redirect host", h.Name, "certificate", h.TLS.CertificateRef, certs)
-		checkClientAuthRef(&errs, "redirect host", h.Name, h.TLS, clientCAs)
+		checkClientAuthRef(&errs, "redirect host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
 	for _, h := range c.DeadHosts {
 		if err := h.Validate(); err != nil {
@@ -106,7 +110,7 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "dead host", h.Name, "certificate", h.TLS.CertificateRef, certs)
-		checkClientAuthRef(&errs, "dead host", h.Name, h.TLS, clientCAs)
+		checkClientAuthRef(&errs, "dead host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
 	for _, h := range c.StreamHosts {
 		if err := h.Validate(); err != nil {
@@ -150,14 +154,20 @@ func (c Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// checkClientAuthRef verifies a host's mTLS trust anchor resolves to a known
-// ClientCA, so a host opted into client-cert verification can never compile
-// against a missing CA (which would fail closed, refusing every client).
-func checkClientAuthRef(errs *[]error, ownerKind, ownerName string, tlsSettings TLSSettings, set map[string]bool) {
+// checkClientAuthRef verifies a host's mTLS trust anchor resolves to a known,
+// ENABLED ClientCA. A missing CA fails closed (refusing every client); a disabled
+// CA is worse - it is excluded from the compiled CA pools, yielding a nil pool and
+// a hard TLS-config error that fails the entire router reload. Catching both at
+// validation turns that opaque ops footgun into a clear load-time rejection.
+func checkClientAuthRef(errs *[]error, ownerKind, ownerName string, tlsSettings TLSSettings, set, disabled map[string]bool) {
 	if tlsSettings.ClientAuth == nil {
 		return
 	}
-	checkRef(errs, ownerKind, ownerName, "clientCA", tlsSettings.ClientAuth.CARef, set)
+	ref := tlsSettings.ClientAuth.CARef
+	checkRef(errs, ownerKind, ownerName, "clientCA", ref, set)
+	if ref != "" && set[ref] && disabled[ref] {
+		*errs = append(*errs, fmt.Errorf("%s %q references clientCA %q, which is disabled (a disabled trust anchor would fail the TLS reload; enable it or remove the mTLS requirement)", ownerKind, ownerName, ref))
+	}
 }
 
 func checkRef(errs *[]error, ownerKind, ownerName, refKind, ref string, set map[string]bool) {

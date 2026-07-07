@@ -64,6 +64,13 @@ func (s Settings) Validate() error {
 	if s.AdminAuth.SSOOnly && len(s.AdminAuth.Providers) == 0 {
 		return fmt.Errorf("settings: ssoOnly requires at least one adminAuth.providers entry")
 	}
+	// Anti-lockout: at least one admin login method must remain. Without local
+	// login AND without any SSO provider there is no way into the panel; reject the
+	// commit instead of silently locking the operator out (recoverable only by a
+	// redeploy). ssoOnly+providers and localLoginEnabled each satisfy this.
+	if !s.AdminAuth.LocalLoginEnabled && len(s.AdminAuth.Providers) == 0 {
+		return fmt.Errorf("settings: no admin login method configured (enable adminAuth.localLoginEnabled or add adminAuth.providers)")
+	}
 	seen := map[string]struct{}{}
 	for i, w := range s.Webhooks {
 		if err := ValidateName(w.Name); err != nil {

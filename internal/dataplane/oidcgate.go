@@ -33,9 +33,14 @@ import (
 const (
 	// oidcCallbackPath is the reserved path gpm handles for the OIDC redirect.
 	// The IdP must list https://<host>/__gpm/oidc/callback as a redirect URI.
-	oidcCallbackPath  = "/__gpm/oidc/callback"
-	oidcSessionCookie = "gpm_sso"
-	oidcStateCookie   = "gpm_sso_state"
+	oidcCallbackPath = "/__gpm/oidc/callback"
+	// The __Host- prefix makes the browser enforce what these cookies already set
+	// themselves - Secure, host-locked (no Domain), Path=/ - so a sibling subdomain
+	// cannot plant a same-named Domain-scoped shadow cookie. The data plane is
+	// always HTTPS (setSignedCookie sets Secure unconditionally), so the prefix's
+	// Secure requirement always holds.
+	oidcSessionCookie = "__Host-gpm_sso"
+	oidcStateCookie   = "__Host-gpm_sso_state"
 	// oidcSessionTTL is an ABSOLUTE cap, not a sliding window: the cookie is not
 	// re-issued on activity, so it expires 1h after login regardless of use. On
 	// expiry the gate falls through to beginLogin, which round-trips the IdP again

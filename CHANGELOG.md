@@ -18,6 +18,22 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Data-plane SSO cookies use the `__Host-` prefix.** `gpm_sso` / `gpm_sso_state`
+  are now `__Host-gpm_sso` / `__Host-gpm_sso_state`, so the browser enforces their
+  Secure + host-locked (no `Domain`) + `Path=/` scope and a sibling subdomain cannot
+  plant a same-named shadow cookie. (Forged values already failed the HMAC; this
+  closes the shadowing vector.) Active sessions re-authenticate once (GPM-I2).
+
+- **Settings validation rejects an admin-lockout configuration.** A settings write
+  with neither local login nor any SSO provider — no way into the admin panel — is
+  now refused at validation instead of committing and locking the operator out
+  (previously recoverable only by redeploy) (GPM-I4).
+
+- **A host referencing a disabled ClientCA is rejected at validation.** Previously
+  referential validation only checked the CA name existed; a disabled CA then
+  produced a nil pool and a hard TLS-config error that failed the whole router
+  reload. The disabled reference is now a clear load-time error (GPM-I3).
+
 - **Access lists are evaluated ahead of authentication.** The middleware chain now
   runs `rate-limit → access-list → auth → guard → headers → upstream` (previously
   the access-list sat inside auth). An IP the access-list would deny is now dropped
