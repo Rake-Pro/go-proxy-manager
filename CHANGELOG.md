@@ -7,6 +7,29 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in `net/http/pprof` on the admin server.** New `-pprof` flag / `GPM_PPROF`
+  env var (default off, same pattern as `-debug-headers`) mounts `net/http/pprof`
+  under `/debug/pprof/` on the admin listener only, behind the same admin-role +
+  same-origin CSRF gate as the REST API (`RequireRole(RoleAdmin, ...)` +
+  `sameOriginGuard`). Registered explicitly on the admin mux, never via the
+  side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
+  `http.DefaultServeMux`. Never touches the data-plane router.
+
+### Changed
+
+- **Data-plane reverse proxy tuned for large/streamed upstream responses.** The
+  shared upstream transport now sets `DisableCompression: true` (the proxy must
+  not transparently gunzip upstream bodies — CPU cost, and it strips
+  Content-Length, forcing the flush-per-write chunked path), and the main
+  `httputil.ReverseProxy` now uses a fixed 512KiB `sync.Pool`-backed `BufferPool`
+  (a larger copy buffer cuts the per-write flush count for chunked upstream
+  responses, which stdlib flushes after every write). The outpost auth
+  subrequest client (`internal/dataplane/authrequest.go`) now uses a dedicated,
+  tuned `http.Transport` (no proxy env, 5s dial/TLS timeouts, 64 idle conns per
+  host) instead of the default transport's 2-conn-per-host cap.
+
 ### Fixed
 
 - **Duplicate `Strict-Transport-Security` on the proxied admin path.** The admin

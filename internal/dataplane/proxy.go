@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -27,6 +28,9 @@ var dataplaneTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+	// The reverse proxy must not transparently gunzip upstream bodies (CPU cost,
+	// and it strips Content-Length, forcing the flush-per-write chunked path).
+	DisableCompression: true,
 }
 
 // configureUpstreamTransport tunes the shared transport. Call once at startup
@@ -60,6 +64,31 @@ func transportFor(t *model.HostTimeouts) http.RoundTripper {
 	return tr
 }
 
+// proxyBufBytes is the fixed size of every buffer proxyBufPool hands out. A
+// larger copy buffer cuts the per-write flush count for unknown-length
+// (chunked) upstream responses, which the stdlib reverse proxy flushes after
+// every write.
+const proxyBufBytes = 512 << 10
+
+// proxyBufPool is a sync.Pool-backed httputil.BufferPool of fixed 512KiB
+// buffers, used by the main data-plane reverse proxy.
+var proxyBufPool httputil.BufferPool = &bufferPool{}
+
+type bufferPool struct {
+	pool sync.Pool
+}
+
+func (p *bufferPool) Get() []byte {
+	if b, ok := p.pool.Get().([]byte); ok {
+		return b
+	}
+	return make([]byte, proxyBufBytes)
+}
+
+func (p *bufferPool) Put(b []byte) {
+	p.pool.Put(b)
+}
+
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
@@ -83,7 +112,8 @@ func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTim
 			rewriteUpstreamRedirect(resp, target)
 			return nil
 		},
-		Transport: transportFor(timeouts),
+		Transport:  transportFor(timeouts),
+		BufferPool: proxyBufPool,
 	}
 	return rp
 }

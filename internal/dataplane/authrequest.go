@@ -83,6 +83,18 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 			// Never follow the auth server's redirects: we want its 200/401/403
 			// verdict, not the HTML of a login page.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			// Dedicated transport, tuned like dataplaneTransport: the default
+			// transport caps idle connections per host at 2, which starves the
+			// per-request auth subrequest under load. The outpost URL is internal,
+			// so proxy env vars are deliberately not honoured.
+			Transport: &http.Transport{
+				Proxy:               nil,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 64,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 5 * time.Second,
+			},
 		},
 	}, nil
 }

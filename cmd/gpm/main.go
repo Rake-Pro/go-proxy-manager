@@ -62,6 +62,7 @@ func main() {
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
+		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin-role gated)")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -231,7 +232,7 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to initialise admin UI")
 	}
 
-	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler)
+	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler, *pprofEnabled)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()

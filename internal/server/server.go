@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
@@ -24,8 +25,9 @@ type Server struct {
 
 // New constructs the admin server bound to addr. apiHandler, if non-nil, is the
 // REST CRUD API (mounted under /api/ behind an admin-role gate); uiHandler, if
-// non-nil, is the embedded SPA (mounted at /).
-func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, uiHandler http.Handler) *Server {
+// non-nil, is the embedded SPA (mounted at /). pprofEnabled mounts net/http/pprof
+// under /debug/pprof/, behind the same admin-role gate as apiHandler.
+func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, uiHandler http.Handler, pprofEnabled bool) *Server {
 	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -48,6 +50,22 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	// CSRF token on mutating methods; sameOriginGuard is the outer belt.
 	if apiHandler != nil {
 		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler))))
+	}
+
+	// net/http/pprof, opt-in and gated exactly like the REST API above (admin
+	// role + same-origin guard). Registered explicitly on this mux, never via the
+	// side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
+	// http.DefaultServeMux.
+	if pprofEnabled {
+		gate := func(h http.HandlerFunc) http.Handler {
+			return sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, h))
+		}
+		mux.Handle("/debug/pprof/", gate(pprof.Index))
+		mux.Handle("/debug/pprof/cmdline", gate(pprof.Cmdline))
+		mux.Handle("/debug/pprof/profile", gate(pprof.Profile))
+		mux.Handle("/debug/pprof/symbol", gate(pprof.Symbol))
+		mux.Handle("/debug/pprof/trace", gate(pprof.Trace))
+		log.Info().Msg("pprof profiling endpoints enabled on admin server at /debug/pprof/ (admin-role gated)")
 	}
 
 	// The embedded SPA at the catch-all root. More specific routes above win;

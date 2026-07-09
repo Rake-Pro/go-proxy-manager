@@ -54,6 +54,7 @@ container deployments).
 | `-slow-request-ms` | `GPM_SLOW_REQUEST_MS` | `0` (off) | Warn on requests slower than N ms |
 | `-debug-headers` | `GPM_DEBUG_HEADERS` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info — keep off in production) |
 | `-upstream-response-header-timeout` | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `0` (unbounded) | Cap time-to-first-byte from an upstream |
+| `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin-role gated) |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
 preference:
@@ -155,9 +156,65 @@ For a full walkthrough — running gpm alongside a live NPM install, validating
 parity before any traffic moves, then cutting over — see
 [migrating-from-npm.md](migrating-from-npm.md).
 
+## Profiling (pprof)
+
+On-demand CPU/memory/goroutine attribution for the running edge - the tool for
+"why is gpm hot / slow" during a throughput investigation, instead of guessing
+from `docker stats`. Off by default; it only expands attack surface and adds
+overhead while it's on.
+
+**Enable/disable:** set `GPM_PPROF=1` (or `-pprof`) and restart. Leave it OFF in
+normal operation: profiles can expose in-memory data (secrets, session
+material), and profiling itself costs CPU. Flip on for an investigation,
+capture what you need, flip back off.
+
+The endpoints are mounted on the **admin server** at `/debug/pprof/`, behind the
+same gate as `/api/` (same-origin guard + admin-role session). There is no
+token-in-URL or basic-auth mode - you authenticate with an admin browser
+session (`gpm_session` cookie), either on the LAN admin listener (`-admin-addr`,
+default `:8081`) or via a proxied admin domain if you've fronted the admin
+panel with a host (see "Admin OIDC" above).
+
+| Endpoint | Answers |
+|----------|---------|
+| `/debug/pprof/profile?seconds=30` | CPU hotspots |
+| `/debug/pprof/heap` | Memory growth / allocation sources |
+| `/debug/pprof/goroutine?debug=2` | Stalls / deadlocks (full goroutine dump) |
+| `/debug/pprof/trace?seconds=5` | Scheduler / syscall timeline (`go tool trace`) |
+
+Capture workflow (browser session cookie required on every request):
+
+```
+# 30s CPU profile while reproducing load
+curl -b "gpm_session=<session-id>" \
+  "https://admin.example.com/debug/pprof/profile?seconds=30" -o cpu.pprof
+go tool pprof -http :8080 cpu.pprof
+
+# heap snapshot
+curl -b "gpm_session=<session-id>" \
+  "https://admin.example.com/debug/pprof/heap" -o heap.pprof
+
+# goroutine dump (stalls/deadlocks)
+curl -b "gpm_session=<session-id>" \
+  "https://admin.example.com/debug/pprof/goroutine?debug=2" -o goroutines.txt
+
+# execution trace
+curl -b "gpm_session=<session-id>" \
+  "https://admin.example.com/debug/pprof/trace?seconds=5" -o trace.out
+go tool trace trace.out
+```
+
+**Known limitation:** `go tool pprof https://admin.example.com/debug/pprof/profile`
+(direct remote attach) does not work. `go tool pprof` sends no session cookie,
+and its symbolization step issues `POST /debug/pprof/symbol`, which fails
+CSRF/auth like any other mutating admin request. Download the profile with the
+cookie (as above) and run `go tool pprof` against the local file instead.
+
 ## Hardening notes
 
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
+- Keep `-pprof` off unless actively profiling; it is admin-role gated but still
+  needless attack surface when idle.
 - Ensure `GPM_COOKIE_SECURE` is `1` (the default) whenever the admin plane is
   reached over HTTPS.
 - Run with `cap_drop: ALL` and `no-new-privileges` (as above).
