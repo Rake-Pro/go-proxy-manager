@@ -80,6 +80,10 @@ type GuardTrigger struct {
 type RateLimitMiddleware struct {
 	RequestsPerSecond float64 `json:"requestsPerSecond" yaml:"requestsPerSecond"`
 	Burst             int     `json:"burst,omitempty" yaml:"burst,omitempty"`
+	// AllowFrom lists client CIDRs that bypass rate limiting entirely: a matching
+	// request skips the limiter (no token consumed, no 429). An any-of,
+	// network-exempt bypass so trusted networks (e.g. LAN) are never throttled.
+	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 }
 
 // Middleware is a reusable, named processing step referenced by hosts/locations.
@@ -137,6 +141,11 @@ func (m Middleware) Validate() error {
 	case MWTypeRateLimit:
 		if m.RateLimit == nil || m.RateLimit.RequestsPerSecond <= 0 {
 			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0", m.Name)
+		}
+		for _, c := range m.RateLimit.AllowFrom {
+			if !validCIDROrIP(c) {
+				return fmt.Errorf("middleware %q: rateLimit.allowFrom has invalid CIDR/IP %q", m.Name, c)
+			}
 		}
 	default:
 		return fmt.Errorf("middleware %q: unknown type %q", m.Name, m.Type)

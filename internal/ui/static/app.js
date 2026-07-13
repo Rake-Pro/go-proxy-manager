@@ -1662,6 +1662,7 @@ async function middlewareEditor(c, name) {
         <div class="field-group"><label>Requests / second</label><input class="field mono" id="rl-rps" type="number" step="0.1" value="${esc(rl.requestsPerSecond != null ? rl.requestsPerSecond : '')}" placeholder="10" /></div>
         <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(rps)" /></div>
       </div>
+      <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="rl-allow"></div><div class="hint">Client CIDRs that bypass rate limiting entirely.</div></div>
     </div>
   </div></div>` + saveBar('middleware', isNew, meta.addLabel);
 
@@ -1672,6 +1673,7 @@ async function middlewareEditor(c, name) {
   const rmReqCtl = makeChipInput($('#hdr-rmreq'), arr(headers.removeRequest), 'add header...');
   const rmRespCtl = makeChipInput($('#hdr-rmresp'), arr(headers.removeResponse), 'add header...');
   const guardAllowCtl = makeChipInput($('#guard-allow'), arr(guard.allowFrom), 'add CIDR...');
+  const rlAllowCtl = makeChipInput($('#rl-allow'), arr(rl.allowFrom), 'add CIDR...');
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
 
   const trigWrap = $('#guard-triggers'); const trigCtls = [];
@@ -1733,6 +1735,7 @@ async function middlewareEditor(c, name) {
       if (isNaN(rps) || rps <= 0) { toast('Rate required', 'Requests per second must be > 0.', 'err'); return null; }
       const spec = { requestsPerSecond: rps };
       const burst = parseInt($('#rl-burst').value, 10); if (!isNaN(burst)) spec.burst = burst;
+      const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       body.rateLimit = spec;
     }
     return body;

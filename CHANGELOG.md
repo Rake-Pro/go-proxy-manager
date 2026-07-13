@@ -9,6 +9,13 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **`allowFrom` exemption on `RateLimitMiddleware`.** Rate-limit middlewares now
+  accept an `allowFrom` list of client CIDRs/IPs (same shape and validation as
+  `AuthMiddleware.AllowFrom` / `GuardMiddleware.AllowFrom`); a matching client
+  bypasses the limiter entirely (no token consumed, no 429), resolved via the
+  same XFF-aware client-IP logic as the rest of the chain. Non-matching and
+  unresolvable-IP clients are limited exactly as before. Config, data-plane
+  enforcement, UI editor, and tests all updated.
 - **Opt-in `net/http/pprof` on the admin server.** New `-pprof` flag / `GPM_PPROF`
   env var (default off, same pattern as `-debug-headers`) mounts `net/http/pprof`
   under `/debug/pprof/` on the admin listener only, behind the same admin-role +

@@ -185,6 +185,45 @@ func TestChainEnforcesRateLimit(t *testing.T) {
 	}
 }
 
+// TestRateLimitHandlerAllowFromBypasses proves a client matching AllowFrom
+// skips the limiter entirely: it never gets 429 no matter how many requests it
+// sends, while a non-matching client is still limited as today.
+func TestRateLimitHandlerAllowFromBypasses(t *testing.T) {
+	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"10.0.0.0/8"}}
+	h := rateLimitHandler(rl, peerIP, okHandler())
+
+	for i := 0; i < 10; i++ {
+		if rec := serveRL(h, "10.1.2.3:1", "http://c/"); rec.Code != http.StatusOK {
+			t.Fatalf("allowlisted request %d should never be rate limited, got %d", i, rec.Code)
+		}
+	}
+
+	// A non-matching client still gets limited exactly as today: first request
+	// passes (burst 1), second is 429.
+	if rec := serveRL(h, "203.0.113.5:1", "http://c/"); rec.Code != http.StatusOK {
+		t.Fatalf("first non-allowlisted request should pass, got %d", rec.Code)
+	}
+	if rec := serveRL(h, "203.0.113.5:1", "http://c/"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second non-allowlisted request should be 429, got %d", rec.Code)
+	}
+}
+
+// TestRateLimitHandlerNilIPNeverMatchesAllowFrom proves an unresolvable client
+// IP never matches AllowFrom (fails closed onto the shared nil bucket), even
+// when AllowFrom is configured.
+func TestRateLimitHandlerNilIPNeverMatchesAllowFrom(t *testing.T) {
+	nilIP := func(*http.Request) net.IP { return nil }
+	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"0.0.0.0/0"}}
+	h := rateLimitHandler(rl, nilIP, okHandler())
+
+	if rec := serveRL(h, "1.1.1.1:1", "http://c/"); rec.Code != http.StatusOK {
+		t.Fatalf("first nil-IP request should pass, got %d", rec.Code)
+	}
+	if rec := serveRL(h, "2.2.2.2:1", "http://c/"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second nil-IP request must still share the bucket and be denied, got %d", rec.Code)
+	}
+}
+
 // TestRateLimitRunsBeforeAuth proves rate limiting is outermost: an over-limit
 // request is shed with 429 before the auth tier runs (so a flood never reaches a
 // forward-auth subrequest). A host gated by forward-auth would 401 an untrusted

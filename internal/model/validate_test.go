@@ -175,6 +175,21 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "invalid CIDR/IP",
 		},
 		{
+			name: "valid rate-limit middleware with allowFrom",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, AllowFrom: []string{"10.0.0.0/8"}},
+			}}},
+		},
+		{
+			name: "rate-limit rejects bad allowFrom",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, AllowFrom: []string{"nope"}},
+			}}},
+			wantErr: "invalid CIDR/IP",
+		},
+		{
 			name: "duplicate cert domain rejected",
 			cfg: Config{Certificates: []Certificate{
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},

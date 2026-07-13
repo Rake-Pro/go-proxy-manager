@@ -120,12 +120,25 @@ func (l *rateLimiter) evictLRULocked() {
 // rateLimitHandler enforces a per-client-IP token-bucket limit. On exhaustion it
 // replies 429 with a Retry-After header and does not call next. The client IP is
 // resolved via ipOf (the registry's shared, XFF-aware resolver); an unresolvable
-// IP falls back to the shared nil bucket.
+// IP falls back to the shared nil bucket. A client matching rl.AllowFrom bypasses
+// the limiter entirely (no token consumed, no 429); a nil/unresolvable IP never
+// matches, so it falls through to the shared bucket as before.
 func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, next http.Handler) http.Handler {
 	l := newRateLimiter(rl)
+	var allowNets []*net.IPNet
+	for _, c := range rl.AllowFrom {
+		if n := parseNet(c); n != nil {
+			allowNets = append(allowNets, n)
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := ipOf(r)
+		if ipInNets(ip, allowNets) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		key := nilIPRateLimitKey
-		if ip := ipOf(r); ip != nil {
+		if ip != nil {
 			key = ip.String()
 		}
 		ok, retry := l.allow(key)
