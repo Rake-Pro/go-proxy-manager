@@ -55,16 +55,17 @@ type rateLimiter struct {
 }
 
 func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
+	rate, defaultBurst := rl.RateAndDefaultBurst()
 	burst := rl.Burst
 	if burst <= 0 {
-		burst = int(math.Ceil(rl.RequestsPerSecond))
+		burst = defaultBurst
 	}
 	if burst < 1 {
 		burst = 1
 	}
 	return &rateLimiter{
 		capacity: float64(burst),
-		refill:   rl.RequestsPerSecond,
+		refill:   rate,
 		now:      time.Now,
 		buckets:  map[string]*list.Element{},
 		order:    list.New(),

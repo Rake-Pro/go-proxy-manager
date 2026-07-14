@@ -9,6 +9,18 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **Configurable rate-limit window on `RateLimitMiddleware`.** Rate limits can
+  now be expressed as `requests` + `window` (a Go duration string, e.g. `10s`,
+  `1m`, `1h`) for limits that don't reduce cleanly to a per-second rate (e.g.
+  "100 requests per 1m", "5 per 1h"). The legacy `requestsPerSecond` field is
+  kept as shorthand for `requests`/`window: 1s` and remains fully supported;
+  exactly one of the two forms may be set, validated at config load. Burst
+  still defaults to `ceil(requests)` and can still be overridden explicitly.
+  Data-plane refill rate and `Retry-After` math both derive from the
+  configured window rather than assuming seconds. UI editor (middleware
+  rate-limit form) updated to a `Requests` + `Per` (window) pair; existing
+  `requestsPerSecond`-only configs still load and behave identically, and
+  editing one through the UI migrates it to the new form on save.
 - **`allowFrom` exemption on `RateLimitMiddleware`.** Rate-limit middlewares now
   accept an `allowFrom` list of client CIDRs/IPs (same shape and validation as
   `AuthMiddleware.AllowFrom` / `GuardMiddleware.AllowFrom`); a matching client

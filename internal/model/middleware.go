@@ -2,7 +2,9 @@ package model
 
 import (
 	"fmt"
+	"math"
 	"net"
+	"time"
 )
 
 // validCIDROrIP reports whether s parses as a CIDR or a bare IP.
@@ -75,15 +77,55 @@ type GuardTrigger struct {
 }
 
 // RateLimitMiddleware throttles a host's requests with a per-client-IP token
-// bucket: steady-state RequestsPerSecond with a Burst allowance (default
-// ceil(rps)). Enforced on the data plane (internal/dataplane/ratelimit.go).
+// bucket: steady-state rate with a Burst allowance (default ceil(rate)).
+// Enforced on the data plane (internal/dataplane/ratelimit.go).
+//
+// The rate can be expressed two ways, and exactly one must be set:
+//   - legacy shorthand: RequestsPerSecond (requests per 1s window), or
+//   - Requests + Window (a Go duration string, e.g. "10s", "1m", "1h"), for
+//     limits like "100 requests per 1m" that don't reduce cleanly to a
+//     per-second rate.
 type RateLimitMiddleware struct {
-	RequestsPerSecond float64 `json:"requestsPerSecond" yaml:"requestsPerSecond"`
-	Burst             int     `json:"burst,omitempty" yaml:"burst,omitempty"`
+	RequestsPerSecond float64 `json:"requestsPerSecond,omitempty" yaml:"requestsPerSecond,omitempty"`
+	// Requests and Window together express "N requests per window" (e.g.
+	// Requests: 100, Window: "1m"). Mutually exclusive with RequestsPerSecond.
+	Requests float64 `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Window   string  `json:"window,omitempty" yaml:"window,omitempty"`
+	Burst    int     `json:"burst,omitempty" yaml:"burst,omitempty"`
 	// AllowFrom lists client CIDRs that bypass rate limiting entirely: a matching
 	// request skips the limiter (no token consumed, no 429). An any-of,
 	// network-exempt bypass so trusted networks (e.g. LAN) are never throttled.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+}
+
+// usesWindow reports whether the Requests+Window form is set (vs. the legacy
+// RequestsPerSecond shorthand).
+func (r RateLimitMiddleware) usesWindow() bool {
+	return r.Requests > 0 || r.Window != ""
+}
+
+// RateAndDefaultBurst returns the steady-state refill rate (tokens/second) and
+// the default burst/capacity (ceil of the configured requests, floored at 1)
+// for whichever form (legacy or Requests+Window) is set. Callers must validate
+// the middleware first; an invalid Window here falls back to 0/1 rather than
+// panicking.
+func (r RateLimitMiddleware) RateAndDefaultBurst() (rate float64, defaultBurst int) {
+	requests := r.RequestsPerSecond
+	if r.usesWindow() {
+		requests = r.Requests
+		d, err := time.ParseDuration(r.Window)
+		if err != nil || d <= 0 {
+			return 0, 1
+		}
+		rate = r.Requests / d.Seconds()
+	} else {
+		rate = r.RequestsPerSecond
+	}
+	burst := int(math.Ceil(requests))
+	if burst < 1 {
+		burst = 1
+	}
+	return rate, burst
 }
 
 // Middleware is a reusable, named processing step referenced by hosts/locations.
@@ -139,8 +181,28 @@ func (m Middleware) Validate() error {
 			return fmt.Errorf("middleware %q: guard.denyStatus must be a 4xx/5xx code, got %d", m.Name, s)
 		}
 	case MWTypeRateLimit:
-		if m.RateLimit == nil || m.RateLimit.RequestsPerSecond <= 0 {
+		if m.RateLimit == nil {
 			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0", m.Name)
+		}
+		rl := m.RateLimit
+		legacySet := rl.RequestsPerSecond > 0
+		windowSet := rl.Requests > 0 || rl.Window != ""
+		switch {
+		case legacySet && windowSet:
+			return fmt.Errorf("middleware %q: rateLimit must set either requestsPerSecond or requests+window, not both", m.Name)
+		case !legacySet && !windowSet:
+			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0 (or set requests+window)", m.Name)
+		case windowSet:
+			if rl.Requests <= 0 {
+				return fmt.Errorf("middleware %q: rateLimit.requests must be > 0", m.Name)
+			}
+			d, err := time.ParseDuration(rl.Window)
+			if err != nil {
+				return fmt.Errorf("middleware %q: rateLimit.window must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", m.Name, rl.Window, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("middleware %q: rateLimit.window must be > 0, got %q", m.Name, rl.Window)
+			}
 		}
 		for _, c := range m.RateLimit.AllowFrom {
 			if !validCIDROrIP(c) {

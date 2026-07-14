@@ -1084,7 +1084,7 @@ const SECTION_META = {
     singular: 'middleware', addLabel: 'Add middleware',
     summary: (o) => `<span class="k">Type</span><span class="v">${esc(o.type || '')}</span>` +
       (o.auth ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider || '')}</span>` : '') +
-      (o.rateLimit ? `<span class="k">Rate</span><span class="v">${esc(o.rateLimit.requestsPerSecond)} r/s</span>` : ''),
+      (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'Credentials used for ACME dns-01 challenges.',
@@ -1621,6 +1621,14 @@ async function middlewareEditor(c, name) {
   const idps = arr(idpR.data);
   const o = objR.data || {}; const type = o.type || 'headers';
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {};
+  // Populate from either form: requests+window as-is, or migrate a legacy
+  // requestsPerSecond into requests + a 1s window so saving upgrades it.
+  const rlRequests = rl.requests != null ? rl.requests : (rl.requestsPerSecond != null ? rl.requestsPerSecond : '');
+  const rlWindow = rl.window || '1s';
+  const RL_WINDOWS = ['1s', '10s', '30s', '1m', '5m', '15m', '1h'];
+  // A hand-authored window outside the presets (e.g. "2m", "90s") must round-trip:
+  // without a matching option the browser would silently fall back to 1s on save.
+  if (!RL_WINDOWS.includes(rlWindow)) RL_WINDOWS.unshift(rlWindow);
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew)}
     <div class="card form-section"><p class="section-label">Type</p>
@@ -1659,8 +1667,11 @@ async function middlewareEditor(c, name) {
 
     <div class="card form-section ed-sub" data-type="rate-limit" style="${type === 'rate-limit' ? '' : 'display:none'}"><p class="section-label">Rate limit</p>
       <div class="inline-fields">
-        <div class="field-group"><label>Requests / second</label><input class="field mono" id="rl-rps" type="number" step="0.1" value="${esc(rl.requestsPerSecond != null ? rl.requestsPerSecond : '')}" placeholder="10" /></div>
-        <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(rps)" /></div>
+        <div class="field-group"><label>Requests</label><input class="field mono" id="rl-requests" type="number" step="0.1" value="${esc(rlRequests)}" placeholder="10" /></div>
+        <div class="field-group"><label>Per</label><select class="field mono" id="rl-window">
+          ${RL_WINDOWS.map((w) => `<option value="${esc(w)}"${rlWindow === w ? ' selected' : ''}>${esc(w)}</option>`).join('')}
+        </select></div>
+        <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(requests)" /></div>
       </div>
       <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="rl-allow"></div><div class="hint">Client CIDRs that bypass rate limiting entirely.</div></div>
     </div>
@@ -1731,9 +1742,9 @@ async function middlewareEditor(c, name) {
       const ds = parseInt($('#guard-deny').value, 10); if (!isNaN(ds)) spec.denyStatus = ds;
       body.guard = spec;
     } else {
-      const rps = parseFloat($('#rl-rps').value);
-      if (isNaN(rps) || rps <= 0) { toast('Rate required', 'Requests per second must be > 0.', 'err'); return null; }
-      const spec = { requestsPerSecond: rps };
+      const requests = parseFloat($('#rl-requests').value);
+      if (isNaN(requests) || requests <= 0) { toast('Rate required', 'Requests must be > 0.', 'err'); return null; }
+      const spec = { requests, window: $('#rl-window').value };
       const burst = parseInt($('#rl-burst').value, 10); if (!isNaN(burst)) spec.burst = burst;
       const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       body.rateLimit = spec;

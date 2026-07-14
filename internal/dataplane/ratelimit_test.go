@@ -56,6 +56,59 @@ func TestRateLimiterBurstDefaultsToCeilRPS(t *testing.T) {
 	}
 }
 
+func TestRateLimiterWindowFormEnforces(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{Requests: 2, Window: "1s"})
+	l.now = func() time.Time { return now }
+
+	if l.capacity != 2 {
+		t.Fatalf("burst should default to ceil(requests)=2, got %v", l.capacity)
+	}
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("request 1 within burst should pass")
+	}
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("request 2 within burst should pass")
+	}
+	if ok, _ := l.allow("ip"); ok {
+		t.Fatal("burst+1 request should be denied")
+	}
+
+	now = now.Add(500 * time.Millisecond) // 1 token at 2 requests/1s
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("one token should have refilled after 0.5s")
+	}
+}
+
+func TestRateLimiterWindowFormBurstDefaultsToCeilRequests(t *testing.T) {
+	l := newRateLimiter(model.RateLimitMiddleware{Requests: 2.5, Window: "1m"})
+	if l.capacity != 3 {
+		t.Fatalf("burst should default to ceil(requests)=3, got %v", l.capacity)
+	}
+	if l.refill != 2.5/60 {
+		t.Fatalf("refill should be requests/window.Seconds()=%v, got %v", 2.5/60, l.refill)
+	}
+}
+
+func TestRateLimiterSlowRefillRetryAfterIsLarge(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{Requests: 1, Window: "1m"})
+	l.now = func() time.Time { return now }
+
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("first request should pass (burst 1)")
+	}
+	ok, retry := l.allow("ip")
+	if ok {
+		t.Fatal("second request should be denied")
+	}
+	// 1 request per 1m => refill is 1/60 tokens/sec; a fully-drained bucket must
+	// wait close to 60s for the next token, not a clamped/truncated small value.
+	if retry < 55 || retry > 60 {
+		t.Fatalf("expected Retry-After near 60s for a 1-per-1m limit, got %d", retry)
+	}
+}
+
 func TestRateLimiterPerKeyIsolation(t *testing.T) {
 	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1})
 	l.now = func() time.Time { return time.Unix(0, 0) }

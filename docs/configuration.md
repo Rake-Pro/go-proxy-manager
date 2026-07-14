@@ -407,17 +407,29 @@ own key (useful when rotating or sharing a key across instances).
 and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
 (default 403).
 
-**RateLimitMiddleware**: `requestsPerSecond` (req, >0), `burst` (default
-`ceil(rps)`), `allowFrom` (CIDRs exempt from rate limiting entirely - no token
-consumed, no 429). Enforced as a per-host, per-client-IP token bucket (capacity =
-`burst`, refill = `requestsPerSecond`/sec). Over-limit requests get `429 Too Many
-Requests` with a `Retry-After` header; the request is not proxied. The client IP
-is resolved the same XFF-aware way as access lists; a request whose client IP
-cannot be resolved falls back to a single shared bucket (fail-safe, never
-unlimited, and never matches `allowFrom`). The middleware sits **outermost** in
-the chain (evaluated first) so a flood is shed before it can drive an auth
-subrequest or any other per-request work: rate-limit → access-list → auth →
-guard → headers → upstream.
+**RateLimitMiddleware**: a rate expressed one of two ways (exactly one must be
+set), plus `burst` (default `ceil(requests)`) and `allowFrom` (CIDRs exempt
+from rate limiting entirely - no token consumed, no 429):
+
+- `requests` + `window`: "N requests per window", where `window` is a Go
+  duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...). Use this for limits
+  that don't reduce cleanly to a per-second rate, e.g. `100` requests per
+  `1m`, or `5` per `1h`.
+- `requestsPerSecond` (req, >0): legacy shorthand, equivalent to
+  `requests: <value>` with `window: "1s"`. Kept for backward compatibility;
+  new configs should prefer `requests`/`window`.
+
+Enforced as a per-host, per-client-IP token bucket (capacity = `burst`, refill
+= `requests`/`window` in tokens/sec). Over-limit requests get `429 Too Many
+Requests` with a `Retry-After` header computed from the refill rate (a slow
+limit like `5` per `1h` can report a Retry-After of several minutes); the
+request is not proxied. The client IP is resolved the same XFF-aware way as
+access lists; a request whose client IP cannot be resolved falls back to a
+single shared bucket (fail-safe, never unlimited, and never matches
+`allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
+so a flood is shed before it can drive an auth subrequest or any other
+per-request work: rate-limit → access-list → auth → guard → headers →
+upstream.
 
 ```yaml
 # Require SSO, but let the LAN through without it
@@ -438,8 +450,18 @@ guard:
   allowFrom: [10.0.0.0/8]
 ```
 ```yaml
-# Rate-limit the host, but let the LAN through uncapped
+# Rate-limit the host to 100 requests/minute, but let the LAN through uncapped
 name: api-rate-limit
+type: rate-limit
+rateLimit:
+  requests: 100
+  window: 1m
+  burst: 150
+  allowFrom: [10.0.0.0/8]
+```
+```yaml
+# Legacy shorthand (requests per second); equivalent to requests: 10, window: 1s
+name: api-rate-limit-legacy
 type: rate-limit
 rateLimit:
   requestsPerSecond: 10

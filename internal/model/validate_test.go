@@ -190,6 +190,53 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "invalid CIDR/IP",
 		},
 		{
+			name: "valid rate-limit middleware with requests+window",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{Requests: 100, Window: "1m"},
+			}}},
+		},
+		{
+			name: "rate-limit rejects both requestsPerSecond and requests+window",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, Requests: 100, Window: "1m"},
+			}}},
+			wantErr: "not both",
+		},
+		{
+			name: "rate-limit rejects neither requestsPerSecond nor requests+window",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{},
+			}}},
+			wantErr: "requestsPerSecond must be > 0",
+		},
+		{
+			name: "rate-limit rejects unparseable window",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{Requests: 100, Window: "1fortnight"},
+			}}},
+			wantErr: "must be a valid duration",
+		},
+		{
+			name: "rate-limit rejects zero window",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{Requests: 100, Window: "0s"},
+			}}},
+			wantErr: "window must be > 0",
+		},
+		{
+			name: "rate-limit rejects requests<=0 with window set",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{Window: "1m"},
+			}}},
+			wantErr: "rateLimit.requests must be > 0",
+		},
+		{
 			name: "duplicate cert domain rejected",
 			cfg: Config{Certificates: []Certificate{
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},
