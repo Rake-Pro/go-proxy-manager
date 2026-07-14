@@ -1084,7 +1084,8 @@ const SECTION_META = {
     singular: 'middleware', addLabel: 'Add middleware',
     summary: (o) => `<span class="k">Type</span><span class="v">${esc(o.type || '')}</span>` +
       (o.auth ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider || '')}</span>` : '') +
-      (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : ''),
+      (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
+      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'Credentials used for ACME dns-01 challenges.',
@@ -1629,6 +1630,11 @@ async function middlewareEditor(c, name) {
   // A hand-authored window outside the presets (e.g. "2m", "90s") must round-trip:
   // without a matching option the browser would silently fall back to 1s on save.
   if (!RL_WINDOWS.includes(rlWindow)) RL_WINDOWS.unshift(rlWindow);
+  const rlBlockFor = rl.blockFor || '';
+  const RL_BLOCKS = ['', '10s', '30s', '1m', '5m', '15m', '1h'];
+  // Same round-trip guarantee as RL_WINDOWS: a hand-authored blockFor (e.g.
+  // "2m") must render selected, not silently reset to "none" on save.
+  if (!RL_BLOCKS.includes(rlBlockFor)) RL_BLOCKS.splice(1, 0, rlBlockFor);
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew)}
     <div class="card form-section"><p class="section-label">Type</p>
@@ -1672,8 +1678,12 @@ async function middlewareEditor(c, name) {
           ${RL_WINDOWS.map((w) => `<option value="${esc(w)}"${rlWindow === w ? ' selected' : ''}>${esc(w)}</option>`).join('')}
         </select></div>
         <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(requests)" /></div>
+        <div class="field-group"><label>Block for</label><select class="field mono" id="rl-block">
+          ${RL_BLOCKS.map((b) => `<option value="${esc(b)}"${rlBlockFor === b ? ' selected' : ''}>${b ? esc(b) : 'none'}</option>`).join('')}
+        </select></div>
       </div>
       <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="rl-allow"></div><div class="hint">Client CIDRs that bypass rate limiting entirely.</div></div>
+      <div class="hint">Block for: once a client exceeds the limit, further requests from it are rejected for this long, regardless of token refill. Fixed - not extended by repeat requests during the block.</div>
     </div>
   </div></div>` + saveBar('middleware', isNew, meta.addLabel);
 
@@ -1747,6 +1757,7 @@ async function middlewareEditor(c, name) {
       const spec = { requests, window: $('#rl-window').value };
       const burst = parseInt($('#rl-burst').value, 10); if (!isNaN(burst)) spec.burst = burst;
       const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
+      const blockFor = $('#rl-block').value; if (blockFor) spec.blockFor = blockFor;
       body.rateLimit = spec;
     }
     return body;

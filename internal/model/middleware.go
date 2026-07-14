@@ -96,6 +96,11 @@ type RateLimitMiddleware struct {
 	// request skips the limiter (no token consumed, no 429). An any-of,
 	// network-exempt bypass so trusted networks (e.g. LAN) are never throttled.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+	// BlockFor, if set, is a Go duration string: once a client exceeds the limit,
+	// further requests from it are rejected for this long regardless of token
+	// refill. The block is fixed - it does not extend on repeat requests during
+	// the block window. Optional; empty means no extra block (today's behavior).
+	BlockFor string `json:"blockFor,omitempty" yaml:"blockFor,omitempty"`
 }
 
 // usesWindow reports whether the Requests+Window form is set (vs. the legacy
@@ -207,6 +212,15 @@ func (m Middleware) Validate() error {
 		for _, c := range m.RateLimit.AllowFrom {
 			if !validCIDROrIP(c) {
 				return fmt.Errorf("middleware %q: rateLimit.allowFrom has invalid CIDR/IP %q", m.Name, c)
+			}
+		}
+		if rl.BlockFor != "" {
+			d, err := time.ParseDuration(rl.BlockFor)
+			if err != nil {
+				return fmt.Errorf("middleware %q: rateLimit.blockFor must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", m.Name, rl.BlockFor, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("middleware %q: rateLimit.blockFor must be > 0, got %q", m.Name, rl.BlockFor)
 			}
 		}
 	default:

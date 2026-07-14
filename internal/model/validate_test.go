@@ -237,6 +237,44 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "rateLimit.requests must be > 0",
 		},
 		{
+			name: "valid rate-limit middleware with blockFor and legacy rate form",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "5m"},
+			}}},
+		},
+		{
+			name: "valid rate-limit middleware with blockFor and requests+window form",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{Requests: 100, Window: "1m", BlockFor: "30s"},
+			}}},
+		},
+		{
+			name: "rate-limit rejects unparseable blockFor",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1fortnight"},
+			}}},
+			wantErr: "blockFor must be a valid duration",
+		},
+		{
+			name: "rate-limit rejects zero blockFor",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "0s"},
+			}}},
+			wantErr: "blockFor must be > 0",
+		},
+		{
+			name: "rate-limit rejects negative blockFor",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "-5s"},
+			}}},
+			wantErr: "blockFor must be > 0",
+		},
+		{
 			name: "duplicate cert domain rejected",
 			cfg: Config{Certificates: []Certificate{
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},

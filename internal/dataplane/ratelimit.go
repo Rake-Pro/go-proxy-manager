@@ -27,8 +27,9 @@ const maxRateLimitBuckets = 16384
 const nilIPRateLimitKey = "\x00nil"
 
 type tokenBucket struct {
-	tokens float64
-	last   time.Time
+	tokens       float64
+	last         time.Time
+	blockedUntil time.Time // zero if not blocked
 }
 
 // lruBucket is one map/list node: the bucket plus its key (kept so the front
@@ -46,7 +47,8 @@ type lruBucket struct {
 // a full-map scan under a high-cardinality flood.
 type rateLimiter struct {
 	capacity float64
-	refill   float64 // tokens per second
+	refill   float64       // tokens per second
+	blockFor time.Duration // 0 disables the extra block period
 	now      func() time.Time
 
 	mu      sync.Mutex
@@ -63,9 +65,16 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 	if burst < 1 {
 		burst = 1
 	}
+	var blockFor time.Duration
+	if rl.BlockFor != "" {
+		if d, err := time.ParseDuration(rl.BlockFor); err == nil && d > 0 {
+			blockFor = d
+		}
+	}
 	return &rateLimiter{
 		capacity: float64(burst),
 		refill:   rate,
+		blockFor: blockFor,
 		now:      time.Now,
 		buckets:  map[string]*list.Element{},
 		order:    list.New(),
@@ -73,7 +82,11 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 }
 
 // allow reports whether a request from key may proceed, consuming a token when it
-// can, and returns the seconds a denied caller should wait before retrying.
+// can, and returns the seconds a denied caller should wait before retrying. When
+// blockFor is set, exceeding the limit blocks the key for a fixed period rather
+// than the usual "wait for the next token": further requests during the block
+// are denied outright, and the block does not extend on repeat hits. A blocked
+// key can still be evicted by the LRU cap like any other idle bucket.
 func (l *rateLimiter) allow(key string) (bool, int) {
 	now := l.now()
 	l.mu.Lock()
@@ -83,11 +96,16 @@ func (l *rateLimiter) allow(key string) (bool, int) {
 	if el := l.buckets[key]; el != nil {
 		lb := el.Value.(*lruBucket)
 		b = &lb.bucket
+		l.order.MoveToBack(el) // mark most-recently-used
+
+		if l.blockFor > 0 && now.Before(b.blockedUntil) {
+			retry := b.blockedUntil.Sub(now).Seconds()
+			return false, int(math.Ceil(retry))
+		}
 		if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
 			b.tokens = math.Min(l.capacity, b.tokens+elapsed*l.refill)
 			b.last = now
 		}
-		l.order.MoveToBack(el) // mark most-recently-used
 	} else {
 		if l.order.Len() >= maxRateLimitBuckets {
 			l.evictLRULocked()
@@ -100,6 +118,10 @@ func (l *rateLimiter) allow(key string) (bool, int) {
 	if b.tokens >= 1 {
 		b.tokens--
 		return true, 0
+	}
+	if l.blockFor > 0 {
+		b.blockedUntil = now.Add(l.blockFor)
+		return false, int(math.Ceil(l.blockFor.Seconds()))
 	}
 	retry := (1 - b.tokens) / l.refill // time until the next whole token
 	return false, int(math.Ceil(retry))

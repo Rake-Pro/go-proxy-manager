@@ -28,6 +28,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   same XFF-aware client-IP logic as the rest of the chain. Non-matching and
   unresolvable-IP clients are limited exactly as before. Config, data-plane
   enforcement, UI editor, and tests all updated.
+- **Optional `blockFor` block period on `RateLimitMiddleware`.** Once a client
+  exceeds the limit, further requests from it are rejected for a configured
+  duration (a Go duration string, e.g. `"30s"`, `"5m"`) regardless of token
+  refill, so a briefly-paused client cannot immediately sail back through. The
+  block is fixed, not sliding - repeat requests during the block do not extend
+  it, and once it expires ordinary token-bucket rules resume (no instant
+  re-burst beyond `burst`). Optional and off by default (empty `blockFor` is
+  today's refill-only behavior); validated via `time.ParseDuration` (must be
+  > 0) alongside either rate form. UI editor adds a "Block for" select
+  (none/10s/30s/1m/5m/15m/1h, with round-trip preservation for a
+  hand-authored value like `2m`) next to the rate-limit form.
 - **Opt-in `net/http/pprof` on the admin server.** New `-pprof` flag / `GPM_PPROF`
   env var (default off, same pattern as `-debug-headers`) mounts `net/http/pprof`
   under `/debug/pprof/` on the admin listener only, behind the same admin-role +

@@ -175,6 +175,113 @@ func TestRateLimiterEvictsLRUNotRecentlyUsed(t *testing.T) {
 	}
 }
 
+// TestRateLimiterBlockForOutlastsTokenRefill proves a client that trips the
+// limit stays blocked for the configured blockFor even once tokens would
+// otherwise have refilled - a paused-then-resumed client must not sail
+// straight through.
+func TestRateLimiterBlockForOutlastsTokenRefill(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 2, Burst: 2, BlockFor: "1m"})
+	l.now = func() time.Time { return now }
+
+	l.allow("ip")
+	l.allow("ip") // drains the burst of 2
+
+	ok, retry := l.allow("ip") // trips the limit -> blocked for 1m
+	if ok {
+		t.Fatal("burst+1 request should be denied")
+	}
+	if retry != 60 {
+		t.Fatalf("expected Retry-After of 60s (blockFor), got %d", retry)
+	}
+
+	// Pause long enough for tokens to have fully refilled (at 2 rps) but well
+	// short of the 1m block.
+	now = now.Add(5 * time.Second)
+	ok, retry = l.allow("ip")
+	if ok {
+		t.Fatal("request during the block period must still be denied despite refilled tokens")
+	}
+	if retry != 55 {
+		t.Fatalf("expected Retry-After of 55s (remaining block), got %d", retry)
+	}
+}
+
+// TestRateLimiterBlockForExpiresThenNormalBucketResumes proves that once the
+// block period elapses, ordinary token-bucket rules resume - the client gets
+// at most a normal refill/capacity, not an instant re-burst.
+func TestRateLimiterBlockForExpiresThenNormalBucketResumes(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 2, Burst: 2, BlockFor: "1m"})
+	l.now = func() time.Time { return now }
+
+	l.allow("ip")
+	l.allow("ip")
+	if ok, _ := l.allow("ip"); ok {
+		t.Fatal("burst+1 request should be denied and start the block")
+	}
+
+	// Advance past the block window. Tokens have had plenty of time to refill
+	// to capacity, but capacity is still capped at 2 (burst), not unbounded.
+	now = now.Add(2 * time.Minute)
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("request after the block expires should be allowed")
+	}
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("second request after the block should still pass (capacity 2)")
+	}
+	if ok, _ := l.allow("ip"); ok {
+		t.Fatal("third request should exceed capacity and be denied (no unbounded re-burst)")
+	}
+}
+
+// TestRateLimiterBlockForNotExtendedByRepeatHits proves repeat requests during
+// an active block do not push blockedUntil further out.
+func TestRateLimiterBlockForNotExtendedByRepeatHits(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, BlockFor: "1m"})
+	l.now = func() time.Time { return now }
+
+	l.allow("ip") // consumes the single token
+	if ok, _ := l.allow("ip"); ok {
+		t.Fatal("second request should trip the limit and start the block")
+	}
+
+	// Hammer the key repeatedly during the block; none of these should extend it.
+	for i := 0; i < 5; i++ {
+		now = now.Add(10 * time.Second)
+		if ok, _ := l.allow("ip"); ok {
+			t.Fatalf("request %d during the block should still be denied", i)
+		}
+	}
+	// Total elapsed so far: 50s. The block was for 60s from t=0, so at t=60s it
+	// must have expired - if a repeat hit had extended it, this would still deny.
+	now = now.Add(10 * time.Second) // t=60s, exactly at expiry
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("block must expire exactly at the original blockFor, not extended by repeat hits")
+	}
+}
+
+// TestRateLimiterBlockForUnsetBehavesAsToday proves that with BlockFor unset,
+// a paused-then-resumed client is limited only by ordinary token refill, same
+// as before this feature existed.
+func TestRateLimiterBlockForUnsetBehavesAsToday(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 2, Burst: 2})
+	l.now = func() time.Time { return now }
+
+	l.allow("ip")
+	l.allow("ip")
+	if ok, _ := l.allow("ip"); ok {
+		t.Fatal("burst+1 request should be denied")
+	}
+
+	now = now.Add(500 * time.Millisecond) // 1 token refills at 2 rps
+	if ok, _ := l.allow("ip"); !ok {
+		t.Fatal("without blockFor, a refilled token should let the request through")
+	}
+}
+
 func serveRL(h http.Handler, remote, target string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", target, nil)

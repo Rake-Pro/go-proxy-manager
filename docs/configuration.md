@@ -408,8 +408,9 @@ and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
 (default 403).
 
 **RateLimitMiddleware**: a rate expressed one of two ways (exactly one must be
-set), plus `burst` (default `ceil(requests)`) and `allowFrom` (CIDRs exempt
-from rate limiting entirely - no token consumed, no 429):
+set), plus `burst` (default `ceil(requests)`), `allowFrom` (CIDRs exempt
+from rate limiting entirely - no token consumed, no 429), and `blockFor`
+(optional):
 
 - `requests` + `window`: "N requests per window", where `window` is a Go
   duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...). Use this for limits
@@ -430,6 +431,21 @@ single shared bucket (fail-safe, never unlimited, and never matches
 so a flood is shed before it can drive an auth subrequest or any other
 per-request work: rate-limit → access-list → auth → guard → headers →
 upstream.
+
+`blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
+harsher penalty on top of the token bucket: the first request that exceeds
+the limit blocks that client for `blockFor`, and every request from it is
+rejected (`429`, `Retry-After` counting down to the end of the block) for the
+whole period - independent of token refill, so a client that merely pauses
+and resumes cannot slip back through once tokens would otherwise have
+refilled. The block is **fixed, not sliding**: repeat requests during the
+block do not push it back out, so it always expires exactly `blockFor` after
+the trip that started it. Once it expires, ordinary token-bucket rules
+resume (the bucket has been refilling in the background the whole time, up
+to `burst`, so the client gets a normal allotment, not an instant re-burst).
+Omit `blockFor` (the default) for today's behavior: only the token bucket
+governs, and a client that outwaits the refill rate is let back through
+immediately.
 
 ```yaml
 # Require SSO, but let the LAN through without it
@@ -467,6 +483,16 @@ rateLimit:
   requestsPerSecond: 10
   burst: 20
   allowFrom: [10.0.0.0/8]
+```
+```yaml
+# Trip the limit and the client is locked out for 5 minutes, regardless of
+# token refill - not just throttled back to the steady-state rate.
+name: api-rate-limit-blocked
+type: rate-limit
+rateLimit:
+  requests: 100
+  window: 1m
+  blockFor: 5m
 ```
 
 ### Middleware ordering
