@@ -290,6 +290,66 @@ func TestRevertRejectsBadHashViaAPI(t *testing.T) {
 	}
 }
 
+// TestPerObjectRevertViaAPI is the incident scenario at the API boundary:
+// POST /proxy-hosts/{name}/revert restores only that host to a past commit and
+// leaves a host created afterwards intact.
+func TestPerObjectRevertViaAPI(t *testing.T) {
+	h, changed := newHandler(t)
+
+	w := do(t, h, "PUT", "/proxy-hosts/app", validProxyHost)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT v1 want 200 got %d", w.Code)
+	}
+	target := w.Header().Get("X-Config-Commit")
+	if target == "" {
+		t.Fatal("missing commit header on first save")
+	}
+
+	updated := `{"name":"app","domains":["app2.example.com"],"upstream":{"scheme":"http","host":"10.0.0.5","port":9090}}`
+	if w := do(t, h, "PUT", "/proxy-hosts/app", updated); w.Code != http.StatusOK {
+		t.Fatalf("PUT v2 want 200 got %d", w.Code)
+	}
+	second := `{"name":"two","domains":["two.example.com"],"upstream":{"scheme":"http","host":"10.0.0.6","port":80}}`
+	if w := do(t, h, "PUT", "/proxy-hosts/two", second); w.Code != http.StatusOK {
+		t.Fatalf("PUT second want 200 got %d", w.Code)
+	}
+
+	*changed = 0
+	w = do(t, h, "POST", "/proxy-hosts/app/revert", `{"hash":"`+target+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("per-object revert want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	if *changed != 1 {
+		t.Fatalf("revert OnChange want 1 got %d", *changed)
+	}
+
+	w = do(t, h, "GET", "/config", "")
+	var cfg model.Config
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ProxyHosts) != 2 {
+		t.Fatalf("scoped revert must keep the later host: want 2 got %d", len(cfg.ProxyHosts))
+	}
+	var app *model.ProxyHost
+	for i := range cfg.ProxyHosts {
+		if cfg.ProxyHosts[i].Name == "app" {
+			app = &cfg.ProxyHosts[i]
+		}
+	}
+	if app == nil || app.Upstream.Port != 8080 {
+		t.Fatalf("app not reverted to v1 port: %+v", app)
+	}
+}
+
+func TestPerObjectRevertRejectsBadHashViaAPI(t *testing.T) {
+	h, _ := newHandler(t)
+	w := do(t, h, "POST", "/proxy-hosts/app/revert", `{"hash":"../nope"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad hash want 400 got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestSaveSurfacesApplyFailure proves a write that commits but cannot be applied
 // to the running config (OnChange/reload error, e.g. a geo rule saved while no
 // GeoIP database is loaded) returns 5xx, not a misleading 200.

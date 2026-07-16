@@ -62,6 +62,27 @@ const PLURAL = {
   dns: 'dns-providers',
 };
 
+// Maps a store object Kind() (as it appears in a commit message) to its plural
+// API path, for offering a per-object revert straight from the history feed.
+const KIND_PLURAL = {
+  ProxyHost: 'proxy-hosts', RedirectHost: 'redirect-hosts', StreamHost: 'stream-hosts',
+  DeadHost: 'dead-hosts', Certificate: 'certificates', ClientCA: 'client-cas',
+  DNSProvider: 'dns-providers', IdentityProvider: 'identity-providers',
+  UpstreamGroup: 'upstream-groups', AccessList: 'access-lists', Middleware: 'middlewares',
+};
+
+// parseObjectCommit recognises a single-object update commit (e.g.
+// `ProxyHost "app": update`) and returns its kind/name/plural so the history
+// view can offer a scoped revert. Non-object commits (import, restore, revert,
+// settings, delete) return null and get only the whole-config revert.
+function parseObjectCommit(msg) {
+  const m = /^(\w+) "(.+)": update$/.exec(msg || '');
+  if (!m) return null;
+  const plural = KIND_PLURAL[m[1]];
+  if (!plural) return null;
+  return { kind: m[1], name: m[2], plural };
+}
+
 // ---------- helpers ----------
 function esc(s) {
   return String(s == null ? '' : s)
@@ -2065,12 +2086,18 @@ async function viewHistory(c) {
       </div>
     </div>
     <div class="card">
-      ${items.length ? `<div class="timeline">${items.map((h, i) => `
-        <div class="tl-item">
+      ${items.length ? `<div class="timeline">${items.map((h, i) => {
+        const obj = parseObjectCommit(h.message);
+        const scoped = obj ? `<span class="revert" data-revert-obj="${esc(h.hash)}" data-obj-plural="${esc(obj.plural)}" data-obj-name="${esc(obj.name)}" data-obj-kind="${esc(obj.kind)}" title="Revert only ${esc(obj.kind)} &quot;${esc(obj.name)}&quot; to this version; every other object is left untouched">revert this object</span>` : '';
+        const whole = i === 0
+          ? '<span class="revert disabled" title="Already the current config">current</span>'
+          : `<span class="revert" data-revert="${esc(h.hash)}" title="Revert the ENTIRE config (every object) to this commit">revert entire config</span>`;
+        return `<div class="tl-item">
           <div class="tl-meta">${esc(fmtTime(h.when))} · ${esc(h.author || 'unknown')}${h.email ? ` <span class="muted">&lt;${esc(h.email)}&gt;</span>` : ''}</div>
           <div class="tl-msg">${esc(h.message || '(no message)')}</div>
-          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${i === 0 ? '<span class="revert disabled" title="Already the current config">current</span>' : `<span class="revert" data-revert="${esc(h.hash)}" title="Revert the whole config to this commit">revert</span>`}</div>
-        </div>`).join('')}</div>` : '<div class="muted" style="font-size:13px">No commits yet.</div>'}
+          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${scoped}${whole}</div>
+        </div>`;
+      }).join('')}</div>` : '<div class="muted" style="font-size:13px">No commits yet.</div>'}
     </div>`;
 
   $('#backupBtn').addEventListener('click', () => { window.location.href = '/api/backup'; });
@@ -2091,10 +2118,24 @@ async function viewHistory(c) {
   c.querySelectorAll('[data-revert]').forEach((el) => {
     el.addEventListener('click', async () => {
       const hash = el.getAttribute('data-revert');
-      if (!confirm(`Revert the entire config to ${shortSha(hash)}? This is recorded as a new commit, so it can be undone.`)) return;
+      if (!confirm(`Revert the ENTIRE config to ${shortSha(hash)}? Every object is reset to that commit, so any object created afterwards is removed. Recorded as a new commit, so it can be undone.`)) return;
       try {
         const r = await api('/api/revert', { method: 'POST', body: { hash } });
         toast('Reverted', r.data && r.data.commit ? `committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : 'config reverted', 'ok', { html: true });
+        await viewHistory(c);
+      } catch (e) { toastErr(e); }
+    });
+  });
+  c.querySelectorAll('[data-revert-obj]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const hash = el.getAttribute('data-revert-obj');
+      const plural = el.getAttribute('data-obj-plural');
+      const name = el.getAttribute('data-obj-name');
+      const kind = el.getAttribute('data-obj-kind');
+      if (!confirm(`Revert ${kind} "${name}" to ${shortSha(hash)}? Only this object changes; every other object is left as it is. Recorded as a new commit, so it can be undone.`)) return;
+      try {
+        const r = await api('/api/' + plural + '/' + encodeURIComponent(name) + '/revert', { method: 'POST', body: { hash } });
+        toast('Reverted', r.data && r.data.commit ? `${esc(kind)} "${esc(name)}" committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : `${esc(kind)} "${esc(name)}" reverted`, 'ok', { html: true });
         await viewHistory(c);
       } catch (e) { toastErr(e); }
     });

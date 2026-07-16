@@ -28,7 +28,16 @@ API or the UI — merges the object into the in-memory config, validates the
 **entire graph** (cross-references must resolve; a delete that would dangle a
 reference is rejected), writes the file, and makes a git commit. There is no
 non-git mode; history is a first-class feature. Git is invoked with a fixed argv
-(no shell), a repo-local identity, and prompts disabled.
+(no shell), a repo-local identity, and prompts disabled. Rollback comes in two
+scopes, both recorded as a new commit (a revert is itself revertible): a
+**whole-tree revert** (`Store.Revert`) resets the entire config to a target commit
+(`git read-tree --reset -u` + `clean -fd`), and a **per-object revert**
+(`Store.RevertObject`) restores only one object's file from a target commit
+(`git checkout <hash> -- <rel>`, the path always after `--` and derived from the
+trusted object-kind directory mapping) so objects created after that commit are
+left untouched. Both re-validate the whole graph before committing and roll the
+working tree back to HEAD if the result does not load cleanly; a per-object revert
+whose object is absent at the target commit is refused rather than deleting it.
 
 **REST API + web UI** (`internal/api`, `internal/ui`). The API is a small
 JSON CRUD surface over the config objects; the UI is a vanilla-JS single-page app

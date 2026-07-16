@@ -224,3 +224,150 @@ func TestSaveGeoRuleNoPredicateSkipsGate(t *testing.T) {
 		t.Fatalf("with no geo predicate wired the gate must be a no-op: %v", err)
 	}
 }
+
+func sampleCert(name string) model.Certificate {
+	return model.Certificate{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		Type:       model.CertTypeCustom,
+		Domains:    []string{name + ".example.com"},
+		Custom:     &model.CustomCertSpec{CertFile: name + ".pem", KeyFile: name + "-key.pem"},
+	}
+}
+
+// TestRevertObjectRestoresOnlyTarget is the exact incident scenario (2026-07-16):
+// reverting one proxy host to an earlier commit must restore ONLY that host's
+// file and leave every object created after that commit intact - unlike the
+// whole-tree Revert, which would wipe the newer objects.
+func TestRevertObjectRestoresOnlyTarget(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	v1 := sampleHost("web")
+	v1.Upstream.Port = 8080
+	target, err := st.Save(ctx, v1, Author{})
+	if err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+
+	v2 := sampleHost("web")
+	v2.Upstream.Port = 9090
+	if _, err := st.Save(ctx, v2, Author{}); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+
+	// Objects created AFTER the target commit - these must survive a scoped revert.
+	for _, n := range []string{"c1", "c2", "c3"} {
+		if _, err := st.Save(ctx, sampleCert(n), Author{}); err != nil {
+			t.Fatalf("save cert %s: %v", n, err)
+		}
+	}
+
+	if _, err := st.RevertObject(ctx, "ProxyHost", "web", target, Author{}); err != nil {
+		t.Fatalf("revert object: %v", err)
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].Upstream.Port != 8080 {
+		t.Fatalf("host not reverted to v1: %+v", cfg.ProxyHosts)
+	}
+	if len(cfg.Certificates) != 3 {
+		t.Fatalf("scoped revert wiped newer objects: want 3 certs, got %d", len(cfg.Certificates))
+	}
+}
+
+func TestRevertObjectRejectsBadHash(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.RevertObject(context.Background(), "ProxyHost", "web", "../nope", Author{}); err == nil {
+		t.Fatal("expected bad hash to be rejected")
+	}
+}
+
+func TestRevertObjectRejectsUnknownKind(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.RevertObject(context.Background(), "Bogus", "web", "abc1234", Author{}); err == nil {
+		t.Fatal("expected unknown kind to be rejected")
+	}
+}
+
+func TestRevertObjectRejectsTraversalName(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.RevertObject(context.Background(), "ProxyHost", "../../etc/x", "abc1234", Author{}); err == nil {
+		t.Fatal("expected traversal name to be rejected")
+	}
+}
+
+// TestRevertObjectAbsentAtCommit: reverting to a commit where the object's file
+// does not exist yet is refused with ErrPathNotInCommit (a scoped revert never
+// recreates a deletion / never resurrects a not-yet-created object).
+func TestRevertObjectAbsentAtCommit(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	early, err := st.Save(ctx, sampleHost("first"), Author{})
+	if err != nil {
+		t.Fatalf("save first: %v", err)
+	}
+	if _, err := st.Save(ctx, sampleHost("later"), Author{}); err != nil {
+		t.Fatalf("save later: %v", err)
+	}
+	// "later" did not exist at the "early" commit.
+	_, err = st.RevertObject(ctx, "ProxyHost", "later", early, Author{})
+	if err == nil {
+		t.Fatal("expected error reverting an object absent at the target commit")
+	}
+	if !errors.Is(err, ErrPathNotInCommit) {
+		t.Fatalf("want ErrPathNotInCommit, got %v", err)
+	}
+}
+
+// TestRevertObjectRollsBackOnInvalid: if restoring the single file leaves the
+// whole config invalid (a dangling reference), the working tree is rolled back
+// to HEAD and nothing is committed.
+func TestRevertObjectRollsBackOnInvalid(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Save(ctx, sampleCert("c1"), Author{}); err != nil {
+		t.Fatalf("save cert: %v", err)
+	}
+	withRef := sampleHost("web")
+	withRef.TLS.CertificateRef = "c1"
+	target, err := st.Save(ctx, withRef, Author{})
+	if err != nil {
+		t.Fatalf("save host w/ ref: %v", err)
+	}
+	// Drop the reference, then remove the cert so the target version is now invalid.
+	if _, err := st.Save(ctx, sampleHost("web"), Author{}); err != nil {
+		t.Fatalf("save host w/o ref: %v", err)
+	}
+	if _, err := st.Delete(ctx, "Certificate", "c1", Author{}); err != nil {
+		t.Fatalf("delete cert: %v", err)
+	}
+
+	head, _ := st.Head(ctx)
+	if _, err := st.RevertObject(ctx, "ProxyHost", "web", target, Author{}); err == nil {
+		t.Fatal("expected revert to be refused when the restored file dangles")
+	}
+	if after, _ := st.Head(ctx); after != head {
+		t.Fatalf("nothing must be committed on refused revert: head moved %q -> %q", head, after)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load after rollback: %v", err)
+	}
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].TLS.CertificateRef != "" {
+		t.Fatalf("working tree not rolled back cleanly: %+v", cfg.ProxyHosts)
+	}
+	// The rollback must leave no staged-but-uncommitted state behind (the
+	// checkout stages the restored file into the index, not just the worktree).
+	clean, err := st.git.IsClean(ctx)
+	if err != nil {
+		t.Fatalf("IsClean after rollback: %v", err)
+	}
+	if !clean {
+		t.Fatal("index/worktree dirty after refused revert; rollback incomplete")
+	}
+}

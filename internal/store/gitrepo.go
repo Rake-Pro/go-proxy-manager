@@ -7,6 +7,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,12 +15,21 @@ import (
 	"time"
 )
 
+// ErrPathNotInCommit is returned by RestorePath when the requested path does not
+// exist in the target commit, so there is nothing to restore. A scoped revert
+// maps this to a clear "object absent at that commit" error rather than silently
+// deleting the object.
+var ErrPathNotInCommit = errors.New("path not present in target commit")
+
 // execEnv returns the process environment with git made deterministic and
 // independent of any host-level/global git config.
 func execEnv() []string {
 	return append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
+		// Stable English messages: error classification (e.g. RestorePath's
+		// pathspec-miss mapping) matches on git's output text.
+		"LC_ALL=C",
 	)
 }
 
@@ -67,6 +77,12 @@ type GitRepo interface {
 	// roll the config back to a past commit (the caller then commits the result)
 	// and to undo a failed restore.
 	RestoreTree(ctx context.Context, treeish string) error
+	// RestorePath restores a single tracked path (relative to the repo root) in
+	// the working tree and index from treeish, leaving every other file untouched.
+	// It does NOT create a commit. The path is always passed after a "--"
+	// separator so an untrusted value can never be read as a git option. Returns
+	// ErrPathNotInCommit when the path does not exist in treeish.
+	RestorePath(ctx context.Context, treeish, rel string) error
 	// IsClean reports whether the working tree has no uncommitted changes.
 	IsClean(ctx context.Context) (bool, error)
 	// PullFFOnly fast-forwards from the configured remote; it never merges or
@@ -185,6 +201,21 @@ func (g *execGit) RestoreTree(ctx context.Context, treeish string) error {
 	// refused for. clean -fd purges them so the working tree exactly matches
 	// treeish (the hard-reset semantics this method promises).
 	if _, err := g.run(ctx, nil, "clean", "-fd"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *execGit) RestorePath(ctx context.Context, treeish, rel string) error {
+	// checkout <treeish> -- <rel> rewrites only that path from the target commit;
+	// the "--" separator makes rel a pathspec, never an option. If rel is not in
+	// the commit, git fails with a "did not match" pathspec error, which we map to
+	// the ErrPathNotInCommit sentinel so a scoped revert reports it cleanly.
+	if _, err := g.run(ctx, execEnv(), "checkout", treeish, "--", rel); err != nil {
+		if strings.Contains(err.Error(), "did not match") ||
+			strings.Contains(err.Error(), "does not exist") {
+			return fmt.Errorf("%q at %s: %w", rel, treeish, ErrPathNotInCommit)
+		}
 		return err
 	}
 	return nil

@@ -468,6 +468,40 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		writeJSON(w, http.StatusOK, nonNilCommits(commits))
 	})
+
+	// Scoped revert: restore ONLY this object's file to its state at a past
+	// commit, committing just that change (every other object is left as-is).
+	// Body: {"hash":"<commit>"}. Contrast POST /revert, which resets the whole
+	// config tree. Same auth/CSRF/reload/webhook wiring as every other write.
+	mux.HandleFunc("POST "+base+"/{name}/revert", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if err := model.ValidateName(name); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		body, err := readBody(w, r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		var req struct {
+			Hash string `json:"hash"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		sha, err := d.Store.RevertObject(r.Context(), res.kind, name, req.Hash, d.author(r))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if !d.applyChange(w, "revert", res.kind, name, sha) {
+			return
+		}
+		w.Header().Set(commitHeader, sha)
+		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
+	})
 }
 
 // deleteStatus maps a store.Delete error to an HTTP status: 404 when the object

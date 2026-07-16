@@ -9,6 +9,29 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **HA design doc** ([docs/design/ha.md](docs/design/ha.md)): a settled
+  multi-instance story for gpm itself. Recommends a phase-1 active/standby
+  two-node homelab pair - static leader owns ACME renewal and admin writes, the
+  follower pulls config via git `pull --ff-only` and reads replicated
+  certs/secrets, a keepalived VRRP VIP steers traffic (client IP preserved), the
+  `sso_not_before` watermark gains a refresh loop so revocation propagates
+  without a restart, and TCP/UDP streams are failover-with-reconnect. Per-instance
+  state (admin sessions, access-log ring, rate-limit buckets, login-lockout maps)
+  is documented as lossy. No new dependency; no data-plane hot-path change.
+- **Per-object revert.** A scoped revert restores only one object's file to its
+  state at a past commit, committing just that change and leaving every other
+  object untouched. New `Store.RevertObject(kind, name, hash)` uses
+  `git checkout <hash> -- <rel>` (path always after `--`); the rel path is derived
+  from the trusted object-kind directory mapping (never client-supplied), the hash
+  is validated, and the whole config is re-validated with a rollback to HEAD on
+  failure exactly like the whole-tree revert. New endpoint
+  `POST /api/{kind}/{name}/revert` (body `{"hash":"<commit>"}`), same
+  auth/CSRF/reload/webhook wiring as the whole-config revert. The History view now
+  offers "revert this object" per single-object commit, and the existing
+  whole-tree action is relabeled "revert entire config" to make its scope
+  unmistakable. This closes the gap where reverting one object from its History
+  view silently deleted every object created after that commit (operator incident
+  2026-07-16: a proxy-host revert wiped three newer Certificate objects).
 - **Upstream groups: health-checked failover across multiple backends.** New
   first-class `UpstreamGroup` object (`config/upstream-groups/`): an ordered
   list of upstreams (first = primary, rest = backups) with a per-group health

@@ -375,7 +375,86 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	return s.git.CommitAll(ctx, fmt.Sprintf("Revert config to %s", short), author)
+	sha, err := s.git.CommitAll(ctx, fmt.Sprintf("Revert config to %s", short), author)
+	if err != nil {
+		// Don't leave the restored-but-uncommitted tree behind: a later write's
+		// commit would silently sweep it in.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert to %q: commit: %w", hash, err)
+	}
+	return sha, nil
+}
+
+// RevertObject restores ONLY the named object's file to its state at commit hash
+// and records the result as a NEW commit, leaving every other object untouched -
+// unlike the whole-tree Revert, which resets the entire config. The object kind
+// selects the managed subdirectory and the name is validated, so the restored
+// path is derived from the trusted kind mapping, never from client input (no
+// traversal, absolute path, or unknown kind can reach git). After restoring the
+// single file the whole config is loaded and validated exactly like Revert; on
+// any failure the working tree is rolled back to HEAD and nothing is committed.
+// If the object does not exist at the target commit the revert is refused with a
+// clear error (a scoped revert never recreates a deletion).
+func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !commitHashRe.MatchString(hash) {
+		return "", fmt.Errorf("invalid commit hash %q", hash)
+	}
+	if err := model.ValidateName(name); err != nil {
+		return "", err
+	}
+	dir, ok := kindDir[kind]
+	if !ok {
+		return "", fmt.Errorf("unknown object kind %q", kind)
+	}
+	rel := dir + "/" + name + ".yaml"
+
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.git.RestorePath(ctx, hash, rel); err != nil {
+		if errors.Is(err, ErrPathNotInCommit) {
+			return "", fmt.Errorf("%s %q is not present at commit %s (a scoped revert cannot recreate a deletion): %w", kind, name, hash, err)
+		}
+		return "", fmt.Errorf("revert %s %q: restore %q from %q: %w", kind, name, rel, hash, err)
+	}
+
+	restored, _, err := s.loadLocked()
+	if err != nil {
+		// The single-file restore left the whole config invalid (e.g. it references
+		// an object deleted since): undo the file change and refuse.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config with %s %q at %q does not validate: %w", kind, name, hash, err)
+	}
+	if err := s.checkGeoAvailable(restored); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
+	}
+
+	short := hash
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	sha, err := s.git.CommitAll(ctx, fmt.Sprintf("Revert %s/%s to %s", kind, name, short), author)
+	if err != nil {
+		// Same as Revert: never leave the restored file uncommitted for a later
+		// write's commit to sweep in.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert %s %q to %q: commit: %w", kind, name, hash, err)
+	}
+	return sha, nil
 }
 
 // SaveSettings validates and writes the singleton settings object, then commits.

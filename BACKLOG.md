@@ -48,7 +48,7 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
   archive): `GET /api/backup`, `POST /api/restore`, with UI controls.
 - [x] **Config history**: revert endpoint (`POST /api/revert`) + live per-commit
   revert action in the History view.
-- [ ] **Per-object revert.** Revert today is whole-tree: `Store.Revert` →
+- [x] **Per-object revert.** Revert today is whole-tree: `Store.Revert` →
   `RestoreTree` (`git read-tree --reset -u` + `clean -fd`) resets the entire
   config to the target commit, so reverting one object from its History view
   silently deletes every object created after that commit (bit the operator
@@ -57,6 +57,12 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
   target commit (`git restore --source=<hash> -- <rel>` semantics) and commits
   just that change; keep the whole-tree revert as an explicit, clearly-labeled
   separate action.
+  *(Done: `Store.RevertObject(kind,name,hash)` restores a single file via
+  `git checkout <hash> -- <rel>` — rel derived from the trusted kind mapping, hash
+  validated, whole-config re-validated with HEAD rollback on failure, absent-at-
+  commit refused (no delete-on-revert); endpoint `POST /api/{kind}/{name}/revert`;
+  History view gains "revert this object" and the whole-tree action is relabeled
+  "revert entire config".)*
 - [x] Full field-level forms in the UI for every object kind (redirect, stream,
   dead, DNS provider, identity provider, access list, middleware now have typed
   field editors with add/remove rows, enum selects, pickers, and secret-aware
@@ -136,21 +142,18 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 - [ ] **HA support for gpm.** Upstream groups remove the single-node dependency
   *behind* gpm; the gpm instance itself is still a single point of failure. Design
-  and ship a supported multi-instance story. Open questions to resolve in a design
-  doc first:
-  - config replication between instances (the git-backed store is a natural
-    transport: leader commits, followers pull/watch; or an external shared repo);
-  - shared secrets so failover is seamless (`GPM_SSO_SIGNING_KEY`, session store,
-    ACME account/material — issued certs must not be double-issued by two
-    instances racing renewals: renewal needs leader election or single-writer);
-  - SSO revocation propagation: the `sso_not_before` watermark is read at
-    startup, so a peer instance sharing the signing key only honors a
-    revocation after its next restart — HA needs a watch/poll or shared store;
-  - traffic-side failover between instances (VRRP/keepalived VIP, DNS, or an
-    upstream L4 balancer) — out of process scope but the deployment doc must
-    cover at least one pattern;
-  - stream (TCP/UDP) listeners and UDP session state are per-instance and
-    non-replicable; document as failover-with-reconnect.
+  and ship a supported multi-instance story.
+  - [x] **Design doc** resolving the open questions -
+    [docs/design/ha.md](docs/design/ha.md): recommends phase-1 active/standby for
+    a 2-node homelab (static leader owns ACME + admin writes; follower pulls
+    config via `git pull --ff-only` and reads replicated certs; `keepalived` VRRP
+    VIP; SSO watermark refresh loop; streams as failover-with-reconnect), with a
+    phase-2 sketch (lease-file election, shared bare repo, active/active) and
+    explicit non-goals (no etcd/consul/raft, no multi-writer, no live stream-state
+    replication).
+  - [ ] Implement phase 1 (see the doc's suggested sequencing: SSO watermark
+    refresh loop -> leader/follower role gate -> follower config poll loop ->
+    deploy doc).
 
 ## Roadmap
 
@@ -164,6 +167,10 @@ MPTCP, Anubis, cosign signing).
 
 ### Design proposals
 
+- **High availability (gpm itself)** -
+  [docs/design/ha.md](docs/design/ha.md) (design complete, implementation not
+  started). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
+  automatic election / active/active.
 - **HTTP/3** — [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
   from the same document are now ✓ shipped - see FEATURES.md and

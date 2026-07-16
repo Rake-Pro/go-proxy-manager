@@ -56,7 +56,8 @@ builds it with a narrower, more focused design:
 
 **Operations**
 - REST API + embedded single-page web UI
-- Git-backed declarative config with full referential validation
+- Git-backed declarative config with full referential validation, per-commit
+  history, and revert (whole-config or scoped to a single object)
 - One-time importer from an existing Nginx-Proxy-Manager/NPMplus data directory
 - Structured logging (zerolog), optional access log, slow-request warnings
 
