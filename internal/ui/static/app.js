@@ -79,6 +79,22 @@ function arr(v) { return Array.isArray(v) ? v : []; }
 function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 
+// Maps a domain to its "zone" (group) for the hosts list filter chips.
+// A leading "*." is stripped first; a wildcard's remainder already names the
+// zone (*.iot.example.com -> iot.example.com), so the label-drop below only runs
+// for non-wildcard domains with more than 2 labels (sensor.iot.example.com
+// -> iot.example.com, gpm.rake.pro -> rake.pro, rake.pro -> rake.pro).
+function domainZone(d) {
+  let s = String(d || '');
+  const wildcard = s.startsWith('*.');
+  if (wildcard) s = s.slice(2);
+  if (!wildcard) {
+    const parts = s.split('.').filter(Boolean);
+    if (parts.length > 2) return parts.slice(1).join('.');
+  }
+  return s;
+}
+
 // ---------- api ----------
 let csrfToken = '';
 
@@ -232,7 +248,7 @@ async function loadTopbar() {
       state.appName = s.appName;
       const nm = document.querySelector('.wordmark .name');
       if (nm) nm.textContent = s.appName;
-      document.title = s.appName + ' admin';
+      document.title = s.appName;
     }
   } catch (e) { /* ignore */ }
 
@@ -494,7 +510,29 @@ async function listHosts(c) {
     return;
   }
 
-  const rows = hosts.map((h) => {
+  // zone (domain-group) filter chips: excluded zones persist across reloads.
+  const ZONES_OFF_KEY = 'gpm.hosts.zonesOff';
+  let zonesOff = new Set();
+  try {
+    const raw = localStorage.getItem(ZONES_OFF_KEY);
+    if (raw) zonesOff = new Set(JSON.parse(raw));
+  } catch (e) { /* ignore */ }
+  function saveZonesOff() {
+    try { localStorage.setItem(ZONES_OFF_KEY, JSON.stringify(Array.from(zonesOff))); } catch (e) { /* ignore */ }
+  }
+
+  const zoneCounts = {};
+  const hostZones = hosts.map((h) => {
+    const zones = Array.from(new Set(arr(h.domains).map(domainZone).filter(Boolean)));
+    zones.forEach((z) => { zoneCounts[z] = (zoneCounts[z] || 0) + 1; });
+    return zones;
+  });
+  const zoneEntries = Object.keys(zoneCounts)
+    .map((z) => [z, zoneCounts[z]])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const showZones = zoneEntries.length >= 2;
+
+  const rows = hosts.map((h, i) => {
     const domains = arr(h.domains);
     const primary = domains[0] || h.name;
     const extra = domains.length > 1 ? ` +${domains.length - 1}` : '';
@@ -510,7 +548,7 @@ async function listHosts(c) {
       ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
       : `<span class="chip ok"><span class="dot ok"></span>live</span>`;
     const tagChips = arr(h.tags).map((t) => `<span class="chip" style="font-size:10px;padding:1px 6px">${esc(t)}</span>`).join(' ');
-    return `<tr class="clickable" data-name="${esc(h.name)}">
+    return `<tr class="clickable" data-name="${esc(h.name)}" data-zones="${esc(hostZones[i].join(','))}">
       <td><span class="host">${esc(primary)}${esc(extra)}</span>${h.displayName ? `<div class="faint" style="font-size:11px">${esc(h.displayName)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
       <td class="mono">${esc(upStr)}</td>
       <td>${tls}</td>
@@ -519,9 +557,16 @@ async function listHosts(c) {
     </tr>`;
   }).join('');
 
+  function zoneChipsInner() {
+    return (zonesOff.size ? `<button type="button" class="chip zone all" data-zone-all="1">all</button>` : '')
+      + zoneEntries.map(([z, n]) => `<button type="button" class="chip zone${zonesOff.has(z) ? ' off' : ''}" data-zone="${esc(z)}">${esc(z)} (${n})</button>`).join('');
+  }
+  const zoneChipsHtml = showZones ? `<div class="chip-row" id="zoneChips">${zoneChipsInner()}</div>` : '';
+
   c.innerHTML = head + `
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter: domain, upstream, cert, tag..." aria-label="Filter hosts" /></div>
+      ${zoneChipsHtml}
     </div>
     <div class="table-wrap">
       <table>
@@ -534,12 +579,33 @@ async function listHosts(c) {
     tr.addEventListener('click', () => { location.hash = '#/hosts/' + encodeURIComponent(tr.dataset.name); });
   });
   const filter = $('#hostFilter');
-  filter.addEventListener('input', () => {
+  function applyFilter() {
     const q = filter.value.toLowerCase();
     $$('#hostRows tr').forEach((tr) => {
-      tr.style.display = tr.textContent.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+      const zones = (tr.dataset.zones || '').split(',').filter(Boolean);
+      const zoneOk = zones.length === 0 || zones.some((z) => !zonesOff.has(z));
+      const textOk = tr.textContent.toLowerCase().indexOf(q) !== -1;
+      tr.style.display = (textOk && zoneOk) ? '' : 'none';
     });
-  });
+  }
+  filter.addEventListener('input', applyFilter);
+  const zoneChips = $('#zoneChips');
+  if (zoneChips) {
+    zoneChips.addEventListener('click', (e) => {
+      const btn = e.target.closest('.chip.zone');
+      if (!btn) return;
+      if (btn.dataset.zoneAll) {
+        zonesOff.clear();
+      } else {
+        const z = btn.dataset.zone;
+        if (zonesOff.has(z)) zonesOff.delete(z); else zonesOff.add(z);
+      }
+      saveZonesOff();
+      zoneChips.innerHTML = zoneChipsInner();
+      applyFilter();
+    });
+  }
+  applyFilter();
 }
 
 // ---------- HOST EDITOR ----------

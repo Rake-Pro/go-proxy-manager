@@ -165,6 +165,12 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .chip.cyan { color:var(--cyan); border-color:rgba(63,208,201,.4); background:rgba(63,208,201,.08); }
 .chip.kind { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; padding:2px 7px; }
 
+/* toggleable filter chips (e.g. hosts list zone filter) */
+.chip-row { display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+.chip.zone { border:1px solid var(--border); }
+.chip.zone.off { color:var(--faint); opacity:.5; }
+.chip.zone.all { color:var(--brand); border-color:rgba(110,139,255,.4); background:rgba(110,139,255,.08); }
+
 /* stat tiles */
 .stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px; }
 .stat {

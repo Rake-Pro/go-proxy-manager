@@ -102,6 +102,14 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   `sameOriginGuard`). Registered explicitly on the admin mux, never via the
   side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
   `http.DefaultServeMux`. Never touches the data-plane router.
+- **Domain-group filter chips on the Proxy Hosts list.** Each host's domains are
+  grouped into a "zone" (a wildcard's remainder, or the last two labels of a
+  regular domain — `sensor.iot.example.com` and `*.iot.example.com` both group
+  under `iot.example.com`). When a list has 2+ zones, a chip row renders below the
+  search box (label "zone (count)", sorted by count then name); clicking a chip
+  excludes/includes that zone, composing with the existing text filter. Excluded
+  zones persist in `localStorage` (`gpm.hosts.zonesOff`) across navigation and
+  reloads.
 
 ### Changed
 
@@ -115,6 +123,10 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   subrequest client (`internal/dataplane/authrequest.go`) now uses a dedicated,
   tuned `http.Transport` (no proxy env, 5s dial/TLS timeouts, 64 idle conns per
   host) instead of the default transport's 2-conn-per-host cap.
+- **Browser tab title dropped the " admin" suffix.** The static fallback title
+  and the dynamic `document.title` (set from `settings.appName` once loaded)
+  now both read just "Go Proxy Manager" (or the configured app name), matching
+  the sidebar wordmark.
 
 ### Fixed
 

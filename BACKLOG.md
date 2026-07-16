@@ -48,6 +48,15 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
   archive): `GET /api/backup`, `POST /api/restore`, with UI controls.
 - [x] **Config history**: revert endpoint (`POST /api/revert`) + live per-commit
   revert action in the History view.
+- [ ] **Per-object revert.** Revert today is whole-tree: `Store.Revert` →
+  `RestoreTree` (`git read-tree --reset -u` + `clean -fd`) resets the entire
+  config to the target commit, so reverting one object from its History view
+  silently deletes every object created after that commit (bit the operator
+  2026-07-16: reverting a proxy host wiped three newer Certificate objects).
+  Offer a scoped revert that restores only the selected object's file from the
+  target commit (`git restore --source=<hash> -- <rel>` semantics) and commits
+  just that change; keep the whole-tree revert as an explicit, clearly-labeled
+  separate action.
 - [x] Full field-level forms in the UI for every object kind (redirect, stream,
   dead, DNS provider, identity provider, access list, middleware now have typed
   field editors with add/remove rows, enum selects, pickers, and secret-aware
@@ -64,6 +73,11 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
   view, gated on the access-log toggle (zero overhead when off).
 - [x] **Lifecycle webhooks** (`settings.webhooks`): async, best-effort POST per
   config change; optional placeholder-resolved `X-GPM-Webhook-Secret`.
+- [x] **Domain-group filter chips on the Proxy Hosts list.** Hosts are grouped
+  into "zones" derived from their domains (wildcard remainder, or last-two-labels
+  of a regular domain) and shown as toggleable chips when 2+ zones exist;
+  clicking excludes/includes a zone, composing with the existing text filter.
+  Exclusions persist in `localStorage`.
 
 ## Security & hardening (post-public follow-ups)
 
@@ -97,13 +111,14 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 ## UI polish
 
-- [ ] **Drop the " admin" suffix from the browser tab title.** The tab should
+- [x] **Drop the " admin" suffix from the browser tab title.** The tab should
   read just the app name (default "Go Proxy Manager"), not "Go Proxy Manager
   admin". Two spots: the static fallback `<title>` in
   `internal/ui/static/index.html:6` and the dynamic
   `document.title = s.appName + ' admin'` in `internal/ui/static/app.js`
   (`refreshAppName`, ~line 235). The login page title
   (`internal/server/authhttp.go`, "{{.AppName}} - Sign in") is fine as is.
+  (Done: both spots now read the app name with no suffix.)
 
 ## Upstream-group follow-ups
 
