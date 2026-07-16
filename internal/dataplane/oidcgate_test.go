@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +270,92 @@ func TestDataOIDCSessionBoundToHost(t *testing.T) {
 	}
 	if recCross.Code != http.StatusFound {
 		t.Fatalf("cross-host replay should trigger a fresh login redirect, got %d", recCross.Code)
+	}
+}
+
+func TestSSORevocationWatermark(t *testing.T) {
+	idpSrv := newMockIdP(t)
+	g, err := compileDataOIDC(model.IdentityProvider{
+		ObjectMeta: model.ObjectMeta{Name: "idp"},
+		Type:       model.IdPTypeOIDC,
+		OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client"},
+	}, nil, "app")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	gate := g.handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("upstream"))
+	}))
+	// The watermark is process-global; reset it so test order never matters.
+	t.Cleanup(func() { ssoNotBefore.Store(0) })
+
+	mkCookie := func(iat int64) *http.Cookie {
+		payload, _ := json.Marshal(oidcSession{
+			Sub: "u", Host: "app",
+			Exp: time.Now().Add(time.Hour).Unix(),
+			Iat: iat,
+		})
+		return &http.Cookie{Name: oidcSessionCookie, Value: signToken(payload)}
+	}
+	serve := func(c *http.Cookie) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "https://app.example.com/x", nil)
+		r.AddCookie(c)
+		gate.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	old := mkCookie(time.Now().Add(-10 * time.Second).Unix())
+	legacy := mkCookie(0) // pre-Iat cookie shape
+
+	if code := serve(old); code != http.StatusOK {
+		t.Fatalf("pre-revocation session rejected: %d", code)
+	}
+	if code := serve(legacy); code != http.StatusOK {
+		t.Fatalf("legacy (iat-less) session rejected before any revocation: %d", code)
+	}
+
+	if err := RevokeAllSSOSessions(); err != nil {
+		t.Fatalf("RevokeAllSSOSessions: %v", err)
+	}
+
+	// Everything issued before the watermark - including legacy cookies - now
+	// bounces to a fresh login instead of reaching the upstream.
+	if code := serve(old); code != http.StatusFound {
+		t.Fatalf("revoked session got %d, want 302 login redirect", code)
+	}
+	if code := serve(legacy); code != http.StatusFound {
+		t.Fatalf("legacy session survived revocation: %d", code)
+	}
+
+	// A session minted after (or at) the watermark is valid.
+	if code := serve(mkCookie(time.Now().Unix())); code != http.StatusOK {
+		t.Fatalf("post-revocation session rejected: %d", code)
+	}
+}
+
+func TestSSORevocationPersists(t *testing.T) {
+	// With a state dir configured, the watermark is written next to the signing
+	// key so revocation survives a restart.
+	dir := t.TempDir()
+	SetSSOKeyDir(dir)
+	t.Cleanup(func() {
+		SetSSOKeyDir("")
+		ssoNotBefore.Store(0)
+	})
+
+	if err := RevokeAllSSOSessions(); err != nil {
+		t.Fatalf("RevokeAllSSOSessions: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ssoNotBeforeFile))
+	if err != nil {
+		t.Fatalf("watermark not persisted: %v", err)
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || v <= 0 {
+		t.Fatalf("persisted watermark %q unusable: %v", b, err)
+	}
+	if got := ssoNotBefore.Load(); got != v {
+		t.Fatalf("in-memory watermark %d != persisted %d", got, v)
 	}
 }

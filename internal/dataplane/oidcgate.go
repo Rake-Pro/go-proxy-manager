@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -149,6 +150,61 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmpName, path)
 }
 
+// ssoNotBeforeFile persists the revocation watermark next to the signing key.
+const ssoNotBeforeFile = "sso_not_before"
+
+// ssoNotBefore is the SSO revocation watermark: sessions issued strictly
+// before it are invalid. Loaded lazily from the state dir; 0 = never revoked.
+var (
+	ssoNotBefore     atomic.Int64
+	ssoNotBeforeOnce sync.Once
+)
+
+// ssoRevokedAt returns the current revocation watermark (unix seconds).
+func ssoRevokedAt() int64 {
+	ssoNotBeforeOnce.Do(func() {
+		d := ssoKeyDir.Load()
+		if d == nil || *d == "" {
+			return
+		}
+		b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile))
+		if err != nil {
+			return // absent (or unreadable) = no revocation on record
+		}
+		if v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			ssoNotBefore.Store(v)
+		}
+	})
+	return ssoNotBefore.Load()
+}
+
+// RevokeAllSSOSessions invalidates every outstanding data-plane SSO session by
+// moving the revocation watermark to now: a session issued strictly before it
+// fails the gate and the user re-authenticates at the IdP (sessions minted in
+// the same second survive, so a login racing the revocation cannot loop).
+// The watermark is persisted next to the signing key so revocation survives
+// restarts; without a state dir it is process-local, matching the ephemeral
+// signing key's semantics.
+func RevokeAllSSOSessions() error {
+	now := time.Now().Unix()
+	// Force the lazy load so the store below cannot be overwritten, and never
+	// move the watermark backwards (clock skew across restarts must not weaken
+	// a prior revocation).
+	if cur := ssoRevokedAt(); cur > now {
+		now = cur
+	}
+	ssoNotBefore.Store(now)
+	log.Info().Int64("notBefore", now).Msg("data-plane SSO: all sessions revoked")
+	d := ssoKeyDir.Load()
+	if d == nil || *d == "" {
+		return nil
+	}
+	if err := os.MkdirAll(*d, 0o700); err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(*d, ssoNotBeforeFile), []byte(strconv.FormatInt(now, 10)), 0o600)
+}
+
 // signToken returns payload as base64url(payload).base64url(HMAC-SHA256(payload)).
 func signToken(payload []byte) string {
 	mac := hmac.New(sha256.New, ssoSigningKey())
@@ -190,6 +246,10 @@ type oidcSession struct {
 	Groups []string `json:"groups,omitempty"`
 	Host   string   `json:"host"`
 	Exp    int64    `json:"exp"`
+	// Iat is the issue time, checked against the revocation watermark (see
+	// RevokeAllSSOSessions). Pre-watermark sessions - including legacy cookies
+	// without the field - are rejected once a revocation is on record.
+	Iat int64 `json:"iat,omitempty"`
 }
 
 // oidcLoginState is the signed, short-lived state cookie binding a login to this
@@ -314,7 +374,8 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 			return
 		}
 		var sess oidcSession
-		if readSignedCookie(r, oidcSessionCookie, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName {
+		if readSignedCookie(r, oidcSessionCookie, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
+			sess.Iat >= ssoRevokedAt() {
 			if !d.authorized(sess.Groups) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -383,6 +444,7 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Sub: claims.Subject, Email: claims.Email, Name: claims.Name,
 		Groups: claims.Groups, Host: d.hostName,
 		Exp: time.Now().Add(oidcSessionTTL).Unix(),
+		Iat: time.Now().Unix(),
 	}, oidcSessionTTL)
 	http.Redirect(w, r, sanitizeSSOReturn(st.Return), http.StatusFound)
 }

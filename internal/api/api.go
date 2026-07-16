@@ -45,6 +45,9 @@ type Deps struct {
 	// UpstreamHealth, if set, returns the live per-group upstream health payload
 	// (marshalled as-is) for GET /upstream-health. May be nil.
 	UpstreamHealth func() any
+	// RevokeSSOSessions, if set, invalidates every outstanding data-plane SSO
+	// session (POST /sso/revoke). May be nil (endpoint responds 501).
+	RevokeSSOSessions func() error
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -231,6 +234,21 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.UpstreamHealth())
+	})
+
+	// Revoke every outstanding data-plane SSO session (users re-authenticate at
+	// the IdP on their next request). Mutating POST, so the server's CSRF and
+	// admin-session gates apply like any other write.
+	mux.HandleFunc("POST /sso/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if d.RevokeSSOSessions == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("SSO revocation is not wired"))
+			return
+		}
+		if err := d.RevokeSSOSessions(); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	})
 
 	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {

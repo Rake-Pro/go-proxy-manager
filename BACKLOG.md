@@ -128,6 +128,9 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   - shared secrets so failover is seamless (`GPM_SSO_SIGNING_KEY`, session store,
     ACME account/material — issued certs must not be double-issued by two
     instances racing renewals: renewal needs leader election or single-writer);
+  - SSO revocation propagation: the `sso_not_before` watermark is read at
+    startup, so a peer instance sharing the signing key only honors a
+    revocation after its next restart — HA needs a watch/poll or shared store;
   - traffic-side failover between instances (VRRP/keepalived VIP, DNS, or an
     upstream L4 balancer) — out of process scope but the deployment doc must
     cover at least one pattern;

@@ -167,6 +167,15 @@ func main() {
 	})
 	authn.Configure(cfg, settings)
 
+	// Production guard for GPM_COOKIE_SECURE=0: an https externalBaseURL says
+	// this deployment is TLS-fronted, so non-Secure admin session cookies are a
+	// misconfiguration (they would ride any plain-HTTP request). Warn loudly
+	// rather than refuse - a LAN-only plain-HTTP admin listener alongside the
+	// public URL is a known deliberate setup, and hard-failing would brick it.
+	if !*cookieSecure && strings.HasPrefix(strings.ToLower(settings.ExternalBaseURL), "https://") {
+		log.Warn().Msg("GPM_COOKIE_SECURE=0 while settings.externalBaseURL is https: admin session cookies are sent without the Secure flag and can leak over plain HTTP; unset GPM_COOKIE_SECURE unless a plain-HTTP admin listener is intentional")
+	}
+
 	// reload re-reads the config and applies it to both the auth layer and the
 	// data plane. It is the single path used after any config or certificate
 	// change (API writes, ACME issuance) so the running state never drifts.
@@ -228,6 +237,7 @@ func main() {
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},
+		RevokeSSOSessions: dataplane.RevokeAllSSOSessions,
 	})
 
 	uiHandler, err := ui.Handler()

@@ -127,6 +127,29 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Webhook delivery is SSRF-bounded** (issue #1, low/defense-in-depth).
+  Lifecycle-webhook targets are admin-configured URLs, which made delivery an
+  SSRF primitive from gpm's network position. Redirects are no longer followed
+  (a 3xx counts as a failed delivery instead of bouncing gpm to a URL the admin
+  never configured), and link-local destinations (`169.254.0.0/16`, `fe80::/10`
+  — cloud metadata services) are refused at connect time on the resolved
+  address, so a rebinding resolver cannot dodge the check. Private/LAN targets
+  remain allowed (the normal self-hosted case); URL scheme/shape was already
+  validated at config-write time.
+- **Data-plane SSO sessions gained global revocation** (issue #1,
+  low/defense-in-depth). Sessions stay stateless (1h absolute TTL), but
+  `POST /api/sso/revoke` (admin-gated, CSRF-protected; also a button under
+  Settings) moves a persisted revocation watermark to "now": any session issued
+  before it — including legacy cookies minted before this change — fails the
+  gate and the user re-authenticates at the IdP. The watermark is stored next
+  to the SSO signing key so revocation survives restarts. Session cookies now
+  carry an `iat` claim to support the check.
+- **`GPM_COOKIE_SECURE=0` production guard** (issue #1, low/defense-in-depth).
+  gpm now logs a prominent startup warning when Secure cookies are disabled
+  while `settings.externalBaseURL` is `https://` — the signature of a
+  TLS-fronted deployment mis-set for local testing. A warning rather than a
+  hard failure, because a LAN-only plain-HTTP admin listener alongside the
+  public URL is a known deliberate topology.
 - **Data-plane SSO cookies use the `__Host-` prefix.** `gpm_sso` / `gpm_sso_state`
   are now `__Host-gpm_sso` / `__Host-gpm_sso_state`, so the browser enforces their
   Secure + host-locked (no `Domain`) + `Path=/` scope and a sibling subdomain cannot

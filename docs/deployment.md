@@ -237,7 +237,13 @@ cookie (as above) and run `go tool pprof` against the local file instead.
 - Keep `-pprof` off unless actively profiling; it is admin-role gated but still
   needless attack surface when idle.
 - Ensure `GPM_COOKIE_SECURE` is `1` (the default) whenever the admin plane is
-  reached over HTTPS.
+  reached over HTTPS. gpm warns at startup when `GPM_COOKIE_SECURE=0` is
+  combined with an `https://` `externalBaseURL` — that pairing is only sane for
+  a deliberate LAN-only plain-HTTP admin listener running alongside the public
+  URL.
+- If a data-plane SSO session may have been exposed (device theft, cookie
+  leak), `POST /api/sso/revoke` (or the button under Settings) invalidates
+  every outstanding SSO session at once; users re-authenticate at the IdP.
 - Run with `cap_drop: ALL` and `no-new-privileges` (as above).
 - Put the admin plane behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't

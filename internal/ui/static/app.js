@@ -2068,6 +2068,11 @@ async function viewSettings(c) {
       <div id="set-webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
     </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Data-plane SSO sessions</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request.</p>
+      <button class="btn danger sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
+    </div>
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
@@ -2095,6 +2100,16 @@ async function viewSettings(c) {
   }
   arr(s.webhooks).forEach(webhookRow);
   $('#addWebhook').addEventListener('click', () => webhookRow({}));
+
+  $('#set-sso-revoke').addEventListener('click', async () => {
+    if (!confirm('Revoke ALL data-plane SSO sessions? Every signed-in user re-authenticates at the IdP on their next request.')) return;
+    const btn = $('#set-sso-revoke'); btn.disabled = true;
+    try {
+      await api('/api/sso/revoke', { method: 'POST' });
+      toast('Sessions revoked', 'All data-plane SSO sessions are now invalid.', 'ok');
+    } catch (e) { toastErr(e); }
+    btn.disabled = false;
+  });
 
   $('#set-save').addEventListener('click', async () => {
     const body = {

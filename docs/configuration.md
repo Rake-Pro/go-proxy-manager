@@ -93,7 +93,13 @@ every successful config change gpm POSTs a JSON event
 `{"action","kind","name","commit","time"}` to each enabled target. `action` is one
 of `save` | `delete` | `restore` | `revert` | `settings`. Delivery is asynchronous
 and best-effort under a 10s timeout — a slow or unreachable endpoint never blocks
-or fails the config write, it is only logged.
+or fails the config write, it is only logged. Because targets are admin-configured
+URLs, delivery is SSRF-bounded as defense in depth: **redirects are never
+followed** (a 3xx counts as a failed delivery, so a receiver cannot bounce gpm to
+a URL the admin didn't configure) and **link-local destinations are refused at
+connect time, post-DNS** (blocking cloud-metadata pivots such as
+`169.254.169.254` even via a rebinding resolver). Private/LAN targets remain
+allowed — they are the normal self-hosted case.
 
 ```yaml
 schemaVersion: 1
@@ -448,9 +454,16 @@ roleMapping:
 > OIDC flow against the IdP, which is silent when the IdP session is still valid
 > and re-checks group membership. This bounds the offboarding window: a user
 > removed from a group or disabled at the IdP loses data-plane access within an
-> hour, without gpm holding server-side session state. There is no per-request
-> revocation — if you need instant cutoff, revoke at the IdP and, where it matters,
-> restart is not required but access ends at the next hourly re-auth.
+> hour, without gpm holding server-side session state. There is no per-user
+> revocation, but there is a global one: `POST /api/sso/revoke` (admin-gated;
+> also a button under Settings) moves a signed revocation watermark to "now",
+> invalidating every outstanding SSO session on this instance immediately —
+> users re-authenticate at the IdP on their next request. The watermark
+> persists next to the signing key, so it survives restarts. Scope note: the
+> watermark is read at startup, so a *second* gpm instance sharing the same
+> signing key only picks a revocation up on its next restart. For a
+> single-user cutoff, revoke at the IdP; access ends at that user's next
+> hourly re-auth.
 
 ---
 

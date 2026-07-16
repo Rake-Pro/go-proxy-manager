@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,4 +71,56 @@ func TestDispatchDeliversEventWithSecret(t *testing.T) {
 func TestDispatchNoTargetsIsNoop(t *testing.T) {
 	New(nil).Dispatch(Event{Action: "save"})                                         // nil targets
 	New(func() []model.WebhookConfig { return nil }).Dispatch(Event{Action: "save"}) // empty
+}
+
+func TestDispatchDoesNotFollowRedirects(t *testing.T) {
+	var pivotHits, redirHits atomic.Int32
+	pivot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pivotHits.Add(1)
+	}))
+	defer pivot.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirHits.Add(1)
+		http.Redirect(w, r, pivot.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	d := New(func() []model.WebhookConfig {
+		return []model.WebhookConfig{{Name: "r", URL: redirector.URL}}
+	})
+	d.Dispatch(Event{Action: "save"})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for redirHits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if redirHits.Load() != 1 {
+		t.Fatal("webhook target was never called")
+	}
+	time.Sleep(100 * time.Millisecond) // a follow, if any, would land by now
+	if pivotHits.Load() != 0 {
+		t.Fatalf("redirect was followed to a URL the admin never configured (%d hits)", pivotHits.Load())
+	}
+}
+
+func TestRefuseLinkLocal(t *testing.T) {
+	tests := []struct {
+		addr    string
+		blocked bool
+	}{
+		{"169.254.169.254:80", true}, // cloud metadata
+		{"[fe80::1]:80", true},       // v6 link-local
+		{"192.0.2.10:443", false},    // ordinary target
+		{"10.0.0.5:80", false},       // private LAN receivers stay allowed
+		{"example.com:443", false},   // unresolved name: Control sees IPs, names pass
+	}
+	for _, tc := range tests {
+		err := refuseLinkLocal("tcp", tc.addr, nil)
+		if tc.blocked && err == nil {
+			t.Fatalf("%s: expected refusal", tc.addr)
+		}
+		if !tc.blocked && err != nil {
+			t.Fatalf("%s: unexpected refusal: %v", tc.addr, err)
+		}
+	}
 }
