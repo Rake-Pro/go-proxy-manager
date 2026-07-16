@@ -140,6 +140,26 @@ serving real traffic. Switch to production (omit `directoryURL`) once it issues.
    `localLoginEnabled: true` while you validate; flip `ssoOnly: true` once an SSO
    login succeeds (recovery from SSO-only is by redeploy).
 
+## Upstream-group health (operations)
+
+Hosts backed by an [UpstreamGroup](configuration.md#upstreamgroup-configupstream-groups)
+fail over automatically, but during rollouts and node maintenance you can watch
+the live state:
+
+```
+curl -s -b "<admin session cookie>" https://<admin>/api/upstream-health | jq
+# {"edge-nodes":[{"upstream":"http://192.0.2.11:80","healthy":true,"weight":1,"active":3}, ...]}
+```
+
+`healthy` flips on the probe/traffic rise-fall thresholds; `active` is the
+in-flight request count per upstream. Draining or rebooting a backend node
+should show its upstream go unhealthy within roughly one probe interval plus
+the fall threshold, with traffic continuing through the remaining upstreams.
+Deploy ordering note: roll a new gpm binary **before** adding the first
+upstream-group config — an older binary treats a host whose only backend is an
+(unknown to it) `upstreamGroupRef` as having no upstream and fails config
+validation.
+
 ## Migrating from Nginx Proxy Manager
 
 ```
@@ -149,7 +169,8 @@ gpm import -npm-data /path/to/npm/data -config-dir /data/config -cert-dir /data/
 Best-effort: it maps proxy/redirect/dead/stream hosts, access lists, and
 certificates into git-backed config and copies the cert files, printing a count,
 the commit hash, and warnings for anything it could not translate (e.g. raw
-`advanced_config` nginx snippets — re-express those as typed middlewares). Use
+`advanced_config` nginx snippets — re-express those as typed middlewares, or as
+an upstream group for a custom load-balanced `upstream` block). Use
 `-dry-run` first to review the mapping without writing anything.
 
 For a full walkthrough — running gpm alongside a live NPM install, validating

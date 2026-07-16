@@ -75,6 +75,24 @@ longest-prefix-first and fall back to the host default; a location carries its o
 upstream and a middleware/access-list chain that is appended to the host's, so it
 is always at least as restrictive.
 
+**Upstream groups** (`internal/dataplane/upstreamgroup.go`). A proxy host (or a
+single location) may reference an `UpstreamGroup` instead of one upstream: an
+ordered backend list with per-group health state. A health manager living on the
+data-plane server (across reloads) runs one prober per group — TCP connect or
+HTTP GET, with rise/fall hysteresis — and live-traffic connect failures feed the
+same counters. Reloads are serialized and staged: a new config's group state is
+built first, the router compiles against it, and only a successful build commits
+(an unchanged group keeps its probers and up/down state; a rejected config
+disturbs nothing). Per request, a failover-aware transport orders the healthy
+upstreams by the group's policy — `failover` (list order), `round-robin`
+(smooth weighted), `least-connections` (in-flight/weight), `ip-hash`
+(rendezvous) — optionally honors a signed sticky-session cookie with a
+server-enforced TTL, and retries the next candidate **only on connect-phase
+errors** (dial/TLS — the request was never transmitted, so non-idempotent
+requests cannot double-apply; request bodies up to 1 MiB are buffered to make
+the replay possible). With every upstream down the group fails open and attempts
+them anyway. Live state is exposed at `GET /api/upstream-health`.
+
 **Middleware chain** (`internal/dataplane/chain.go`). Each host/location compiles
 to a handler that wraps the reverse proxy in a fixed order:
 

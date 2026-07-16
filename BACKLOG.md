@@ -95,6 +95,16 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   (`"1.2"` default | `"1.3"`) selected by SNI, rather than a global edge pin that
   would drop older clients.
 
+## UI polish
+
+- [ ] **Drop the " admin" suffix from the browser tab title.** The tab should
+  read just the app name (default "Go Proxy Manager"), not "Go Proxy Manager
+  admin". Two spots: the static fallback `<title>` in
+  `internal/ui/static/index.html:6` and the dynamic
+  `document.title = s.appName + ' admin'` in `internal/ui/static/app.js`
+  (`refreshAppName`, ~line 235). The login page title
+  (`internal/server/authhttp.go`, "{{.AppName}} - Sign in") is fine as is.
+
 ## Upstream-group follow-ups
 
 - [x] **Per-location upstream group references.** `upstreamGroupRef` on Location
