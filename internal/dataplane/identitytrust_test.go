@@ -81,7 +81,7 @@ func forwardAuthHost(t *testing.T) *hostHandler {
 			Middlewares: []string{"sso"},
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestStripBaselineIdentityNoProviders(t *testing.T) {
 		Domains:    []string{"app2.example.com"},
 		Upstream:   up,
 	}}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestIdentityTrustNotSharedAcrossHosts(t *testing.T) {
 			{ObjectMeta: model.ObjectMeta{Name: "b"}, Domains: []string{"b.example.com"}, Upstream: model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9}},
 		},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestAccessListTrustedProxyXFF(t *testing.T) {
 			},
 		},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}

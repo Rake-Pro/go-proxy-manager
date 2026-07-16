@@ -9,6 +9,62 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **Upstream groups: health-checked failover across multiple backends.** New
+  first-class `UpstreamGroup` object (`config/upstream-groups/`): an ordered
+  list of upstreams (first = primary, rest = backups) with a per-group health
+  check (TCP connect by default, or HTTP GET via `healthCheck.path`; tunable
+  `intervalSeconds`/`timeoutSeconds`/`rise`/`fall`). A ProxyHost selects it via
+  `upstreamGroupRef` (mutually exclusive with `upstream`; locations inherit the
+  group unless they set their own single `upstream`). The data plane tries
+  candidates healthy-first in config order and retries a request on the next
+  upstream **only on connect-phase failures** (dial/TLS — the request was never
+  sent, so retrying is safe for non-idempotent methods; an HTTP response,
+  including a 5xx, is never replayed). Live-traffic connect failures feed the
+  same fall counter as the active probe, an immediate probe round runs at
+  (re)load, and a group with every upstream down fails open (attempts in
+  preference order). Request bodies up to 1 MiB are buffered for replay; larger
+  bodies stream with a single attempt at the preferred upstream. Group health
+  state and probers survive config reloads that don't change the group, and a
+  rejected config never disturbs the running probers. Live status at
+  `GET /api/upstream-health`; full CRUD at `/api/upstream-groups/`; UI gains an
+  "Upstream Groups" section (typed editor with per-upstream up/down chips) and
+  a group selector on the proxy-host editor. Referential integrity enforced:
+  unknown or disabled group references are rejected at write time.
+- **Load-distribution policies and weights on upstream groups.** `policy` on
+  `UpstreamGroup` selects how traffic spreads across the healthy upstreams:
+  `failover` (default — strict list order, unchanged behavior), `round-robin`
+  (smooth weighted round-robin, nginx's algorithm), `least-connections`
+  (fewest in-flight requests relative to weight, tracked per upstream until
+  each response body closes), and `ip-hash` (rendezvous hashing on the client
+  IP for sticky sessions — when an upstream dies only its own clients move).
+  Per-upstream `weight` (1–256, default 1) sets the relative share for the
+  weighted policies and is ignored by `failover`/`ip-hash`. Unhealthy
+  upstreams are demoted to the end of the try-order under every policy
+  (fail-open preserved), and the connect-error-only retry rule is unchanged.
+  `GET /api/upstream-health` now also reports each upstream's `weight` and
+  in-flight `active` count. UI: policy select and per-upstream weight column
+  on the group editor.
+- **Cookie-based sticky sessions with a server-enforced TTL on upstream
+  groups.** `stickiness: {ttl: "12h", cookie: "..."}` on `UpstreamGroup` pins
+  each client to its assigned upstream via an HMAC-signed cookie (default name
+  `gpm-sticky-<group>`; `HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` when the
+  client arrived over HTTPS). The TTL (Go duration, plus a `d` day suffix,
+  e.g. `3d`) rides inside the signed value, so replaying a cookie past its
+  `Max-Age` still re-assigns — expiry is authoritative server-side and the
+  window is fixed from assignment, not sliding. Signed with the existing
+  data-plane SSO key (`GPM_SSO_SIGNING_KEY` / persisted `sso_signing.key`), so
+  clients cannot forge a pin to a chosen backend; tampered, expired,
+  foreign-group, or dead-upstream pins all fall back to the policy and get a
+  fresh assignment cookie, and an honored pin adds no Set-Cookie noise.
+  Composes with every policy (the policy picks initial/replacement
+  assignments). UI: sticky TTL + cookie-name fields on the group editor.
+- **Per-location upstream group references.** `upstreamGroupRef` on a
+  `Location` (mutually exclusive with the location's `upstream`) points one
+  path at its own group; with neither set the location inherits the host
+  backend as before. Validated like the host-level reference (unknown or
+  disabled groups rejected). UI: a group select per location row on the
+  proxy-host editor.
+
 - **Configurable rate-limit window on `RateLimitMiddleware`.** Rate limits can
   now be expressed as `requests` + `window` (a Go duration string, e.g. `10s`,
   `1m`, `1h`) for limits that don't reduce cleanly to a per-second rate (e.g.

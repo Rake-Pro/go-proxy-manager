@@ -39,6 +39,8 @@ func withObject(cfg *model.Config, obj model.Object) model.Config {
 		c.DNSProviders = upsert(c.DNSProviders, o)
 	case model.IdentityProvider:
 		c.IdentityProviders = upsert(c.IdentityProviders, o)
+	case model.UpstreamGroup:
+		c.UpstreamGroups = upsert(c.UpstreamGroups, o)
 	case model.AccessList:
 		c.AccessLists = upsert(c.AccessLists, o)
 	case model.Middleware:
@@ -68,6 +70,8 @@ func withoutObject(cfg *model.Config, kind, name string) model.Config {
 		c.DNSProviders = dropNamed(c.DNSProviders, name)
 	case "IdentityProvider":
 		c.IdentityProviders = dropNamed(c.IdentityProviders, name)
+	case "UpstreamGroup":
+		c.UpstreamGroups = dropNamed(c.UpstreamGroups, name)
 	case "AccessList":
 		c.AccessLists = dropNamed(c.AccessLists, name)
 	case "Middleware":
@@ -119,6 +123,9 @@ func stampTimes(obj model.Object, now time.Time) any {
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.IdentityProvider:
+		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		return o
+	case model.UpstreamGroup:
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.AccessList:

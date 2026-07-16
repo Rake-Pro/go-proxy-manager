@@ -28,6 +28,10 @@ type registry struct {
 	// AccessList geo rules (see internal/geoip). Never nil, but reports every IP
 	// as not-found when no GeoIP database is configured.
 	geoCountry func(net.IP) (string, bool)
+	// health resolves upstream-group names to their live health state so a
+	// group-backed host binds to the (reload-surviving) group probers. Set by
+	// buildRouter; nil in chains built without a router (tests).
+	health groupResolver
 	// geoLoaded reports, LIVE, whether a GeoIP database is currently loaded. It
 	// is consulted at request-evaluation time by accessList.ipAllowed, not baked
 	// into the compiled accessList at build time - so a database that loads (or

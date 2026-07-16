@@ -33,6 +33,7 @@ type Config struct {
 	ClientCAs         []ClientCA         `json:"clientCAs,omitempty" yaml:"clientCAs,omitempty"`
 	DNSProviders      []DNSProvider      `json:"dnsProviders,omitempty" yaml:"dnsProviders,omitempty"`
 	IdentityProviders []IdentityProvider `json:"identityProviders,omitempty" yaml:"identityProviders,omitempty"`
+	UpstreamGroups    []UpstreamGroup    `json:"upstreamGroups,omitempty" yaml:"upstreamGroups,omitempty"`
 	AccessLists       []AccessList       `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Middlewares       []Middleware       `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 }

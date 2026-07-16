@@ -19,7 +19,7 @@ func TestRobotsNoIndexHeader(t *testing.T) {
 		{ObjectMeta: model.ObjectMeta{Name: "noindex"}, Domains: []string{"noindex.example.com"}, Upstream: up, RobotsNoIndex: true},
 		{ObjectMeta: model.ObjectMeta{Name: "plain"}, Domains: []string{"plain.example.com"}, Upstream: up},
 	}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

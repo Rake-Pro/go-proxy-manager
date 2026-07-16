@@ -187,7 +187,11 @@ earlier tiers or duplicating work (see "Architecture for extension").
   optional light-theme toggle),
   robots/no-index toggle (✓ shipped: per-host `robotsNoIndex` → `X-Robots-Tag`),
   custom timeouts (✓ shipped: per-host `timeouts.connectSeconds`/`readSeconds`,
-  isolated per-host transport), load balancing / upstream groups,
+  isolated per-host transport), load balancing / upstream groups (✓ shipped:
+  first-class `UpstreamGroup` objects — failover / weighted round-robin /
+  least-connections / ip-hash policies, signed sticky-session cookies with a
+  server-enforced TTL, active TCP/HTTP health probes + passive connect-failure
+  detection, `GET /api/upstream-health`, typed UI editor),
   access-log viewer (✓ shipped: in-memory ring + `GET /api/logs` + "Access Logs"
   view, gated on the access-log toggle) or metrics.
 - Per-host OIDC relying-party gating on the data plane (✓ shipped: redirect →

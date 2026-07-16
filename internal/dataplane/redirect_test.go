@@ -69,7 +69,7 @@ func TestRewriteUpstreamRedirect(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := newResp(tc.location, tc.fwdProto, tc.reqHost)
-			rewriteUpstreamRedirect(resp, target)
+			rewriteUpstreamRedirect(resp)
 			if got := resp.Header.Get("Location"); got != tc.want {
 				t.Fatalf("Location = %q, want %q", got, tc.want)
 			}

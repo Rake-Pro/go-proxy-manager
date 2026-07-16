@@ -53,8 +53,9 @@ type clientAuthReq struct {
 }
 
 // buildRouter compiles the config into a router. certDir resolves relative
-// custom-certificate paths.
-func buildRouter(cfg model.Config, certDir string) (*router, error) {
+// custom-certificate paths; health supplies the live upstream-group state that
+// group-backed hosts bind to (reconciled by the caller before the build).
+func buildRouter(cfg model.Config, certDir string, health groupResolver) (*router, error) {
 	certs, err := buildCertResolver(cfg.Certificates, certDir)
 	if err != nil {
 		return nil, err
@@ -64,6 +65,7 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		return nil, err
 	}
 	reg := buildRegistry(cfg)
+	reg.health = health
 
 	rt := &router{
 		hosts:      map[string]*hostHandler{},
@@ -103,10 +105,15 @@ func buildRouter(cfg model.Config, certDir string) (*router, error) {
 		if h.Disabled {
 			continue
 		}
-		proxy := newReverseProxy(h.Upstream, h.Name, h.Timeouts)
+		proxy, upLabel, err := hostProxy(h, reg)
+		if err != nil {
+			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
 		handler := buildChain(proxy, h, reg)
-		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upstreamLabel(h.Upstream)}
-		hh.locations = buildLocations(h, reg)
+		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel}
+		if hh.locations, err = buildLocations(h, reg); err != nil {
+			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
 		hh.hsts = hstsHeader(h.TLS.HSTS)
 		hh.robots = robotsHeader(h.RobotsNoIndex)
@@ -227,35 +234,62 @@ func normalizeLocationPrefix(p string) string {
 	return c
 }
 
+// hostProxy returns the terminal reverse-proxy handler and its upstream label
+// for a host: a single upstream, or a health-checked failover group resolved
+// from the live health state (reconciled before the router build, so a missing
+// group here is a hard build error rather than a silently dead host).
+func hostProxy(h model.ProxyHost, reg *registry) (http.Handler, string, error) {
+	if h.UpstreamGroupRef == "" {
+		return newReverseProxy(h.Upstream, h.Name, h.Timeouts), upstreamLabel(h.Upstream), nil
+	}
+	var gh *groupHealth
+	if reg.health != nil {
+		gh = reg.health.lookup(h.UpstreamGroupRef)
+	}
+	if gh == nil {
+		return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
+	}
+	return newGroupReverseProxy(gh, h.Name, h.Timeouts), groupLabel(h.UpstreamGroupRef), nil
+}
+
 // buildLocations compiles a host's path-scoped locations into routes ordered
 // longest-prefix first, so the most specific path wins. Each location proxies to
-// its own upstream (falling back to the host upstream) and inherits the host's
-// middleware/access-list chain with its own appended, so per-location auth is
-// applied on top of the host gate rather than replacing it. The request path is
-// forwarded unchanged - the upstream receives the full request path unmodified.
-func buildLocations(h model.ProxyHost, reg *registry) []locationRoute {
+// its own upstream (falling back to the host upstream or upstream group) and
+// inherits the host's middleware/access-list chain with its own appended, so
+// per-location auth is applied on top of the host gate rather than replacing it.
+// The request path is forwarded unchanged - the upstream receives the full
+// request path unmodified.
+func buildLocations(h model.ProxyHost, reg *registry) ([]locationRoute, error) {
 	if len(h.Locations) == 0 {
-		return nil
+		return nil, nil
 	}
 	locs := append([]model.Location{}, h.Locations...)
 	sort.SliceStable(locs, func(i, j int) bool { return len(locs[i].Path) > len(locs[j].Path) })
 	routes := make([]locationRoute, 0, len(locs))
 	for _, loc := range locs {
 		lh := h
-		if loc.Upstream != nil {
+		switch {
+		case loc.Upstream != nil: // explicit single upstream overrides any group
 			lh.Upstream = *loc.Upstream
+			lh.UpstreamGroupRef = ""
+		case loc.UpstreamGroupRef != "": // location's own group overrides the host backend
+			lh.UpstreamGroupRef = loc.UpstreamGroupRef
+			lh.Upstream = model.Upstream{}
 		}
 		lh.Middlewares = append(append([]string{}, h.Middlewares...), loc.Middlewares...)
 		lh.AccessLists = append(append([]string{}, h.AccessLists...), loc.AccessLists...)
 		lh.Locations = nil
-		proxy := newReverseProxy(lh.Upstream, h.Name, h.Timeouts)
+		proxy, upLabel, err := hostProxy(lh, reg)
+		if err != nil {
+			return nil, fmt.Errorf("location %q: %w", loc.Path, err)
+		}
 		routes = append(routes, locationRoute{
 			prefix:   normalizeLocationPrefix(loc.Path),
 			handler:  buildChain(proxy, lh, reg),
-			upstream: upstreamLabel(lh.Upstream),
+			upstream: upLabel,
 		})
 	}
-	return routes
+	return routes, nil
 }
 
 // baseHostTLSConfig returns a per-host TLS config with the shared cert resolver,

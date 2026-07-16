@@ -24,6 +24,7 @@ var kindDir = map[string]string{
 	"ClientCA":         "client-cas",
 	"DNSProvider":      "dns-providers",
 	"IdentityProvider": "identity-providers",
+	"UpstreamGroup":    "upstream-groups",
 	"AccessList":       "access-lists",
 	"Middleware":       "middlewares",
 }
@@ -156,6 +157,9 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 		return cfg, model.Settings{}, err
 	}
 	if cfg.IdentityProviders, err = loadDir[model.IdentityProvider](s.dir, "identity-providers"); err != nil {
+		return cfg, model.Settings{}, err
+	}
+	if cfg.UpstreamGroups, err = loadDir[model.UpstreamGroup](s.dir, "upstream-groups"); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	if cfg.AccessLists, err = loadDir[model.AccessList](s.dir, "access-lists"); err != nil {

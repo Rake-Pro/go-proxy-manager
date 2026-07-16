@@ -98,7 +98,21 @@ func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTim
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 	}
-	rp := &httputil.ReverseProxy{
+	return newProxyWith(target, transportFor(timeouts), hostName)
+}
+
+// newGroupReverseProxy builds the terminal handler for a host backed by an
+// upstream group. The Rewrite target is nominally the group's first upstream;
+// the groupTransport re-points each attempt at the healthiest candidate, so the
+// URL set here only seeds scheme/host for X-Forwarded computation.
+func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts) *httputil.ReverseProxy {
+	first := gh.ups[0]
+	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
+	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName)
+}
+
+func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
@@ -109,36 +123,40 @@ func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTim
 			w.WriteHeader(http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			rewriteUpstreamRedirect(resp, target)
+			rewriteUpstreamRedirect(resp)
 			return nil
 		},
-		Transport:  transportFor(timeouts),
+		Transport:  transport,
 		BufferPool: proxyBufPool,
 	}
-	return rp
 }
 
 // rewriteUpstreamRedirect fixes Location headers that point back at the upstream's
 // own address. Some backends (e.g. Pi-hole/civetweb) build absolute redirect URLs
 // from their listening socket, ignoring the forwarded Host - so a client behind
 // the proxy gets bounced to the internal host:port over http. We rewrite only
-// redirects whose host matches this proxy's upstream, swapping in the
-// client-facing scheme (from X-Forwarded-Proto, set by SetXForwarded) and host
-// (the original request Host, preserved on the outbound request). Redirects to any
-// other host - an IdP, an external site - are left untouched.
-func rewriteUpstreamRedirect(resp *http.Response, target *url.URL) {
+// redirects whose host matches the upstream that actually served the response
+// (resp.Request.URL - correct even under group failover, where the serving
+// upstream may differ from the Rewrite target), swapping in the client-facing
+// scheme (from X-Forwarded-Proto, set by SetXForwarded) and host (the original
+// request Host, preserved on the outbound request). Redirects to any other host -
+// an IdP, an external site - are left untouched.
+func rewriteUpstreamRedirect(resp *http.Response) {
 	loc := resp.Header.Get("Location")
 	if loc == "" {
+		return
+	}
+	if resp.Request == nil || resp.Request.URL == nil {
 		return
 	}
 	u, err := url.Parse(loc)
 	if err != nil || !u.IsAbs() {
 		return // relative redirects already resolve against the public URL
 	}
-	if u.Host != target.Host {
+	if u.Host != resp.Request.URL.Host {
 		return // only rewrite redirects aimed at our own upstream
 	}
-	if resp.Request == nil || resp.Request.Host == "" {
+	if resp.Request.Host == "" {
 		return
 	}
 	scheme := resp.Request.Header.Get("X-Forwarded-Proto")

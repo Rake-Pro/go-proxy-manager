@@ -40,6 +40,7 @@ const NAV = [
   { id: 'identity', label: 'Identity', icon: ICON.user },
   { id: 'access', label: 'Access Lists', icon: ICON.shield },
   { id: 'middleware', label: 'Middleware', icon: ICON.layers },
+  { id: 'upstreams', label: 'Upstream Groups', icon: ICON.server },
   { id: 'dns', label: 'DNS Providers', icon: ICON.globe },
   { id: 'logs', label: 'Access Logs', icon: ICON.history },
   { id: 'history', label: 'History', icon: ICON.history },
@@ -49,14 +50,16 @@ const NAV = [
 const TITLES = {
   overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
   dead: 'Dead hosts', certs: 'Certificates', identity: 'Identity', access: 'Access Lists',
-  middleware: 'Middleware', dns: 'DNS Providers', history: 'History', settings: 'Settings',
+  middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
+  history: 'History', settings: 'Settings',
 };
 
 // plural API paths per section
 const PLURAL = {
   hosts: 'proxy-hosts', redirects: 'redirect-hosts', streams: 'stream-hosts',
   dead: 'dead-hosts', certs: 'certificates', identity: 'identity-providers',
-  access: 'access-lists', middleware: 'middlewares', dns: 'dns-providers',
+  access: 'access-lists', middleware: 'middlewares', upstreams: 'upstream-groups',
+  dns: 'dns-providers',
 };
 
 // ---------- helpers ----------
@@ -370,6 +373,7 @@ async function route() {
       case 'identity': await genericSection(c, 'identity', sub); break;
       case 'access': await genericSection(c, 'access', sub); break;
       case 'middleware': await genericSection(c, 'middleware', sub); break;
+      case 'upstreams': await genericSection(c, 'upstreams', sub); break;
       case 'dns': await genericSection(c, 'dns', sub); break;
       case 'redirects': await genericSection(c, 'redirects', sub); break;
       case 'streams': await genericSection(c, 'streams', sub); break;
@@ -495,7 +499,7 @@ async function listHosts(c) {
     const primary = domains[0] || h.name;
     const extra = domains.length > 1 ? ` +${domains.length - 1}` : '';
     const up = h.upstream || {};
-    const upStr = `${up.host || '?'}:${up.port != null ? up.port : '?'}`;
+    const upStr = h.upstreamGroupRef ? `group:${h.upstreamGroupRef}` : `${up.host || '?'}:${up.port != null ? up.port : '?'}`;
     const cert = h.tls && h.tls.certificateRef;
     const tls = cert
       ? `<span class="lock ok">${ICON.lock}${esc(cert)}</span>`
@@ -582,15 +586,17 @@ function renderHostFlow(rootEl, ctx) {
 
 async function hostEditor(c, name) {
   const isNew = !name;
-  const [certsR, mwR, alR, hostR] = await Promise.all([
+  const [certsR, mwR, alR, ugR, hostR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
     api('/api/middlewares').catch(() => ({ data: [] })),
     api('/api/access-lists').catch(() => ({ data: [] })),
+    api('/api/upstream-groups').catch(() => ({ data: [] })),
     isNew ? Promise.resolve({ data: {} }) : api('/api/proxy-hosts/' + encodeURIComponent(name)),
   ]);
   const certs = arr(certsR.data);
   const middlewares = arr(mwR.data);
   const accessLists = arr(alR.data);
+  const upstreamGroups = arr(ugR.data);
   const mwType = {}; middlewares.forEach((m) => { mwType[m.name] = m.type; });
   const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
   const h = hostR.data || {};
@@ -654,6 +660,14 @@ async function hostEditor(c, name) {
 
         <div class="card form-section">
           <p class="section-label">Upstream</p>
+          ${upstreamGroups.length ? `<div class="field-group" style="margin-bottom:10px">
+            <label>Upstream group</label>
+            <select class="field mono" id="f-upgroup">
+              <option value="">(single upstream)</option>
+              ${upstreamGroups.map((g) => `<option value="${esc(g.name)}"${h.upstreamGroupRef === g.name ? ' selected' : ''}>${esc(g.name)} (${arr(g.upstreams).length} upstreams)</option>`).join('')}
+            </select>
+            <div class="hint">A group fails over across its upstreams with health checks. Selecting one replaces the single upstream below.</div>
+          </div>` : ''}
           <div class="inline-fields">
             <div class="field-group">
               <label>Scheme</label>
@@ -778,14 +792,29 @@ async function hostEditor(c, name) {
     const lu = loc.upstream || {};
     const div = document.createElement('div');
     div.className = 'loc-row';
+    const groupSel = upstreamGroups.length ? `
+      <select class="field mono loc-group" style="flex:0 0 130px" aria-label="Upstream group">
+        <option value="">(no group)</option>
+        ${upstreamGroups.map((g) => `<option value="${esc(g.name)}"${loc.upstreamGroupRef === g.name ? ' selected' : ''}>group:${esc(g.name)}</option>`).join('')}
+      </select>` : '';
     div.innerHTML = `
       <input class="field mono loc-path" style="flex:1 1 120px" value="${esc(loc.path || '')}" placeholder="/api" aria-label="Path" />
-      <span class="arrow">${ICON.arrow}</span>
+      <span class="arrow">${ICON.arrow}</span>${groupSel}
       <select class="field mono loc-scheme" style="flex:0 0 90px"><option value="">(host default)</option><option value="http"${lu.scheme === 'http' ? ' selected' : ''}>http</option><option value="https"${lu.scheme === 'https' ? ' selected' : ''}>https</option></select>
       <input class="field mono loc-host" style="flex:1 1 110px" value="${esc(lu.host || '')}" placeholder="host (optional)" aria-label="Upstream host" />
       <input class="field mono loc-port" type="number" style="flex:0 0 80px" value="${esc(lu.port != null ? lu.port : '')}" placeholder="port" aria-label="Upstream port" />
       <button class="icon-btn loc-del" type="button" aria-label="Remove location">${ICON.x}</button>`;
     div.querySelector('.loc-del').addEventListener('click', () => div.remove());
+    // A selected group replaces (and greys out) the row's single-upstream fields.
+    const gsel = div.querySelector('.loc-group');
+    if (gsel) {
+      const sync = () => {
+        const grouped = !!gsel.value;
+        ['.loc-scheme', '.loc-host', '.loc-port'].forEach((s) => { div.querySelector(s).disabled = grouped; });
+      };
+      gsel.addEventListener('change', sync);
+      sync();
+    }
     locsWrap.appendChild(div);
   }
   arr(h.locations).forEach(locRow);
@@ -795,6 +824,14 @@ async function hostEditor(c, name) {
   $('#f-hsts').addEventListener('switchchange', () => {
     $('#hsts-fields').style.display = isOn('f-hsts') ? '' : 'none';
   });
+
+  // upstream group vs single upstream: a selected group replaces (and greys
+  // out) the single-upstream fields.
+  function curGroup() { const g = $('#f-upgroup'); return g ? g.value : ''; }
+  function refreshUpstreamMode() {
+    const grouped = !!curGroup();
+    ['#f-scheme', '#f-uphost', '#f-upport'].forEach((sel) => { $(sel).disabled = grouped; });
+  }
 
   // flow
   const flowEl = $('#flow');
@@ -806,14 +843,17 @@ async function hostEditor(c, name) {
     const upport = $('#f-upport').value || '?';
     renderHostFlow(flowEl, {
       certRef: cert, certDomains: certDomains[cert] || cert,
-      upstreamStr: `${uphost}:${upport}`,
+      upstreamStr: curGroup() ? `group:${curGroup()}` : `${uphost}:${upport}`,
       mwSelected: curMw(), mwType, alSelected: curAl(),
     });
   }
+  refreshUpstreamMode();
   refreshFlow();
   $('#f-cert').addEventListener('change', refreshFlow);
   $('#f-uphost').addEventListener('input', refreshFlow);
   $('#f-upport').addEventListener('input', refreshFlow);
+  const upGroupSel = $('#f-upgroup');
+  if (upGroupSel) upGroupSel.addEventListener('change', () => { refreshUpstreamMode(); refreshFlow(); });
   $$('#f-mw input, #f-al input').forEach((i) => i.addEventListener('change', refreshFlow));
 
   // save
@@ -822,10 +862,14 @@ async function hostEditor(c, name) {
     if (!nm) { toast('Name required', 'Enter an internal name for this host.', 'err'); return; }
     const domains = domainsCtl.get();
     if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return; }
-    const portVal = parseInt($('#f-upport').value, 10);
-    if (!$('#f-uphost').value.trim() || isNaN(portVal)) { toast('Upstream incomplete', 'Set the upstream host and port.', 'err'); return; }
-
-    const obj = { name: nm, domains: domains, upstream: { scheme: $('#f-scheme').value, host: $('#f-uphost').value.trim(), port: portVal } };
+    const obj = { name: nm, domains: domains };
+    if (curGroup()) {
+      obj.upstreamGroupRef = curGroup();
+    } else {
+      const portVal = parseInt($('#f-upport').value, 10);
+      if (!$('#f-uphost').value.trim() || isNaN(portVal)) { toast('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.', 'err'); return; }
+      obj.upstream = { scheme: $('#f-scheme').value, host: $('#f-uphost').value.trim(), port: portVal };
+    }
     const display = $('#f-display').value.trim();
     if (display) obj.displayName = display;
     const tags = tagsCtl.get(); if (tags.length) obj.tags = tags;
@@ -864,10 +908,15 @@ async function hostEditor(c, name) {
       const path = row.querySelector('.loc-path').value.trim();
       if (!path) return;
       const loc = { path };
-      const lh = row.querySelector('.loc-host').value.trim();
-      const lp = parseInt(row.querySelector('.loc-port').value, 10);
-      const ls = row.querySelector('.loc-scheme').value;
-      if (lh && !isNaN(lp)) loc.upstream = { scheme: ls || 'http', host: lh, port: lp };
+      const gsel = row.querySelector('.loc-group');
+      if (gsel && gsel.value) {
+        loc.upstreamGroupRef = gsel.value;
+      } else {
+        const lh = row.querySelector('.loc-host').value.trim();
+        const lp = parseInt(row.querySelector('.loc-port').value, 10);
+        const ls = row.querySelector('.loc-scheme').value;
+        if (lh && !isNaN(lp)) loc.upstream = { scheme: ls || 'http', host: lh, port: lp };
+      }
       locs.push(loc);
     });
     if (locs.length) obj.locations = locs;
@@ -1111,6 +1160,14 @@ const SECTION_META = {
     title: 'Dead hosts', sub: 'Hosts kept for 404 handling or scheduled decommission.',
     singular: 'dead host', addLabel: 'Add dead host',
     summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>`,
+  },
+  upstreams: {
+    title: 'Upstream Groups', sub: 'Ordered failover backends with health checks, shared across hosts.',
+    singular: 'upstream group', addLabel: 'Add upstream group',
+    summary: (o) => `<span class="k">Upstreams</span><span class="v">${arr(o.upstreams).map((u) => esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))).join(' -> ') || '0'}</span>` +
+      `<span class="k">Policy</span><span class="v">${esc(o.policy || 'failover')}</span>` +
+      (o.stickiness && o.stickiness.ttl ? `<span class="k">Sticky</span><span class="v">${esc(o.stickiness.ttl)}</span>` : '') +
+      (o.healthCheck && o.healthCheck.path ? `<span class="k">Probe</span><span class="v">GET ${esc(o.healthCheck.path)}</span>` : `<span class="k">Probe</span><span class="v">TCP</span>`),
   },
 };
 
@@ -1765,9 +1822,130 @@ async function middlewareEditor(c, name) {
 }
 
 // section -> editor dispatch for the typed object editors
+// ---------- UPSTREAM GROUP EDITOR ----------
+async function upstreamGroupEditor(c, name) {
+  const meta = SECTION_META.upstreams; const isNew = !name;
+  const [objR, healthR] = await Promise.all([
+    isNew ? Promise.resolve({ data: {} }) : api('/api/upstream-groups/' + encodeURIComponent(name)),
+    isNew ? Promise.resolve({ data: {} }) : api('/api/upstream-health').catch(() => ({ data: {} })),
+  ]);
+  const o = objR.data || {};
+  const hc = o.healthCheck || {};
+  const health = {};
+  arr((healthR.data || {})[name]).forEach((u) => { health[u.upstream] = u.healthy; });
+  const healthChip = (u) => {
+    // Match upstreamLabel() server-side: net.JoinHostPort brackets IPv6 hosts.
+    const hostPart = (u.host || '').indexOf(':') !== -1 ? `[${u.host}]` : u.host;
+    const label = `${u.scheme || 'http'}://${hostPart}:${u.port}`;
+    if (!(label in health)) return '';
+    return health[label]
+      ? '<span class="chip ok" style="flex:0 0 auto"><span class="dot ok"></span>up</span>'
+      : '<span class="chip err" style="flex:0 0 auto"><span class="dot err"></span>down</span>';
+  };
+  const POLICIES = [
+    { v: '', label: 'failover (ordered: first healthy wins)' },
+    { v: 'round-robin', label: 'round-robin (weighted, smooth)' },
+    { v: 'least-connections', label: 'least-connections (fewest in-flight / weight)' },
+    { v: 'ip-hash', label: 'ip-hash (sticky per client IP)' },
+  ];
+  c.innerHTML = editorHead('upstreams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Upstreams</p>
+      <div id="ed-ups"></div>
+      <button class="btn ghost sm" id="ed-addup" type="button" style="margin-top:6px">${ICON.plus}Add upstream</button>
+      <div class="hint" style="margin-top:6px">Weight (1-256, default 1) sets the relative share for round-robin and least-connections; failover and ip-hash ignore it. Requests are retried on another upstream only when the connection itself fails - never after the request was sent.</div>
+    </div>
+    <div class="card form-section"><p class="section-label">Policy</p>
+      <div class="field-group"><label>Load distribution</label>
+        <select class="field mono" id="ed-policy">
+          ${POLICIES.map((p) => `<option value="${p.v}"${(o.policy || '') === p.v ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
+        </select>
+        <div class="hint">Unhealthy upstreams always drop to the end of the try-order regardless of policy.</div>
+      </div>
+      <div class="inline-fields" style="margin-top:10px">
+        <div class="field-group"><label>Sticky sessions TTL</label>
+          <input class="field mono" id="ed-sticky-ttl" value="${esc((o.stickiness && o.stickiness.ttl) || '')}" placeholder="off (e.g. 30m, 12h, 3d)" />
+          <div class="hint">Pins each client to its assigned upstream via a signed cookie for this long. Blank disables. Expiry is enforced server-side.</div>
+        </div>
+        <div class="field-group"><label>Sticky cookie name</label>
+          <input class="field mono" id="ed-sticky-cookie" value="${esc((o.stickiness && o.stickiness.cookie) || '')}" placeholder="gpm-sticky-<name>" />
+        </div>
+      </div>
+    </div>
+  </div><div class="stack">
+    <div class="card form-section"><p class="section-label">Health check</p>
+      <div class="field-group"><label>HTTP probe path</label>
+        <input class="field mono" id="ed-hc-path" value="${esc(hc.path || '')}" placeholder="(blank = TCP connect probe)" />
+        <div class="hint">Any response below 500 counts as alive - the probe checks the entry point, not the application behind it.</div>
+      </div>
+      <div class="inline-fields" style="margin-top:8px">
+        <div class="field-group"><label>Interval (s)</label><input class="field mono" id="ed-hc-interval" type="number" min="1" max="3600" value="${esc(hc.intervalSeconds || '')}" placeholder="5" /></div>
+        <div class="field-group"><label>Timeout (s)</label><input class="field mono" id="ed-hc-timeout" type="number" min="1" max="60" value="${esc(hc.timeoutSeconds || '')}" placeholder="3" /></div>
+      </div>
+      <div class="inline-fields" style="margin-top:8px">
+        <div class="field-group"><label>Rise</label><input class="field mono" id="ed-hc-rise" type="number" min="1" max="10" value="${esc(hc.rise || '')}" placeholder="2" /><div class="hint">Consecutive successes to recover.</div></div>
+        <div class="field-group"><label>Fall</label><input class="field mono" id="ed-hc-fall" type="number" min="1" max="10" value="${esc(hc.fall || '')}" placeholder="2" /><div class="hint">Consecutive failures to mark down.</div></div>
+      </div>
+    </div>
+  </div></div>` + saveBar('upstreams', isNew, meta.addLabel);
+
+  const upsWrap = $('#ed-ups');
+  function upRow(u) {
+    u = u || {};
+    const div = document.createElement('div');
+    div.className = 'loc-row';
+    div.innerHTML = `
+      <select class="field mono up-scheme" style="flex:0 0 90px"><option value="http"${u.scheme === 'https' ? '' : ' selected'}>http</option><option value="https"${u.scheme === 'https' ? ' selected' : ''}>https</option></select>
+      <input class="field mono up-host" style="flex:2 1 140px" value="${esc(u.host || '')}" placeholder="10.0.0.5" aria-label="Upstream host" />
+      <input class="field mono up-port" type="number" style="flex:0 0 90px" value="${esc(u.port != null ? u.port : '')}" placeholder="80" aria-label="Upstream port" />
+      <input class="field mono up-weight" type="number" min="1" max="256" style="flex:0 0 80px" value="${esc(u.weight || '')}" placeholder="w:1" aria-label="Weight" />
+      ${u.host ? healthChip(u) : ''}
+      <button class="icon-btn up-del" type="button" aria-label="Remove upstream">${ICON.x}</button>`;
+    div.querySelector('.up-del').addEventListener('click', () => div.remove());
+    upsWrap.appendChild(div);
+  }
+  const initial = arr(o.upstreams);
+  (initial.length ? initial : [{}]).forEach(upRow);
+  $('#ed-addup').addEventListener('click', () => upRow({}));
+
+  wireEditor('upstreams', 'upstream-groups', meta, isNew, name || o.name, () => {
+    const ups = [];
+    let bad = false;
+    $$('#ed-ups .loc-row').forEach((row) => {
+      const host = row.querySelector('.up-host').value.trim();
+      const port = parseInt(row.querySelector('.up-port').value, 10);
+      if (!host && isNaN(port)) return; // fully empty row: skip
+      if (!host || isNaN(port)) { bad = true; return; }
+      const up = { scheme: row.querySelector('.up-scheme').value, host, port };
+      const weight = parseInt(row.querySelector('.up-weight').value, 10);
+      if (!isNaN(weight) && weight > 0) up.weight = weight;
+      ups.push(up);
+    });
+    if (bad) { toast('Upstream incomplete', 'Every upstream needs a host and a port.', 'err'); return null; }
+    if (!ups.length) { toast('Upstream required', 'Add at least one upstream.', 'err'); return null; }
+    const body = { upstreams: ups };
+    const policy = $('#ed-policy').value; if (policy) body.policy = policy;
+    const stickyTTL = $('#ed-sticky-ttl').value.trim();
+    if (stickyTTL) {
+      body.stickiness = { ttl: stickyTTL };
+      const stickyCookie = $('#ed-sticky-cookie').value.trim();
+      if (stickyCookie) body.stickiness.cookie = stickyCookie;
+    }
+    const hcOut = {};
+    const path = $('#ed-hc-path').value.trim(); if (path) hcOut.path = path;
+    const iv = parseInt($('#ed-hc-interval').value, 10); if (!isNaN(iv) && iv > 0) hcOut.intervalSeconds = iv;
+    const to = parseInt($('#ed-hc-timeout').value, 10); if (!isNaN(to) && to > 0) hcOut.timeoutSeconds = to;
+    const rise = parseInt($('#ed-hc-rise').value, 10); if (!isNaN(rise) && rise > 0) hcOut.rise = rise;
+    const fall = parseInt($('#ed-hc-fall').value, 10); if (!isNaN(fall) && fall > 0) hcOut.fall = fall;
+    if (Object.keys(hcOut).length) body.healthCheck = hcOut;
+    return body;
+  });
+}
+
 const EDITORS = {
   redirects: redirectEditor, streams: streamEditor, dead: deadEditor, dns: dnsEditor,
   identity: idpEditor, access: accessEditor, middleware: middlewareEditor,
+  upstreams: upstreamGroupEditor,
 };
 
 // ---------- ACCESS LOGS ----------

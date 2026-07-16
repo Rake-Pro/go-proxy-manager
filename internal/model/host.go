@@ -110,13 +110,16 @@ func (t *HostTimeouts) validate() error {
 }
 
 // Location is a path-scoped override within a proxy host. Locations carry their
-// own upstream and their own ordered middleware/access-list references, so
-// per-location auth and access control are first-class config, not text snippets.
+// own upstream (a single backend OR an upstream-group reference; at most one)
+// and their own ordered middleware/access-list references, so per-location auth
+// and access control are first-class config, not text snippets. A location with
+// neither inherits the host's backend.
 type Location struct {
-	Path        string    `json:"path" yaml:"path"`
-	Upstream    *Upstream `json:"upstream,omitempty" yaml:"upstream,omitempty"`
-	Middlewares []string  `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
-	AccessLists []string  `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+	Path             string    `json:"path" yaml:"path"`
+	Upstream         *Upstream `json:"upstream,omitempty" yaml:"upstream,omitempty"`
+	UpstreamGroupRef string    `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
+	Middlewares      []string  `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
+	AccessLists      []string  `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 }
 
 // ProxyHost terminates TLS for one or more domains and reverse-proxies to an
@@ -124,8 +127,13 @@ type Location struct {
 type ProxyHost struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 
-	Domains  []string `json:"domains" yaml:"domains"`
-	Upstream Upstream `json:"upstream" yaml:"upstream"`
+	Domains []string `json:"domains" yaml:"domains"`
+
+	// Exactly one of Upstream / UpstreamGroupRef is set. Upstream forwards to a
+	// single backend; UpstreamGroupRef names an UpstreamGroup whose ordered
+	// upstreams are tried with health-checked failover.
+	Upstream         Upstream `json:"upstream,omitempty" yaml:"upstream,omitempty"`
+	UpstreamGroupRef string   `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
 
 	WebsocketsUpgrade bool `json:"websocketsUpgrade,omitempty" yaml:"websocketsUpgrade,omitempty"`
 
@@ -155,8 +163,12 @@ func (h ProxyHost) Validate() error {
 	if len(h.Domains) == 0 {
 		return fmt.Errorf("proxy host %q: at least one domain is required", h.Name)
 	}
-	if err := h.Upstream.validate(); err != nil {
-		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	if h.UpstreamGroupRef == "" {
+		if err := h.Upstream.validate(); err != nil {
+			return fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
+	} else if h.Upstream != (Upstream{}) {
+		return fmt.Errorf("proxy host %q: upstream and upstreamGroupRef are mutually exclusive", h.Name)
 	}
 	if err := h.TLS.validate(); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
@@ -169,6 +181,9 @@ func (h ProxyHost) Validate() error {
 			return fmt.Errorf("proxy host %q: location with empty path", h.Name)
 		}
 		if l.Upstream != nil {
+			if l.UpstreamGroupRef != "" {
+				return fmt.Errorf("proxy host %q location %q: upstream and upstreamGroupRef are mutually exclusive", h.Name, l.Path)
+			}
 			if err := l.Upstream.validate(); err != nil {
 				return fmt.Errorf("proxy host %q location %q: %w", h.Name, l.Path, err)
 			}

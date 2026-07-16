@@ -43,7 +43,7 @@ func TestBuildRouterFailsClosedWithoutGeoDB(t *testing.T) {
 			Upstream:    model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 1},
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter must not fail on a geo rule without a DB (fail closed at compile, not abort): %v", err)
 	}
@@ -124,7 +124,7 @@ func TestBuildRouterGeoEndToEnd(t *testing.T) {
 			Upstream:    up,
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestGeoAvailabilityIsLiveNotBakedAtBuildTime(t *testing.T) {
 			Upstream:    up,
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}

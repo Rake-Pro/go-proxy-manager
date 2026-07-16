@@ -155,7 +155,7 @@ func TestBuildRouterMTLSConfig(t *testing.T) {
 			{ObjectMeta: model.ObjectMeta{Name: "plain"}, Domains: []string{"plain.example"}, Upstream: up},
 		},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func mtlsDispatchRouter(t *testing.T) (*router, *x509.Certificate, *ecdsa.Privat
 			{ObjectMeta: model.ObjectMeta{Name: "plain"}, Domains: []string{"plain.example"}, Upstream: up},
 		},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestBuildRouterMTLSFailClosed(t *testing.T) {
 				TLS: model.TLSSettings{ClientAuth: &model.ClientAuth{CARef: "corp", Mode: "require"}}},
 		},
 	}
-	if _, err := buildRouter(cfg, ""); err == nil {
+	if _, err := buildRouter(cfg, "", nil); err == nil {
 		t.Fatal("buildRouter must fail closed when a client CA parses to no certificates")
 	}
 }

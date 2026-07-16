@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,7 +44,16 @@ type Server struct {
 
 	cur atomic.Pointer[router]
 
+	// reloadMu serializes Reload end to end. Callers race legitimately (admin
+	// API writes and the ACME renewal loop both trigger reloads), and the
+	// health stage -> build -> commit sequence mutates shared prober state that
+	// two interleaved reloads would corrupt (a replaced group's stopped prober
+	// could be reinstated, leaving the group unprobed and a later close(stop)
+	// panicking on the already-closed channel).
+	reloadMu sync.Mutex
+
 	streams *streamManager
+	health  *healthManager
 
 	httpsSrv *http.Server
 	httpSrv  *http.Server
@@ -90,12 +100,19 @@ func New(c Config) *Server {
 		debugHeaders:  c.DebugHeaders,
 		logBuf:        newLogRing(bufSize),
 		streams:       newStreamManager(),
+		health:        newHealthManager(),
 	}
 }
 
 // AccessLogEnabled reports whether request capture is on. When false the /api/logs
 // viewer has nothing to show and the UI surfaces how to enable it.
 func (s *Server) AccessLogEnabled() bool { return s.accessLog }
+
+// UpstreamHealth returns the live health of every upstream group's upstreams,
+// keyed by group name, for the admin status API.
+func (s *Server) UpstreamHealth() map[string][]UpstreamStatus {
+	return s.health.snapshot()
+}
 
 // RecentLogs returns the buffered access entries, newest first (nil when capture
 // has never run).
@@ -107,12 +124,19 @@ func (s *Server) RecentLogs() []AccessEntry {
 }
 
 // Reload compiles cfg into a new router (HTTP/S hosts) and reconciles the raw
-// TCP/UDP stream listeners, swapping the router in atomically.
+// TCP/UDP stream listeners and upstream-group health probers, swapping the
+// router in atomically. Group health is staged first and committed only after
+// the router compiles, so a rejected config leaves the running probers (and
+// their accumulated up/down state) untouched.
 func (s *Server) Reload(cfg model.Config) error {
-	rt, err := buildRouter(cfg, s.certDir)
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	stage := s.health.stage(cfg.UpstreamGroups)
+	rt, err := buildRouter(cfg, s.certDir, stage)
 	if err != nil {
 		return fmt.Errorf("compile data plane: %w", err)
 	}
+	stage.commit()
 	s.cur.Store(rt)
 	s.streams.reload(cfg.StreamHosts)
 	log.Info().
@@ -178,6 +202,7 @@ func (s *Server) Start(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		s.streams.stopAll()
+		s.health.stopAll()
 		_ = s.httpSrv.Shutdown(shutdownCtx)
 		_ = s.httpsSrv.Shutdown(shutdownCtx)
 		return nil

@@ -34,6 +34,10 @@ builds it with a narrower, more focused design:
 - SNI-based TLS termination with exact and wildcard certificate selection
 - HTTP/2, WebSocket upgrades, force-SSL (HTTP→HTTPS 308)
 - Path-scoped **locations** (per-path upstream and middleware on one host)
+- **Upstream groups**: failover, weighted round-robin, least-connections, and
+  sticky ip-hash across multiple backends, with active TCP/HTTP health checks,
+  passive connect-failure detection, and signed sticky-session cookies with a
+  configurable TTL
 - Redirect hosts, raw TCP/UDP **stream** forwarding, and dead hosts (absorb
   unmatched vhosts)
 

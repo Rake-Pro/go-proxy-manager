@@ -225,6 +225,9 @@ func main() {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
 		},
 		GeoDBLoaded: geoResolver.Loaded,
+		UpstreamHealth: func() any {
+			return dp.UpstreamHealth()
+		},
 	})
 
 	uiHandler, err := ui.Handler()

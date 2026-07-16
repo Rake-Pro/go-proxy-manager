@@ -42,6 +42,9 @@ type Deps struct {
 	// read-only GET /capabilities probe the UI uses to enable/grey-out geo
 	// controls. May be nil (reported as not loaded).
 	GeoDBLoaded func() bool
+	// UpstreamHealth, if set, returns the live per-group upstream health payload
+	// (marshalled as-is) for GET /upstream-health. May be nil.
+	UpstreamHealth func() any
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -180,6 +183,16 @@ func New(d Deps) http.Handler {
 			return v, err
 		},
 	})
+	register(mux, d, "upstream-groups", resource[model.UpstreamGroup]{
+		kind: "UpstreamGroup",
+		list: func(c model.Config) []model.UpstreamGroup { return c.UpstreamGroups },
+		decode: func(b []byte, name string) (model.UpstreamGroup, error) {
+			var v model.UpstreamGroup
+			err := json.Unmarshal(b, &v)
+			v.Name = name
+			return v, err
+		},
+	})
 	register(mux, d, "access-lists", resource[model.AccessList]{
 		kind: "AccessList",
 		list: func(c model.Config) []model.AccessList { return c.AccessLists },
@@ -208,6 +221,16 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, capabilities{
 			GeoIP: geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
 		})
+	})
+
+	// Live upstream-group health (read-only): which upstreams each group currently
+	// considers healthy, for the UI status view and operational checks.
+	mux.HandleFunc("GET /upstream-health", func(w http.ResponseWriter, r *http.Request) {
+		if d.UpstreamHealth == nil {
+			writeJSON(w, http.StatusOK, map[string]any{})
+			return
+		}
+		writeJSON(w, http.StatusOK, d.UpstreamHealth())
 	})
 
 	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {

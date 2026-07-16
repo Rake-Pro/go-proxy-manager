@@ -21,6 +21,8 @@ func (c Config) Validate() error {
 	als := map[string]bool{}
 	idps := map[string]bool{}
 	dns := map[string]bool{}
+	ugs := map[string]bool{}
+	disabledUGs := map[string]bool{}
 
 	// First pass: per-object validation + duplicate-name detection + name sets.
 	register := func(kind, name string, seen map[string]bool) {
@@ -72,6 +74,15 @@ func (c Config) Validate() error {
 		}
 		register("identityProvider", o.Name, idps)
 	}
+	for _, o := range c.UpstreamGroups {
+		if err := o.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+		register("upstreamGroup", o.Name, ugs)
+		if o.Disabled {
+			disabledUGs[o.Name] = true
+		}
+	}
 
 	seenHost := map[string]bool{}
 	for _, h := range c.ProxyHosts {
@@ -81,6 +92,16 @@ func (c Config) Validate() error {
 		register("host", h.Name, seenHost)
 		checkRef(&errs, "proxy host", h.Name, "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "proxy host", h.Name, h.TLS, clientCAs, disabledClientCAs)
+		// A disabled group is excluded from the compiled health state, so an enabled
+		// host referencing it would fail the whole router build; reject at validation
+		// like a disabled clientCA.
+		checkGroupRef := func(owner, ref string) {
+			checkRef(&errs, "proxy host", owner, "upstreamGroup", ref, ugs)
+			if !h.Disabled && ref != "" && ugs[ref] && disabledUGs[ref] {
+				errs = append(errs, fmt.Errorf("proxy host %q references upstreamGroup %q, which is disabled (enable the group or use a single upstream)", owner, ref))
+			}
+		}
+		checkGroupRef(h.Name, h.UpstreamGroupRef)
 		for _, m := range h.Middlewares {
 			checkRef(&errs, "proxy host", h.Name, "middleware", m, mws)
 		}
@@ -88,6 +109,7 @@ func (c Config) Validate() error {
 			checkRef(&errs, "proxy host", h.Name, "accessList", a, als)
 		}
 		for _, l := range h.Locations {
+			checkGroupRef(h.Name+" location "+l.Path, l.UpstreamGroupRef)
 			for _, m := range l.Middlewares {
 				checkRef(&errs, "proxy host", h.Name+" location "+l.Path, "middleware", m, mws)
 			}

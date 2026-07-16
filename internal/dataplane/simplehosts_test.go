@@ -26,7 +26,7 @@ func TestRedirectHostServes(t *testing.T) {
 		{ObjectMeta: model.ObjectMeta{Name: "auto"}, Domains: []string{"auto.com"}, TargetDomain: "dest.com"}, // default 301, auto scheme, no path
 		{ObjectMeta: model.ObjectMeta{Name: "fixed"}, Domains: []string{"fixed.com"}, TargetScheme: "https", TargetDomain: "secure.com", StatusCode: 302},
 	}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestDeadHostServes(t *testing.T) {
 		{ObjectMeta: model.ObjectMeta{Name: "gone"}, Domains: []string{"gone.com"}},
 		{ObjectMeta: model.ObjectMeta{Name: "teapot"}, Domains: []string{"teapot.com"}, StatusCode: 418},
 	}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestRedirectAndDeadForceSSL(t *testing.T) {
 		RedirectHosts: []model.RedirectHost{{ObjectMeta: model.ObjectMeta{Name: "r"}, Domains: []string{"r.com"}, TargetDomain: "t.com", TLS: model.TLSSettings{ForceSSL: true}}},
 		DeadHosts:     []model.DeadHost{{ObjectMeta: model.ObjectMeta{Name: "d"}, Domains: []string{"d.com"}, TLS: model.TLSSettings{ForceSSL: true}}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

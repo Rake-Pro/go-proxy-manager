@@ -54,7 +54,7 @@ func TestRouterTLSConfigForSNI(t *testing.T) {
 		{ObjectMeta: model.ObjectMeta{Name: "strict"}, Domains: []string{"strict.example"}, Upstream: up, TLS: model.TLSSettings{MinTLSVersion: "1.3"}},
 		{ObjectMeta: model.ObjectMeta{Name: "normal"}, Domains: []string{"normal.example"}, Upstream: up},
 	}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

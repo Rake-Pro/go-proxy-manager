@@ -95,6 +95,35 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   (`"1.2"` default | `"1.3"`) selected by SNI, rather than a global edge pin that
   would drop older clients.
 
+## Upstream-group follow-ups
+
+- [x] **Per-location upstream group references.** `upstreamGroupRef` on Location
+  (mutually exclusive with the location `upstream`), validated like the
+  host-level ref, with a per-row group select in the UI.
+- [x] **Load-distribution policies.** `policy` on UpstreamGroup: `failover`
+  (default), `round-robin` (smooth weighted), `least-connections`
+  (in-flight/weight), `ip-hash` (rendezvous, sticky per client IP), plus
+  per-upstream `weight`. Unhealthy demotion + connect-only retry unchanged.
+- Not planned until a need appears: slow-start after recovery, per-upstream
+  max-connections caps.
+
+## High availability (gpm itself)
+
+- [ ] **HA support for gpm.** Upstream groups remove the single-node dependency
+  *behind* gpm; the gpm instance itself is still a single point of failure. Design
+  and ship a supported multi-instance story. Open questions to resolve in a design
+  doc first:
+  - config replication between instances (the git-backed store is a natural
+    transport: leader commits, followers pull/watch; or an external shared repo);
+  - shared secrets so failover is seamless (`GPM_SSO_SIGNING_KEY`, session store,
+    ACME account/material — issued certs must not be double-issued by two
+    instances racing renewals: renewal needs leader election or single-writer);
+  - traffic-side failover between instances (VRRP/keepalived VIP, DNS, or an
+    upstream L4 balancer) — out of process scope but the deployment doc must
+    cover at least one pattern;
+  - stream (TCP/UDP) listeners and UDP session state are per-instance and
+    non-replicable; document as failover-with-reconnect.
+
 ## Roadmap
 
 See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts ✓, backup/

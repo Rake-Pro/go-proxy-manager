@@ -47,7 +47,7 @@ func TestProxyEndToEnd(t *testing.T) {
 		Domains:    []string{"app2.example.com"},
 		Upstream:   up,
 	}}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestProxyLocationRouting(t *testing.T) {
 			Upstream: &reports,
 		}},
 	}}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestProxyLocationPathNormalization(t *testing.T) {
 		Upstream:   root,
 		Locations:  []model.Location{{Path: "/reports", Upstream: &reports}},
 	}}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestProxyHSTS(t *testing.T) {
 			Upstream:   up,
 		},
 	}}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestProxyLocationInheritsHostAccessList(t *testing.T) {
 			Locations:   []model.Location{{Path: "/reports", Upstream: &reports}},
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestProxyLocationInheritsHostAccessList(t *testing.T) {
 }
 
 func TestProxyUnknownHost(t *testing.T) {
-	rt, _ := buildRouter(model.Config{}, "")
+	rt, _ := buildRouter(model.Config{}, "", nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "https://nope.example.com/", nil)
 	req.Host = "nope.example.com"
@@ -271,7 +271,7 @@ func TestProxyWithAccessListAndHeaders(t *testing.T) {
 			Middlewares: []string{"sec-headers"},
 		}},
 	}
-	rt, err := buildRouter(cfg, "")
+	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
 	}
