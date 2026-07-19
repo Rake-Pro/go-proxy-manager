@@ -275,6 +275,52 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "blockFor must be > 0",
 		},
 		{
+			name: "valid rewrite middleware",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "authentik-token-slash"}, Type: MWTypeRewrite,
+				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{"/application/o/token": "/application/o/token/"}},
+			}}},
+		},
+		{
+			name: "rewrite requires a spec",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
+			}}},
+			wantErr: "rewrite requires at least one replacePath",
+		},
+		{
+			name: "rewrite rejects empty replacePath",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
+				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{}},
+			}}},
+			wantErr: "rewrite requires at least one replacePath",
+		},
+		{
+			name: "rewrite rejects non-absolute key",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
+				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{"token": "/token/"}},
+			}}},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name: "rewrite rejects non-absolute value",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
+				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{"/token": "token/"}},
+			}}},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name: "rewrite rejects no-op key==value",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
+				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{"/same": "/same"}},
+			}}},
+			wantErr: "no-op",
+		},
+		{
 			name: "duplicate cert domain rejected",
 			cfg: Config{Certificates: []Certificate{
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},

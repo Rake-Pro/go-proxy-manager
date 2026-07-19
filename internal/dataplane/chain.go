@@ -180,7 +180,11 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 // buildChain wraps the terminal proxy handler in the host's middleware chain.
 // Steps run in a fixed canonical order regardless of reference order:
 //
-//	rate-limit -> access-list -> auth -> guard -> headers -> (WAF ... later) -> proxy
+//	rate-limit -> access-list -> auth -> guard -> headers -> rewrite -> (WAF ... later) -> proxy
+//
+// Rewrite is innermost (closest to upstream), so the path replacement it applies
+// is upstream-facing only: rate-limit/access-list/auth/guard all evaluate the
+// ORIGINAL client path, never the rewritten one.
 //
 // so new behaviours slot into defined positions instead of colliding as text.
 // Rate limiting is outermost so a flood is shed before it can drive work in the
@@ -200,7 +204,18 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 	_, hostTrusted := hostIdentityTrust(host, reg)
 	clientIP := clientIPResolver(hostTrusted)
 
-	// Innermost: header mutations (closest to the upstream).
+	// Innermost: exact-match request-path rewrites (closest to the upstream), so
+	// the rewritten path is upstream-facing only and every security tier above
+	// still sees the original client path.
+	for _, name := range host.Middlewares {
+		mw, ok := reg.middlewares[name]
+		if !ok || mw.Type != model.MWTypeRewrite || mw.Rewrite == nil {
+			continue
+		}
+		h = rewriteHandler(*mw.Rewrite, h)
+	}
+
+	// Header mutations, just outside the rewrite.
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeHeaders || mw.Headers == nil {

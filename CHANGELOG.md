@@ -9,6 +9,19 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **`rewrite` middleware: exact-match request-path replacement.** A new
+  middleware type (`type: rewrite`) with a `replacePath` map that swaps an
+  incoming request path for a target before proxying, when the path matches a key
+  **exactly** (no regex/prefix matching, sidestepping the path-confusion/ReDoS
+  classes). The rewrite is internal and upstream-facing: it preserves the method
+  and body (never an HTTP redirect) and runs **innermost** in the chain (closest
+  to the upstream, after headers), so auth/guard/access-list all still evaluate
+  the ORIGINAL client path. Motivating case: repair a client that mangles an
+  upstream path - e.g. a mobile OIDC app that strips the trailing slash off
+  Authentik's `/application/o/token`, which Django answers `405`; a
+  `/application/o/token → /application/o/token/` rewrite at the edge fixes it.
+  Both key and value must be absolute paths and a key may not map to itself
+  (`internal/dataplane/rewrite.go`, model `RewriteMiddleware`).
 - **HA design doc** ([docs/design/ha.md](docs/design/ha.md)): a settled
   multi-instance story for gpm itself. Recommends a phase-1 active/standby
   two-node homelab pair - static leader owns ACME renewal and admin writes, the

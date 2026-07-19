@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,7 @@ const (
 	MWTypeHeaders   = "headers"
 	MWTypeGuard     = "guard"
 	MWTypeRateLimit = "rate-limit" // per-host, per-client-IP token bucket
+	MWTypeRewrite   = "rewrite"    // exact-match upstream-facing request-path replacement
 )
 
 // AuthMode selects how an auth middleware authenticates.
@@ -133,6 +135,21 @@ func (r RateLimitMiddleware) RateAndDefaultBurst() (rate float64, defaultBurst i
 	return rate, burst
 }
 
+// RewriteMiddleware rewrites the request path before proxying to the upstream.
+// It is exact-match only (no regex): each key is a full request path that, when
+// it equals the incoming path exactly, is replaced by its value. Exact matching
+// avoids the path-confusion and ReDoS classes that pattern rewrites invite.
+//
+// The rewrite is internal - it mutates the proxied request path in place,
+// preserving the method and body; it is never an HTTP redirect, so the client
+// sees no 3xx and non-idempotent POSTs are forwarded unchanged. It is purely
+// upstream-facing and runs innermost (closest to the backend), so auth, guards
+// and access lists all evaluate the ORIGINAL client path - a rewrite can never
+// move a request past a path-scoped security control.
+type RewriteMiddleware struct {
+	ReplacePath map[string]string `json:"replacePath,omitempty" yaml:"replacePath,omitempty"`
+}
+
 // Middleware is a reusable, named processing step referenced by hosts/locations.
 type Middleware struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
@@ -142,6 +159,7 @@ type Middleware struct {
 	Headers   *HeadersMiddleware   `json:"headers,omitempty" yaml:"headers,omitempty"`
 	Guard     *GuardMiddleware     `json:"guard,omitempty" yaml:"guard,omitempty"`
 	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
+	Rewrite   *RewriteMiddleware   `json:"rewrite,omitempty" yaml:"rewrite,omitempty"`
 }
 
 func (m Middleware) Kind() string { return "Middleware" }
@@ -221,6 +239,21 @@ func (m Middleware) Validate() error {
 			}
 			if d <= 0 {
 				return fmt.Errorf("middleware %q: rateLimit.blockFor must be > 0, got %q", m.Name, rl.BlockFor)
+			}
+		}
+	case MWTypeRewrite:
+		if m.Rewrite == nil || len(m.Rewrite.ReplacePath) == 0 {
+			return fmt.Errorf("middleware %q: rewrite requires at least one replacePath entry", m.Name)
+		}
+		for k, v := range m.Rewrite.ReplacePath {
+			if k == "" || !strings.HasPrefix(k, "/") {
+				return fmt.Errorf("middleware %q: rewrite.replacePath key %q must be an absolute path (start with %q)", m.Name, k, "/")
+			}
+			if v == "" || !strings.HasPrefix(v, "/") {
+				return fmt.Errorf("middleware %q: rewrite.replacePath[%q] target %q must be an absolute path (start with %q)", m.Name, k, v, "/")
+			}
+			if k == v {
+				return fmt.Errorf("middleware %q: rewrite.replacePath[%q] rewrites a path to itself (no-op)", m.Name, k)
 			}
 		}
 	default:
