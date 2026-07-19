@@ -22,6 +22,11 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   `/application/o/token → /application/o/token/` rewrite at the edge fixes it.
   Both key and value must be absolute paths and a key may not map to itself
   (`internal/dataplane/rewrite.go`, model `RewriteMiddleware`).
+- **Web UI: middleware editor supports `rewrite`.** The middleware-type
+  dropdown now offers `rewrite` with a `replacePath` key/value row editor
+  (parity with the `headers` editor), so an existing `rewrite` middleware can
+  be opened and saved without being coerced into another type
+  (`internal/ui/static/app.js`).
 - **HA design doc** ([docs/design/ha.md](docs/design/ha.md)): a settled
   multi-instance story for gpm itself. Recommends a phase-1 active/standby
   two-node homelab pair - static leader owns ACME renewal and admin writes, the

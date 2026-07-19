@@ -117,6 +117,12 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 ## UI polish
 
+- [x] **UI middleware editor: support the `rewrite` type.** The middleware-type
+  `<select>` in `internal/ui/static/app.js` now offers `rewrite` with a
+  `replacePath` key/value row editor (mirroring the headers map editor),
+  validation (absolute paths, key != value), an `mwIcon` entry, and a summary
+  chip in the middleware list. An existing `rewrite` middleware loaded from git
+  now round-trips correctly instead of being coerced into another type on save.
 - [ ] **UI middleware editor: support the `rewrite` type.** The middleware-type
   `<select>` in `internal/ui/static/app.js` (~line 1786) enumerates
   `auth`/`headers`/`guard`/`rate-limit`; the new `rewrite` type is not yet

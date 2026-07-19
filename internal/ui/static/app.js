@@ -650,6 +650,7 @@ function mwIcon(type) {
   if (type === 'auth') return ICON.shieldCheck;
   if (type === 'headers') return ICON.headers;
   if (type === 'rate-limit') return ICON.gauge;
+  if (type === 'rewrite') return ICON.redirect;
   return ICON.layers;
 }
 
@@ -1221,7 +1222,8 @@ const SECTION_META = {
     summary: (o) => `<span class="k">Type</span><span class="v">${esc(o.type || '')}</span>` +
       (o.auth ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider || '')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
-      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : ''),
+      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : '') +
+      (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${Object.keys(o.rewrite.replacePath).length} path(s)</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'Credentials used for ACME dns-01 challenges.',
@@ -1765,7 +1767,7 @@ async function middlewareEditor(c, name) {
   ]);
   const idps = arr(idpR.data);
   const o = objR.data || {}; const type = o.type || 'headers';
-  const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {};
+  const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
   // Populate from either form: requests+window as-is, or migrate a legacy
   // requestsPerSecond into requests + a 1s window so saving upgrades it.
   const rlRequests = rl.requests != null ? rl.requests : (rl.requestsPerSecond != null ? rl.requestsPerSecond : '');
@@ -1783,7 +1785,7 @@ async function middlewareEditor(c, name) {
     ${nameCard(o, isNew)}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type">
-        ${[['auth', 'Auth'], ['headers', 'Headers'], ['guard', 'Guard'], ['rate-limit', 'Rate limit']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        ${[['auth', 'Auth'], ['headers', 'Headers'], ['guard', 'Guard'], ['rate-limit', 'Rate limit'], ['rewrite', 'Rewrite']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
       </select></div>
     </div>
 
@@ -1829,6 +1831,11 @@ async function middlewareEditor(c, name) {
       <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="rl-allow"></div><div class="hint">Client CIDRs that bypass rate limiting entirely.</div></div>
       <div class="hint">Block for: once a client exceeds the limit, further requests from it are rejected for this long, regardless of token refill. Fixed - not extended by repeat requests during the block.</div>
     </div>
+
+    <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
+      <div class="field-group"><label>Replace path</label><div id="rw-replacepath"></div><button class="btn ghost sm" id="rw-add" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>
+      <div class="hint">Exact request path -> replacement (both absolute, e.g. /application/o/token -> /application/o/token/).</div>
+    </div>
   </div></div>` + saveBar('middleware', isNew, meta.addLabel);
 
   const rolesCtl = makeChipInput($('#mw-roles'), arr(auth.requiredRoles), 'add role...');
@@ -1839,7 +1846,9 @@ async function middlewareEditor(c, name) {
   const rmRespCtl = makeChipInput($('#hdr-rmresp'), arr(headers.removeResponse), 'add header...');
   const guardAllowCtl = makeChipInput($('#guard-allow'), arr(guard.allowFrom), 'add CIDR...');
   const rlAllowCtl = makeChipInput($('#rl-allow'), arr(rl.allowFrom), 'add CIDR...');
+  const rwCtl = makeKVRows($('#rw-replacepath'), rewrite.replacePath || {}, 'Path', 'replacement', false);
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
+  $('#rw-add').addEventListener('click', () => rwCtl.addRow('', ''));
 
   const trigWrap = $('#guard-triggers'); const trigCtls = [];
   function trigRow(t) {
@@ -1895,7 +1904,7 @@ async function middlewareEditor(c, name) {
       const allow = guardAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       const ds = parseInt($('#guard-deny').value, 10); if (!isNaN(ds)) spec.denyStatus = ds;
       body.guard = spec;
-    } else {
+    } else if (t === 'rate-limit') {
       const requests = parseFloat($('#rl-requests').value);
       if (isNaN(requests) || requests <= 0) { toast('Rate required', 'Requests must be > 0.', 'err'); return null; }
       const spec = { requests, window: $('#rl-window').value };
@@ -1903,6 +1912,16 @@ async function middlewareEditor(c, name) {
       const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       const blockFor = $('#rl-block').value; if (blockFor) spec.blockFor = blockFor;
       body.rateLimit = spec;
+    } else if (t === 'rewrite') {
+      const rp = rwCtl.get();
+      const entries = Object.entries(rp);
+      if (!entries.length) { toast('Replace path required', 'Add at least one replace-path entry.', 'err'); return null; }
+      for (const [k, v] of entries) {
+        if (!k.startsWith('/') || !v.startsWith('/')) { toast('Invalid path', 'Both the path and its replacement must be absolute (start with "/").', 'err'); return null; }
+        if (k === v) { toast('No-op rewrite', `"${k}" maps to itself.`, 'err'); return null; }
+      }
+      const spec = { replacePath: rp };
+      body.rewrite = spec;
     }
     return body;
   });
