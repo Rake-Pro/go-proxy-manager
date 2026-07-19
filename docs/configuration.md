@@ -494,6 +494,7 @@ defaultAction: deny
 | `headers` | HeadersMiddleware | Add/remove request/response headers. |
 | `guard` | GuardMiddleware | Conditionally deny requests. |
 | `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
+| `rewrite` | RewriteMiddleware | Exact-match request-path replacement (upstream-facing). |
 
 **AuthMiddleware**: `identityProvider` (req), `mode` (`oidc`|`forward-auth`|
 `auth-request`, defaults from the IdP type), `requiredRoles` (forbidden in
@@ -519,6 +520,18 @@ own key (useful when rotating or sharing a key across instances).
 and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
 (default 403).
 
+**RewriteMiddleware**: `replacePath` (a map of exact request paths to their
+replacements). When the incoming request path equals a key **exactly** (no
+prefix or pattern matching), the path is replaced by the mapped value before
+the request is proxied. Both key and value must be absolute paths (start with
+`/`), and a key may not map to itself. The rewrite is **internal**: it mutates
+the proxied path in place, preserving the method and body - it is never an HTTP
+redirect (the client sees no 3xx, and a `POST` body is forwarded unchanged). It
+is exact-match only by design, sidestepping the path-confusion / ReDoS classes
+pattern rewrites invite. It runs **innermost** (closest to the upstream), so
+auth, guards and access lists all evaluate the ORIGINAL client path; a rewrite
+can never move a request past a path-scoped security control.
+
 **RateLimitMiddleware**: a rate expressed one of two ways (exactly one must be
 set), plus `burst` (default `ceil(requests)`), `allowFrom` (CIDRs exempt
 from rate limiting entirely - no token consumed, no 429), and `blockFor`
@@ -541,7 +554,7 @@ access lists; a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches
 `allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
 so a flood is shed before it can drive an auth subrequest or any other
-per-request work: rate-limit → access-list → auth → guard → headers →
+per-request work: rate-limit → access-list → auth → guard → headers → rewrite →
 upstream.
 
 `blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
@@ -606,12 +619,23 @@ rateLimit:
   window: 1m
   blockFor: 5m
 ```
+```yaml
+# Add the trailing slash a client strips off Authentik's token endpoint, so the
+# request reaches Django as /application/o/token/ (POST + body preserved) instead
+# of getting a 405. Exact-match, upstream-facing only.
+name: authentik-token-slash
+type: rewrite
+rewrite:
+  replacePath:
+    /application/o/token: /application/o/token/
+```
 
 ### Middleware ordering
 
 Middlewares are applied in a fixed order per request regardless of the order you
-list them: **rate-limit → access-list → auth → guard → headers → upstream**. Rate
-limiting is outermost (evaluated first, so floods are shed before any work); the
-access-list is evaluated ahead of auth, so a denied IP never reaches the IdP;
-header mutations are innermost (closest to the backend). Host-wide middlewares run
+list them: **rate-limit → access-list → auth → guard → headers → rewrite →
+upstream**. Rate limiting is outermost (evaluated first, so floods are shed before
+any work); the access-list is evaluated ahead of auth, so a denied IP never
+reaches the IdP; path rewrites are innermost (closest to the backend), so every
+security tier above still sees the original client path. Host-wide middlewares run
 before any location-scoped ones.

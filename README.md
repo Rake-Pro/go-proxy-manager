@@ -52,6 +52,7 @@ builds it with a narrower, more focused design:
 - **Forward-auth** (trust upstream-asserted identity headers from trusted peers)
 - **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)
 - Request **guards** (deny by path/method/query, with CIDR exemptions)
+- Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
 - Composable, ordered middleware chain per host and per location
 
 **Operations**

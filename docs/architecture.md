@@ -106,13 +106,27 @@ them anyway. Live state is exposed at `GET /api/upstream-health`.
 to a handler that wraps the reverse proxy in a fixed order:
 
 ```
-request → rate-limit → access-list → auth → guard → headers → reverse proxy → upstream
+request → rate-limit → access-list → auth → guard → headers → rewrite → reverse proxy → upstream
 ```
 
-Rate limiting is outermost; header mutation is innermost (closest to the
-backend). The access-list sits ahead of auth, so an IP the list would deny is
-dropped before any auth work runs (no forward-auth subrequest to the IdP, no
-OIDC redirect). The reverse proxy sets `X-Forwarded-*`, preserves the client `Host`, and
+Rate limiting is outermost; path rewrite is innermost (closest to the backend).
+The access-list sits ahead of auth, so an IP the list would deny is dropped
+before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
+redirect).
+
+The **rewrite** middleware (`internal/dataplane/rewrite.go`) does exact-match
+request-path replacement just before the request enters the reverse proxy. On an
+exact `r.URL.Path` hit it swaps in the target path (clearing `RawPath` so Go
+re-derives the escaped form) and forwards the request unchanged otherwise -
+same method, same body, no HTTP redirect. Exact matching (a single map lookup,
+no regex) sidesteps the path-confusion and ReDoS classes pattern rewrites
+invite. Because it is wrapped innermost, the replacement is purely
+upstream-facing: rate-limit, access-list, auth and guard all evaluate the
+original client path, so a rewrite can never carry a request past a path-scoped
+security control. Its motivating case is repairing a client that mangles an
+upstream path - e.g. adding the trailing slash a mobile OIDC client strips off
+Authentik's `/application/o/token` endpoint, which Django would otherwise answer
+`405`. The reverse proxy sets `X-Forwarded-*`, preserves the client `Host`, and
 carries WebSocket upgrades transparently. Redirects that an upstream emits to its
 own address are rewritten to the public scheme/host.
 
