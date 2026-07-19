@@ -123,6 +123,15 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   validation (absolute paths, key != value), an `mwIcon` entry, and a summary
   chip in the middleware list. An existing `rewrite` middleware loaded from git
   now round-trips correctly instead of being coerced into another type on save.
+- [ ] **UI middleware editor: support the `rewrite` type.** The middleware-type
+  `<select>` in `internal/ui/static/app.js` (~line 1786) enumerates
+  `auth`/`headers`/`guard`/`rate-limit`; the new `rewrite` type is not yet
+  offerable, so a rewrite middleware can only be authored via git/API. Add a
+  `rewrite` option plus a `replacePath` key/value row editor (mirroring the
+  headers map editor) and an icon in `mwIcon`. Until then, per the homelab
+  ui-disable-unavailable rule, an existing `rewrite` middleware loaded from git
+  should render read-only / clearly flagged rather than silently mis-editing as
+  another type.
 - [x] **Drop the " admin" suffix from the browser tab title.** The tab should
   read just the app name (default "Go Proxy Manager"), not "Go Proxy Manager
   admin". Two spots: the static fallback `<title>` in
