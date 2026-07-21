@@ -87,14 +87,22 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 // panel is either reached over plain HTTP on its direct port (where browsers ignore
 // HSTS) or fronted by the data plane over TLS, which is the actual TLS edge and
 // owns the Strict-Transport-Security header for the host. Emitting it here too
-// produced a duplicate HSTS header on the proxied admin path. The CSP is
-// intentionally limited to frame-ancestors so it cannot break the SPA.
+// produced a duplicate HSTS header on the proxied admin path. The CSP pins
+// script execution to 'self' as an XSS backstop behind the SPA's esc()
+// discipline. Policy constraints: the SPA renders inline style="" attributes
+// (style-src 'unsafe-inline') and loads Space Grotesk/Inter/JetBrains Mono
+// from Google Fonts (style-src googleapis, font-src gstatic).
 func securityHeaders(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+		"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " +
+		"connect-src 'self'; object-src 'none'; base-uri 'none'; " +
+		"form-action 'self'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", csp)
 		h.Set("Referrer-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
