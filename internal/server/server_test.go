@@ -20,10 +20,14 @@ func TestSecurityHeaders(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/auth/login", nil))
 
 	want := map[string]string{
-		"X-Content-Type-Options":  "nosniff",
-		"X-Frame-Options":         "DENY",
-		"Content-Security-Policy": "frame-ancestors 'none'",
-		"Referrer-Policy":         "same-origin",
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Content-Security-Policy": "default-src 'self'; script-src 'self'; " +
+			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+			"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " +
+			"connect-src 'self'; object-src 'none'; base-uri 'none'; " +
+			"form-action 'self'; frame-ancestors 'none'",
+		"Referrer-Policy": "same-origin",
 	}
 	for k, v := range want {
 		if got := rec.Header().Get(k); got != v {
