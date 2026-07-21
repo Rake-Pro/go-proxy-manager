@@ -43,7 +43,11 @@ whose object is absent at the target commit is refused rather than deleting it.
 JSON CRUD surface over the config objects; the UI is a vanilla-JS single-page app
 embedded in the binary with `go:embed`. Both are served by the admin listener.
 Mutating requests require an admin session plus a double-submit CSRF token, behind
-a same-origin guard.
+a same-origin guard. Every admin response also carries hardening headers: a strict
+CSP (`script-src 'self'`, with carve-outs only for inline style attributes and
+Google Fonts) as an XSS backstop behind the UI's output escaping, `nosniff`,
+`X-Frame-Options: DENY`, and `Referrer-Policy: same-origin`. HSTS is deliberately
+left to the data plane, which is the TLS edge for the proxied admin host.
 
 **Auth** (`internal/auth`, `internal/oidc`, `internal/session`). Operators
 authenticate with a local bcrypt password and/or OIDC (authorization code +

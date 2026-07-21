@@ -180,6 +180,15 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Admin CSP tightened from frame-ancestors-only to a strict policy**
+  (defense-in-depth). Every admin/login response now carries
+  `script-src 'self'` (plus `default-src 'self'`, `connect-src 'self'`,
+  `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`), so injected
+  markup could not execute script even if the SPA's output escaping ever
+  regressed. Carve-outs: `style-src 'unsafe-inline'` for the SPA's inline
+  style attributes, and Google Fonts (`style-src` fonts.googleapis.com,
+  `font-src` fonts.gstatic.com). Admin listener only — proxied data-plane
+  traffic is untouched (`internal/server`).
 - **Webhook delivery is SSRF-bounded** (issue #1, low/defense-in-depth).
   Lifecycle-webhook targets are admin-configured URLs, which made delivery an
   SSRF primitive from gpm's network position. Redirects are no longer followed
