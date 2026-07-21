@@ -180,6 +180,11 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Aikido SAST suppression documented at the git exec site.** The
+  command-injection finding on `internal/store/gitrepo.go` is a false
+  positive - git runs as a fixed argv (no shell) with internal literal
+  arguments - now marked with an inline `noaikido` justification instead of
+  recurring in every scan.
 - **Admin CSP tightened from frame-ancestors-only to a strict policy**
   (defense-in-depth). Every admin/login response now carries
   `script-src 'self'` (plus `default-src 'self'`, `connect-src 'self'`,

@@ -102,7 +102,9 @@ type execGit struct {
 func NewExecGit(dir string) GitRepo { return &execGit{dir: dir} }
 
 func (g *execGit) run(ctx context.Context, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...)
+	// Fixed argv (no shell): literal git binary, repo dir from server config,
+	// args are internal literals from the GitRepo methods.
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
 	if env != nil {
 		cmd.Env = env
 	}
