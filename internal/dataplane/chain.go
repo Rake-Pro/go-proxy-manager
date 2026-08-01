@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog/log"
 )
 
 // registry indexes reusable config objects by name for chain assembly. It also
@@ -177,6 +178,24 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 	return headers, trusted
 }
 
+// unresolvedRefs returns a description of the first middleware/access-list name
+// on host that the registry cannot resolve, or "" when every reference lands.
+// buildLocations folds a location's own names into the host copy it passes to
+// buildChain, so checking the host here covers locations too.
+func unresolvedRefs(host model.ProxyHost, reg *registry) string {
+	for _, name := range host.AccessLists {
+		if _, ok := reg.accessLists[name]; !ok {
+			return "accessList " + name
+		}
+	}
+	for _, name := range host.Middlewares {
+		if _, ok := reg.middlewares[name]; !ok {
+			return "middleware " + name
+		}
+	}
+	return ""
+}
+
 // buildChain wraps the terminal proxy handler in the host's middleware chain.
 // Steps run in a fixed canonical order regardless of reference order:
 //
@@ -192,6 +211,28 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 // access-list sits just inside rate-limit, ahead of auth, so an IP the list would
 // deny is dropped before any auth work (forward-auth subrequest, OIDC redirect).
 func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Handler {
+	// FAIL CLOSED on a name that resolves to nothing. Every loop below skips a
+	// name it cannot find, which for an access list means a typo silently turns a
+	// restricted host into an open one - the exact opposite of what the reference
+	// was for. Config.Validate rejects dangling references and is the primary
+	// guard, but it is the ONLY thing between a typo and an unauthenticated route,
+	// and a security boundary should not rest on a single check in a different
+	// package.
+	//
+	// Middlewares are treated the same way rather than merely skipped: an
+	// unresolvable name there can just as easily be the auth or rate-limit tier,
+	// and "serve it without the gate" is never the safer reading of an operator's
+	// intent. The blast radius is deliberately ONE host (not the whole router
+	// build): a config that cannot pass validation anyway should not be able to
+	// take unrelated hosts down as a side effect of this defence in depth.
+	if missing := unresolvedRefs(host, reg); missing != "" {
+		log.Error().Str("host", host.Name).Str("unresolved", missing).
+			Msg("dataplane: host references a middleware or access list that does not exist; serving 503 rather than dropping the gate")
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		})
+	}
+
 	h := proxy
 
 	// Per-host client-IP resolver for the IP-based controls (access-list, guard,

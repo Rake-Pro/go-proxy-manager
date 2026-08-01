@@ -228,6 +228,17 @@ The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
 
+**A reference that resolves to nothing fails the host closed.** If a host (or one
+of its locations) names a middleware or access list that does not exist in the
+compiled registry, the chain is replaced by a handler answering `503` and the
+mismatch is logged at `error`. `Config.Validate` already rejects dangling
+references and is the primary guard, but it must not be the *only* thing between
+a typo and an unauthenticated route: skipping an unresolvable access list would
+turn a restricted host into an open one, which is the opposite of what the
+reference was written for. The blast radius is deliberately one host - a config
+that cannot pass validation anyway must not take unrelated hosts down as a side
+effect of this defence in depth.
+
 The **rewrite** middleware (`internal/dataplane/rewrite.go`) does exact-match
 request-path replacement just before the request enters the reverse proxy. On an
 exact `r.URL.Path` hit it swaps in the target path (clearing `RawPath` so Go
