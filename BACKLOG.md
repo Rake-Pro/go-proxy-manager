@@ -58,8 +58,10 @@ All findings from that review are remediated in the same change (see CHANGELOG
   *(Low)*
 - [x] Manual DNS reconcile returns 409 instead of blocking on the run lock.
   *(Low)*
-- [x] `apexTarget` change orphans previously-managed records — documented in
-  `docs/configuration.md` and `docs/deployment.md`. *(Low)*
+- [x] `apexTarget` change orphans previously-managed records — **fixed, not just
+  documented**, by the ownership ledger: a record gpm created and nobody has
+  touched since is still recognisably gpm's after the apex moves, so it is
+  retargeted on the next reconcile instead of being orphaned. *(Low)*
 - [x] The SPA gates the API Tokens nav entry and page on
   `capabilities.apiTokens.enabled`. *(Low)*
 - [x] The API scope gate denies when no principal is on the request. *(Info)*
@@ -262,7 +264,84 @@ and the design record
     latency-critical. A full-state poll self-heals from a missed event by
     construction.
 
-Deliberately deferred (not planned until a need appears):
+- [ ] **Let an operator disable a discovery-managed host.** `derive()` never sets
+  `Disabled` and `sameHost` compares it, so a managed host disabled by hand - the
+  obvious move when an app has to come offline *now* - is upserted back to enabled
+  on the next poll, DNS records and all. Today's only real off-switches are
+  removing the `Ingress` annotation (needs cluster access) and removing the
+  `managed-by` label (no cluster access, but permanent adoption); both are
+  documented in `docs/configuration.md`. Proposal: treat `disabled` as
+  operator-owned state - discovery honours an operator-set `Disabled` and only
+  clears it when discovery itself set it. That needs a way to tell the two apart
+  (a `gpm.rake.pro/disabled-by` label, or an annotation on the `Ingress` that
+  discovery derives `Disabled` from), and it must not become a way for a cluster
+  user to keep an operator-disabled host enabled. Deferred deliberately: the
+  behaviour is documented rather than changed for now.
+
+### DNS record ownership (2026-08-01 incident)
+
+Enabling `dnsSync.pihole` for the first time deleted 19 hand-written LAN CNAMEs
+that pointed at the configured `apexTarget` (see CHANGELOG `Fixed`). Remediated in
+one change:
+
+- [x] **Explicit ownership ledger** (`model.DNSLedger`, singleton
+  `config/dns-ledger.yaml`) replaces target-equality inference. A record absent
+  from the ledger is never deleted, whatever it points at.
+- [x] **Adopt, don't purge, on first enable** — a present record matching the
+  desired set is claimed rather than recreated; everything else is left alone and
+  counted as `untouched`.
+- [x] **Dry run**: `GET /api/dns-sync/plan` (`dns-sync:read`), wired into the
+  settings UI as *Preview changes*, reporting the same decisions the reconcile
+  would take without writing anything.
+- [x] **Cloudflare on the same discipline** — the ledger is authoritative for
+  deletion, the `managed-by:gpm` comment stays as an independent second condition.
+- [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
+  created and deleted.
+
+Adversarial review of that change (2026-08-01), all remediated:
+
+- [x] **Adoption was a one-way trap** — an adopted record the config later stopped
+  wanting was deleted. Ledger entries now record provenance (`adopted`) and an
+  adopted entry is *released*, never deleted; a missing field reads as adopted so
+  upgrades cannot destroy anything. *(High)*
+- [x] **A retarget deleted records gpm had only ADOPTED** - the retarget branch
+  ignored the claim's provenance, so an `apexTarget` change destroyed an
+  operator-authored record *and* re-recorded it as gpm-created, arming a later
+  host removal to hard-delete it. An adopted claim whose record no longer matches
+  the apex is now released, not retargeted; retarget applies only to records gpm
+  created. *(Med)*
+- [x] **Pi-hole session leaked on context cancellation** — `logout` ran on the
+  caller's (cancelled) context. It now uses a detached 5s context. *(High)*
+- [x] **Retarget had no rollback** — a failed create after a successful delete
+  destroyed the record and under-reported the run. The original is restored, the
+  run fails loudly, and the counter increments as soon as the delete lands. *(Med)*
+- [x] **A Pi-hole API shape change read as "zero records"** and wiped the ledger.
+  The record list is now required to be present. *(Med)*
+- [x] **Cloudflare pagination truncated** when `result_info` was absent or zero.
+  Termination is by short page; `result_info` is advisory. *(Med)*
+- [x] **Ledger read-modify-write raced a concurrent Revert** (confirmed). The save
+  carries the revision it read at and is refused when the tree moved; the run then
+  re-writes without the claims the revert withdrew. *(Med)*
+- [x] **A revert can resurrect a stale claim** — documented beside the existing
+  revert note, and deletions now log at warn with the authorising `ledgerRev`.
+  *(Med)*
+- [x] Ledger duplicate-domain validation is case-insensitive. *(Low)*
+- [x] The ledger commit runs on a context detached from the reconcile's. *(Low)*
+- [x] Plan/reconcile agreement is asserted on names, not counts. *(Low)*
+
+Deliberately deferred:
+
+- **Migrating a pre-ledger deployment's Cloudflare records without the comment.**
+  A record with the right content but no `managed-by:gpm` comment is not adopted
+  (Cloudflare deletion needs both marks), so it is reported as `skipped` forever.
+  Adopting it would mean weakening the comment guarantee; add the comment by hand
+  if you want gpm to own it.
+- **A ledger-repair endpoint** (adopt / disown a named record on request).
+  Hand-editing `config/dns-ledger.yaml` and reloading already does it, and an API
+  route onto the ledger is an "authorise a DNS deletion" primitive worth thinking
+  twice about.
+
+Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 - **Per-host ACME** for discovered names outside the wildcard's coverage. Would
   need its own rate-limit budget and a CT-disclosure note in the UI.
@@ -283,6 +362,8 @@ Deliberately deferred (not planned until a need appears):
 - **Per-profile `allowedDomainSuffixes`**, so a permissive profile can be
   restricted to a subset of the published namespace. The suffix list is currently
   global to the whole discovery block.
+  without writing. Cheap to add on top of the existing plan/apply split — the DNS
+  sync's `GET /dns-sync/plan` is now the worked example to copy.
 - **Live validation** against the real cluster: the subsystem is unit-tested
   hermetically (httptest fake API server) but has not yet run against
   production RBAC and a real Ingress set.

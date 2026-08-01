@@ -237,9 +237,12 @@ func main() {
 	// resolver (Pi-hole) and/or the public zone (Cloudflare). Like the webhook
 	// dispatcher it reads live config on every run, so nothing needs re-wiring
 	// when settings change.
+	// The ownership ledger is what authorises a DNS deletion: gpm only ever removes
+	// records this file says it created. It is committed to the config repo like
+	// everything else, authored as the reconciler rather than as an operator.
 	dnsSyncer := dnssync.New(func(c context.Context) (model.Config, model.Settings, error) {
 		return st.Load(c)
-	})
+	}, dnsLedgerStore{st})
 
 	// Kubernetes Ingress discovery: derives managed proxy hosts from annotated
 	// cluster Ingresses (read-only against the cluster) and writes them as ONE
@@ -326,7 +329,10 @@ func main() {
 		TokenLastUsed:     authn.TokenLastUsed,
 		DNSSyncReconcile:  dnsSyncer.ReconcileNow,
 		DNSSyncStatus:     func() any { return dnsSyncer.Status() },
-		DNSSyncEnabled:    dnsSyncer.Enabled,
+		DNSSyncPlan: func(c context.Context) (any, error) {
+			return dnsSyncer.Plan(c)
+		},
+		DNSSyncEnabled: dnsSyncer.Enabled,
 
 		IngressDiscoveryReconcile: ingressDisc.ReconcileNow,
 		IngressDiscoveryStatus:    func() any { return ingressDisc.Status() },
@@ -425,4 +431,26 @@ func secretFromEnv(key string) string {
 		return strings.TrimSpace(string(b))
 	}
 	return os.Getenv(key)
+}
+
+// dnsLedgerStore adapts the config store to the dnssync.Ledger interface. It
+// exists so the DNS reconciler depends on the two ledger operations it needs
+// rather than on the whole store, and so the ledger commit is authored as the
+// reconciler instead of as whichever operator happened to trigger the run.
+type dnsLedgerStore struct{ st *store.Store }
+
+func (d dnsLedgerStore) Load(ctx context.Context) (model.DNSLedger, string, error) {
+	return d.st.LoadDNSLedger(ctx)
+}
+
+// Save detaches the write from the caller's context. A reconcile can be driven by
+// an HTTP request, and the client hanging up must not cancel the commit half way:
+// SaveDNSLedger writes the file and then commits it, so a cancellation between
+// the two leaves the ledger on disk but out of git, to be swept into whatever
+// unrelated commit lands next. The write is short, local and already ordered
+// after the DNS changes it records, so seeing it through is strictly safer than
+// abandoning it.
+func (d dnsLedgerStore) Save(ctx context.Context, l model.DNSLedger, rev string) error {
+	_, err := d.st.SaveDNSLedger(context.WithoutCancel(ctx), l, store.Author{Name: "dns-sync", Email: "gpm@localhost"}, rev)
+	return err
 }

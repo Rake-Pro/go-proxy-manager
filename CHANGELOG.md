@@ -17,6 +17,170 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   is wired - not an error to refuse, and the capability probe is cached per page
   load, so a stale "not configured" could otherwise outlive the fact and block a
   valid edit. Every other capability-gated control still greys out.
+### Fixed
+
+- **A record gpm ADOPTED is never deleted — it is released.** Adoption used to be
+  a one-way trap. An operator hand-writes `x.example.com`; a proxy host is later
+  given `dns.lanDirect` for that name, so the reconcile adopts the existing record
+  into the ownership ledger; the operator later takes the flag off again — and the
+  next reconcile **deleted their record**, because the ledger no longer
+  distinguished a record gpm made from one it had merely claimed. On Pi-hole,
+  where every correctly-targeted record is adoptable, that was the 2026-08-01
+  incident deferred by one config edit.
+
+  **The guarantee now: an adopted DNS record is never deleted *or* retargeted -
+  gpm destroys only records it CREATED.** Ledger entries
+  record their provenance (`adopted: true|false`), and an adopted entry the config
+  no longer wants is *released* — dropped from the ledger with a warning, with the
+  record left exactly where it stands. Deletion remains available for records gpm
+  created itself. Existing ledgers upgrade safely: an entry written before the
+  field existed carries no provenance, and a missing `adopted` is read as
+  **adopted**, the only reading that cannot destroy a record on upgrade. The
+  trade-off is stated in `docs/configuration.md`: gpm will not clean up an adopted
+  record for you.
+
+- **An `apexTarget` change no longer deletes the records gpm only ADOPTED.** A
+  retarget is a delete followed by a create, and the retarget branch did not look
+  at the claim's provenance: after the edge host moved, a record an operator had
+  hand-written and gpm had merely adopted was **destroyed and recreated**, and the
+  replacement was recorded as `adopted: false`. Two failures in one - an
+  operator-authored record deleted by the subsystem that exists to prevent exactly
+  that, and a claim silently upgraded from adopted to created, so a *later* host
+  removal would hard-delete the name for good. Adopt -> change `apexTarget` ->
+  remove the host reproduced the 2026-08-01 incident one record at a time.
+
+  An adopted claim whose record no longer matches the apex is now **released**:
+  dropped from the ledger with a warning and counted as a skip, with nothing
+  written to the backend. Retarget stays available for records gpm created itself,
+  which it may safely replace. Provenance is carried forward unchanged everywhere
+  else; the single place a claim may become "created" is a record that has gone
+  and is genuinely re-created by gpm. To move an adopted name to a new apex,
+  delete or re-point the record by hand (`docs/configuration.md`).
+
+- **Pi-hole sessions leaked whenever a run was cut short.** `logout` ran on the
+  caller's context, so an HTTP client disconnecting mid-reconcile cancelled the
+  logout along with the run (measurably: one login, zero logouts). Pi-hole has a
+  small fixed session pool, so a leak per aborted run eventually locks the
+  operator out of their own admin UI. Logout now runs on a detached context with a
+  5s deadline.
+
+- **A failed retarget no longer destroys the record.** Neither backend can update
+  a CNAME in place, so a retarget is delete-then-create; a create that failed left
+  the name unresolved until some later reconcile happened to heal it, while the
+  status reported `Deleted:0 Retargeted:0` — a run that destroyed something and
+  said nothing had happened. The original record is now restored (Cloudflare
+  included, orange-cloud flag and all), the run fails loudly, and the counter is
+  incremented as soon as the *delete* lands.
+
+- **A Pi-hole API shape change is an error, not a silent ledger wipe.** A renamed
+  or missing `config.dns.cnameRecords` field decoded to a nil slice, which a
+  full-state reconciler reads as "the resolver holds nothing" — status OK, zero
+  counters, ledger emptied and committed. The field is now required to be present
+  and a list; anything else fails the run with the ledger intact.
+
+- **Cloudflare pagination no longer truncates when `result_info` is absent.** A
+  full 100-record page with no (or a zeroed) `result_info` stopped the walk at
+  page 1, hiding the rest of the zone: no false deletes, but orphaned ledger
+  entries and repeated creates of records that already exist. Termination is now
+  driven by a short page; `result_info` is advisory.
+
+- **A reconcile can no longer clobber a concurrent revert of the ownership
+  ledger.** The reconcile's read-modify-write spans minutes of backend I/O, and
+  `Revert` rewrites `dns-ledger.yaml` with the rest of the tree; a reconcile that
+  had loaded the ledger first would write its own version back afterwards,
+  re-establishing claims the revert withdrew — and a claim authorises a deletion.
+  `SaveDNSLedger` now takes the repo revision the ledger was read at and refuses a
+  stale write (`ErrLedgerStale`); the reconciler re-reads and rewrites *without*
+  the withdrawn claims rather than resurrecting them.
+
+- **A revert can still restore an ownership claim reality has moved past** (gpm
+  created a record, deleted it, an operator recreated it by hand, the config is
+  reverted to before the deletion). This is documented prominently beside the
+  existing revert note in `docs/configuration.md`, and every deletion is now
+  logged at **warn** with the ledger revision that authorised it, so a record
+  removed on the strength of a stale claim is identifiable after the fact.
+
+- **Ledger duplicate-domain validation is case-insensitive**, matching the
+  normalised form the reconciler indexes by. `Foo.lan` and `foo.lan` could both
+  validate, leaving one claim silently shadowing the other.
+
+- **The ledger commit survives a cancelled request.** The reconciler's ledger save
+  passed the (possibly request-scoped) context to `git.CommitAll`, so a cancelled
+  reconcile could leave the file written but uncommitted, to be swept into an
+  unrelated commit later. It now writes on a detached context.
+
+- **DNS sync deleted 19 records it did not create. It can no longer delete
+  anything it did not create.** On 2026-08-01 an operator enabled
+  `settings.dnsSync.pihole` for the first time. Their Pi-hole already held 19
+  hand-written LAN CNAMEs (their LAN-direct bypass list: `plex`, `argo`, `cloud`,
+  `wiki`, ...) pointing at the same edge host they had just configured as
+  `apexTarget`. No proxy host carried `dns.lanDirect` yet, so the desired set was
+  empty. The Pi-hole backend treated *any* CNAME whose target equalled
+  `apexTarget` as gpm-managed, found all 19 unwanted, and deleted every one on the
+  very first reconcile. LAN DNS broke until they were restored by hand.
+
+  The bug was the ownership test. Pi-hole/dnsmasq CNAMEs have no comment field, so
+  target equality was used as a stand-in for "gpm created this" — and on a shared
+  apex that is not ownership at all, it is a coincidence. (The Cloudflare backend
+  was safe in the identical situation only because its marker, the
+  `managed-by:gpm` record comment, is one pre-existing records do not carry.)
+
+  **The guarantee now: gpm deletes only DNS records it recorded creating.**
+  Ownership is written down, not inferred, in a new git-backed ledger
+  (`model.DNSLedger`, the singleton `config/dns-ledger.yaml`). A record absent from
+  that ledger is never in a delete list, whatever its name and whatever it points
+  at. `apexTarget` says where managed records point and nothing more.
+
+  What a reconcile does per desired name: **create** what is absent (recording
+  ownership); **adopt** a record that already holds the right target but predates
+  the ledger — claimed, not recreated, logged at info; **retarget** a record that
+  still holds exactly what gpm wrote after `apexTarget` moved; **skip and warn** on
+  a name held by a record gpm does not own (unchanged — never shadowed, never
+  replaced). It **deletes** only ledger entries the config no longer wants, and
+  only while the record still matches what gpm left there; re-pointed out of band,
+  it is disowned rather than deleted.
+
+  **Migration for existing deployments is a no-op plus adoptions.** An empty ledger
+  means gpm owns nothing, so a first reconcile can only create and adopt: records
+  matching the desired set are adopted, every other record on the backend is left
+  exactly as it is, and the run logs a one-line summary of both counts. Nothing has
+  to be done before upgrading, and no ledger file has to be seeded.
+
+  Cloudflare is held to the same discipline: the ledger is authoritative for
+  deletion and the `managed-by:gpm` comment remains an independent second
+  condition (adoption there requires the comment too), so none of that backend's
+  existing guarantees are weakened.
+
+  Regression coverage names the incident directly: pre-existing records pointing
+  at `apexTarget`, an empty desired set and an empty ledger must produce **zero**
+  deletions, on both backends.
+
+### Added
+
+- **`GET /api/dns-sync/plan` — dry run before you enable.** Reads both backends and
+  the ownership ledger and reports exactly what a reconcile would create, adopt,
+  retarget, delete and skip, plus how many records it would leave alone, without
+  issuing a single write. Scope `dns-sync:read`; `409 Conflict` while a reconcile
+  is in flight, for the same reason the manual reconcile refuses to queue. Wired
+  into the settings UI as **Preview changes**, next to *Reconcile now*. The
+  2026-08-01 incident was unpreviewable — the only way to learn what the first
+  reconcile would do was to run it, and by then the records were gone.
+
+### Changed
+
+- **`GET /api/dns-sync/status` reports adoption.** Each backend now carries
+  `adopted`, `retargeted`, `skipped` and `untouched` alongside `created` and
+  `deleted`. `managed` changes meaning from "records whose target matched the
+  apex" to "records gpm owns" (the ledger entry count after the run). `untouched`
+  is the number to check after a first enable: it should equal everything you
+  maintain by hand on that backend.
+- **Changing `apexTarget` no longer orphans records.** Previously ownership *was*
+  target equality, so moving the apex made every record gpm had created
+  unrecognisable to it — never updated, never deleted, and never recreated either
+  because the name now conflicted. With the ledger, a record gpm created and
+  nobody has touched since is still identifiably gpm's, so it is retargeted on the
+  next reconcile. The manual-cleanup warning in `docs/configuration.md` and
+  `docs/deployment.md` is retired.
 
 ### Added
 

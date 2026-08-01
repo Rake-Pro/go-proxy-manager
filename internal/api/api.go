@@ -72,6 +72,10 @@ type Deps struct {
 	// DNSSyncStatus, if set, returns the last reconcile result (marshalled
 	// as-is) for GET /dns-sync/status. May be nil (endpoint responds 501).
 	DNSSyncStatus func() any
+	// DNSSyncPlan, if set, returns the read-only preview of what a reconcile
+	// WOULD create, adopt and delete per backend (GET /dns-sync/plan), without
+	// changing anything. May be nil (endpoint responds 501).
+	DNSSyncPlan func(context.Context) (any, error)
 	// DNSSyncEnabled, if set, reports which DNS sync backends are configured,
 	// for the capability probe. May be nil (both reported disabled).
 	DNSSyncEnabled func() (pihole, cloudflare bool)
@@ -380,6 +384,28 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.DNSSyncStatus())
+	}))
+	// Dry run. It reads the backends and the ownership ledger and reports what a
+	// reconcile WOULD do, changing nothing - so enabling a backend on a resolver
+	// that already holds hand-written records can be checked before it is done, not
+	// discovered afterwards. It is a read, so it takes dns-sync:read.
+	mux.HandleFunc("GET /dns-sync/plan", d.scoped("dns-sync:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.DNSSyncPlan == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("DNS sync is not wired"))
+			return
+		}
+		plan, err := d.DNSSyncPlan(r.Context())
+		if err != nil {
+			// Same reasoning as the reconcile route: a run in flight is a conflict,
+			// and a preview of a moving target is worth less than an honest 409.
+			if errors.Is(err, dnssync.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, plan)
 	}))
 
 	// Kubernetes Ingress discovery: reconcile annotated cluster Ingresses into

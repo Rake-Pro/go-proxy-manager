@@ -9,6 +9,7 @@ API, or write the files directly and let the daemon load them on start/reload.
 ```
 config/
   settings.yaml            # singleton app settings
+  dns-ledger.yaml          # singleton DNS record-ownership ledger (reconciler-written)
   proxy-hosts/<name>.yaml
   redirect-hosts/<name>.yaml
   stream-hosts/<name>.yaml
@@ -45,6 +46,26 @@ references it).
 > because no annotated `Ingress` derives it. Removing the label is the supported
 > way to adopt a discovered host permanently; adding it is never the way to give
 > one away.
+
+> **A managed host is not editable by hand - every edit is reverted on the next
+> poll, `disabled` included.** Discovery derives the whole object from the
+> template and the `Ingress` and writes it back whenever it differs from what is
+> stored, so `disabled: true`, an edited `displayName`, added `tags`, `timeouts`,
+> `locations` or `robotsNoIndex` all survive at most until the next reconcile
+> (default 60s) - and re-enabling the host republishes its DNS records with it.
+> **Disabling a managed host is therefore not an off-switch.** There are exactly
+> two supported ones:
+>
+> - **Remove `gpm.rake.pro/managed` from the `Ingress`** (or delete the
+>   `Ingress`). Discovery stops deriving the host and deletes it on the next
+>   successful reconcile. This is the clean route, but it needs cluster access.
+> - **Remove the `gpm.rake.pro/managed-by` label from the proxy host.** The
+>   object becomes operator-authored, discovery refuses to touch it ever again,
+>   and you can then disable or edit it freely. This is the **emergency**
+>   route - it needs no cluster access, so it is the one to reach for when an app
+>   has to come offline now - and it is **permanent**: the corresponding
+>   `Ingress` is skipped with a warning from then on, and putting the host back
+>   under discovery means deleting it and letting the next poll recreate it.
 
 ## Domains are exclusive
 
@@ -180,7 +201,7 @@ contacts anything.
 | `pihole.enabled` | bool | Turn on local (LAN) CNAME reconciliation. |
 | `pihole.url` | string | Pi-hole base URL, absolute http/https, no `/api` suffix. Required when enabled. |
 | `pihole.appPassword` | Secret | Pi-hole **application password** (placeholder-resolved). Used for `POST /api/auth`. |
-| `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Also the ownership marker** — see below. |
+| `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Not an ownership marker** — see below. |
 | `cloudflare.enabled` | bool | Turn on public zone reconciliation. |
 | `cloudflare.dnsProviderRef` | string | Name of an existing [DNSProvider](#dnsprovider-configdns-providers) whose `config.apiToken` is reused. Required when enabled. |
 | `cloudflare.zoneName` | string | Zone the records live in, e.g. `example.com`. Required when enabled. |
@@ -190,27 +211,100 @@ contacts anything.
 **Ownership — what gpm will and will not delete.** Reconcile is *full-state*: the
 desired set is recomputed from the whole config on every run, so a record deleted
 out of band is recreated and a host removed while gpm was down is still cleaned
-up. Deletion, however, is strictly limited to records gpm demonstrably owns:
+up. Deletion, however, is limited to records **gpm created itself**, recorded
+explicitly in the ownership ledger at `config/dns-ledger.yaml`:
 
-- **Pi-hole** — only a CNAME whose target is *exactly* `pihole.apexTarget`. A
-  hand-written entry pointing anywhere else is read and ignored, even when it
-  names a domain gpm also serves. If a desired name already exists with a
-  different target, gpm logs it and creates nothing for that name rather than
-  adding a second, shadowing entry.
-- **Cloudflare** — only a record carrying the comment `managed-by:gpm`, which gpm
-  writes on every record it creates. If a desired name already exists as somebody
-  else's record, gpm logs it and leaves both alone rather than creating a
-  duplicate or removing theirs.
+```yaml
+# config/dns-ledger.yaml - written by the reconciler, committed like everything else
+schemaVersion: 1
+pihole:
+  - domain: app.example.com
+    target: edge.example.com
+    adopted: false      # gpm created this record, so gpm may delete it
+cloudflare:
+  - domain: www.example.com
+    target: edge.example.com
+    adopted: true       # the record was already there; gpm only claimed it
+```
 
-> **Changing `apexTarget` orphans the records created under the old one.**
-> Ownership on Pi-hole is target equality, so as soon as the apex changes, every
-> record gpm previously created stops matching and becomes, by its own rules,
-> somebody else's — it will never be updated or deleted again, and the names now
-> conflict with the desired set (so nothing is recreated either, per the
-> skip-and-warn above). The same applies on Cloudflare for records that predate
-> the `managed-by:gpm` comment. **Delete the stale records yourself before or
-> right after changing `apexTarget`**, then run
-> `POST /api/dns-sync/reconcile` to recreate them against the new target.
+`adopted` records **how** the claim was acquired, and it is what decides whether
+the record can ever be deleted. An entry with no `adopted` key at all (a ledger
+written before this field existed) is read as **adopted**, deliberately: it is the
+only reading of a missing field that cannot destroy a record on upgrade.
+
+Per desired record, on every run:
+
+| Backend state | What gpm does |
+|---------------|---------------|
+| absent | **create**, and record ownership (`adopted: false`) |
+| present, right target, **not** in the ledger | **adopt** — record ownership (`adopted: true`), do not recreate (logged at info) |
+| present, right target, already owned | nothing |
+| **created by gpm**, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** - replace it and update the ledger (the replacement is again a record gpm created) |
+| **adopted**, and `apexTarget` has since changed | **released, not retargeted** - the claim is dropped and the record left exactly where it is (logged at warn, counted as a skip) |
+| present, different target, not owned | **skip and warn** — never shadowed, never replaced |
+| in the ledger as **created by gpm**, no longer desired | **delete**, and drop from the ledger (logged at warn, with the ledger revision that authorised it) |
+| in the ledger as **adopted**, no longer desired | **released, not deleted** — the claim is dropped and the record left exactly where it is (logged at warn) |
+| **not in the ledger** | **never deleted**, whatever it points at |
+
+**A record gpm adopted is never deleted *or* retargeted.** Adoption claims a
+record somebody else made; it is not, and must never become, permission to
+destroy it. So turning `dns.lanDirect` on for a name an operator had
+hand-written, and then turning it off again, leaves their record untouched - gpm
+simply stops managing it. A retarget is a delete followed by a create, so the
+same rule applies when `apexTarget` moves: an adopted record is **released**
+rather than re-pointed, both because re-pointing would destroy the operator's
+record and because the replacement would be recorded as gpm-created, leaving a
+later host removal free to delete the name outright. To move an adopted name to
+a new apex, either delete the record and let the next reconcile create it (gpm
+then owns it, and may later remove it), or re-point it yourself and let gpm
+re-adopt it. The flip side is that gpm will not clean up an
+adopted record for you: once released it is yours to remove by hand.
+
+`apexTarget` is *not* an ownership marker. It says where managed records point,
+nothing more. A hand-written CNAME aimed at the same host is adopted only if a
+proxy host asks for that exact name, and is otherwise left completely alone.
+
+**Cloudflare keeps a second marker.** Every record gpm creates there also carries
+the comment `managed-by:gpm`, and deletion needs **both** the ledger entry and
+the comment (re-checked inside the delete call itself). Adoption likewise only
+claims records that already carry the comment; a record with the right content
+but no comment is somebody else's and is skipped. Pi-hole/dnsmasq CNAMEs have no
+comment field at all, which is exactly why the ledger exists.
+
+**Enabling a backend for the first time is safe, and previewable.** With an empty
+ledger gpm owns nothing, so it can only create and adopt: records matching the
+desired set are adopted, and every other record on the backend is left untouched
+and counted in the `untouched` field of the status. Run
+`GET /api/dns-sync/plan` (or **Preview changes** in the settings UI) first — it
+reads the backends and the ledger and reports exactly what a reconcile would
+create, adopt, retarget and delete, without writing anything.
+
+> **Do not hand-edit `config/dns-ledger.yaml`.** It is what authorises a DNS
+> deletion. An entry with a missing domain or target, or a duplicate domain
+> (compared case-insensitively, as the reconciler indexes it), is rejected at load
+> and stops the reconcile rather than being acted on. To make gpm forget a record,
+> delete the entry — that disowns it, it is not a deletion of the record itself.
+> It is reverted along with the rest of the config by `POST /api/restore` / a
+> whole-tree revert, which is deliberate: rolling the config back to before a host
+> existed also rolls back gpm's claim on the record that host published.
+
+> **Caveat: a revert can restore an ownership claim that is no longer true.** The
+> ledger reverts with the tree, and history does not know what happened at the DNS
+> backend in the meantime. If gpm created `x.example.com`, later deleted it, and an
+> operator then recreated that name by hand, a revert to a commit from before the
+> deletion restores gpm's claim on it — and the next reconcile, finding the name
+> unwanted and the record matching what the claim says gpm left there, deletes the
+> operator's record. The `adopted` rule above does **not** cover this case: the
+> restored entry is one gpm genuinely created at the time it was written.
+>
+> Two things limit the damage. A reconcile whose ledger write is refused because
+> the repo moved under it (which is what a concurrent revert looks like) re-reads
+> and rewrites *without* the claims the revert withdrew, so a revert cannot be
+> silently undone by a run already in flight. And every deletion is logged at
+> **warn** with the ledger revision that authorised it (`ledgerRev`), so a record
+> removed on the strength of a stale claim is identifiable after the fact. After
+> reverting a config that ever contained DNS-synced hosts, run
+> `GET /api/dns-sync/plan` before letting a reconcile proceed.
 
 Wildcard domains (`*.example.com`) are skipped by both backends, as is a domain
 equal to the apex target (which would be a CNAME loop). Disabled proxy hosts
@@ -226,8 +320,11 @@ change, restore or whole-config revert (non-blocking, and bursts coalesce into a
 single run), and can be run on demand with `POST /api/dns-sync/reconcile`. The
 manual endpoint never queues: if a reconcile is already running it answers **409
 Conflict** rather than blocking, so repeated clicks cannot stack requests behind a
-slow backend. `GET /api/dns-sync/status` reports the last run per backend. A
-Pi-hole `403` is
+slow backend. `GET /api/dns-sync/status` reports the last run per backend
+(`desired`, `managed`, `created`, `adopted`, `retargeted`, `deleted`, `skipped`,
+`untouched`), and `GET /api/dns-sync/plan` returns the same decisions as a dry
+run without touching anything (`409` while a reconcile is in flight, for the same
+reason). Both take `dns-sync:read`. A Pi-hole `403` is
 surfaced as a distinct error — it means the session is read-only or the instance
 was built without `webserver.api.app_sudo`, which retrying will not fix.
 
@@ -436,6 +533,26 @@ silently replace its whole middleware/access-list chain and its TLS pinning.
 even the apex claimable. Two annotated Ingresses claiming the same hostname are
 resolved the same way — first by derived name wins, the rest are skipped.
 
+**What a derived host cannot express.** Cutting a hand-written host over to
+discovery - annotate the `Ingress`, let the derived host appear, delete the
+hand-written one - silently drops everything the template has no field for. A
+derived host carries only `upstream`/`upstreamGroupRef`, `tls`,
+`websocketsUpgrade`, `middlewares`, `accessLists` and the `dns` policy. It cannot
+carry:
+
+- `timeouts` - per-host dial/response overrides; the host falls back to the
+  shared transport defaults, which a slow backend will notice,
+- `locations` - path-scoped routing, and with it any path-scoped middleware,
+  access list or upstream override,
+- `robotsNoIndex` - the `X-Robots-Tag: noindex, nofollow` response header,
+- `tags`, and `displayName`, which is fixed to `<namespace>/<name>` (cosmetic).
+
+So **diff each hand-written host against what the template derives before you
+delete it**, field by field, and keep it hand-written if it uses any of the
+above. Adding them back afterwards is not an option: manual edits to a managed
+host are reverted on the next poll (see the reserved-label note near the top of
+this document).
+
 Ownership is re-checked **under the store lock at write time**, not only when the
 reconcile was planned: the plan is made before a multi-second cluster list, so an
 object relabelled or replaced in that window is left alone rather than written on
@@ -473,6 +590,20 @@ reconcile that finds no drift writes nothing at all.
 
 Discovery publishes no DNS itself: it sets the `dns` policy on the derived hosts
 and asks the phase-1 reconciler for a run, so there is exactly one DNS code path.
+
+**Disabling a derived host withdraws its DNS.** The host *object* is preserved by
+a disable - but a disabled host contributes nothing to the DNS desired set, so
+the next reconcile treats its domains as no longer wanted: records **gpm
+created** are **deleted**, records gpm had only **adopted** are **released**
+(dropped from the ledger, left standing). This is deliberate and fail-closed - a
+name must not keep resolving to an edge that no longer serves it - but it means
+anything that disables a derived host takes its public and LAN DNS down with it,
+including a discovery profile that has been retired or that no longer resolves.
+Putting the profile back re-enables the host and **recreates** the records, after
+up to one poll interval (default 60s) plus whatever negative-cache TTL the
+resolvers on the far side are still holding, so the name does not necessarily
+come back the moment the config does. A released record needs nothing recreated:
+it never left, and the next reconcile simply re-adopts it.
 
 `POST /api/ingress-discovery/reconcile` runs a reconcile on demand (**409
 Conflict** while one is in flight, never queued);

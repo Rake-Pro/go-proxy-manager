@@ -31,8 +31,9 @@ type PiholeDNSSync struct {
 	// Stored as a ${ENV:...}/${FILE:...} placeholder like every other secret.
 	AppPassword Secret `json:"appPassword,omitempty" yaml:"appPassword,omitempty"`
 	// ApexTarget is the CNAME target every managed record points at (the edge
-	// hostname resolvable on the LAN). It is ALSO the ownership marker: only
-	// CNAME records whose target is exactly this value are ever deleted.
+	// hostname resolvable on the LAN). It is NOT an ownership marker: it once was,
+	// and treating a hand-written CNAME aimed here as gpm's cost an operator 19
+	// records (see DNSLedger). Deletion is authorised by the ledger alone.
 	ApexTarget string `json:"apexTarget,omitempty" yaml:"apexTarget,omitempty"`
 }
 

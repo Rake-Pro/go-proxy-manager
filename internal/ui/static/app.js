@@ -2450,13 +2450,13 @@ async function viewSettings(c) {
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state: gpm only ever deletes records it owns - a Pi-hole CNAME whose target is the apex below, or a Cloudflare record commented <span class="mono">managed-by:gpm</span>.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a backend on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. A record gpm <i>adopted</i> is released rather than deleted when a host stops asking for it, so it stays in your resolver for you to remove by hand. Use <b>Preview changes</b> first to see it.</p>
       <div class="grid-2">
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Pi-hole (LAN)</div><div class="ds">Local CNAMEs on the LAN resolver</div></div>${switchHtml('set-ph-on', !!ds.pihole.enabled, 'Pi-hole DNS sync')}</div>
           <div class="field-group" style="margin-top:8px"><label>Pi-hole URL</label><input class="field mono" id="set-ph-url" value="${esc(ds.pihole.url || '')}" placeholder="http://pihole.lan" /></div>
           <div class="field-group"><label>App password</label><input class="field mono" id="set-ph-pw" value="${esc(ds.pihole.appPassword || '')}" placeholder="\${ENV:PIHOLE_APP_PASSWORD}" /><div class="hint">Use a placeholder so no secret is committed.</div></div>
-          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-ph-apex" value="${esc(ds.pihole.apexTarget || '')}" placeholder="edge.example.com" /><div class="hint">Also the ownership marker: only CNAMEs pointing here are ever deleted.</div></div>
+          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-ph-apex" value="${esc(ds.pihole.apexTarget || '')}" placeholder="edge.example.com" /><div class="hint">Where managed CNAMEs point. It is not an ownership marker: hand-written records aimed here are adopted only if a host asks for that exact name, and are otherwise left alone.</div></div>
         </div>
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Cloudflare (public)</div><div class="ds">Records in the authoritative zone</div></div>${switchHtml('set-cf-on', !!ds.cloudflare.enabled, 'Cloudflare DNS sync')}</div>
@@ -2467,7 +2467,11 @@ async function viewSettings(c) {
         </div>
       </div>
       <div id="set-dns-status" class="hint" style="margin-top:12px"></div>
-      <button class="btn ghost sm" id="set-dns-run" type="button" style="margin-top:6px">Reconcile now</button>
+      <div id="set-dns-plan" class="hint" style="margin-top:6px"></div>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn ghost sm" id="set-dns-preview" type="button" title="Read the backends and report what a reconcile would change. Nothing is written.">Preview changes</button>
+        <button class="btn ghost sm" id="set-dns-run" type="button">Reconcile now</button>
+      </div>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Kubernetes Ingress discovery</p>
@@ -2570,7 +2574,13 @@ async function viewSettings(c) {
       const line = (label, b) => {
         if (!b || !b.enabled) return `${label}: off`;
         if (b.error) return `${label}: FAILED - ${b.error}`;
-        return `${label}: ok (${b.desired} desired, +${b.created} / -${b.deleted})`;
+        const extra = [];
+        if (b.adopted) extra.push(`${b.adopted} adopted`);
+        if (b.retargeted) extra.push(`${b.retargeted} retargeted`);
+        if (b.skipped) extra.push(`${b.skipped} skipped`);
+        if (b.untouched) extra.push(`${b.untouched} left alone`);
+        return `${label}: ok (${b.desired} desired, ${b.managed} owned, +${b.created} / -${b.deleted}` +
+          (extra.length ? ', ' + extra.join(', ') : '') + ')';
       };
       el.textContent = (st.lastRun ? 'Last run ' + fmtTime(st.lastRun) + '. ' : 'Never run. ') +
         line('Pi-hole', st.pihole) + ' | ' + line('Cloudflare', st.cloudflare) +
@@ -2580,6 +2590,34 @@ async function viewSettings(c) {
     }
   }
   renderDNSStatus();
+
+  // Dry run. gpm only ever deletes records its ownership ledger says it created,
+  // so the number that matters before a first reconcile is "left alone" - it
+  // should equal everything the operator wrote by hand on that backend.
+  async function renderDNSPlan() {
+    const el = $('#set-dns-plan');
+    if (!el) return;
+    el.textContent = 'Reading backends...';
+    try {
+      const p = (await api('/api/dns-sync/plan')).data || {};
+      const names = (a) => arr(a).join(', ');
+      const line = (label, b) => {
+        if (!b || !b.enabled) return `${label}: off`;
+        if (b.error) return `${label}: FAILED - ${b.error}`;
+        const parts = [];
+        if (arr(b.create).length) parts.push(`create ${names(b.create)}`);
+        if (arr(b.adopt).length) parts.push(`adopt ${names(b.adopt)}`);
+        if (arr(b.retarget).length) parts.push(`retarget ${names(b.retarget)}`);
+        if (arr(b.delete).length) parts.push(`DELETE ${names(b.delete)}`);
+        if (arr(b.skip).length) parts.push(`skip (not ours) ${names(b.skip)}`);
+        parts.push(`${b.untouched || 0} record(s) gpm does not own, left alone`);
+        return `${label}: ` + (parts.length === 1 ? 'no changes. ' : '') + parts.join('; ');
+      };
+      el.textContent = 'Dry run, nothing was changed. ' + line('Pi-hole', p.pihole) + ' | ' + line('Cloudflare', p.cloudflare);
+    } catch (e) {
+      el.textContent = e && e.status === 501 ? 'DNS sync is not wired in this deployment.' : 'Preview unavailable: ' + (e.message || e);
+    }
+  }
 
   const idSuffixCtl = makeChipInput($('#set-id-suffixes'), arr(idc.allowedDomainSuffixes), 'add suffix...');
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
@@ -2689,6 +2727,12 @@ async function viewSettings(c) {
       toast('Reconciled', 'Managed proxy hosts are back in step with the cluster.', 'ok');
     } catch (e) { toastErr(e); }
     await renderIngressStatus();
+    btn.disabled = false;
+  });
+
+  $('#set-dns-preview').addEventListener('click', async () => {
+    const btn = $('#set-dns-preview'); btn.disabled = true;
+    await renderDNSPlan();
     btn.disabled = false;
   });
 

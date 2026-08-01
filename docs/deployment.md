@@ -211,30 +211,62 @@ Prerequisites:
 - **Cloudflare**: an existing `dns-providers` entry whose `config.apiToken` has
   `Zone:DNS:Edit` on the target zone. The same token the ACME solver uses is fine.
 
+**Preview before you enable.** `GET /api/dns-sync/plan` (the **Preview changes**
+button next to *Reconcile now* in the settings UI) reads both backends and the
+ownership ledger and reports exactly what a reconcile would create, adopt,
+retarget and delete — writing nothing. Do this first on any resolver that already
+holds hand-written records:
+
+```
+curl -s https://<admin>/api/dns-sync/plan -H 'Authorization: Bearer gpm_...' | jq
+# {"generatedAt":"...","pihole":{"enabled":true,"ok":true,"create":["app.example.com"],
+#   "adopt":["www.example.com"],"retarget":[],"delete":[],"skip":[],"untouched":19}, ...}
+```
+
+`"delete": []` is the line to check. It is empty on a first enable by
+construction: gpm deletes only records recorded in `config/dns-ledger.yaml`, which
+is empty until it has created something, so the first run can only create and
+adopt. `untouched` should equal the number of records you wrote by hand.
+
 ```
 # Trigger a reconcile and read the result.
 curl -s -X POST https://<admin>/api/dns-sync/reconcile -H 'Authorization: Bearer gpm_...' | jq
 curl -s          https://<admin>/api/dns-sync/status    -H 'Authorization: Bearer gpm_...' | jq
-# {"lastRun":"...","pihole":{"enabled":true,"ok":true,"desired":12,"managed":12,"created":0,"deleted":0}, ...}
+# {"lastRun":"...","pihole":{"enabled":true,"ok":true,"desired":12,"managed":12,
+#   "created":0,"adopted":0,"retargeted":0,"deleted":0,"skipped":0,"untouched":19}, ...}
 ```
 
 Reconciles also fire automatically after any proxy-host write, settings change,
 restore or whole-config revert. The manual endpoint does **not** queue: while a
 reconcile is in flight it answers `409 Conflict`, so a retry loop cannot stack
-requests behind a slow backend. Verification after enabling: `created` should
-equal the number of opted-in domains on the first run and `0` on the second, and
-`deleted` should stay `0` unless you removed a host. If `deleted` is non-zero
-unexpectedly, check that `apexTarget` matches what your existing records point
-at — on Pi-hole that value *is* the ownership marker.
+requests behind a slow backend (`/plan` answers `409` in the same situation).
 
-**Do not change `apexTarget` without cleaning up first.** Ownership on Pi-hole is
-target equality, so every record created under the old apex is orphaned the moment
-it changes: gpm will neither update nor delete it again, and the now-conflicting
-name stops it recreating the record either (it skips names owned by somebody
-else). Delete the stale records, then reconcile. See
-[configuration.md](configuration.md#dnssyncsettings-settingsdnssync).
+Verification after enabling: on the first run `created + adopted` should equal the
+number of opted-in domains, `deleted` should be `0`, and `untouched` should
+account for everything you maintain by hand. On the second run everything but
+`desired`, `managed` and `untouched` should be `0`. `skipped` is a real finding —
+it means a name a host asks for is already held by a record gpm does not own, and
+gpm has left both alone; resolve it by hand.
 
-Scopes: `dns-sync:read` for status, `dns-sync:write` for reconcile.
+Each reconcile that changes what gpm owns writes one commit to the config repo
+(`DNS sync ledger: update`, authored `dns-sync`); a steady-state run commits
+nothing. Changing `apexTarget` no longer orphans anything: records gpm created and
+nobody has touched since are **retargeted** on the next reconcile. Records that
+predate the ledger, or that somebody has re-pointed, are left alone and reported
+as `skipped` / disowned — clean those up by hand.
+
+Two things to expect in the logs. A record gpm **adopted** (rather than created)
+is *released* when the config stops asking for it - and equally when `apexTarget`
+moves, since a retarget is a delete plus a create: a warn line, the ledger entry
+dropped, and the record left in the resolver exactly as you wrote it, for you to
+re-point or remove by hand - gpm destroys only what it created. And every
+deletion is logged at warn with the
+`ledgerRev` that authorised it, because a whole-tree revert restores ownership
+claims along with everything else; after reverting a config that ever contained
+DNS-synced hosts, run `/api/dns-sync/plan` before letting a reconcile proceed
+(see the revert caveat in [configuration.md](configuration.md#dnssyncsettings-settingsdnssync)).
+
+Scopes: `dns-sync:read` for status and plan, `dns-sync:write` for reconcile.
 
 ## Kubernetes Ingress discovery
 
