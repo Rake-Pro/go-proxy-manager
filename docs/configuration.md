@@ -47,6 +47,26 @@ references it).
 > way to adopt a discovered host permanently; adding it is never the way to give
 > one away.
 
+> **A managed host is not editable by hand - every edit is reverted on the next
+> poll, `disabled` included.** Discovery derives the whole object from the
+> template and the `Ingress` and writes it back whenever it differs from what is
+> stored, so `disabled: true`, an edited `displayName`, added `tags`, `timeouts`,
+> `locations` or `robotsNoIndex` all survive at most until the next reconcile
+> (default 60s) - and re-enabling the host republishes its DNS records with it.
+> **Disabling a managed host is therefore not an off-switch.** There are exactly
+> two supported ones:
+>
+> - **Remove `gpm.rake.pro/managed` from the `Ingress`** (or delete the
+>   `Ingress`). Discovery stops deriving the host and deletes it on the next
+>   successful reconcile. This is the clean route, but it needs cluster access.
+> - **Remove the `gpm.rake.pro/managed-by` label from the proxy host.** The
+>   object becomes operator-authored, discovery refuses to touch it ever again,
+>   and you can then disable or edit it freely. This is the **emergency**
+>   route - it needs no cluster access, so it is the one to reach for when an app
+>   has to come offline now - and it is **permanent**: the corresponding
+>   `Ingress` is skipped with a warning from then on, and putting the host back
+>   under discovery means deleting it and letting the next poll recreate it.
+
 ## Domains are exclusive
 
 The data plane routes by hostname, so **at most one enabled host may claim a
@@ -214,18 +234,26 @@ Per desired record, on every run:
 | absent | **create**, and record ownership (`adopted: false`) |
 | present, right target, **not** in the ledger | **adopt** — record ownership (`adopted: true`), do not recreate (logged at info) |
 | present, right target, already owned | nothing |
-| present, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** — replace it and update the ledger (the replacement is a record gpm created) |
+| **created by gpm**, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** - replace it and update the ledger (the replacement is again a record gpm created) |
+| **adopted**, and `apexTarget` has since changed | **released, not retargeted** - the claim is dropped and the record left exactly where it is (logged at warn, counted as a skip) |
 | present, different target, not owned | **skip and warn** — never shadowed, never replaced |
 | in the ledger as **created by gpm**, no longer desired | **delete**, and drop from the ledger (logged at warn, with the ledger revision that authorised it) |
 | in the ledger as **adopted**, no longer desired | **released, not deleted** — the claim is dropped and the record left exactly where it is (logged at warn) |
 | **not in the ledger** | **never deleted**, whatever it points at |
 
-**A record gpm adopted is released, not deleted.** Adoption claims a record
-somebody else made; it is not, and must never become, permission to destroy it.
-So turning `dns.lanDirect` on for a name an operator had hand-written, and then
-turning it off again, leaves their record untouched — gpm simply stops managing
-it. The flip side is that gpm will not clean up an adopted record for you: once
-released it is yours to remove by hand.
+**A record gpm adopted is never deleted *or* retargeted.** Adoption claims a
+record somebody else made; it is not, and must never become, permission to
+destroy it. So turning `dns.lanDirect` on for a name an operator had
+hand-written, and then turning it off again, leaves their record untouched - gpm
+simply stops managing it. A retarget is a delete followed by a create, so the
+same rule applies when `apexTarget` moves: an adopted record is **released**
+rather than re-pointed, both because re-pointing would destroy the operator's
+record and because the replacement would be recorded as gpm-created, leaving a
+later host removal free to delete the name outright. To move an adopted name to
+a new apex, either delete the record and let the next reconcile create it (gpm
+then owns it, and may later remove it), or re-point it yourself and let gpm
+re-adopt it. The flip side is that gpm will not clean up an
+adopted record for you: once released it is yours to remove by hand.
 
 `apexTarget` is *not* an ownership marker. It says where managed records point,
 nothing more. A hand-written CNAME aimed at the same host is adopted only if a
@@ -366,6 +394,26 @@ silently replace its whole middleware/access-list chain and its TLS pinning.
 even the apex claimable. Two annotated Ingresses claiming the same hostname are
 resolved the same way — first by derived name wins, the rest are skipped.
 
+**What a derived host cannot express.** Cutting a hand-written host over to
+discovery - annotate the `Ingress`, let the derived host appear, delete the
+hand-written one - silently drops everything the template has no field for. A
+derived host carries only `upstream`/`upstreamGroupRef`, `tls`,
+`websocketsUpgrade`, `middlewares`, `accessLists` and the `dns` policy. It cannot
+carry:
+
+- `timeouts` - per-host dial/response overrides; the host falls back to the
+  shared transport defaults, which a slow backend will notice,
+- `locations` - path-scoped routing, and with it any path-scoped middleware,
+  access list or upstream override,
+- `robotsNoIndex` - the `X-Robots-Tag: noindex, nofollow` response header,
+- `tags`, and `displayName`, which is fixed to `<namespace>/<name>` (cosmetic).
+
+So **diff each hand-written host against what the template derives before you
+delete it**, field by field, and keep it hand-written if it uses any of the
+above. Adding them back afterwards is not an option: manual edits to a managed
+host are reverted on the next poll (see the reserved-label note near the top of
+this document).
+
 Ownership is re-checked **under the store lock at write time**, not only when the
 reconcile was planned: the plan is made before a multi-second cluster list, so an
 object relabelled or replaced in that window is left alone rather than written on
@@ -401,6 +449,20 @@ reconcile that finds no drift writes nothing at all.
 
 Discovery publishes no DNS itself: it sets the `dns` policy on the derived hosts
 and asks the phase-1 reconciler for a run, so there is exactly one DNS code path.
+
+**Disabling a derived host withdraws its DNS.** The host *object* is preserved by
+a disable - but a disabled host contributes nothing to the DNS desired set, so
+the next reconcile treats its domains as no longer wanted: records **gpm
+created** are **deleted**, records gpm had only **adopted** are **released**
+(dropped from the ledger, left standing). This is deliberate and fail-closed - a
+name must not keep resolving to an edge that no longer serves it - but it means
+anything that disables a derived host takes its public and LAN DNS down with it,
+including a discovery profile that has been retired or that no longer resolves.
+Putting the profile back re-enables the host and **recreates** the records, after
+up to one poll interval (default 60s) plus whatever negative-cache TTL the
+resolvers on the far side are still holding, so the name does not necessarily
+come back the moment the config does. A released record needs nothing recreated:
+it never left, and the next reconcile simply re-adopts it.
 
 `POST /api/ingress-discovery/reconcile` runs a reconcile on demand (**409
 Conflict** while one is in flight, never queued);

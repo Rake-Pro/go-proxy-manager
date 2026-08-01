@@ -245,6 +245,20 @@ and the design record
     latency-critical. A full-state poll self-heals from a missed event by
     construction.
 
+- [ ] **Let an operator disable a discovery-managed host.** `derive()` never sets
+  `Disabled` and `sameHost` compares it, so a managed host disabled by hand - the
+  obvious move when an app has to come offline *now* - is upserted back to enabled
+  on the next poll, DNS records and all. Today's only real off-switches are
+  removing the `Ingress` annotation (needs cluster access) and removing the
+  `managed-by` label (no cluster access, but permanent adoption); both are
+  documented in `docs/configuration.md`. Proposal: treat `disabled` as
+  operator-owned state - discovery honours an operator-set `Disabled` and only
+  clears it when discovery itself set it. That needs a way to tell the two apart
+  (a `gpm.rake.pro/disabled-by` label, or an annotation on the `Ingress` that
+  discovery derives `Disabled` from), and it must not become a way for a cluster
+  user to keep an operator-disabled host enabled. Deferred deliberately: the
+  behaviour is documented rather than changed for now.
+
 ### DNS record ownership (2026-08-01 incident)
 
 Enabling `dnsSync.pihole` for the first time deleted 19 hand-written LAN CNAMEs
@@ -271,6 +285,12 @@ Adversarial review of that change (2026-08-01), all remediated:
   wanting was deleted. Ledger entries now record provenance (`adopted`) and an
   adopted entry is *released*, never deleted; a missing field reads as adopted so
   upgrades cannot destroy anything. *(High)*
+- [x] **A retarget deleted records gpm had only ADOPTED** - the retarget branch
+  ignored the claim's provenance, so an `apexTarget` change destroyed an
+  operator-authored record *and* re-recorded it as gpm-created, arming a later
+  host removal to hard-delete it. An adopted claim whose record no longer matches
+  the apex is now released, not retargeted; retarget applies only to records gpm
+  created. *(Med)*
 - [x] **Pi-hole session leaked on context cancellation** — `logout` ran on the
   caller's (cancelled) context. It now uses a detached 5s context. *(High)*
 - [x] **Retarget had no rollback** — a failed create after a successful delete

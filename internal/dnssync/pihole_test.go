@@ -143,6 +143,14 @@ func (f *fakePihole) checkAllowed(w http.ResponseWriter) bool {
 	return true
 }
 
+// writeCount is the number of mutating calls the fake has served, read under the
+// lock so a test can assert "nothing was written" without racing the handler.
+func (f *fakePihole) writeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.writes
+}
+
 func (f *fakePihole) snapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -172,6 +180,13 @@ func startPihole(t *testing.T, f *fakePihole) *httptest.Server {
 // nothing, so it may create and adopt but must delete nothing.
 func piholeSyncerWith(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost, ledger Ledger) *Syncer {
 	t.Helper()
+	return piholeSyncerApex(t, srv, hosts, ledger, "edge.example.com")
+}
+
+// piholeSyncerApex is the same with an explicit apexTarget, so a test can model
+// the operator moving the edge host between two reconciles.
+func piholeSyncerApex(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost, ledger Ledger, apex string) *Syncer {
+	t.Helper()
 	t.Setenv("GPM_PIHOLE_PW", "secret")
 	return New(func(context.Context) (model.Config, model.Settings, error) {
 		return model.Config{ProxyHosts: hosts}, model.Settings{
@@ -179,7 +194,7 @@ func piholeSyncerWith(t *testing.T, srv *httptest.Server, hosts []model.ProxyHos
 				Enabled:     true,
 				URL:         srv.URL,
 				AppPassword: model.Secret("${ENV:GPM_PIHOLE_PW}"),
-				ApexTarget:  "edge.example.com",
+				ApexTarget:  apex,
 			}},
 		}, nil
 	}, ledger)
@@ -416,6 +431,118 @@ func TestPiholeRetargetsOwnedRecordsAfterApexChange(t *testing.T) {
 		t.Fatalf("records = %v\nwant %v", got, want)
 	}
 	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
+	if led.pihole()["app.example.com"].Adopted {
+		t.Fatal("a record gpm created and retargeted must stay recorded as created")
+	}
+}
+
+// The same apex change over a record gpm only ADOPTED. A retarget is a delete
+// plus a create, so retargeting here would destroy the operator's record and then
+// record its replacement as gpm-created - which a later host removal would be free
+// to hard-delete. The claim is released instead: nothing is written at all.
+func TestPiholeReleasesAdoptedRecordWhenApexChanges(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{
+		"app.example.com,old-edge.example.com", // hand-written, adopted by gpm
+	}}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{l: model.DNSLedger{
+		Pihole: adoptedEntries("app.example.com", "old-edge.example.com"),
+	}}
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Pihole
+	if st.Retargeted != 0 || st.Deleted != 0 || st.Created != 0 {
+		t.Fatalf("REGRESSION: status = %+v, an adopted record must never be retargeted or deleted", st)
+	}
+	if st.Skipped != 1 {
+		t.Fatalf("status = %+v, want the released name reported as skipped", st)
+	}
+	if fake.writeCount() != 0 {
+		t.Fatalf("REGRESSION: %d backend writes, want the operator's record touched not at all", fake.writeCount())
+	}
+	if got := fake.snapshot(); len(got) != 1 || got[0] != "app.example.com,old-edge.example.com" {
+		t.Fatalf("REGRESSION: records = %v, want the operator's record exactly as they wrote it", got)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("ledger = %v, want the adopted claim released", led.pihole())
+	}
+}
+
+// Provenance is carried, not recomputed: an ordinary reconcile over an adopted
+// record that is already exactly right must leave the claim adopted. Reset it to
+// "created" and the next removal deletes somebody else's record.
+func TestPiholeAdoptedClaimStaysAdoptedAcrossReconciles(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{"app.example.com,edge.example.com"}}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{l: model.DNSLedger{
+		Pihole: adoptedEntries("app.example.com", "edge.example.com"),
+	}}
+	hosts := []model.ProxyHost{lanHost("app", "app.example.com")}
+	for i := range 3 {
+		s := piholeSyncerWith(t, srv, hosts, led)
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+		if !led.pihole()["app.example.com"].Adopted {
+			t.Fatalf("REGRESSION: reconcile %d upgraded an adopted claim to created", i)
+		}
+	}
+	if fake.writeCount() != 0 {
+		t.Fatalf("REGRESSION: %d backend writes for a record that was already correct", fake.writeCount())
+	}
+}
+
+// The whole sequence, end to end: adopt a hand-written record, move the edge host,
+// then take dns.lanDirect off the proxy host. Each step on its own looks harmless;
+// before the release-on-retarget fix the three together reproduced the 2026-08-01
+// incident one record at a time, because step two silently re-recorded the
+// operator's record as one gpm had created.
+func TestPiholeAdoptThenApexChangeThenRemovalKeepsTheOperatorsRecord(t *testing.T) {
+	const original = "app.example.com,old-edge.example.com"
+	fake := &fakePihole{password: "secret", records: []string{original}}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{}
+	hosts := []model.ProxyHost{lanHost("app", "app.example.com")}
+
+	// Step 1: dns.lanDirect goes on while apexTarget is still the old edge host, so
+	// the operator's record is adopted rather than recreated.
+	s1 := piholeSyncerApex(t, srv, hosts, led, "old-edge.example.com")
+	if err := s1.Reconcile(context.Background()); err != nil {
+		t.Fatalf("adopting reconcile: %v", err)
+	}
+	if st := s1.Status().Pihole; st.Adopted != 1 || st.Created != 0 {
+		t.Fatalf("status = %+v, want the hand-written record adopted", st)
+	}
+
+	// Step 2: the edge host moves. The claim is released, not retargeted.
+	s2 := piholeSyncerApex(t, srv, hosts, led, "new-edge.example.com")
+	if err := s2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("apex-change reconcile: %v", err)
+	}
+	if st := s2.Status().Pihole; st.Retargeted != 0 || st.Deleted != 0 {
+		t.Fatalf("REGRESSION: status = %+v, want the adopted claim released", st)
+	}
+
+	// Step 3: the flag comes off again. There is no claim left to authorise
+	// anything, and there never was one gpm could have deleted on.
+	s3 := piholeSyncerApex(t, srv, nil, led, "new-edge.example.com")
+	if err := s3.Reconcile(context.Background()); err != nil {
+		t.Fatalf("removal reconcile: %v", err)
+	}
+	if st := s3.Status().Pihole; st.Deleted != 0 {
+		t.Fatalf("REGRESSION: status = %+v, the operator's record was deleted", st)
+	}
+	if got := fake.snapshot(); len(got) != 1 || got[0] != original {
+		t.Fatalf("REGRESSION: records = %v, want %q still exactly as the operator wrote it", got, original)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("ledger = %v, want no claim left", led.pihole())
+	}
 }
 
 // The ownership rule: only CNAMEs recorded in the ledger belong to gpm.

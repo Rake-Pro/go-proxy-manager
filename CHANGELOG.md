@@ -18,7 +18,8 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   where every correctly-targeted record is adoptable, that was the 2026-08-01
   incident deferred by one config edit.
 
-  **The guarantee now: gpm deletes only DNS records it CREATED.** Ledger entries
+  **The guarantee now: an adopted DNS record is never deleted *or* retargeted -
+  gpm destroys only records it CREATED.** Ledger entries
   record their provenance (`adopted: true|false`), and an adopted entry the config
   no longer wants is *released* — dropped from the ledger with a warning, with the
   record left exactly where it stands. Deletion remains available for records gpm
@@ -27,6 +28,24 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   **adopted**, the only reading that cannot destroy a record on upgrade. The
   trade-off is stated in `docs/configuration.md`: gpm will not clean up an adopted
   record for you.
+
+- **An `apexTarget` change no longer deletes the records gpm only ADOPTED.** A
+  retarget is a delete followed by a create, and the retarget branch did not look
+  at the claim's provenance: after the edge host moved, a record an operator had
+  hand-written and gpm had merely adopted was **destroyed and recreated**, and the
+  replacement was recorded as `adopted: false`. Two failures in one - an
+  operator-authored record deleted by the subsystem that exists to prevent exactly
+  that, and a claim silently upgraded from adopted to created, so a *later* host
+  removal would hard-delete the name for good. Adopt -> change `apexTarget` ->
+  remove the host reproduced the 2026-08-01 incident one record at a time.
+
+  An adopted claim whose record no longer matches the apex is now **released**:
+  dropped from the ledger with a warning and counted as a skip, with nothing
+  written to the backend. Retarget stays available for records gpm created itself,
+  which it may safely replace. Provenance is carried forward unchanged everywhere
+  else; the single place a claim may become "created" is a record that has gone
+  and is genuinely re-created by gpm. To move an adopted name to a new apex,
+  delete or re-point the record by hand (`docs/configuration.md`).
 
 - **Pi-hole sessions leaked whenever a run was cut short.** `logout` ran on the
   caller's context, so an HTTP client disconnecting mid-reconcile cancelled the

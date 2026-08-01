@@ -400,6 +400,25 @@ Two guards remain in force:
   existing referential-integrity check, aborting the batch rather than
   committing a broken graph.
 
+### Disabling a derived host withdraws its DNS
+
+Preserving the host *object* is not the same as preserving what it publishes. A
+disabled host is excluded from the compiled data plane, so `desiredDomains` skips
+it (a record pointing at an edge that no longer serves the name would be a lie),
+and the next DNS reconcile finds its domains no longer wanted: every record
+**gpm created** for it is **deleted**, and every record gpm had only **adopted**
+is **released** - dropped from the ledger and left exactly where the operator
+wrote it, because gpm deletes only what it created.
+
+That is the fail-closed direction and it is intended, but it must be said
+plainly: anything that disables a derived host takes its LAN and public DNS with
+it, including a discovery profile being retired or ceasing to resolve. The
+object survives untouched and re-adding the profile re-enables the host, which
+recreates the deleted records and re-adopts the released ones - but only after
+up to one poll interval (default 60s), plus whatever the resolvers downstream
+have negatively cached. "Nothing is destroyed" is true of the config object, not
+of the records.
+
 ---
 
 ## 6. Package layout

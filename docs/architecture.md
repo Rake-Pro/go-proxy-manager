@@ -112,8 +112,8 @@ live, and both backends plus the dry-run planner call it, so a preview cannot
 disagree with the run it previews. Per desired name it **creates** what is absent,
 **adopts** what is already correct but not yet in the ledger (the migration path —
 an empty ledger makes a first reconcile adopt-only, never a purge), **retargets** a
-record that still holds exactly what gpm wrote after `apexTarget` moved, and
-**skips and warns** on a name held by a record it does not own rather than
+record it *created* that still holds exactly what gpm wrote after `apexTarget`
+moved, and **skips and warns** on a name held by a record it does not own rather than
 shadowing or replacing it. It **deletes** only ledger entries the config no longer
 wants, and only while the record still matches what the ledger says gpm left there
 — re-pointed out of band, it is disowned instead. A name absent from the ledger is
@@ -122,7 +122,10 @@ never in a delete list, whatever it points at.
 Each entry also records **how** the claim was acquired (`adopted`), because
 adoption is a claim on a record somebody else made and must not become permission
 to destroy it: an adopted entry the config no longer wants is **released** (dropped
-from the ledger, record left standing), never deleted. Without that distinction
+from the ledger, record left standing), never deleted. The same applies when
+`apexTarget` moves - a retarget is a delete plus a create, so an adopted record is
+released there too rather than replaced, which also stops the claim being quietly
+upgraded to "created" and arming a later deletion. Without that distinction
 adoption was a one-way trap — turn `dns.lanDirect` on for a hand-written name, turn
 it off again, and the next reconcile deleted the operator's record, which is the
 2026-08-01 incident deferred by one config edit. An entry with no recorded

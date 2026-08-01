@@ -256,9 +256,11 @@ predate the ledger, or that somebody has re-pointed, are left alone and reported
 as `skipped` / disowned — clean those up by hand.
 
 Two things to expect in the logs. A record gpm **adopted** (rather than created)
-is *released* when the config stops asking for it: a warn line, the ledger entry
-dropped, and the record left in the resolver for you to remove by hand — gpm
-deletes only what it created. And every deletion is logged at warn with the
+is *released* when the config stops asking for it - and equally when `apexTarget`
+moves, since a retarget is a delete plus a create: a warn line, the ledger entry
+dropped, and the record left in the resolver exactly as you wrote it, for you to
+re-point or remove by hand - gpm destroys only what it created. And every
+deletion is logged at warn with the
 `ledgerRev` that authorised it, because a whole-tree revert restores ownership
 claims along with everything else; after reverting a config that ever contained
 DNS-synced hosts, run `/api/dns-sync/plan` before letting a reconcile proceed

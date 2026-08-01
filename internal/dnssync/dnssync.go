@@ -33,6 +33,11 @@
 //   - ADOPTED by gpm, no longer desired -> RELEASE: drop from the ledger and warn,
 //     never delete. Adoption is a claim on a record somebody else made, so it must
 //     not become a licence to destroy it: gpm deletes only what it created.
+//   - ADOPTED by gpm, still desired, apexTarget since changed -> RELEASE as well.
+//     A retarget is a delete plus a create, so retargeting an adopted record would
+//     both destroy the operator's record and re-record it as gpm-created, leaving a
+//     later host removal free to hard-delete it. Retarget applies only to records
+//     gpm created itself.
 //   - not owned                  -> untouched, always
 //
 // Cloudflare keeps its "managed-by:gpm" record comment as a second, independent
@@ -79,7 +84,8 @@ type BackendStatus struct {
 	// Desired is how many records the config asks for; Managed is how many
 	// records gpm owns (ledger entries) once the run finished; Created, Adopted,
 	// Retargeted and Deleted count the changes this run made; Skipped counts
-	// desired names held by a record gpm does not own and will not overwrite.
+	// desired names gpm left alone - held by a record it does not own, or held by
+	// one it had adopted and released when the apex moved.
 	Desired    int `json:"desired"`
 	Managed    int `json:"managed"`
 	Created    int `json:"created"`
@@ -110,10 +116,11 @@ type BackendPlan struct {
 	Error   string `json:"error,omitempty"`
 	// Create is desired names with no record; Adopt is desired names that already
 	// hold the right record but are not in the ledger yet (first-enable
-	// migration); Retarget is owned names whose record still carries the target
-	// gpm published it with while the configured apex has since changed; Delete is
-	// owned names the config no longer wants; Skip is desired names held by a
-	// record gpm does not own and will not overwrite.
+	// migration); Retarget is names gpm CREATED whose record still carries the
+	// target gpm published it with while the configured apex has since changed;
+	// Delete is gpm-created names the config no longer wants; Skip is desired names
+	// gpm will not write, either because a record it does not own holds the name or
+	// because the claim it held was adopted and the apex has moved (released).
 	Create   []string `json:"create"`
 	Adopt    []string `json:"adopt"`
 	Retarget []string `json:"retarget"`
@@ -519,9 +526,13 @@ func mergeLedgerEntries(base, current, next []model.DNSLedgerEntry) []model.DNSL
 // CNAMEs have nowhere to put one. That asymmetry is the whole reason the ledger
 // exists.
 //
-// Two invariants every branch below preserves: a name absent from owned is NEVER
-// put in the delete list, whatever it points at; and a name gpm ADOPTED rather
-// than created is never put there either - it is released instead.
+// Three invariants every branch below preserves: a name absent from owned is
+// NEVER put in the delete list, whatever it points at; a name gpm ADOPTED rather
+// than created is never put in the delete OR the retarget list (both destroy the
+// record, one of them permanently) - it is released instead; and a claim's
+// provenance is carried forward untouched, never quietly upgraded from adopted to
+// created. The single exception to that last one is the !exists branch, where the
+// adopted record has gone and gpm really does create the one that replaces it.
 func decide(backend string, desired []string, present map[string]string, apex string, owned map[string]model.DNSClaim, mark func(name string) bool) decisions {
 	d := decisions{owned: make(map[string]model.DNSClaim, len(owned))}
 	for k, v := range owned {
@@ -537,9 +548,11 @@ func decide(backend string, desired []string, present map[string]string, apex st
 		claim, isOwned := owned[name]
 		switch {
 		case !exists:
-			// Either brand new, or one gpm created that has been removed out of band.
-			// A full-state reconcile (re)creates it either way - and whatever the
-			// claim used to say, the record that will be there is one gpm made.
+			// Either brand new, or one that has been removed out of band. A full-state
+			// reconcile (re)creates it either way, and this is the ONE place a claim
+			// may go from adopted to created: the adopted record is gone, so the
+			// record that will stand here afterwards is genuinely one gpm made, and
+			// deleting that later destroys nothing but gpm's own write.
 			d.create = append(d.create, name)
 			d.owned[name] = model.DNSClaim{Target: apex}
 		case cur == apex && isOwned:
@@ -555,10 +568,26 @@ func decide(backend string, desired []string, present map[string]string, apex st
 			// ever acquiring the right to destroy it.
 			d.adopt = append(d.adopt, name)
 			d.owned[name] = model.DNSClaim{Target: apex, Adopted: true}
-		case isOwned && cur == claim.Target && mark(name):
-			// Ours, and still holding exactly what gpm wrote, but the configured apex
-			// has moved since. Replacing it is safe precisely because it is unchanged,
-			// and what stands there afterwards is a record gpm created.
+		case isOwned && claim.Adopted:
+			// Ours only by ADOPTION - the operator wrote this record, gpm merely
+			// claimed it - and the apex has moved out from under it. Retargeting would
+			// DELETE an operator-authored record and record its replacement as
+			// gpm-created, so a later host removal would then hard-delete the name for
+			// good: adopt -> apex change -> remove host is the 2026-08-01 incident in
+			// slow motion. The claim is RELEASED instead: dropped from the ledger,
+			// nothing touched in the backend. Publishing the name under the new apex
+			// needs the operator to re-point or remove their own record first. The same
+			// applies if they have re-pointed it themselves: either way the record is
+			// theirs and gpm's only correct move is to stop claiming it.
+			d.skip = append(d.skip, name)
+			delete(d.owned, name)
+			log.Warn().Str("backend", backend).Str("domain", name).Str("target", cur).Str("apex", apex).
+				Msg("dnssync: a record gpm adopted rather than created no longer matches the configured apex; releasing the claim and leaving the record exactly as it stands")
+		case isOwned && !claim.Adopted && cur == claim.Target && mark(name):
+			// Ours because gpm CREATED it, and it still holds exactly what gpm wrote,
+			// but the configured apex has moved since. Replacing it is safe precisely
+			// because it is unchanged and gpm's own - it destroys nothing an operator
+			// authored - and what stands there afterwards is again a record gpm created.
 			d.retarget = append(d.retarget, name)
 			d.owned[name] = model.DNSClaim{Target: apex}
 		default:
