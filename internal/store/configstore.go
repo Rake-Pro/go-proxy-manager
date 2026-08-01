@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -320,6 +321,262 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 		message = "Import configuration"
 	}
 	return s.git.CommitAll(ctx, message, author)
+}
+
+// ObjectRef names one object for ApplyBatch's delete list.
+type ObjectRef struct {
+	Kind string
+	Name string
+}
+
+// ApplyGuard authorises ApplyBatch to touch one object that ALREADY exists in
+// the config, and is consulted under the store lock against the freshly loaded
+// state - not against whatever the caller planned from. Returning an error skips
+// that single upsert or delete; it never fails the batch.
+//
+// It exists because a caller's plan is computed from a pre-network snapshot: the
+// Ingress reconciler loads the config, spends seconds listing the cluster, and
+// only then applies. An object created, deleted or relabelled inside that window
+// would otherwise be written or removed on the strength of an ownership check
+// made against state that no longer exists.
+type ApplyGuard func(existing model.Object) error
+
+// findObject returns the object of the given kind and name in cfg, if present.
+func findObject(cfg model.Config, kind, name string) (model.Object, bool) {
+	var list []model.Object
+	switch kind {
+	case "ProxyHost":
+		for _, o := range cfg.ProxyHosts {
+			list = append(list, o)
+		}
+	case "RedirectHost":
+		for _, o := range cfg.RedirectHosts {
+			list = append(list, o)
+		}
+	case "StreamHost":
+		for _, o := range cfg.StreamHosts {
+			list = append(list, o)
+		}
+	case "DeadHost":
+		for _, o := range cfg.DeadHosts {
+			list = append(list, o)
+		}
+	case "Certificate":
+		for _, o := range cfg.Certificates {
+			list = append(list, o)
+		}
+	case "ClientCA":
+		for _, o := range cfg.ClientCAs {
+			list = append(list, o)
+		}
+	case "DNSProvider":
+		for _, o := range cfg.DNSProviders {
+			list = append(list, o)
+		}
+	case "IdentityProvider":
+		for _, o := range cfg.IdentityProviders {
+			list = append(list, o)
+		}
+	case "UpstreamGroup":
+		for _, o := range cfg.UpstreamGroups {
+			list = append(list, o)
+		}
+	case "AccessList":
+		for _, o := range cfg.AccessLists {
+			list = append(list, o)
+		}
+	case "Middleware":
+		for _, o := range cfg.Middlewares {
+			list = append(list, o)
+		}
+	case "APIToken":
+		for _, o := range cfg.APITokens {
+			list = append(list, o)
+		}
+	}
+	for _, o := range list {
+		if o.GetMeta().Name == name {
+			return o, true
+		}
+	}
+	return nil, false
+}
+
+// fileState is one config file as it was before a batch touched it, so the batch
+// can be undone if any later step fails.
+type fileState struct {
+	path   string
+	data   []byte
+	exists bool
+}
+
+// snapshotFile captures a file's current contents (or its absence).
+func snapshotFile(path string) (fileState, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileState{path: path}, nil
+		}
+		return fileState{}, err
+	}
+	return fileState{path: path, data: b, exists: true}, nil
+}
+
+// restoreFiles puts every snapshotted path back the way it was. It is a
+// best-effort undo run on a failure path, so it reports rather than returns.
+func restoreFiles(snaps []fileState) {
+	for _, f := range snaps {
+		var err error
+		if f.exists {
+			err = os.WriteFile(f.path, f.data, 0o640)
+		} else if err = os.Remove(f.path); os.IsNotExist(err) {
+			err = nil
+		}
+		if err != nil {
+			log.Error().Err(err).Str("path", f.path).
+				Msg("config store: could not roll back a failed batch; the working tree may hold uncommitted changes")
+		}
+	}
+}
+
+// ApplyBatch writes every object in upserts and removes every object named in
+// deletes as ONE commit. It is SaveBatch plus removals: the whole merged graph
+// (upserts applied, deletes removed) is validated once - including the
+// dangling-reference check Delete performs per object - before anything touches
+// the working tree, so a batch is all-or-nothing and never commits an
+// intermediate state that never existed as a whole.
+//
+// It exists for the Ingress-discovery reconciler, whose unit of work is a whole
+// reconcile: a poll that adds two hosts and removes one is a single revision an
+// operator can read and revert, not four commits with a reload, webhook and DNS
+// trigger apiece (see docs/design/ingress-discovery.md §2).
+//
+// An empty batch is a no-op: it returns ("", nil) without committing, so a
+// steady-state reconcile produces no empty revisions. A delete naming an object
+// that does not exist is skipped rather than failing the batch - the reconciler
+// works from a snapshot, and an object removed underneath it is already in the
+// desired end state.
+//
+// guard (may be nil) re-checks ownership of every object that already exists,
+// under this lock and against the state just loaded, closing the window between
+// the caller planning the batch and the batch landing. A guarded-away object is
+// skipped, and a batch left with nothing to do returns ("", nil).
+//
+// Atomicity is enforced, not assumed: every file the batch touches is
+// snapshotted first, and a failed write, removal or commit rolls the working
+// tree back. Leaving it mutated but uncommitted would make the next Load see
+// changes the caller was told had failed - and the following unrelated commit
+// would sweep them in.
+func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes []ObjectRef, message string, author Author, guard ApplyGuard) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg, _, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+
+	applied := make([]model.Object, 0, len(upserts))
+	var removals []string
+	merged := cfg
+	for _, o := range upserts {
+		if err := o.Validate(); err != nil {
+			return "", err
+		}
+		if _, ok := kindDir[o.Kind()]; !ok {
+			return "", fmt.Errorf("unknown object kind %q", o.Kind())
+		}
+		if existing, ok := findObject(cfg, o.Kind(), o.GetMeta().Name); ok && guard != nil {
+			if err := guard(existing); err != nil {
+				log.Warn().Err(err).Str("kind", o.Kind()).Str("name", o.GetMeta().Name).
+					Msg("config store: batch upsert skipped, the object on disk is no longer one the caller owns")
+				continue
+			}
+		}
+		merged = withObject(&merged, o)
+		applied = append(applied, o)
+	}
+	for _, ref := range deletes {
+		if err := model.ValidateName(ref.Name); err != nil {
+			return "", err
+		}
+		dir, ok := kindDir[ref.Kind]
+		if !ok {
+			return "", fmt.Errorf("unknown object kind %q", ref.Kind)
+		}
+		path := filepath.Join(s.dir, dir, ref.Name+".yaml")
+		if _, err := os.Stat(path); err != nil {
+			continue // already gone; the desired end state is satisfied
+		}
+		if guard != nil {
+			existing, ok := findObject(cfg, ref.Kind, ref.Name)
+			if !ok {
+				continue // on disk but not in the loaded config: nothing to authorise
+			}
+			if err := guard(existing); err != nil {
+				log.Warn().Err(err).Str("kind", ref.Kind).Str("name", ref.Name).
+					Msg("config store: batch delete skipped, the object on disk is no longer one the caller owns")
+				continue
+			}
+		}
+		merged = withoutObject(&merged, ref.Kind, ref.Name)
+		removals = append(removals, path)
+	}
+	if len(applied) == 0 && len(removals) == 0 {
+		return "", nil
+	}
+
+	if err := merged.Validate(); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := s.checkGeoAvailable(merged); err != nil {
+		return "", err
+	}
+	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
+		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+
+	// Snapshot every path the batch will touch, so any failure below - including a
+	// commit cancelled by shutdown - can be undone completely.
+	snaps := make([]fileState, 0, len(applied)+len(removals))
+	for _, o := range applied {
+		snap, err := snapshotFile(filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
+		if err != nil {
+			return "", err
+		}
+		snaps = append(snaps, snap)
+	}
+	for _, path := range removals {
+		snap, err := snapshotFile(path)
+		if err != nil {
+			return "", err
+		}
+		snaps = append(snaps, snap)
+	}
+
+	now := time.Now().UTC()
+	for _, o := range applied {
+		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
+		if err := writeYAML(path, stampTimes(o, now)); err != nil {
+			restoreFiles(snaps)
+			return "", err
+		}
+	}
+	for _, path := range removals {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			restoreFiles(snaps)
+			return "", err
+		}
+	}
+	if message == "" {
+		message = "Apply configuration batch"
+	}
+	sha, err := s.git.CommitAll(ctx, message, author)
+	if err != nil {
+		restoreFiles(snaps)
+		return "", err
+	}
+	return sha, nil
 }
 
 // Head returns the current config repo HEAD commit hash.

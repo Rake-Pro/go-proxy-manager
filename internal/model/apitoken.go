@@ -13,7 +13,8 @@ const ScopeAdmin = "admin"
 
 // ScopePlurals is the central list of scope subjects. Every entry is either a
 // REST resource plural (the path segment under /api/) or a pseudo-resource for a
-// non-CRUD endpoint group ("settings", "dns-sync"). APIToken.Validate checks
+// non-CRUD endpoint group ("settings", "dns-sync", "ingress-discovery").
+// APIToken.Validate checks
 // every configured scope against this list, so a typo is rejected at write time
 // instead of silently granting nothing.
 var ScopePlurals = []string{
@@ -31,6 +32,7 @@ var ScopePlurals = []string{
 	"api-tokens",
 	"settings",
 	"dns-sync",
+	"ingress-discovery",
 }
 
 func knownScopePlural(p string) bool {

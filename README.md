@@ -62,6 +62,11 @@ builds it with a narrower, more focused design:
 - **DNS sync** — publishes CNAMEs for opted-in hosts to a local Pi-hole v6
   resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
   records it can prove it created
+- **Kubernetes Ingress discovery** — opt an `Ingress` in with one annotation and
+  gpm derives a proxy host from your template (read-only against the cluster, no
+  `client-go`), which then feeds the same DNS sync; only its own labelled objects
+  are ever touched, and it freezes rather than deleting when the cluster cannot
+  be read
 
 **Operations**
 - REST API + embedded single-page web UI

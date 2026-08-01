@@ -21,7 +21,7 @@ import (
 
 // Event is the JSON payload POSTed to each webhook target.
 type Event struct {
-	Action string `json:"action"` // save | delete | restore | revert | settings
+	Action string `json:"action"` // save | delete | restore | revert | settings | ingress-discovery
 	Kind   string `json:"kind,omitempty"`
 	Name   string `json:"name,omitempty"`
 	Commit string `json:"commit,omitempty"`

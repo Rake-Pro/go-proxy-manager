@@ -1,6 +1,7 @@
 # Build output
 /bin/
 /gpm
+/test/stream/echo/echo
 
 # Local runtime data (git-backed config dir, certs, db, etc.)
 /data/

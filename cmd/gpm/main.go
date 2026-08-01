@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/geoip"
+	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
@@ -239,6 +241,55 @@ func main() {
 		return st.Load(c)
 	})
 
+	// Kubernetes Ingress discovery: derives managed proxy hosts from annotated
+	// cluster Ingresses (read-only against the cluster) and writes them as ONE
+	// commit per reconcile. It publishes no DNS itself - after a write it asks the
+	// phase-1 syncer for a run, so there is a single DNS code path.
+	ingressDisc := k8s.New(
+		func(c context.Context) (model.Config, model.Settings, error) { return st.Load(c) },
+		func(c context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error) {
+			objs := make([]model.Object, 0, len(upserts))
+			for _, h := range upserts {
+				objs = append(objs, h)
+			}
+			refs := make([]store.ObjectRef, 0, len(deletes))
+			for _, name := range deletes {
+				refs = append(refs, store.ObjectRef{Kind: "ProxyHost", Name: name})
+			}
+			// The reconciler's plan is made from a snapshot taken before a
+			// multi-second cluster list, so ownership is re-checked here under the
+			// store lock: anything that stopped being a discovery-owned object in
+			// the meantime is left alone rather than overwritten or deleted.
+			guard := func(existing model.Object) error {
+				if existing.GetMeta().Labels[model.ManagedByLabel] != model.ManagedByIngressDiscovery {
+					return fmt.Errorf("%s %q is not labelled %s=%s", existing.Kind(), existing.GetMeta().Name,
+						model.ManagedByLabel, model.ManagedByIngressDiscovery)
+				}
+				return nil
+			}
+			return st.ApplyBatch(c, objs, refs, message, store.Author{Name: "ingress-discovery", Email: "gpm@localhost"}, guard)
+		},
+		func(commit string) {
+			if err := reload(); err != nil {
+				log.Error().Err(err).Msg("ingress discovery: config written but reload failed")
+			}
+			hooks.Dispatch(webhook.Event{Action: "ingress-discovery", Kind: "ProxyHost", Commit: commit})
+			// Reuse the phase-1 trigger: it is non-blocking and coalescing, so the
+			// derived hosts' dns policies are published by the ONE DNS reconciler.
+			dnsSyncer.Trigger()
+		},
+	)
+	// The reconciler is tracked, not fire-and-forget: a run that is mid-commit when
+	// the process is asked to stop has to be allowed to finish (or roll back)
+	// before main returns, or shutdown is exactly the window that leaves the config
+	// repo written but uncommitted.
+	var discWG sync.WaitGroup
+	discWG.Add(1)
+	go func() {
+		defer discWG.Done()
+		ingressDisc.Run(ctx)
+	}()
+
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
 	apiHandler := api.New(api.Deps{
@@ -276,6 +327,10 @@ func main() {
 		DNSSyncReconcile:  dnsSyncer.ReconcileNow,
 		DNSSyncStatus:     func() any { return dnsSyncer.Status() },
 		DNSSyncEnabled:    dnsSyncer.Enabled,
+
+		IngressDiscoveryReconcile: ingressDisc.ReconcileNow,
+		IngressDiscoveryStatus:    func() any { return ingressDisc.Status() },
+		IngressDiscoveryEnabled:   ingressDisc.Enabled,
 	})
 
 	uiHandler, err := ui.Handler()
@@ -294,6 +349,7 @@ func main() {
 		stop() // cancel ctx so the sibling server shuts down too
 	}
 	<-errc
+	discWG.Wait()
 	log.Info().Msg("shutdown complete")
 }
 

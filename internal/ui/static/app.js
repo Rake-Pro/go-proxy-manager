@@ -2396,6 +2396,12 @@ async function viewSettings(c) {
   const ds = Object.assign({ pihole: {}, cloudflare: {} }, s.dnsSync || {});
   ds.pihole = ds.pihole || {};
   ds.cloudflare = ds.cloudflare || {};
+  await loadCapabilities();
+  const idc = Object.assign({ template: {} }, s.ingressDiscovery || {});
+  const idt = Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {});
+  idt.upstream = idt.upstream || {};
+  idt.tls = idt.tls || {};
+  idt.defaultDNS = idt.defaultDNS || {};
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>Instance configuration and admin authentication.</p></div>
     <div class="grid-2" style="margin-bottom:16px">
@@ -2444,6 +2450,58 @@ async function viewSettings(c) {
       </div>
       <div id="set-dns-status" class="hint" style="margin-top:12px"></div>
       <button class="btn ghost sm" id="set-dns-run" type="button" style="margin-top:6px">Reconcile now</button>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Kubernetes Ingress discovery</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">gpm.rake.pro/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">gpm.rake.pro/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template below, so a cluster manifest can never supply an upstream, a certificate or a middleware. Derived hosts feed the DNS sync above.</p>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Ingress discovery</div><div class="ds">Reconcile annotated cluster Ingresses into managed proxy hosts</div></div>${switchHtml('set-id-on', !!idc.enabled, 'Ingress discovery')}</div>
+      <div class="grid-2" style="margin-top:8px">
+        <div>
+          <div class="field-group"><label>API server URL</label><input class="field mono" id="set-id-url" value="${esc(idc.apiURL || '')}" placeholder="https://k8s.example.lan:6443" /><div class="hint">Leave empty to use the in-cluster endpoint. Must be https.</div></div>
+          <div class="field-group"><label>Token file</label><input class="field mono" id="set-id-token" value="${esc(idc.tokenFile || '')}" placeholder="/run/secrets/gpm-k8s-token" /><div class="hint">Path to a read-only ServiceAccount token. Re-read periodically, so a rotated token is picked up.</div></div>
+          <div class="field-group"><label>CA file</label><input class="field mono" id="set-id-ca" value="${esc(idc.caFile || '')}" placeholder="/run/secrets/gpm-k8s-ca.crt" /></div>
+          <div class="field-group"><label>Poll interval</label><input class="field mono" id="set-id-poll" value="${esc(idc.pollInterval || '')}" placeholder="60s" /><div class="hint">Go duration, minimum 15s. Empty means 1m.</div></div>
+        </div>
+        <div>
+          <div class="field-group"><label>Namespace</label><input class="field mono" id="set-id-ns" value="${esc(idc.namespace || '')}" placeholder="(all namespaces)" /></div>
+          <div class="field-group"><label>Label selector</label><input class="field mono" id="set-id-sel" value="${esc(idc.labelSelector || '')}" placeholder="app.kubernetes.io/part-of=platform" /><div class="hint">Optional, server-side. The opt-in annotation is still required.</div></div>
+          <div class="field-group">
+            <label>Allowed domain suffixes</label>
+            <div class="chip-input" id="set-id-suffixes"></div>
+            <div class="hint">Required. A discovered hostname must equal or end in one of these, so a cluster manifest cannot publish an arbitrary name at the edge.</div>
+          </div>
+        </div>
+      </div>
+      <p class="section-label" style="margin-top:14px">Derived host template</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">gpm runs outside the cluster, so in-cluster Service DNS is not resolvable: the upstream is the <strong>ingress controller's</strong> address, and the controller routes by vhost using the Host header gpm forwards. Prefer <span class="mono">http</span> to its plain port; with <span class="mono">https</span> the upstream host is what SNI and certificate verification use.</p>
+      <div class="grid-2">
+        <div>
+          <div class="field-group">
+            <label>Upstream (ingress controller)</label>
+            <div class="loc-row">
+              <select class="field mono" id="set-id-up-scheme" style="flex:0 0 90px" aria-label="Upstream scheme">
+                <option value="http"${(idt.upstream.scheme || 'http') === 'http' ? ' selected' : ''}>http</option>
+                <option value="https"${idt.upstream.scheme === 'https' ? ' selected' : ''}>https</option>
+              </select>
+              <input class="field mono" id="set-id-up-host" style="flex:2 1 160px" value="${esc(idt.upstream.host || '')}" placeholder="10.0.0.40" aria-label="Upstream host" />
+              <input class="field mono" id="set-id-up-port" style="flex:0 0 90px" value="${esc(idt.upstream.port || '')}" placeholder="80" aria-label="Upstream port" />
+            </div>
+          </div>
+          <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required. Discovery never issues per-host certificates: point this at your wildcard certificate.</div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect http to https on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">HTTP/2</div><div class="ds">Enable h2 on derived hosts</div></div>${switchHtml('set-id-http2', !!idt.tls.http2, 'HTTP/2')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Websockets</div><div class="ds">Allow upgrade on derived hosts</div></div>${switchHtml('set-id-ws', !!idt.websocketsUpgrade, 'Websockets')}</div>
+        </div>
+        <div>
+          <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw"></div><div class="hint">Applied to every derived host, in order.</div></div>
+          <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-id-al"></div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div><div class="ds">When the lan-direct annotation is absent</div></div>${switchHtml('set-id-dns-lan', !!idt.defaultDNS.lanDirect, 'Default LAN direct')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div><div class="ds">When the public-cname annotation is absent</div></div>${switchHtml('set-id-dns-pub', !!idt.defaultDNS.publicCname, 'Default public CNAME')}</div>
+        </div>
+      </div>
+      <div id="set-id-status" class="hint" style="margin-top:12px"></div>
+      <div id="set-id-hosts" style="margin-top:8px"></div>
+      <button class="btn ghost sm" id="set-id-run" type="button" style="margin-top:6px">Reconcile now</button>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Data-plane SSO sessions</p>
@@ -2498,6 +2556,59 @@ async function viewSettings(c) {
     }
   }
   renderDNSStatus();
+
+  const idSuffixCtl = makeChipInput($('#set-id-suffixes'), arr(idc.allowedDomainSuffixes), 'add suffix...');
+  const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
+  const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
+
+  // Ingress-discovery status. The panel and the manual reconcile are only
+  // meaningful once discovery is enabled, so they are greyed out rather than
+  // offered as controls that cannot work.
+  const idAvailable = hasCapability('ingressDiscovery.enabled');
+  gateControl($('#set-id-run'), idAvailable, 'Ingress discovery is turned off (enable it above and save).');
+
+  async function renderIngressStatus() {
+    const el = $('#set-id-status');
+    const list = $('#set-id-hosts');
+    if (!el) return;
+    if (!idAvailable) {
+      el.textContent = 'Ingress discovery is turned off.';
+      if (list) list.innerHTML = '';
+      return;
+    }
+    try {
+      const st = (await api('/api/ingress-discovery/status')).data || {};
+      const parts = [];
+      parts.push(st.lastRun ? 'Last run ' + fmtTime(st.lastRun) : 'Never run');
+      // A failed run freezes the managed hosts, so how stale the good state is
+      // matters more than when the last attempt happened.
+      if (st.error) parts.push('FAILED - ' + st.error + (st.lastSuccess ? ' (last success ' + fmtTime(st.lastSuccess) + ', managed hosts frozen as they were)' : ' (no successful run yet)'));
+      else parts.push(`${st.discovered || 0} annotated Ingresses, ${st.managed || 0} managed hosts (+${st.created || 0} / ~${st.updated || 0} / -${st.deleted || 0}${st.skipped ? ', ' + st.skipped + ' skipped' : ''})`);
+      el.textContent = parts.join('. ') + '.';
+      if (list) {
+        const hosts = arr(st.hosts);
+        list.innerHTML = hosts.length ? `<div class="check-list">${hosts.map((h) => `
+          <div class="check-item" style="cursor:default"><span class="mono">${esc(h.name || '')}</span>
+          <span class="ci-ty">${esc(h.action || '')}</span>
+          ${h.ingress ? `<span class="muted" style="font-size:11px">${esc(h.ingress)}</span>` : ''}
+          ${h.reason ? `<span class="muted" style="font-size:11px">${esc(h.reason)}</span>` : ''}</div>`).join('')}</div>` : '';
+      }
+    } catch (e) {
+      el.textContent = e && e.status === 501 ? 'Ingress discovery is not wired in this deployment.' : 'Status unavailable: ' + (e.message || e);
+      if (list) list.innerHTML = '';
+    }
+  }
+  renderIngressStatus();
+
+  $('#set-id-run').addEventListener('click', async () => {
+    const btn = $('#set-id-run'); btn.disabled = true;
+    try {
+      await api('/api/ingress-discovery/reconcile', { method: 'POST' });
+      toast('Reconciled', 'Managed proxy hosts are back in step with the cluster.', 'ok');
+    } catch (e) { toastErr(e); }
+    await renderIngressStatus();
+    btn.disabled = false;
+  });
 
   $('#set-dns-run').addEventListener('click', async () => {
     const btn = $('#set-dns-run'); btn.disabled = true;
@@ -2563,6 +2674,36 @@ async function viewSettings(c) {
     dnsSync.cloudflare.apexTarget = $('#set-cf-apex').value.trim();
     if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
     body.dnsSync = dnsSync;
+
+    const ingressDiscovery = {
+      apiURL: $('#set-id-url').value.trim(),
+      tokenFile: $('#set-id-token').value.trim(),
+      caFile: $('#set-id-ca').value.trim(),
+      namespace: $('#set-id-ns').value.trim(),
+      labelSelector: $('#set-id-sel').value.trim(),
+      pollInterval: $('#set-id-poll').value.trim(),
+      allowedDomainSuffixes: idSuffixCtl.get(),
+      template: {
+        upstream: {
+          scheme: $('#set-id-up-scheme').value,
+          host: $('#set-id-up-host').value.trim(),
+          port: parseInt($('#set-id-up-port').value, 10) || 0,
+        },
+        tls: {
+          certificateRef: $('#set-id-cert').value.trim(),
+          forceSSL: isOn('set-id-forcessl'),
+          http2: isOn('set-id-http2'),
+        },
+        websocketsUpgrade: isOn('set-id-ws'),
+        middlewares: idMwCtl.get(),
+        accessLists: idAlCtl.get(),
+      },
+    };
+    if (isOn('set-id-on')) ingressDiscovery.enabled = true;
+    if (isOn('set-id-dns-lan') || isOn('set-id-dns-pub')) {
+      ingressDiscovery.template.defaultDNS = { lanDirect: isOn('set-id-dns-lan'), publicCname: isOn('set-id-dns-pub') };
+    }
+    body.ingressDiscovery = ingressDiscovery;
 
     const btn = $('#set-save'); btn.disabled = true;
     try {
