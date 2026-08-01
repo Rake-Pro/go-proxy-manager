@@ -816,10 +816,12 @@ async function hostEditor(c, name) {
             <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
             ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct')}
           </div>
+          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
           <div class="toggle-line">
             <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
             ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME')}
           </div>
+          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
         </div>
       </div>
 
@@ -889,13 +891,20 @@ async function hostEditor(c, name) {
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...');
   const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
 
-  // Grey out each DNS toggle whose backend is not configured, rather than
-  // accepting a flag that would silently publish nothing.
+  // These two DNS toggles stay USABLE when their backend is not configured, and
+  // say so inline instead. Deliberately unlike every other capability-gated
+  // control (which gateControl still greys out): setting the flag before the
+  // backend exists is legitimate staging - the host is the declaration, the
+  // syncer publishes whenever it is wired - not an error to be refused. And the
+  // capability probe is cached per page load, so a stale "not configured" would
+  // otherwise outlive the fact and block a perfectly valid edit.
   await loadCapabilities();
-  gateControl($('#f-dns-lan'), hasCapability('dnsSync.piholeEnabled'),
-    'Pi-hole DNS sync is not configured (Settings -> DNS sync).');
-  gateControl($('#f-dns-public'), hasCapability('dnsSync.cloudflareEnabled'),
-    'Cloudflare DNS sync is not configured (Settings -> DNS sync).');
+  const dnsHint = (id, available) => {
+    const el = $(id);
+    if (el) el.style.display = available ? 'none' : '';
+  };
+  dnsHint('#f-dns-lan-hint', hasCapability('dnsSync.piholeEnabled'));
+  dnsHint('#f-dns-public-hint', hasCapability('dnsSync.cloudflareEnabled'));
 
   // locations
   const locsWrap = $('#f-locs');

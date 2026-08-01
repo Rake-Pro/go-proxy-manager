@@ -524,7 +524,10 @@ is published unless asked for, and an opted-out host omits the `dns` key from it
 API responses entirely rather than returning an empty object. The backends
 themselves are configured once, in
 [`settings.dnsSync`](#dnssyncsettings-settingsdnssync); a policy flag with its
-backend disabled publishes nothing (the UI greys the toggle out).
+backend disabled publishes nothing, and the UI says so inline while leaving the
+toggle usable — setting the flag before the backend exists is legitimate staging
+(the host is the declaration; the syncer publishes once it is wired), so it is
+not refused.
 
 **HostTimeouts** (`timeouts`): `connectSeconds` caps establishing the TCP/TLS
 connection to the upstream; `readSeconds` caps time awaiting the upstream's
