@@ -42,6 +42,13 @@ const (
 // dnsLabelRe matches a single DNS-1123 label (a Kubernetes namespace).
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// IsDNSLabel reports whether s is a single DNS-1123 label, i.e. a valid
+// Kubernetes namespace. Discovery derives a proxy-host name by joining the
+// Ingress name and its namespace with a dot, which is only unambiguous while the
+// namespace is dot-free; gpm checks that itself rather than trusting the API
+// server to have enforced it.
+func IsDNSLabel(s string) bool { return dnsLabelRe.MatchString(s) }
+
 // hostnameRe matches a strict LDH hostname of at least two labels. It is the
 // gate every string that arrives from the Kubernetes API passes before it can
 // become a served domain, so it deliberately rejects wildcards ("*."), empty

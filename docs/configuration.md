@@ -34,9 +34,27 @@ references it).
 |-------|------|----------|-------|
 | `name` | string | yes | Identity and filename. Lowercase alphanumeric plus `-_.`, must start and end alphanumeric, 1–254 chars. |
 | `displayName` | string | no | Human label for the UI. |
-| `labels` | map | no | Arbitrary key/value metadata. |
+| `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` is reserved** — see below. |
 | `tags` | []string | no | Flat, free-form labels for grouping/filtering. On the Proxy Hosts list they render as chips and are matched by the filter box. |
 | `disabled` | bool | no | Keep the object in config but exclude it from the running data plane. |
+
+> **`gpm.rake.pro/managed-by` is a reserved label — do not set it by hand.** It
+> marks an object as owned by an automated reconciler. Adding
+> `gpm.rake.pro/managed-by: ingress-discovery` to a proxy host you wrote yourself
+> hands it to Ingress discovery, which will **delete it** on the next poll,
+> because no annotated `Ingress` derives it. Removing the label is the supported
+> way to adopt a discovered host permanently; adding it is never the way to give
+> one away.
+
+## Domains are exclusive
+
+The data plane routes by hostname, so **at most one enabled host may claim a
+given domain**. Two enabled proxy, redirect or dead hosts listing the same domain
+are rejected at load time (`hosts "a" and "b" both claim domain "x.example.com"`)
+rather than resolved by whichever file happens to be read last. *Disabled* hosts
+are exempt: they are excluded from the running data plane entirely, so staging a
+replacement host beside the live one stays legal — enable the new one in the same
+change that disables the old one.
 
 ## Secrets
 
@@ -267,6 +285,22 @@ removed (the same rule the DNS backends apply to records they do not own). To
 adopt a discovered host permanently, remove the label: gpm then treats it as
 operator-authored and stops managing it.
 
+Ownership covers the **domain** as well as the name. A derived host whose domains
+include one already claimed by a host discovery does not own — proxy, redirect or
+dead, enabled *or* disabled — is skipped with that host named in the `reason`.
+Without that rule a tenant who can annotate an `Ingress` in their own namespace
+could claim `sso.example.com`, and because the router fills its per-domain maps
+in config load order, a derived name sorting after the operator's host would
+silently replace its whole middleware/access-list chain and its TLS pinning.
+`allowedDomainSuffixes` alone does not prevent this: an exact-match suffix makes
+even the apex claimable. Two annotated Ingresses claiming the same hostname are
+resolved the same way — first by derived name wins, the rest are skipped.
+
+Ownership is re-checked **under the store lock at write time**, not only when the
+reconcile was planned: the plan is made before a multi-second cluster list, so an
+object relabelled or replaced in that window is left alone rather than written on
+the strength of a stale snapshot.
+
 **Hostname validation.** Every string from the API server is untrusted. A host
 must be a valid multi-label LDH hostname of at most 253 characters and fall
 within `allowedDomainSuffixes`; wildcards, single labels, underscores, URLs and
@@ -279,8 +313,12 @@ configured.
 **When the cluster cannot be read, discovery freezes.** A managed host is deleted
 **only** when a reconcile obtained a complete, successful, fully-paginated list of
 annotated Ingresses and the derived name is absent from it. Any transport error,
-timeout, non-`200` status, decode failure, or a page that fails mid-pagination
-aborts the run *before any write* — no creates, no updates, no deletes. An
+timeout, non-`200` status, decode failure, a page that fails mid-pagination, or a
+`200` whose body is not an `IngressList` (a mistyped `apiURL` landing on another
+HTTPS service behind the same CA, a mesh or gateway envelope, a `Status` reply)
+aborts the run *before any write* — no creates, no updates, no deletes. One list
+is bounded to two minutes end to end, so a hung endpoint fails the run rather
+than holding the reconciler for the page limit times the per-request timeout. An
 annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
 **and** protects its existing host from deletion, so one bad manifest edit cannot
 take a host offline. An *empty successful* list is a different thing entirely: it

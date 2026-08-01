@@ -245,22 +245,37 @@ discovery** (full field reference in
 rationale in [design/ingress-discovery.md](design/ingress-discovery.md)).
 
 **gpm reads the cluster; it never writes to it.** Apply the shipped RBAC, which
-grants `get`/`list`/`watch` on `ingresses` and nothing else:
+grants `list` on `ingresses` and nothing else — the reconciler works from a full
+list on a poll interval, so it never reads an object by name and never opens a
+watch:
 
 ```
 kubectl apply -f deploy/k8s-ingress-discovery-rbac.yaml
 ```
 
+**Tighten it when you scope to one namespace.** If you set
+`settings.ingressDiscovery.namespace`, gpm lists a single namespace, so replace
+the shipped `ClusterRole`/`ClusterRoleBinding` with a `Role`/`RoleBinding` in
+that namespace — same single `list` verb, without cluster-wide read on every
+`Ingress` in the cluster.
+
 Then extract the credential for the (normal) off-cluster deployment, where gpm
-runs on the edge host and there is no kubelet to project a token into it:
+runs on the edge host and there is no kubelet to project a token into it. Create
+each file `0400` **first**: a plain redirect creates it `0644`, leaving a window
+in which any local user can read the bearer token.
 
 ```
+install -m 0400 /dev/null /run/secrets/gpm-k8s-token
+install -m 0400 /dev/null /run/secrets/gpm-k8s-ca.crt
 kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
   -o jsonpath='{.data.token}' | base64 -d > /run/secrets/gpm-k8s-token
 kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
   -o jsonpath='{.data.ca\.crt}' | base64 -d > /run/secrets/gpm-k8s-ca.crt
-chmod 0400 /run/secrets/gpm-k8s-token /run/secrets/gpm-k8s-ca.crt
 ```
+
+The `ca.crt` jsonpath escapes the dot **inside the key** only. `{.data\.ca\.crt}`
+escapes the separator as well, matches nothing, and silently writes an empty CA
+file — which surfaces later as `caFile ... contains no usable PEM certificate`.
 
 Mount both into the container and point `tokenFile` / `caFile` at them. gpm
 re-reads the token from disk every 5 minutes (and immediately after a `401`), so
@@ -296,16 +311,33 @@ discovery.
 number of annotated Ingresses whose hosts pass validation; on the second run
 everything should read `unchanged` and no commit should appear in
 `GET /api/history`. Anything in `hosts[]` with `action: "skipped"` carries a
-`reason` — the usual ones are a hostname outside `allowedDomainSuffixes` and a
-name already taken by a proxy host you wrote by hand.
+`reason` — the usual ones are a hostname outside `allowedDomainSuffixes`, a name
+already taken by a proxy host you wrote by hand, and a **domain** already served
+by a host discovery does not own.
+
+**Ownership covers the domain, not just the name.** A derived host is skipped
+whenever any of its domains is already claimed by a host discovery does not own —
+including a *disabled* one — so an annotated Ingress cannot take over the
+hostname of your SSO or dashboard host by deriving a name that happens to sort
+after it. Two annotated Ingresses claiming the same hostname are resolved the
+same way: the first by derived name wins, the second is skipped with a reason.
+The rule is also enforced one layer down — the config validator rejects any two
+*enabled* hosts claiming the same domain, whatever wrote them.
 
 **Freeze on failure is expected behaviour, not an outage.** If the API server is
-unreachable, returns an error, or a paginated list fails part-way, the run aborts
-before any write and the managed hosts stay exactly as they are. `status.error`
+unreachable, returns an error, returns something that is not an `IngressList`, or
+a paginated list fails part-way, the run aborts before any write and the managed
+hosts stay exactly as they are. One list is bounded to two minutes end to end, so
+a hung API server fails the run instead of stalling the reconciler. `status.error`
 says why and `lastSuccess` says how stale the state is — watch that pair, not
 `lastRun`, when alerting. The only condition that deletes a managed host is a
 *complete, successful* list that no longer derives it (which includes an Ingress
 that simply lost its annotation).
+
+**A misdirected `apiURL` cannot empty your config.** A `200` from something that
+is not the Kubernetes API — another HTTPS service behind the same internal CA, a
+mesh or gateway envelope — is rejected as a shape error rather than decoded as an
+empty list, so it lands on the freeze path instead of deleting every managed host.
 
 **Upstream gotcha.** `template.upstream` is the **ingress controller's** address,
 not a Service: gpm is off-cluster, so `*.svc.cluster.local` cannot be resolved or

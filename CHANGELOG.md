@@ -245,6 +245,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Changed
 
+- **One Ingress reconcile's cluster list is bounded to two minutes.** The only
+  bound was the 30s per-request timeout times the 100-page limit — roughly 50
+  minutes holding the reconcile mutex, during which every poll and every manual
+  reconcile queues behind it. The list now runs under a `context.WithTimeout`
+  (`internal/k8s`).
+- **`GET /api/capabilities` no longer loads and validates the whole config to
+  answer whether Ingress discovery is enabled.** The probe runs on every admin page
+  load and took the store read lock behind in-flight reconcile commits. The
+  `Discoverer` now caches the flag, refreshing it on every reconcile and every poll
+  interval read, so the answer lags a settings change by at most one poll
+  (`internal/k8s`).
 - **Manual DNS reconciles no longer queue.** `POST /api/dns-sync/reconcile` used
   a blocking lock acquire that ignored the request context, so repeated calls
   piled goroutines (each holding a request-scoped context) up behind a slow
@@ -273,6 +284,35 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Fixed
 
+- **`Store.ApplyBatch` is now actually atomic, as its doc comment claimed.** YAML
+  was written and files removed *before* `CommitAll`, so a failing `os.Remove` or a
+  failing/cancelled commit left the working tree mutated but uncommitted: the next
+  `Load` served the deletions as live config while the status reported failure, and
+  the following unrelated write swept the orphans into its commit. Shutdown made it
+  reachable — the discovery goroutine was fire-and-forget, so `main` could cancel the
+  context mid-commit and return. Every file a batch touches is now snapshotted first
+  and the tree is rolled back on any failure (the `snapshotDirs`/`writeDirs` precedent
+  from `RevertObject`), and the reconciler runs under a `sync.WaitGroup` that
+  shutdown waits on (`internal/store`, `cmd/gpm`).
+- **Ingress discovery no longer fires a reload, webhook and DNS trigger on an
+  empty commit.** When every planned delete turned out to be already gone,
+  `ApplyBatch` returned `("", nil)` and `onChange("")` ran anyway — reloading,
+  dispatching a lifecycle webhook and triggering DNS with an empty
+  `status.commit` while `deleted` was non-zero. Notification now requires a real
+  commit (`internal/k8s`).
+- **An oversized Kubernetes response is reported as such, not as a decode
+  failure.** `io.ReadAll(io.LimitReader(...))` truncated silently at the 8MiB body
+  cap, surfacing as a JSON syntax error and a permanent freeze — triggerable by a
+  tenant putting large annotations on an annotated `Ingress`. The read now goes one
+  byte past the cap to detect the overflow and says so, and `listPageSize` drops
+  from 500 to 100 so a page of realistically-sized objects stays well clear of the
+  cap (`internal/k8s`).
+- **A namespace containing a dot is refused rather than assumed impossible.**
+  `derive()` builds `ing-<name>.<namespace>` and relied on the API server having
+  enforced that a namespace is a DNS-1123 label; the derived name is an ownership
+  boundary, so gpm now validates it itself and skips the Ingress (returning no name,
+  so an ambiguous one cannot protect a host from deletion) (`internal/k8s`,
+  `internal/model`).
 - **Duplicate `Strict-Transport-Security` on the proxied admin path.** The admin
   server emitted its own HSTS header in addition to the one the data plane (the
   actual TLS edge) emits for the admin host, so a request to the admin panel
@@ -282,6 +322,51 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Ingress discovery: ownership now gates the DOMAIN, not just the derived
+  name.** A derived host was skipped only when its *name* collided with a host gpm
+  did not own, but the data plane routes by hostname and fills its per-domain maps
+  in config load order — so a cluster tenant who could annotate an `Ingress` in
+  their own namespace could claim `sso.example.com`, derive a name colliding with
+  nothing, sort after the operator's host, and replace that host's SSO/access-list
+  chain with the template's (and overwrite its mTLS pinning). `allowedDomainSuffixes`
+  was no defence: exact-suffix matching makes even the apex claimable. `planReconcile`
+  now refuses any derived host whose domains are already claimed by a host discovery
+  does not own — proxy, redirect or dead, enabled or disabled — reporting it per host
+  in `status.hosts[].reason`, and resolves two Ingresses claiming one hostname
+  first-by-derived-name-wins. Backstopped in `Config.Validate`, which now rejects any
+  two **enabled** hosts claiming the same domain whatever wrote them (disabled hosts
+  are exempt so staging a replacement beside the live host still works)
+  (`internal/k8s`, `internal/model`).
+- **Ingress discovery: a `200` that is not an `IngressList` no longer reads as an
+  empty cluster.** The LIST decode asserted nothing about the response shape, so
+  `null`, `{}`, a `kind: Status` reply and `{"items":null}` all decoded to zero
+  items, no continue token and a nil error — which the reconciler treats as a
+  complete list and answers by **deleting every managed host**. It needed no
+  compromised API server: an `apiURL` typo'd onto another HTTPS service behind the
+  same internal CA, a mesh/gateway `200` envelope, or a namespace/label-selector
+  typo would do it. The page struct now asserts `kind: IngressList` and a present
+  `items` field, and anything else is an error on the freeze path (`internal/k8s`).
+- **`Store.ApplyBatch` re-checks ownership under the store lock.** It trusted the
+  caller's ownership filter and never inspected labels, while the caller's plan was
+  computed from a snapshot taken *before* a multi-second cluster list — so an object
+  created, deleted or relabelled inside that window was written or removed on the
+  strength of a check against state that no longer existed. `ApplyBatch` takes an
+  `ApplyGuard` it evaluates against freshly loaded state, under the lock, for every
+  delete target and every pre-existing upsert target; a guarded-away object is
+  skipped, not clobbered, and a batch left with nothing to do commits nothing. The
+  Ingress reconciler installs a managed-by-label guard (`internal/store`,
+  `cmd/gpm`).
+- **Shipped Ingress RBAC narrowed to `list`, and the token-extraction recipe no
+  longer leaves a world-readable window.** The `ClusterRole` granted `get`/`list`/
+  `watch` while the client only ever lists. The manifest's `ca.crt` jsonpath
+  (`{.data\.ca\.crt}`) also escaped the `data` separator, matched nothing, and
+  silently wrote an **empty CA file**; and both files were created by a plain shell
+  redirect (mode `0644`) and only `chmod 0400`'d afterwards, leaving the bearer
+  token readable by any local user in between. The manifest and
+  `docs/deployment.md` now use `install -m 0400 /dev/null` first, the correct
+  jsonpath, and document that a namespaced `Role`/`RoleBinding` is tighter when
+  `settings.ingressDiscovery.namespace` is set
+  (`deploy/k8s-ingress-discovery-rbac.yaml`, `docs/deployment.md`).
 - **`/debug/pprof/*` now requires the `admin` scope, not just the admin role.**
   Every API-token principal is admin-*role* by construction (the coarse gate is
   satisfied and the real authorization is the per-route scope check), so a

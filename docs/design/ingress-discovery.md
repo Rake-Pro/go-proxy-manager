@@ -424,13 +424,13 @@ takes a `load` func and an `apply` func and imports neither `store` nor `api`.
 
 | Requirement | Mechanism |
 |---|---|
-| gpm never writes to the cluster | shipped ClusterRole grants `get`/`list`/`watch` on `ingresses` only; no write verb exists to call |
+| gpm never writes to the cluster | shipped ClusterRole grants `list` on `ingresses` only (the reconciler never gets by name and never watches); no write verb exists to call |
 | Opt-in only | `gpm.rake.pro/managed: "true"` exactly; absent/any other value = invisible. No namespace sweep mode exists |
 | No privilege inheritance from cluster manifests | every security-relevant field comes from the template; the Ingress contributes hostnames (validated, suffix-restricted) and two booleans |
 | Untrusted strings | strict hostname validation + allowed-suffix gate + `model.ValidateName` on the derived name; upstream is never built from Ingress input |
 | Credential handling | bearer token read from a file, re-read on a TTL (projected SA tokens rotate), never logged, never returned by any endpoint, never committed to git |
 | Transport | TLS with the supplied CA bundle, redirects never followed, bounded response reads, bounded timeouts — the same hardening as `internal/dnssync` |
-| Ownership | writes and deletes restricted to objects carrying the managed-by label; name collision with an unlabelled object = skip + warn |
+| Ownership | writes and deletes restricted to objects carrying the managed-by label, re-verified under the store lock at write time (the plan predates the cluster list); collision on the derived NAME *or* on any DOMAIN with a host discovery does not own = skip + warn, backstopped by a duplicate-domain check in `Config.Validate` |
 | API surface | `ingress-discovery:read` / `ingress-discovery:write` scopes; status carries no token, no CA, no cluster addresses beyond what settings already expose |
 
 The token file is a path, not a `Secret` placeholder, for two reasons: projected

@@ -79,10 +79,12 @@ func (f *fakeAPI) client(t *testing.T) *Client {
 	return c
 }
 
-// writeList renders one LIST page. cont is the continue token for the next page.
+// writeList renders one LIST page, exactly as a Kubernetes API server does -
+// kind and apiVersion included, because the client asserts on them.
 func writeList(w http.ResponseWriter, items []string, cont string) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"metadata":{"continue":%q},"items":[%s]}`, cont, strings.Join(items, ","))
+	fmt.Fprintf(w, `{"kind":"IngressList","apiVersion":"networking.k8s.io/v1","metadata":{"continue":%q},"items":[%s]}`,
+		cont, strings.Join(items, ","))
 }
 
 // ingressJSON builds one Ingress item with the given annotations and hosts.
@@ -467,4 +469,66 @@ func unrelatedCAPEM(t *testing.T) []byte {
 		t.Fatalf("create certificate: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// A 200 whose body is not an IngressList is an error at the client boundary, so
+// the reconciler never sees a "complete, empty" list it would act on.
+func TestListIngressesRequiresAnIngressListShape(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":       `null`,
+		"empty":      `{}`,
+		"status":     `{"kind":"Status","apiVersion":"v1","status":"Success"}`,
+		"null items": `{"kind":"IngressList","items":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeAPI(t, "tok")
+			f.handler = func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, body)
+			}
+			got, err := f.client(t).ListIngresses(context.Background())
+			if err == nil {
+				t.Fatalf("want an error, got %d items and nil", len(got))
+			}
+			if got != nil {
+				t.Fatalf("an error must never come with items, got %+v", got)
+			}
+			if !strings.Contains(err.Error(), "IngressList") {
+				t.Fatalf("error should name the expected shape, got %v", err)
+			}
+		})
+	}
+}
+
+// A response larger than the body cap is reported as exactly that. Silently
+// truncating it produced a JSON syntax error instead, which reads as "the API
+// server is broken" and freezes discovery until somebody works out that one
+// object simply carried too many annotations.
+func TestOversizedResponseIsReportedAsSuch(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"kind":"IngressList","metadata":{"continue":""},"items":[`))
+		chunk := strings.Repeat("x", 64<<10)
+		for written := 0; written < maxRespBody; written += len(chunk) {
+			w.Write([]byte(chunk))
+		}
+	}
+	_, err := f.client(t).ListIngresses(context.Background())
+	if err == nil {
+		t.Fatal("an oversized response must be an error")
+	}
+	if !strings.Contains(err.Error(), "body cap") {
+		t.Fatalf("error must distinguish an oversized body from a malformed one, got %v", err)
+	}
+}
+
+// The page size has to stay well under the body cap: a real Ingress carries
+// managedFields and arbitrary annotations, so a large page is one verbose tenant
+// manifest away from overflowing it.
+func TestListPageSizeLeavesHeadroomUnderTheBodyCap(t *testing.T) {
+	const generousObjectBytes = 64 << 10
+	if listPageSize*generousObjectBytes > maxRespBody {
+		t.Fatalf("listPageSize %d x %d bytes exceeds the %d-byte body cap", listPageSize, generousObjectBytes, maxRespBody)
+	}
 }

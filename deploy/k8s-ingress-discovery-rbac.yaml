@@ -6,13 +6,25 @@
 #
 #   kubectl apply -f deploy/k8s-ingress-discovery-rbac.yaml
 #
-# Then extract the token and CA bundle for gpm (see docs/deployment.md):
+# Then extract the token and CA bundle for gpm (see docs/deployment.md). Create
+# each file 0400 FIRST: a plain shell redirect would create it 0644 and leave a
+# window in which any local user can read the bearer token.
 #
+#   install -m 0400 /dev/null /run/secrets/gpm-k8s-token
+#   install -m 0400 /dev/null /run/secrets/gpm-k8s-ca.crt
 #   kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
 #     -o jsonpath='{.data.token}' | base64 -d > /run/secrets/gpm-k8s-token
 #   kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
-#     -o jsonpath='{.data\.ca\.crt}' | base64 -d > /run/secrets/gpm-k8s-ca.crt
-#   chmod 0400 /run/secrets/gpm-k8s-token /run/secrets/gpm-k8s-ca.crt
+#     -o jsonpath='{.data.ca\.crt}' | base64 -d > /run/secrets/gpm-k8s-ca.crt
+#
+# The ca.crt jsonpath escapes the DOT INSIDE THE KEY only: '{.data\.ca\.crt}'
+# escapes the separator too, matches nothing, and silently writes an empty CA
+# file - which then fails at client construction with "no usable PEM certificate".
+#
+# When settings.ingressDiscovery.namespace is set, replace the ClusterRole and
+# ClusterRoleBinding below with a namespaced Role/RoleBinding in that namespace:
+# gpm then lists a single namespace, so cluster-wide read on ingresses is more
+# authority than it needs.
 #
 # The Secret below is a long-lived, manually-managed ServiceAccount token
 # (kubernetes.io/service-account-token). That is deliberate for the OFF-CLUSTER
@@ -38,9 +50,12 @@ kind: ClusterRole
 metadata:
   name: gpm-ingress-discovery
 rules:
+  # LIST only. gpm reconciles from a full list on a poll interval: it never reads
+  # an object by name and never opens a watch, so get and watch would be standing
+  # authority nothing uses.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

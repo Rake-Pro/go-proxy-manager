@@ -37,6 +37,9 @@ type recorder struct {
 	message string
 	err     error
 	changed int
+	// emptyCommit makes apply report "nothing was written" the way the store does
+	// when every planned change turned out to be moot.
+	emptyCommit bool
 }
 
 func (r *recorder) apply(_ context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error) {
@@ -47,6 +50,9 @@ func (r *recorder) apply(_ context.Context, upserts []model.ProxyHost, deletes [
 		return "", r.err
 	}
 	r.upserts, r.deletes, r.message = upserts, deletes, message
+	if r.emptyCommit {
+		return "", nil
+	}
 	return fmt.Sprintf("commit%d", r.calls), nil
 }
 
@@ -793,5 +799,330 @@ func TestClientIsCachedUntilSettingsChange(t *testing.T) {
 	}
 	if built != 2 {
 		t.Fatalf("client built %d times, want a rebuild after the settings changed", built)
+	}
+}
+
+// operatorHost is a hand-written (unlabelled) proxy host.
+func operatorHost(name string, domains ...string) model.ProxyHost {
+	return model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		Domains:    domains,
+		Upstream:   model.Upstream{Scheme: "http", Host: "192.0.2.9", Port: 8080},
+	}
+}
+
+// The DOMAIN ownership gate. Owning the derived NAME is not enough: hosts are
+// routed by domain, so a tenant who can annotate an Ingress in their own
+// namespace could otherwise claim an operator hostname - deriving a host whose
+// name collides with nothing, but whose domain silently replaces the operator's
+// SSO/access-list chain (and its TLS pinning) in the router's per-domain maps.
+func TestDerivedHostCannotShadowAnOperatorDomain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  model.Config
+	}{
+		{"proxy host", model.Config{ProxyHosts: []model.ProxyHost{operatorHost("sso", "sso.example.com")}}},
+		{"disabled proxy host", model.Config{ProxyHosts: []model.ProxyHost{func() model.ProxyHost {
+			h := operatorHost("sso", "sso.example.com")
+			h.Disabled = true
+			return h
+		}()}}},
+		{"redirect host", model.Config{RedirectHosts: []model.RedirectHost{{
+			ObjectMeta:   model.ObjectMeta{Name: "sso"},
+			Domains:      []string{"sso.example.com"},
+			TargetDomain: "elsewhere.example.com",
+		}}}},
+		{"dead host", model.Config{DeadHosts: []model.DeadHost{{
+			ObjectMeta: model.ObjectMeta{Name: "sso"},
+			Domains:    []string{"sso.example.com"},
+		}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t, "tok")
+			f.handler = func(w http.ResponseWriter, r *http.Request) {
+				writeList(w, []string{
+					ingressJSON("tenant", "grab", map[string]string{model.AnnotationManaged: "true"}, "sso.example.com"),
+				}, "")
+			}
+			cfg := tc.cfg
+			settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+			rec := &recorder{}
+			d := newDiscoverer(f, &cfg, settings, rec)
+
+			if err := d.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if rec.calls != 0 {
+				t.Fatalf("a domain an operator host already serves must never be written (calls=%d)", rec.calls)
+			}
+			st := d.Status()
+			if st.Skipped != 1 || len(st.Hosts) != 1 || st.Hosts[0].Action != ActionSkipped {
+				t.Fatalf("status = %+v", st)
+			}
+			if !strings.Contains(st.Hosts[0].Reason, "already claimed by proxy host \"sso\"") {
+				t.Fatalf("skip reason must name the owning host, got %q", st.Hosts[0].Reason)
+			}
+		})
+	}
+}
+
+// The apex of an allowed suffix is claimable by an exact-match Ingress, so the
+// gate has to cover it too.
+func TestDerivedHostCannotShadowTheApexDomain(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("tenant", "grab", map[string]string{model.AnnotationManaged: "true"}, "example.com"),
+		}, "")
+	}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{operatorHost("apex", "example.com")}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("the apex must not be claimable (calls=%d)", rec.calls)
+	}
+}
+
+// Two annotated Ingresses that derive DIFFERENT names but the same domain: the
+// first by derived name wins and the second is skipped, so the batch can never
+// carry a duplicate domain into the config validator (which would fail the whole
+// reconcile and freeze every unrelated change with it).
+func TestTwoIngressesCannotClaimTheSameDomain(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("ns", "zeta", map[string]string{model.AnnotationManaged: "true"}, "app.example.com"),
+			ingressJSON("ns", "alpha", map[string]string{model.AnnotationManaged: "true"}, "app.example.com"),
+		}, "")
+	}
+	cfg := &model.Config{}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || rec.upserts[0].Name != "ing-alpha.ns" {
+		t.Fatalf("exactly the first derived host may take the domain, got %+v", rec.upserts)
+	}
+	st := d.Status()
+	if st.Skipped != 1 {
+		t.Fatalf("the second claimant must be skipped, status = %+v", st)
+	}
+}
+
+// A managed host whose Ingress went bad is protected from deletion; while it is
+// protected it must keep its domains, so a different Ingress cannot take the
+// hostname out from under it.
+func TestProtectedManagedHostKeepsItsDomainClaim(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			// Underivable: protects ing-a.ns without refreshing it.
+			ingressJSON("ns", "a", map[string]string{model.AnnotationManaged: "true"}, "*.example.com"),
+			ingressJSON("ns", "zz", map[string]string{model.AnnotationManaged: "true"}, "app.example.com"),
+		}, "")
+	}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{managedHostFixture("ing-a.ns", "app.example.com")}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("nothing may be written: the domain is held by a protected host (calls=%d, upserts=%+v)", rec.calls, rec.upserts)
+	}
+}
+
+// A managed host being REPLACED releases its domains: renaming the Ingress must
+// hand the hostname over rather than deadlock on its own claim.
+func TestRenamedIngressHandsItsDomainOver(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("ns", "new", map[string]string{model.AnnotationManaged: "true"}, "app.example.com"),
+		}, "")
+	}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{managedHostFixture("ing-old.ns", "app.example.com")}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || rec.upserts[0].Name != "ing-new.ns" {
+		t.Fatalf("upserts = %+v", rec.upserts)
+	}
+	if len(rec.deletes) != 1 || rec.deletes[0] != "ing-old.ns" {
+		t.Fatalf("deletes = %+v", rec.deletes)
+	}
+}
+
+// A LIST that decodes to zero items only because the body was not an IngressList
+// must freeze, not delete. Each of these bodies is a plausible 200 from
+// something that is not the API server (a mistyped apiURL onto another HTTPS
+// service, a mesh or gateway envelope, a Status reply).
+func TestMalformedListBodyDeletesNothing(t *testing.T) {
+	bodies := map[string]string{
+		"null":         `null`,
+		"empty":        `{}`,
+		"status":       `{"kind":"Status","apiVersion":"v1","status":"Success"}`,
+		"null items":   `{"kind":"IngressList","items":null}`,
+		"items typo":   `{"kind":"IngressList","itemz":[]}`,
+		"wrong kind":   `{"kind":"ServiceList","items":[]}`,
+		"html-ish 200": `{"ok":true}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeAPI(t, "tok")
+			f.handler = func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, body)
+			}
+			cfg := &model.Config{ProxyHosts: []model.ProxyHost{
+				managedHostFixture("ing-a.ns", "a.example.com"),
+				managedHostFixture("ing-b.ns", "b.example.com"),
+			}}
+			settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+			rec := &recorder{}
+			d := newDiscoverer(f, cfg, settings, rec)
+
+			err := d.Reconcile(context.Background())
+			if err == nil {
+				t.Fatal("a response that is not an IngressList must be an error, not an empty list")
+			}
+			if rec.calls != 0 {
+				t.Fatalf("a malformed list must delete nothing (calls=%d, deletes=%+v)", rec.calls, rec.deletes)
+			}
+			if st := d.Status(); st.Error == "" || st.LastSuccess != (time.Time{}) {
+				t.Fatalf("the run must be recorded as a failure, status = %+v", st)
+			}
+		})
+	}
+}
+
+// A namespace containing a dot would make the derived "<name>.<namespace>"
+// ambiguous, so it is refused rather than trusted to have been enforced upstream.
+func TestNamespaceMustBeADNSLabel(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("ns.evil", "app", map[string]string{model.AnnotationManaged: "true"}, "app.example.com"),
+		}, "")
+	}
+	cfg := &model.Config{}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("an ambiguous namespace must derive nothing (calls=%d)", rec.calls)
+	}
+	st := d.Status()
+	if st.Skipped != 1 || !strings.Contains(st.Hosts[0].Reason, "DNS-1123") {
+		t.Fatalf("status = %+v", st)
+	}
+	if st.Hosts[0].Name != "" {
+		t.Fatalf("an ambiguous name must not be reported as a protectable host, got %q", st.Hosts[0].Name)
+	}
+}
+
+// A write that turned out to change nothing on disk returns an empty commit. The
+// reload, webhook and DNS trigger must not fire on it: there is no revision to
+// point at and nothing reloaded.
+func TestEmptyCommitDoesNotNotify(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) { writeList(w, nil, "") }
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{managedHostFixture("ing-a.ns", "a.example.com")}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{emptyCommit: true}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 1 || len(rec.deletes) != 1 {
+		t.Fatalf("the delete should still have been attempted (calls=%d deletes=%+v)", rec.calls, rec.deletes)
+	}
+	if rec.changed != 0 {
+		t.Fatalf("onChange must not fire without a commit (fired %d times)", rec.changed)
+	}
+	if st := d.Status(); st.Commit != "" {
+		t.Fatalf("status commit = %q, want empty", st.Commit)
+	}
+}
+
+// One reconcile's list is bounded, so a hung API server cannot hold the reconcile
+// mutex for the page limit times the per-request timeout.
+func TestListIsBoundedByAPerReconcileDeadline(t *testing.T) {
+	prev := listDeadline
+	listDeadline = 50 * time.Millisecond
+	t.Cleanup(func() { listDeadline = prev })
+
+	f := newFakeAPI(t, "tok")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{managedHostFixture("ing-a.ns", "a.example.com")}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	start := time.Now()
+	err := d.Reconcile(context.Background())
+	if err == nil {
+		t.Fatal("a list that outruns the deadline must fail the reconcile")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("reconcile took %s; the deadline did not apply", elapsed)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("a timed-out list must write nothing (calls=%d)", rec.calls)
+	}
+}
+
+// The capability probe is hit on every admin page load, so it must not turn into
+// a full config load (and a store read-lock behind an in-flight reconcile commit)
+// each time.
+func TestEnabledIsAnsweredFromTheCachedFlag(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) { writeList(w, nil, "") }
+	settings := model.Settings{IngressDiscovery: baseSettings(f)}
+	var loads int
+	d := New(
+		func(context.Context) (model.Config, model.Settings, error) {
+			loads++
+			return model.Config{}, settings, nil
+		},
+		(&recorder{}).apply, nil)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	after := loads
+	for i := 0; i < 5; i++ {
+		if !d.Enabled() {
+			t.Fatal("discovery is enabled in settings")
+		}
+	}
+	if loads != after {
+		t.Fatalf("Enabled() loaded the config %d extra times; it must answer from the cache", loads-after)
 	}
 }

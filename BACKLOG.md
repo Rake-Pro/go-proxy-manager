@@ -209,10 +209,16 @@ and the design record
     gpm runs off-cluster on the edge host), token re-read on a TTL for projected
     SA rotation, hardened transport, bounded pagination.
   - [x] **Scoped read-only ServiceAccount**: `deploy/k8s-ingress-discovery-rbac.yaml`
-    grants `get`/`list`/`watch` on `ingresses` only. gpm never writes to the cluster.
+    grants `list` on `ingresses` only (the reconciler works from a full list and
+    never gets by name or watches). gpm never writes to the cluster.
   - [x] **Template-derived, managed-labelled objects** carrying
     `gpm.rake.pro/managed-by: ingress-discovery`; only those are written or
     deleted, and a name collision with a hand-written host is skipped + warned.
+  - [x] **Domain ownership, not just name ownership** — a derived host whose
+    domains are already claimed by a host discovery does not own is skipped and
+    reported, and `Config.Validate` rejects two enabled hosts claiming one domain
+    whatever wrote them. Ownership is re-checked under the store lock at write
+    time via `Store.ApplyBatch`'s `ApplyGuard`, since the plan predates the list.
   - [x] **Feeds the existing DNS sync** — discovery sets the `dns` policy and
     reuses the phase-1 trigger, so there is one DNS code path.
   - [x] Open questions resolved in the design doc:
@@ -228,6 +234,9 @@ and the design record
       complete, successful, fully-paginated list that no longer derives it; every
       error path aborts before any write, and the client never returns a partial
       list with a nil error, so "empty" and "failed" are different return shapes.
+      The LIST decode asserts `kind: IngressList` and a present `items` field, so a
+      `200` from something that is not the API server freezes rather than reading
+      as an empty cluster; one list is bounded to two minutes end to end.
   - [x] Poll (configurable `pollInterval`, default 1m, floor 15s) rather than
     watch: a watch means hand-rolling resourceVersion tracking, `410 Gone`
     re-lists and a reconnect loop over a LAN hop, for convergence that is not

@@ -187,3 +187,24 @@ func TestIngressDiscoveryScopeIsKnown(t *testing.T) {
 		t.Fatal("read must not imply write")
 	}
 }
+
+func TestIsDNSLabel(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"monitoring", true},
+		{"kube-system", true},
+		{"a", true},
+		{"", false},
+		{"ns.evil", false},    // a dot would make the derived "<name>.<namespace>" ambiguous
+		{"Monitoring", false}, // namespaces are lowercase
+		{"-ns", false},
+		{"ns-", false},
+		{"ns/other", false},
+	} {
+		if got := IsDNSLabel(tc.in); got != tc.want {
+			t.Errorf("IsDNSLabel(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -255,7 +256,18 @@ func main() {
 			for _, name := range deletes {
 				refs = append(refs, store.ObjectRef{Kind: "ProxyHost", Name: name})
 			}
-			return st.ApplyBatch(c, objs, refs, message, store.Author{Name: "ingress-discovery", Email: "gpm@localhost"})
+			// The reconciler's plan is made from a snapshot taken before a
+			// multi-second cluster list, so ownership is re-checked here under the
+			// store lock: anything that stopped being a discovery-owned object in
+			// the meantime is left alone rather than overwritten or deleted.
+			guard := func(existing model.Object) error {
+				if existing.GetMeta().Labels[model.ManagedByLabel] != model.ManagedByIngressDiscovery {
+					return fmt.Errorf("%s %q is not labelled %s=%s", existing.Kind(), existing.GetMeta().Name,
+						model.ManagedByLabel, model.ManagedByIngressDiscovery)
+				}
+				return nil
+			}
+			return st.ApplyBatch(c, objs, refs, message, store.Author{Name: "ingress-discovery", Email: "gpm@localhost"}, guard)
 		},
 		func(commit string) {
 			if err := reload(); err != nil {
@@ -267,7 +279,16 @@ func main() {
 			dnsSyncer.Trigger()
 		},
 	)
-	go ingressDisc.Run(ctx)
+	// The reconciler is tracked, not fire-and-forget: a run that is mid-commit when
+	// the process is asked to stop has to be allowed to finish (or roll back)
+	// before main returns, or shutdown is exactly the window that leaves the config
+	// repo written but uncommitted.
+	var discWG sync.WaitGroup
+	discWG.Add(1)
+	go func() {
+		defer discWG.Done()
+		ingressDisc.Run(ctx)
+	}()
 
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
@@ -328,6 +349,7 @@ func main() {
 		stop() // cancel ctx so the sibling server shuts down too
 	}
 	<-errc
+	discWG.Wait()
 	log.Info().Msg("shutdown complete")
 }
 

@@ -18,6 +18,12 @@ import (
 // running. The API maps it to 409 Conflict, mirroring the DNS syncer.
 var ErrReconcileInProgress = errors.New("ingress discovery: a reconcile is already in progress")
 
+// listDeadline bounds ONE reconcile's list, pagination included. Without it the
+// per-request timeout multiplied by the page limit is the real bound (tens of
+// minutes), during which the reconcile mutex is held and every manual reconcile
+// and poll queues behind it. It is a var only so the tests can shorten it.
+var listDeadline = 2 * time.Minute
+
 // Per-host outcomes reported in Status.Hosts.
 const (
 	ActionCreated   = "created"
@@ -91,6 +97,13 @@ type Discoverer struct {
 
 	mu     sync.Mutex
 	status Status
+	// enabled caches settings.ingressDiscovery.enabled so the capability probe
+	// (hit on every SPA page load) does not have to take the store's read lock and
+	// validate the whole config graph behind an in-flight reconcile commit. It is
+	// refreshed by every reconcile and every interval read, so it lags a settings
+	// change by at most one poll.
+	enabled      bool
+	enabledKnown bool
 
 	// single serialises reconciles so two runs never plan against each other.
 	single sync.Mutex
@@ -119,17 +132,34 @@ func (d *Discoverer) Status() Status {
 	return d.status
 }
 
-// Enabled reports whether discovery is configured, for the capability probe. A
-// load failure reports disabled rather than guessing.
+// Enabled reports whether discovery is configured, for the capability probe. It
+// answers from the cached flag once anything has read settings; only the very
+// first call (before the first poll) loads, so the probe cannot become a config
+// load per admin page view. A load failure reports disabled rather than guessing.
 func (d *Discoverer) Enabled() bool {
 	if d == nil || d.load == nil {
 		return false
 	}
+	d.mu.Lock()
+	if d.enabledKnown {
+		v := d.enabled
+		d.mu.Unlock()
+		return v
+	}
+	d.mu.Unlock()
+
 	_, settings, err := d.load(context.Background())
 	if err != nil {
 		return false
 	}
+	d.setEnabled(settings.IngressDiscovery.Enabled)
 	return settings.IngressDiscovery.Enabled
+}
+
+func (d *Discoverer) setEnabled(v bool) {
+	d.mu.Lock()
+	d.enabled, d.enabledKnown = v, true
+	d.mu.Unlock()
 }
 
 // Run polls until ctx is cancelled, reconciling on the configured interval. The
@@ -158,6 +188,7 @@ func (d *Discoverer) interval(ctx context.Context) time.Duration {
 	if err != nil {
 		return time.Minute
 	}
+	d.setEnabled(settings.IngressDiscovery.Enabled)
 	return settings.IngressDiscovery.Interval()
 }
 
@@ -213,6 +244,7 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 		return d.fail(now, false, fmt.Errorf("ingress discovery: load config: %w", err))
 	}
 	conf := settings.IngressDiscovery
+	d.setEnabled(conf.Enabled)
 	if !conf.Enabled {
 		d.mu.Lock()
 		d.status = Status{Enabled: false, LastRun: now, Hosts: []HostResult{}}
@@ -231,7 +263,9 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 	// that failed mid-pagination - returns WITHOUT items, and no write of any
 	// kind happens below. A managed host is only ever deleted on the strength of
 	// a complete, successful list.
-	ingresses, err := client.ListIngresses(ctx)
+	listCtx, cancelList := context.WithTimeout(ctx, listDeadline)
+	ingresses, err := client.ListIngresses(listCtx)
+	cancelList()
 	if err != nil {
 		return d.fail(now, true, fmt.Errorf("ingress discovery: list ingresses: %w", err))
 	}
@@ -247,11 +281,17 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 		if commit, err = d.apply(ctx, plan.upserts, plan.deletes, msg); err != nil {
 			return d.fail(now, true, fmt.Errorf("ingress discovery: apply: %w", err))
 		}
-		log.Info().
-			Int("created", plan.created).Int("updated", plan.updated).Int("deleted", len(plan.deletes)).
-			Str("commit", commit).Msg("ingress discovery: config updated")
-		if d.onChange != nil {
-			d.onChange(commit)
+		// An empty commit means the writer found nothing left to do (every planned
+		// delete was already gone, or an ownership re-check under the store lock
+		// dropped the whole batch). Nothing changed on disk, so firing the reload,
+		// webhook and DNS trigger would be a lie with an empty revision attached.
+		if commit != "" {
+			log.Info().
+				Int("created", plan.created).Int("updated", plan.updated).Int("deleted", len(plan.deletes)).
+				Str("commit", commit).Msg("ingress discovery: config updated")
+			if d.onChange != nil {
+				d.onChange(commit)
+			}
 		}
 	}
 
@@ -365,25 +405,91 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		source[name] = ref
 	}
 
+	// Which managed hosts this run would remove. Needed before the domain gate
+	// below: a host on its way out must not keep claiming its domains, or a
+	// renamed Ingress could never hand its hostname over.
+	doomed := map[string]bool{}
+	for name := range managed {
+		if _, want := desired[name]; !want && !protected[name] {
+			doomed[name] = true
+		}
+	}
+
+	// The DOMAIN ownership gate. Ownership of the derived NAME is not enough:
+	// hosts are routed by domain, and the router's per-domain maps are filled in
+	// config load order, so a derived host whose name sorts late would silently
+	// take over an operator host's hostname (and its TLS/mTLS pinning with it)
+	// without ever colliding on a name. Every domain already claimed by a host
+	// this reconcile is not rewriting is off limits; a derived host that wants one
+	// is skipped and reported, exactly like a name collision.
+	claimed := map[string]string{}
+	claim := func(owner string, domains []string) {
+		for _, dom := range domains {
+			key := domainKey(dom)
+			if key == "" {
+				continue
+			}
+			if _, taken := claimed[key]; !taken {
+				claimed[key] = owner
+			}
+		}
+	}
+	for _, h := range cfg.ProxyHosts {
+		// A managed host that this run rewrites or removes releases its domains;
+		// everything else - every operator-authored host, and every managed host
+		// being kept as-is - holds on to them.
+		if managedHost(h) {
+			if _, rewritten := desired[h.Name]; rewritten || doomed[h.Name] {
+				continue
+			}
+		}
+		claim(h.Name, h.Domains)
+	}
+	for _, h := range cfg.RedirectHosts {
+		claim(h.Name, h.Domains)
+	}
+	for _, h := range cfg.DeadHosts {
+		claim(h.Name, h.Domains)
+	}
+
 	for _, name := range sortedKeys(desired) {
 		want := desired[name]
 		cur, exists := current[name]
+		// A skipped host leaves whatever is on disk in place, so it must re-assert
+		// that object's domains: otherwise a later-sorted derived host could claim
+		// one and produce a duplicate the config validator would reject, failing the
+		// whole batch.
+		skip := func(reason string) {
+			p.skipped++
+			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains,
+				Action: ActionSkipped, Reason: reason})
+			if exists {
+				claim(name, cur.Domains)
+			}
+		}
+		if conflict, owner := firstClaimed(want.Domains, claimed); conflict != "" {
+			skip(fmt.Sprintf("domain %q is already claimed by proxy host %q, which ingress discovery does not own", conflict, owner))
+			log.Warn().Str("host", name).Str("ingress", source[name]).
+				Str("domain", conflict).Str("owner", owner).
+				Msg("ingress discovery: an existing host already serves this domain; refusing to shadow it")
+			continue
+		}
 		switch {
 		case exists && !managedHost(cur):
 			// Somebody hand-wrote a host with this name. Overwriting it is exactly
 			// what the ownership rule forbids, so skip and say so - the same
 			// skip-and-warn the Pi-hole and Cloudflare backends do for a record they
 			// do not own.
-			p.skipped++
-			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains,
-				Action: ActionSkipped, Reason: "a proxy host with this name exists and is not managed by ingress discovery"})
+			skip("a proxy host with this name exists and is not managed by ingress discovery")
 			log.Warn().Str("host", name).Str("ingress", source[name]).
 				Msg("ingress discovery: name is taken by an operator-authored proxy host; leaving it alone")
 		case !exists:
+			claim(name, want.Domains)
 			p.upserts = append(p.upserts, want)
 			p.created++
 			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionCreated})
 		default:
+			claim(name, want.Domains)
 			// Carry the original creation timestamp so an update does not rewrite it.
 			want.CreatedAt = cur.CreatedAt
 			if sameHost(cur, want) {
@@ -397,7 +503,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 	}
 
 	for _, name := range sortedKeys(managed) {
-		if _, want := desired[name]; want || protected[name] {
+		if !doomed[name] {
 			continue
 		}
 		p.deletes = append(p.deletes, name)
@@ -410,6 +516,21 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		p.results = []HostResult{}
 	}
 	return p
+}
+
+// domainKey normalises a configured domain for comparison, matching the key the
+// config validator and the router's per-domain maps use.
+func domainKey(d string) string { return strings.ToLower(strings.TrimSpace(d)) }
+
+// firstClaimed returns the first of domains already claimed by another host, and
+// that host's name, or ("", "") when none is.
+func firstClaimed(domains []string, claimed map[string]string) (string, string) {
+	for _, d := range domains {
+		if owner, taken := claimed[domainKey(d)]; taken {
+			return domainKey(d), owner
+		}
+	}
+	return "", ""
 }
 
 func sortedKeys[T any](m map[string]T) []string {
@@ -444,8 +565,14 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 	if ns == "" || nm == "" {
 		return "", model.ProxyHost{}, errors.New("Ingress has no namespace/name")
 	}
-	// "<name>.<namespace>": a dot separator is unambiguous because a Kubernetes
-	// namespace is a DNS-1123 label (no dots) while a name may contain "-".
+	// "<name>.<namespace>": a dot separator is unambiguous only while the
+	// namespace is a DNS-1123 label (no dots). The API server enforces that, but
+	// the derived name is an ownership boundary, so gpm checks it here rather than
+	// trusting whatever answered the LIST. No name is returned: an ambiguous one
+	// must not protect an existing host from deletion.
+	if !model.IsDNSLabel(ns) {
+		return "", model.ProxyHost{}, fmt.Errorf("namespace %q is not a DNS-1123 label", ns)
+	}
 	name := "ing-" + nm + "." + ns
 	if err := model.ValidateName(name); err != nil {
 		return "", model.ProxyHost{}, fmt.Errorf("derived name %q is not usable: %w", name, err)

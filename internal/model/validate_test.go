@@ -486,3 +486,110 @@ func TestClientAuthRequiresForceSSL(t *testing.T) {
 		t.Fatalf("clientAuth with forceSSL:true should be valid, got %v", err)
 	}
 }
+
+// Two enabled hosts claiming the same domain is a load-time error, whatever
+// wrote them. The data plane keys its per-domain maps by hostname and fills them
+// in config load order, so a duplicate is resolved by YAML filename rather than
+// by intent - which is how an automated writer (Ingress discovery) could
+// otherwise shadow an operator-authored host without ever colliding on a name.
+func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
+	redirect := func(name, domain string) RedirectHost {
+		return RedirectHost{
+			ObjectMeta:   ObjectMeta{Name: name},
+			Domains:      []string{domain},
+			TargetDomain: "elsewhere.example.com",
+		}
+	}
+	dead := func(name, domain string) DeadHost {
+		return DeadHost{ObjectMeta: ObjectMeta{Name: name}, Domains: []string{domain}}
+	}
+	withDomains := func(name string, domains ...string) ProxyHost {
+		return proxyHost(name, func(h *ProxyHost) { h.Domains = domains })
+	}
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name:    "two proxy hosts",
+			cfg:     Config{ProxyHosts: []ProxyHost{withDomains("sso", "sso.example.com"), withDomains("ing-grab.tenant", "sso.example.com")}},
+			wantErr: `both claim domain "sso.example.com"`,
+		},
+		{
+			name:    "case and trailing whitespace do not evade the check",
+			cfg:     Config{ProxyHosts: []ProxyHost{withDomains("a", "SSO.Example.com"), withDomains("b", " sso.example.com ")}},
+			wantErr: `both claim domain "sso.example.com"`,
+		},
+		{
+			name: "proxy host and redirect host",
+			cfg: Config{
+				ProxyHosts:    []ProxyHost{withDomains("app", "app.example.com")},
+				RedirectHosts: []RedirectHost{redirect("old-app", "app.example.com")},
+			},
+			wantErr: `both claim domain "app.example.com"`,
+		},
+		{
+			name: "proxy host and dead host",
+			cfg: Config{
+				ProxyHosts: []ProxyHost{withDomains("app", "app.example.com")},
+				DeadHosts:  []DeadHost{dead("absorb", "app.example.com")},
+			},
+			wantErr: `both claim domain "app.example.com"`,
+		},
+		{
+			name: "one domain of several collides",
+			cfg: Config{ProxyHosts: []ProxyHost{
+				withDomains("a", "a.example.com", "shared.example.com"),
+				withDomains("b", "b.example.com", "shared.example.com"),
+			}},
+			wantErr: `both claim domain "shared.example.com"`,
+		},
+		// A disabled host is excluded from the compiled data plane entirely, so it
+		// cannot shadow anything - and staging a replacement beside the live host is
+		// a legitimate workflow that a strict global check would break.
+		{
+			name: "a disabled host may share a domain with the live one",
+			cfg: Config{ProxyHosts: []ProxyHost{
+				withDomains("app", "app.example.com"),
+				proxyHost("app-next", func(h *ProxyHost) {
+					h.Domains = []string{"app.example.com"}
+					h.Disabled = true
+				}),
+			}},
+		},
+		{
+			name: "two disabled hosts may share a domain",
+			cfg: Config{ProxyHosts: []ProxyHost{
+				proxyHost("a", func(h *ProxyHost) { h.Domains = []string{"x.example.com"}; h.Disabled = true }),
+				proxyHost("b", func(h *ProxyHost) { h.Domains = []string{"x.example.com"}; h.Disabled = true }),
+			}},
+		},
+		{
+			name: "distinct domains are fine",
+			cfg: Config{
+				ProxyHosts:    []ProxyHost{withDomains("a", "a.example.com")},
+				RedirectHosts: []RedirectHost{redirect("b", "b.example.com")},
+				DeadHosts:     []DeadHost{dead("c", "c.example.com")},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected a validation error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}

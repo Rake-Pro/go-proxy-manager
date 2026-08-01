@@ -148,6 +148,43 @@ func (c Config) Validate() error {
 		register("host", h.Name, seenHost)
 	}
 
+	// Reject two ENABLED hosts claiming the same domain. The router keys its
+	// host/redirect/dead maps by domain, so a duplicate is resolved by whichever
+	// object happens to be compiled last (i.e. by YAML filename order), not by
+	// intent - and an automated writer such as Ingress discovery could therefore
+	// shadow an operator-authored host simply by sorting after it. Making a
+	// duplicate a load-time error means no source of writes can produce one.
+	//
+	// The check is scoped to ENABLED hosts on purpose: a disabled host is excluded
+	// from the compiled data plane entirely, so staging a replacement host beside
+	// the live one (disable old, enable new, or vice versa) stays legal.
+	hostDomains := map[string]string{}
+	claimDomains := func(name string, disabled bool, domains []string) {
+		if disabled {
+			return
+		}
+		for _, d := range domains {
+			key := strings.ToLower(strings.TrimSpace(d))
+			if key == "" {
+				continue
+			}
+			if other, dup := hostDomains[key]; dup {
+				errs = append(errs, fmt.Errorf("hosts %q and %q both claim domain %q (an enabled domain may be served by exactly one host; disable one of them)", other, name, key))
+				continue
+			}
+			hostDomains[key] = name
+		}
+	}
+	for _, h := range c.ProxyHosts {
+		claimDomains(h.Name, h.Disabled, h.Domains)
+	}
+	for _, h := range c.RedirectHosts {
+		claimDomains(h.Name, h.Disabled, h.Domains)
+	}
+	for _, h := range c.DeadHosts {
+		claimDomains(h.Name, h.Disabled, h.Domains)
+	}
+
 	// Certificate -> DNS provider references.
 	for _, ct := range c.Certificates {
 		if ct.ACME != nil {

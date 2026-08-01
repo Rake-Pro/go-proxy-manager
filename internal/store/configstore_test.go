@@ -538,7 +538,7 @@ func TestApplyBatchUpsertsAndDeletesInOneCommit(t *testing.T) {
 			},
 		},
 		[]ObjectRef{{Kind: "ProxyHost", Name: "drop"}},
-		"Ingress discovery: reconcile (+1 ~1 -1)", Author{})
+		"Ingress discovery: reconcile (+1 ~1 -1)", Author{}, nil)
 	if err != nil {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestApplyBatchEmptyIsANoOp(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	before, _ := s.RepoHistory(ctx, 100)
-	sha, err := s.ApplyBatch(ctx, nil, nil, "nothing", Author{})
+	sha, err := s.ApplyBatch(ctx, nil, nil, "nothing", Author{}, nil)
 	if err != nil {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestApplyBatchRejectsInvalidWithoutWriting(t *testing.T) {
 			Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80},
 		},
 		model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "bad"}}, // no domains, no upstream
-	}, nil, "batch", Author{})
+	}, nil, "batch", Author{}, nil)
 	if err == nil {
 		t.Fatal("an invalid member must fail the batch")
 	}
@@ -633,7 +633,7 @@ func TestApplyBatchRefusesDanglingDelete(t *testing.T) {
 	}, Author{}); err != nil {
 		t.Fatalf("seed host: %v", err)
 	}
-	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Certificate", Name: "wildcard"}}, "drop cert", Author{}); err == nil {
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Certificate", Name: "wildcard"}}, "drop cert", Author{}, nil); err == nil {
 		t.Fatal("deleting a referenced certificate in a batch must be refused")
 	}
 	cfg, _, err := s.Load(ctx)
@@ -651,7 +651,7 @@ func TestApplyBatchIgnoresAbsentDeletes(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	before, _ := s.RepoHistory(ctx, 100)
-	sha, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "never-existed"}}, "drop", Author{})
+	sha, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "never-existed"}}, "drop", Author{}, nil)
 	if err != nil {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
@@ -667,10 +667,188 @@ func TestApplyBatchIgnoresAbsentDeletes(t *testing.T) {
 func TestApplyBatchRejectsUnknownKindAndBadName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Nonsense", Name: "x"}}, "m", Author{}); err == nil {
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Nonsense", Name: "x"}}, "m", Author{}, nil); err == nil {
 		t.Fatal("an unknown kind must be refused")
 	}
-	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "../escape"}}, "m", Author{}); err == nil {
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "../escape"}}, "m", Author{}, nil); err == nil {
 		t.Fatal("a name that is not a valid object name must be refused")
+	}
+}
+
+// managedByFixture returns a proxy host labelled as one Ingress discovery owns.
+func managedByFixture(name string) model.ProxyHost {
+	h := sampleHost(name)
+	h.Labels = map[string]string{model.ManagedByLabel: model.ManagedByIngressDiscovery}
+	return h
+}
+
+// ownedByDiscovery is the guard the Ingress reconciler installs.
+func ownedByDiscovery(existing model.Object) error {
+	if existing.GetMeta().Labels[model.ManagedByLabel] != model.ManagedByIngressDiscovery {
+		return errors.New("not owned by ingress discovery")
+	}
+	return nil
+}
+
+// The TOCTOU the guard closes: the caller's plan is made from a snapshot taken
+// before a multi-second network list, and ApplyBatch is what finally runs. An
+// object relabelled (an operator adopting it) or replaced in that window must be
+// left alone, not written or deleted on the strength of the stale plan.
+func TestApplyBatchGuardRefusesObjectsThatChangedOwnerSincePlanning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// The state the caller planned against: both hosts were discovery-owned.
+	if _, err := s.SaveBatch(ctx, []model.Object{managedByFixture("adopt"), managedByFixture("drop")}, "seed", Author{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// The window: an operator takes both over by removing the ownership label.
+	adopted, dropped := sampleHost("adopt"), sampleHost("drop")
+	if _, err := s.SaveBatch(ctx, []model.Object{adopted, dropped}, "operator adopts", Author{}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	head, _ := s.Head(ctx)
+
+	// The stale plan lands: rewrite "adopt", delete "drop".
+	rewrite := managedByFixture("adopt")
+	rewrite.Domains = []string{"rewritten.example.com"}
+	sha, err := s.ApplyBatch(ctx, []model.Object{rewrite},
+		[]ObjectRef{{Kind: "ProxyHost", Name: "drop"}}, "stale plan", Author{}, ownedByDiscovery)
+	if err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if sha != "" {
+		t.Fatalf("nothing was authorised, so nothing may be committed (sha=%q)", sha)
+	}
+	if now, _ := s.Head(ctx); now != head {
+		t.Fatal("a fully guarded-away batch must not move HEAD")
+	}
+
+	cfg, _, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.ProxyHosts) != 2 {
+		t.Fatalf("both hosts must survive, got %d", len(cfg.ProxyHosts))
+	}
+	for _, h := range cfg.ProxyHosts {
+		if h.Domains[0] != h.Name+".example.com" {
+			t.Fatalf("host %q was clobbered: domains=%v", h.Name, h.Domains)
+		}
+		if h.Labels[model.ManagedByLabel] != "" {
+			t.Fatalf("host %q must keep the operator's labels, got %v", h.Name, h.Labels)
+		}
+	}
+}
+
+// The guard authorises only objects that ALREADY exist: a brand-new object has
+// no owner to check, so a create still goes through beside a guarded-away update.
+func TestApplyBatchGuardAllowsCreatesAndOwnedObjects(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.SaveBatch(ctx, []model.Object{managedByFixture("owned"), sampleHost("foreign")}, "seed", Author{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	owned := managedByFixture("owned")
+	owned.Domains = []string{"owned2.example.com"}
+	foreign := managedByFixture("foreign")
+	foreign.Domains = []string{"stolen.example.com"}
+
+	if _, err := s.ApplyBatch(ctx,
+		[]model.Object{managedByFixture("fresh"), owned, foreign},
+		nil, "mixed", Author{}, ownedByDiscovery); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	cfg, _, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	byName := map[string]model.ProxyHost{}
+	for _, h := range cfg.ProxyHosts {
+		byName[h.Name] = h
+	}
+	if _, ok := byName["fresh"]; !ok {
+		t.Fatal("a create has no existing owner to check and must go through")
+	}
+	if got := byName["owned"].Domains[0]; got != "owned2.example.com" {
+		t.Fatalf("an owned object must be updated, domains[0]=%q", got)
+	}
+	if got := byName["foreign"].Domains[0]; got != "foreign.example.com" {
+		t.Fatalf("the unowned object must be untouched, domains[0]=%q", got)
+	}
+}
+
+// failingCommitGit commits normally until armed, then fails - standing in for a
+// commit cancelled by shutdown or a git binary that dies mid-batch.
+type failingCommitGit struct {
+	GitRepo
+	fail bool
+}
+
+func (g *failingCommitGit) CommitAll(ctx context.Context, message string, author Author) (string, error) {
+	if g.fail {
+		return "", errors.New("git: commit failed")
+	}
+	return g.GitRepo.CommitAll(ctx, message, author)
+}
+
+// ApplyBatch writes YAML and removes files BEFORE it commits, so a failing commit
+// used to leave the working tree mutated but uncommitted: the next Load would
+// serve the deletions as live config while the status reported failure, and the
+// following unrelated write would sweep the orphaned changes into its commit.
+func TestApplyBatchRollsBackWhenTheCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	git := &failingCommitGit{GitRepo: NewExecGit(dir)}
+	s := New(dir, git)
+	ctx := context.Background()
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := s.SaveBatch(ctx, []model.Object{managedByFixture("keep"), managedByFixture("drop")}, "seed", Author{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	head, _ := s.Head(ctx)
+	before, err := os.ReadFile(filepath.Join(dir, "proxy-hosts", "keep.yaml"))
+	if err != nil {
+		t.Fatalf("read keep.yaml: %v", err)
+	}
+
+	git.fail = true
+	updated := managedByFixture("keep")
+	updated.Domains = []string{"changed.example.com"}
+	if _, err := s.ApplyBatch(ctx,
+		[]model.Object{updated, managedByFixture("added")},
+		[]ObjectRef{{Kind: "ProxyHost", Name: "drop"}},
+		"will fail", Author{}, nil); err == nil {
+		t.Fatal("a failing commit must fail the batch")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "proxy-hosts", "added.yaml")); err == nil {
+		t.Fatal("a rolled-back batch must not leave the new object behind")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "proxy-hosts", "drop.yaml")); err != nil {
+		t.Fatalf("a rolled-back batch must restore the deleted object: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "proxy-hosts", "keep.yaml"))
+	if err != nil {
+		t.Fatalf("read keep.yaml: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("an overwritten object must be restored byte for byte:\nbefore=%s\nafter=%s", before, after)
+	}
+	if now, _ := s.Head(ctx); now != head {
+		t.Fatal("HEAD must not move")
+	}
+
+	// The decisive check: the tree is clean again, so the next commit cannot
+	// silently carry the failed batch with it.
+	git.fail = false
+	clean, err := git.IsClean(ctx)
+	if err != nil {
+		t.Fatalf("IsClean: %v", err)
+	}
+	if !clean {
+		t.Fatal("the working tree must be clean after a rolled-back batch")
 	}
 }

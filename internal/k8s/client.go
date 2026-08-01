@@ -18,8 +18,8 @@
 // The client is deliberately plain net/http + encoding/json against the
 // Kubernetes REST API. client-go and its transitive tree would dwarf this
 // project's entire direct dependency set, which is the thing the project exists
-// to avoid. gpm never writes to the cluster: the shipped RBAC grants get/list/
-// watch on ingresses and nothing else.
+// to avoid. gpm never writes to the cluster: the client only ever LISTs, and the
+// shipped RBAC grants exactly that verb on ingresses and nothing else.
 //
 // See docs/design/ingress-discovery.md for the decision record.
 package k8s
@@ -46,8 +46,14 @@ import (
 const (
 	// ingressesPath is the collection endpoint for cluster-wide listing.
 	ingressesPath = "/apis/networking.k8s.io/v1/ingresses"
-	// listPageSize bounds one page of a paginated LIST.
-	listPageSize = 500
+	// listPageSize bounds one page of a paginated LIST. It is deliberately small
+	// relative to maxRespBody: a real Ingress carries managedFields and arbitrary
+	// annotations and runs to tens of kilobytes, so a large page is one verbose
+	// tenant manifest away from overflowing the body cap and freezing discovery.
+	listPageSize = 100
+	// listKind is the kind a LIST of ingresses must announce. A 200 whose body is
+	// not an IngressList is an ERROR, never an empty list - see ListIngresses.
+	listKind = "IngressList"
 	// maxListPages / maxListItems bound a paginated LIST so a misbehaving or
 	// hostile endpoint cannot stream unbounded data into memory. Exceeding either
 	// is an ERROR, never a silent truncation: a truncated list read as complete is
@@ -89,11 +95,19 @@ type Ingress struct {
 }
 
 // ingressList is one page of a LIST response.
+//
+// Kind and Items are shape assertions, not conveniences. Decoding a 200 into a
+// plain struct accepts `null`, `{}`, a Status object and `{"items":null}` alike,
+// all of which yield zero items and a nil error - which the reconciler would read
+// as "the cluster has no annotated Ingresses" and act on by deleting every
+// managed host. Items is a POINTER so an absent/null items field is
+// distinguishable from an empty one.
 type ingressList struct {
+	Kind     string `json:"kind"`
 	Metadata struct {
 		Continue string `json:"continue"`
 	} `json:"metadata"`
-	Items []Ingress `json:"items"`
+	Items *[]Ingress `json:"items"`
 }
 
 // statusError carries the API server's own error reply for a non-2xx response.
@@ -287,9 +301,14 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 		return fmt.Errorf("kubernetes: GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
+	// Read one byte past the cap so an oversized response is reported as such
+	// rather than surfacing as an opaque JSON syntax error on a truncated body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody+1))
 	if err != nil {
 		return fmt.Errorf("kubernetes: GET %s: read body: %w", path, err)
+	}
+	if len(body) > maxRespBody {
+		return fmt.Errorf("kubernetes: GET %s: response exceeded the %d-byte body cap (lower the page size, or trim oversized annotations on the listed objects)", path, maxRespBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized {
@@ -354,7 +373,18 @@ func (c *Client) ListIngresses(ctx context.Context) ([]Ingress, error) {
 		if err := c.get(ctx, path, q, &list); err != nil {
 			return nil, err
 		}
-		out = append(out, list.Items...)
+		// Shape assertion. A LIST reply from a Kubernetes API server always carries
+		// kind: IngressList; anything else on a 200 - a Status envelope, a mesh or
+		// gateway response, an unrelated HTTPS service sharing the internal CA, or a
+		// bare null - is a MISDIRECTED request, not an empty cluster. Erroring here
+		// keeps it on the freeze path instead of letting it delete managed hosts.
+		if list.Kind != listKind {
+			return nil, fmt.Errorf("kubernetes: GET %s returned kind %q, want %q; refusing to treat a non-IngressList response as an empty list (check apiURL, namespace and labelSelector)", path, list.Kind, listKind)
+		}
+		if list.Items == nil {
+			return nil, fmt.Errorf("kubernetes: GET %s returned an %s with no items field; refusing to treat it as an empty list", path, listKind)
+		}
+		out = append(out, *list.Items...)
 		if len(out) > maxListItems {
 			return nil, fmt.Errorf("kubernetes: ingress list exceeded %d items; refusing to treat a truncated list as complete", maxListItems)
 		}
