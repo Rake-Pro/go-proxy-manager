@@ -755,6 +755,19 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 	if err := settings.Validate(); err != nil {
 		return "", err
 	}
+	// Settings.Validate can only check the shape of the names the discovery block
+	// carries; whether they RESOLVE needs the rest of the config. A dangling
+	// certificate/upstreamGroup/middleware/accessList ref there is not a settings
+	// problem later - it is stamped onto every derived host and rejects the whole
+	// reconcile batch on every poll, dropping unrelated tenants' changes with it.
+	// Cross-check here so the error lands on this write.
+	cfg, _, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+	if err := settings.IngressDiscovery.ValidateRefs(cfg); err != nil {
+		return "", err
+	}
 	if lits := model.LiteralSecrets(settings); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}

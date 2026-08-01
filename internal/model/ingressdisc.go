@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -303,6 +304,71 @@ func (d IngressDiscoverySettings) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ValidateRefs cross-checks every object the discovery block NAMES - the
+// certificate, the upstream group, each middleware, each access list, and the
+// mTLS trust anchor - against the objects that actually exist in cfg.
+//
+// Validate() above only checks name SHAPE, because a Settings value knows
+// nothing about the rest of the config. That was enough to write a settings
+// object that passes and then wedges discovery permanently: the reconciler
+// stamps the dangling ref onto every derived host, the store validates the whole
+// merged graph as ONE batch, and the batch is rejected - so every other tenant's
+// create, update and delete is dropped too, on every poll, forever, surfacing
+// only as an opaque batch-validation error in the reconcile status. Landing the
+// error on the operator's own write instead is the difference between a typo and
+// an outage.
+//
+// Like Validate, a disabled block is not checked at all, so a half-filled draft
+// can sit in settings without blocking unrelated writes.
+func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
+	if !d.Enabled {
+		return nil
+	}
+	certs := map[string]bool{}
+	for _, o := range cfg.Certificates {
+		certs[o.Name] = true
+	}
+	mws := map[string]bool{}
+	for _, o := range cfg.Middlewares {
+		mws[o.Name] = true
+	}
+	als := map[string]bool{}
+	for _, o := range cfg.AccessLists {
+		als[o.Name] = true
+	}
+	ugs := map[string]bool{}
+	for _, o := range cfg.UpstreamGroups {
+		ugs[o.Name] = true
+	}
+	clientCAs := map[string]bool{}
+	disabledClientCAs := map[string]bool{}
+	for _, o := range cfg.ClientCAs {
+		clientCAs[o.Name] = true
+		if o.Disabled {
+			disabledClientCAs[o.Name] = true
+		}
+	}
+
+	var errs []error
+	check := func(path string, t IngressHostTemplate) {
+		owner := "settings.ingressDiscovery." + path
+		checkRef(&errs, "ingress discovery", owner, "certificate", t.TLS.CertificateRef, certs)
+		checkRef(&errs, "ingress discovery", owner, "upstreamGroup", t.UpstreamGroupRef, ugs)
+		checkClientAuthRef(&errs, "ingress discovery", owner, t.TLS, clientCAs, disabledClientCAs)
+		for _, m := range t.Middlewares {
+			checkRef(&errs, "ingress discovery", owner, "middleware", m, mws)
+		}
+		for _, a := range t.AccessLists {
+			checkRef(&errs, "ingress discovery", owner, "accessList", a, als)
+		}
+	}
+	check(DefaultProfileName, d.Template)
+	for _, name := range d.ProfileNames() {
+		check(fmt.Sprintf("profiles[%q]", name), d.Profiles[name])
+	}
+	return errors.Join(errs...)
 }
 
 // validate checks one derived-host shape. path is the settings location used in
