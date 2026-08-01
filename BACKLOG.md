@@ -216,6 +216,25 @@ and the design record
   - [x] **Template-derived, managed-labelled objects** carrying
     `gpm.rake.pro/managed-by: ingress-discovery`; only those are written or
     deleted, and a name collision with a hand-written host is skipped + warned.
+  - [x] **Per-host chains via named profiles** (`ingressDiscovery.profiles`,
+    selected with `gpm.rake.pro/profile`). One template only fits a uniform
+    fleet; adopting a host with a different chain would drop its
+    `sso`/`rate-limit`/login middleware or impose an access list on a host that
+    is public on purpose. The annotation carries a **name only** - the Ingress
+    author is untrusted, so a manifest picks among operator-authored chains and
+    can never name a middleware, access list, certificate or upstream. An
+    undefined name skips the Ingress rather than downgrading it to the default.
+    `template` stays the default profile, so existing configs are unaffected.
+  - [x] **Revocation fails closed.** An Ingress whose profile no longer resolves
+    (typo, renamed profile, retired profile, profile rows cleared in the UI) has
+    its existing derived host **disabled**, not frozen - otherwise a tenant could
+    pin a chain the operator had just tightened simply by naming a profile that
+    does not exist. Other derive failures still freeze.
+  - [x] **Discovery refs are cross-checked at settings-write time**
+    (`IngressDiscoverySettings.ValidateRefs`). One dangling
+    certificate/upstreamGroup/middleware/accessList/clientCA name used to pass
+    `SaveSettings` and then reject the whole reconcile batch on every poll,
+    dropping every unrelated tenant's changes with it.
   - [x] **Domain ownership, not just name ownership** — a derived host whose
     domains are already claimed by a host discovery does not own is skipped and
     reported, and `Config.Validate` rejects two enabled hosts claiming one domain
@@ -329,6 +348,20 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
 - **Gateway API** (`Gateway`/`HTTPRoute`) as a second discovery source.
 - **A dry-run endpoint** (`GET /ingress-discovery/plan`) reporting the diff
+  without writing. Cheap to add on top of the existing plan/apply split.
+- **Operator-side profile selection** — mapping rules in settings
+  (`namespace`/label ⇒ profile) so the `Ingress` selects nothing at all. Strictly
+  stronger than the annotation, and the answer to the one residual risk profiles
+  carry: **every profile is selectable by every annotating Ingress**, so a tenant
+  can pick the most permissive profile you defined. Until this exists, the
+  mitigation is documented policy — define only profiles you are willing for any
+  tenant to choose (now stated in `docs/configuration.md` and in the settings UI).
+  Cost: a settings commit per new service. Named
+  profiles are the substrate it would sit on. See
+  [design/ingress-discovery.md §5a](docs/design/ingress-discovery.md).
+- **Per-profile `allowedDomainSuffixes`**, so a permissive profile can be
+  restricted to a subset of the published namespace. The suffix list is currently
+  global to the whole discovery block.
   without writing. Cheap to add on top of the existing plan/apply split — the DNS
   sync's `GET /dns-sync/plan` is now the worked example to copy.
 - **Live validation** against the real cluster: the subsystem is unit-tested

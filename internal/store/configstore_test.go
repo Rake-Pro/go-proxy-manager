@@ -852,3 +852,128 @@ func TestApplyBatchRollsBackWhenTheCommitFails(t *testing.T) {
 		t.Fatal("the working tree must be clean after a rolled-back batch")
 	}
 }
+
+// A discovery template or profile naming an object that does not exist used to
+// pass SaveSettings and then wedge the WHOLE reconcile: the reconciler stamps the
+// dangling ref onto every derived host, the batch is validated as one graph, and
+// the rejection drops every other tenant's change too, on every poll, forever.
+// The error has to land on the operator's own write.
+func TestSaveSettingsRejectsDanglingDiscoveryRefs(t *testing.T) {
+	ctx := context.Background()
+	author := Author{Name: "admin", Email: "admin@example.com"}
+
+	base := func() model.IngressDiscoverySettings {
+		return model.IngressDiscoverySettings{
+			Enabled:               true,
+			AllowedDomainSuffixes: []string{"example.com"},
+			Template: model.IngressHostTemplate{
+				Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			},
+		}
+	}
+	profile := func(mw, al []string) model.IngressHostTemplate {
+		return model.IngressHostTemplate{
+			Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			Middlewares: mw,
+			AccessLists: al,
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*model.IngressDiscoverySettings)
+		wantErr string
+	}{
+		{
+			name: "profile names a middleware that does not exist",
+			mutate: func(d *model.IngressDiscoverySettings) {
+				d.Profiles = map[string]model.IngressHostTemplate{"sso-internal": profile([]string{"nope"}, nil)}
+			},
+			wantErr: `unknown middleware "nope"`,
+		},
+		{
+			name: "profile names an access list that does not exist",
+			mutate: func(d *model.IngressDiscoverySettings) {
+				d.Profiles = map[string]model.IngressHostTemplate{"vpn": profile(nil, []string{"ghost-vpn"})}
+			},
+			wantErr: `unknown accessList "ghost-vpn"`,
+		},
+		{
+			name:    "template names a certificate that does not exist",
+			mutate:  func(d *model.IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "no-such-cert" },
+			wantErr: `unknown certificate "no-such-cert"`,
+		},
+		{
+			name: "template names an upstream group that does not exist",
+			mutate: func(d *model.IngressDiscoverySettings) {
+				d.Template.Upstream = model.Upstream{}
+				d.Template.UpstreamGroupRef = "no-such-group"
+			},
+			wantErr: `unknown upstreamGroup "no-such-group"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			if _, err := st.Save(ctx, sampleCert("wildcard"), author); err != nil {
+				t.Fatalf("seed certificate: %v", err)
+			}
+			_, s, err := st.Load(ctx)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			s.IngressDiscovery = base()
+			tc.mutate(&s.IngressDiscovery)
+			_, err = st.SaveSettings(ctx, s, author)
+			if err == nil {
+				t.Fatal("SaveSettings accepted a dangling ingressDiscovery reference")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to name the dangling ref (%s)", err, tc.wantErr)
+			}
+		})
+	}
+
+	// And the same shape, all refs resolving, is accepted.
+	t.Run("resolvable refs are accepted", func(t *testing.T) {
+		st := newTestStore(t)
+		for _, o := range []model.Object{
+			sampleCert("wildcard"),
+			model.AccessList{ObjectMeta: model.ObjectMeta{Name: "home-vpn"}, Rules: []model.IPRule{{CIDR: "10.0.0.0/8", Action: "allow"}}},
+		} {
+			if _, err := st.Save(ctx, o, author); err != nil {
+				t.Fatalf("seed %s: %v", o.Kind(), err)
+			}
+		}
+		_, s, err := st.Load(ctx)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		s.IngressDiscovery = base()
+		s.IngressDiscovery.Template.AccessLists = []string{"home-vpn"}
+		s.IngressDiscovery.Profiles = map[string]model.IngressHostTemplate{"vpn": profile(nil, []string{"home-vpn"})}
+		if _, err := st.SaveSettings(ctx, s, author); err != nil {
+			t.Fatalf("SaveSettings rejected a config whose refs all resolve: %v", err)
+		}
+	})
+
+	// A DISABLED block is a draft: it is not cross-checked, exactly as
+	// Settings.Validate does not shape-check it, so half-filled settings never
+	// block an unrelated write.
+	t.Run("a disabled block is not cross-checked", func(t *testing.T) {
+		st := newTestStore(t)
+		_, s, err := st.Load(ctx)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		s.IngressDiscovery = base()
+		s.IngressDiscovery.Enabled = false
+		s.IngressDiscovery.Profiles = map[string]model.IngressHostTemplate{"draft": profile([]string{"not-written-yet"}, nil)}
+		if _, err := st.SaveSettings(ctx, s, author); err != nil {
+			t.Fatalf("a disabled discovery draft must not block a settings write: %v", err)
+		}
+	})
+}

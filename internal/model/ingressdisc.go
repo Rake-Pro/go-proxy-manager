@@ -1,9 +1,11 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,7 +20,19 @@ const (
 	AnnotationLanDirect = "gpm.rake.pro/lan-direct"
 	// AnnotationPublicCname sets dns.publicCname on the derived proxy host.
 	AnnotationPublicCname = "gpm.rake.pro/public-cname"
+	// AnnotationProfile NAMES one of the operator-defined
+	// settings.ingressDiscovery.profiles entries. It carries a name and nothing
+	// else: the Ingress author is untrusted, so they may pick from the set of
+	// chains the operator sanctioned but can never describe one. Naming a profile
+	// that does not exist SKIPS the Ingress - it is never quietly downgraded to
+	// the default. See docs/design/ingress-discovery.md §5a.
+	AnnotationProfile = "gpm.rake.pro/profile"
 )
+
+// DefaultProfileName is what a host derived from the default `template` reports
+// as its profile in the reconcile status. It is a reserved profile name so the
+// audit trail is never ambiguous about which block produced a chain.
+const DefaultProfileName = "template"
 
 // ManagedByLabel/ManagedByIngressDiscovery mark the proxy hosts discovery owns.
 // Reconciliation creates, updates and deletes ONLY objects carrying this label
@@ -153,7 +167,64 @@ type IngressDiscoverySettings struct {
 	// manifest away from claiming somebody else's name at the edge.
 	AllowedDomainSuffixes []string `json:"allowedDomainSuffixes,omitempty" yaml:"allowedDomainSuffixes,omitempty"`
 
+	// Template is the DEFAULT profile: the shape an Ingress gets when it names no
+	// profile at all. It predates Profiles and keeps working unchanged.
 	Template IngressHostTemplate `json:"template,omitempty" yaml:"template,omitempty"`
+
+	// Profiles are additional operator-defined chains an Ingress may SELECT BY
+	// NAME with gpm.rake.pro/profile. The real fleet is heterogeneous - some hosts
+	// are deliberately public, some carry sso, some rate-limit - and one template
+	// can only ever adopt the group that happens to match it; adopting the rest
+	// would silently drop their middleware or impose an access list on a host that
+	// is public on purpose.
+	//
+	// The security property that makes this safe is that the annotation carries a
+	// NAME and nothing else. Every profile is written by the operator here, in the
+	// config repo, and validated exactly like Template; a cluster tenant chooses
+	// among them but cannot invent one, cannot name a middleware, an access list,
+	// a certificate or an upstream, and cannot produce a host weaker than
+	// something the operator explicitly sanctioned. A name that matches no profile
+	// is skipped, not defaulted.
+	//
+	// Keys are profile names (ValidateName shape). "template" is reserved for the
+	// default block above.
+	Profiles map[string]IngressHostTemplate `json:"profiles,omitempty" yaml:"profiles,omitempty"`
+}
+
+// ResolveProfile maps the raw gpm.rake.pro/profile annotation value onto the
+// template that should shape the derived host. It returns the template, the
+// resolved profile name (for the reconcile status), and whether resolution
+// succeeded.
+//
+// The rules are deliberately blunt, because the input is untrusted:
+//   - absent or whitespace-only -> the default Template, reported as "template"
+//   - an EXACT match (after trimming surrounding whitespace) against a defined
+//     profile -> that profile
+//   - anything else -> ok=false, and the caller SKIPS the Ingress
+//
+// There is no prefix matching, no case folding, no nearest-neighbour guess and
+// no fallback to the default: those are the ways a junk or hostile annotation
+// value turns into a chain nobody chose.
+func (d IngressDiscoverySettings) ResolveProfile(raw string) (IngressHostTemplate, string, bool) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return d.Template, DefaultProfileName, true
+	}
+	if p, ok := d.Profiles[name]; ok {
+		return p, name, true
+	}
+	return IngressHostTemplate{}, name, false
+}
+
+// ProfileNames returns the defined profile names in sorted order, so validation
+// errors and logs do not depend on map iteration order.
+func (d IngressDiscoverySettings) ProfileNames() []string {
+	out := make([]string, 0, len(d.Profiles))
+	for k := range d.Profiles {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Interval returns the configured poll interval, or the default when unset. It
@@ -214,32 +285,122 @@ func (d IngressDiscoverySettings) Validate() error {
 			return fmt.Errorf("settings: ingressDiscovery.allowedDomainSuffixes[%d] %q is not a valid domain suffix", i, s)
 		}
 	}
-	if d.Template.UpstreamGroupRef == "" {
-		if err := d.Template.Upstream.validate(); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.template.upstream: %w", err)
+	// The default block and every named profile are held to IDENTICAL standards.
+	// A profile is not a lightweight variant: it is a full chain an untrusted
+	// Ingress can select, so an invalid one has to fail the settings WRITE rather
+	// than surface as a skipped host at the next reconcile.
+	if err := d.Template.validate("template"); err != nil {
+		return err
+	}
+	for _, name := range d.ProfileNames() {
+		if name == DefaultProfileName {
+			return fmt.Errorf("settings: ingressDiscovery.profiles[%q] is reserved for the default template block; pick another name", name)
+		}
+		if err := ValidateName(name); err != nil {
+			return fmt.Errorf("settings: ingressDiscovery.profiles: %w", err)
+		}
+		if err := d.Profiles[name].validate(fmt.Sprintf("profiles[%q]", name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateRefs cross-checks every object the discovery block NAMES - the
+// certificate, the upstream group, each middleware, each access list, and the
+// mTLS trust anchor - against the objects that actually exist in cfg.
+//
+// Validate() above only checks name SHAPE, because a Settings value knows
+// nothing about the rest of the config. That was enough to write a settings
+// object that passes and then wedges discovery permanently: the reconciler
+// stamps the dangling ref onto every derived host, the store validates the whole
+// merged graph as ONE batch, and the batch is rejected - so every other tenant's
+// create, update and delete is dropped too, on every poll, forever, surfacing
+// only as an opaque batch-validation error in the reconcile status. Landing the
+// error on the operator's own write instead is the difference between a typo and
+// an outage.
+//
+// Like Validate, a disabled block is not checked at all, so a half-filled draft
+// can sit in settings without blocking unrelated writes.
+func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
+	if !d.Enabled {
+		return nil
+	}
+	certs := map[string]bool{}
+	for _, o := range cfg.Certificates {
+		certs[o.Name] = true
+	}
+	mws := map[string]bool{}
+	for _, o := range cfg.Middlewares {
+		mws[o.Name] = true
+	}
+	als := map[string]bool{}
+	for _, o := range cfg.AccessLists {
+		als[o.Name] = true
+	}
+	ugs := map[string]bool{}
+	for _, o := range cfg.UpstreamGroups {
+		ugs[o.Name] = true
+	}
+	clientCAs := map[string]bool{}
+	disabledClientCAs := map[string]bool{}
+	for _, o := range cfg.ClientCAs {
+		clientCAs[o.Name] = true
+		if o.Disabled {
+			disabledClientCAs[o.Name] = true
+		}
+	}
+
+	var errs []error
+	check := func(path string, t IngressHostTemplate) {
+		owner := "settings.ingressDiscovery." + path
+		checkRef(&errs, "ingress discovery", owner, "certificate", t.TLS.CertificateRef, certs)
+		checkRef(&errs, "ingress discovery", owner, "upstreamGroup", t.UpstreamGroupRef, ugs)
+		checkClientAuthRef(&errs, "ingress discovery", owner, t.TLS, clientCAs, disabledClientCAs)
+		for _, m := range t.Middlewares {
+			checkRef(&errs, "ingress discovery", owner, "middleware", m, mws)
+		}
+		for _, a := range t.AccessLists {
+			checkRef(&errs, "ingress discovery", owner, "accessList", a, als)
+		}
+	}
+	check(DefaultProfileName, d.Template)
+	for _, name := range d.ProfileNames() {
+		check(fmt.Sprintf("profiles[%q]", name), d.Profiles[name])
+	}
+	return errors.Join(errs...)
+}
+
+// validate checks one derived-host shape. path is the settings location used in
+// error messages ("template" or `profiles["sso-internal"]`), so an operator can
+// tell which block they broke.
+func (t IngressHostTemplate) validate(path string) error {
+	if t.UpstreamGroupRef == "" {
+		if err := t.Upstream.validate(); err != nil {
+			return fmt.Errorf("settings: ingressDiscovery.%s.upstream: %w", path, err)
 		}
 	} else {
-		if d.Template.Upstream != (Upstream{}) {
-			return fmt.Errorf("settings: ingressDiscovery.template: upstream and upstreamGroupRef are mutually exclusive")
+		if t.Upstream != (Upstream{}) {
+			return fmt.Errorf("settings: ingressDiscovery.%s: upstream and upstreamGroupRef are mutually exclusive", path)
 		}
-		if err := ValidateName(d.Template.UpstreamGroupRef); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.template.upstreamGroupRef: %w", err)
+		if err := ValidateName(t.UpstreamGroupRef); err != nil {
+			return fmt.Errorf("settings: ingressDiscovery.%s.upstreamGroupRef: %w", path, err)
 		}
 	}
-	if err := ValidateName(d.Template.TLS.CertificateRef); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.template.tls.certificateRef is required when discovery is enabled (discovery never issues per-host certificates): %w", err)
+	if err := ValidateName(t.TLS.CertificateRef); err != nil {
+		return fmt.Errorf("settings: ingressDiscovery.%s.tls.certificateRef is required when discovery is enabled (discovery never issues per-host certificates): %w", path, err)
 	}
-	if err := d.Template.TLS.validate(); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.template.tls: %w", err)
+	if err := t.TLS.validate(); err != nil {
+		return fmt.Errorf("settings: ingressDiscovery.%s.tls: %w", path, err)
 	}
-	for i, m := range d.Template.Middlewares {
+	for i, m := range t.Middlewares {
 		if err := ValidateName(m); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.template.middlewares[%d]: %w", i, err)
+			return fmt.Errorf("settings: ingressDiscovery.%s.middlewares[%d]: %w", path, i, err)
 		}
 	}
-	for i, a := range d.Template.AccessLists {
+	for i, a := range t.AccessLists {
 		if err := ValidateName(a); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.template.accessLists[%d]: %w", i, err)
+			return fmt.Errorf("settings: ingressDiscovery.%s.accessLists[%d]: %w", path, i, err)
 		}
 	}
 	return nil

@@ -182,6 +182,11 @@ ingressDiscovery:
       http2: true
     middlewares: [sso]
     defaultDNS: { lanDirect: true }
+  profiles:                         # optional named chains, selected per Ingress
+    public-ratelimited:
+      upstream: { scheme: http, host: 10.0.0.40, port: 80 }
+      tls: { certificateRef: wildcard, forceSSL: true, http2: true }
+      middlewares: [rate-limit]     # and no access list: public on purpose
 ```
 
 ### DNSSyncSettings (`settings.dnsSync`)
@@ -347,14 +352,148 @@ rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
 | `template.middlewares` | []string | Applied to every derived host, in order. |
 | `template.accessLists` | []string | Applied to every derived host. |
 | `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
+| `profiles` | map[string]→ same shape as `template` | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
 
 **Opt-in annotations** (on the `Ingress`, never on gpm's side):
 
 | Annotation | Value | Meaning |
 |------------|-------|---------|
 | `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into discovery. Absent or any other value means gpm ignores it entirely. There is no opt-out mode and no namespace sweep. |
-| `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Sets `dns.lanDirect` on the derived host, overriding `template.defaultDNS`. |
+| `gpm.rake.pro/profile` | a `profiles` key | Select one of the operator-defined profiles. Absent (or empty) uses the default `template`. An **undefined** name skips the Ingress. |
+| `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Sets `dns.lanDirect` on the derived host, overriding the resolved profile's `defaultDNS`. |
 | `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Sets `dns.publicCname` on the derived host. |
+
+#### Discovery profiles
+
+One template only fits a uniform fleet. A real one is not: some hosts are
+deliberately public, some carry `sso`, some carry a login middleware, some
+rate-limit. With a single template, adopting anything but the group that happens
+to match it would silently **drop** a host's `sso`/`rate-limit`/login middleware,
+or **impose** an access list on a host that is public on purpose — either way the
+host keeps serving, with a chain nobody chose.
+
+`profiles` is a map of operator-defined chains, each with **exactly the same
+shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
+required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
+`websocketsUpgrade`, `defaultDNS`). An `Ingress` picks one with
+`gpm.rake.pro/profile`.
+
+**The annotation carries a name and nothing else — that is the security model.**
+An Ingress author is untrusted: in a shared cluster a tenant may be able to
+create or edit an `Ingress`, and gpm sits at the edge in front of everything.
+There is deliberately **no** annotation that lets an Ingress name a middleware,
+an access list, a certificate or an upstream, because such an annotation is a
+self-service privilege grant — `access-lists: ""` on your own namespace's Ingress
+would remove `home-vpn` from a hostname at the edge. Every profile is written by
+you, here, in the config repo; a manifest chooses among them and can never invent
+one, so a derived host is always one of a set you authored and can audit.
+
+**The residual risk, stated plainly: every profile is selectable by every
+annotating Ingress — define only profiles you are willing for any cluster tenant
+to choose.** Selection is not restricted per namespace, per Ingress or per
+tenant. A tenant who can annotate an Ingress in their own namespace can pick the
+*most permissive* profile you defined, so a profile with no access list (like
+`public-ratelimited` in the example below) is effectively an open door any tenant
+may walk their own hostname through. That is a real capability — bounded by a set
+you control, not unbounded, but not nothing. If it is too coarse for your cluster,
+the escalation path is an operator-side selector table (deferred, see
+[design/ingress-discovery.md §5a](design/ingress-discovery.md), which also holds
+the full threat model).
+
+**Resolution rules:**
+
+| `gpm.rake.pro/profile` | Result |
+|---|---|
+| absent | the default `template` block |
+| present but empty or whitespace-only | treated as absent → the default `template` |
+| exact match on a `profiles` key (surrounding whitespace trimmed) | that profile, **verbatim** |
+| anything else | the Ingress is **skipped**, with the requested name in the status `reason` and a `warn` log |
+
+An undefined profile is **never** downgraded to the default and never adopted
+with a partial chain — falling back is exactly the silent regression profiles
+exist to prevent. Matching is exact: no prefix match, no case folding, no
+nearest-neighbour guess.
+
+**An unresolvable profile fails closed on an existing host.** If the Ingress
+already has a derived host, that host is not left alone: it is updated with
+`disabled: true`. Nothing is deleted, nothing is rewritten, and re-adding the
+profile re-enables it on the very next reconcile. This is what makes **revocation**
+work. Leaving it untouched would mean a tenant could pin a chain you have just
+tightened, renamed or retired — by pointing the annotation at a name that does
+not exist — and the host would go on serving the revoked chain indefinitely.
+Retiring a profile (or clearing the profile rows in the UI) disables the hosts
+derived from it for the same reason.
+
+Every *other* derive failure — a malformed hostname, an unusable derived name —
+still **freezes** the existing host instead: your policy has not changed there,
+the host on disk is the last good rendering of it, and failing closed would let
+any tenant take their own service offline with a one-character manifest edit.
+A profile is applied **verbatim**, never merged with the template, so the
+default's access list can never leak onto a profile that is public on purpose.
+
+Every profile validates at **settings-write time**, not at reconcile time — an
+invalid one is rejected by `PUT /api/settings` where you see it, rather than
+surfacing later as a skipped host. That includes **referential** validation: the
+`certificateRef`, `upstreamGroupRef`, `middlewares`, `accessLists` and
+`tls.clientAuth.caRef` of the template and of every profile are cross-checked
+against the objects that actually exist. A dangling name there is not a
+localised problem later — it is stamped onto every derived host, and the store
+validates a reconcile as one batch, so the rejection would drop every *other*
+tenant's create, update and delete too, on every poll, until it was fixed.
+A disabled `ingressDiscovery` block is not cross-checked, so a half-filled draft
+never blocks an unrelated settings write.
+
+`GET /api/ingress-discovery/status` reports the resolved `profile` per host (the
+literal `template` for the default block), so you can audit what chain a given
+Ingress actually got.
+
+Worked example, modelled on a mixed fleet:
+
+```yaml
+ingressDiscovery:
+  enabled: true
+  allowedDomainSuffixes: [example.com]
+  # The default: no middleware, everything behind the VPN access list. Any
+  # Ingress that names no profile gets this - unchanged from before profiles.
+  template:
+    upstreamGroupRef: k8s-nodes
+    tls: { certificateRef: wildcard, forceSSL: true, http2: true }
+    accessLists: [home-vpn]
+    defaultDNS: { lanDirect: true }
+  profiles:
+    # Public on purpose - rate-limited, and NO access list.
+    public-ratelimited:
+      upstreamGroupRef: k8s-nodes
+      tls: { certificateRef: wildcard, forceSSL: true, http2: true }
+      middlewares: [rate-limit]
+      defaultDNS: { lanDirect: true, publicCname: true }
+    # SSO-gated and VPN-restricted.
+    sso-internal:
+      upstreamGroupRef: k8s-nodes
+      tls: { certificateRef: wildcard, forceSSL: true, http2: true }
+      middlewares: [sso, rate-limit]
+      accessLists: [home-vpn]
+      defaultDNS: { lanDirect: true }
+```
+
+```yaml
+# paste.example.com: public, rate-limited.
+metadata:
+  annotations:
+    gpm.rake.pro/managed: "true"
+    gpm.rake.pro/profile: "public-ratelimited"
+---
+# radarr.example.com: sso + home-vpn.
+metadata:
+  annotations:
+    gpm.rake.pro/managed: "true"
+    gpm.rake.pro/profile: "sso-internal"
+---
+# grafana.example.com: no profile named, so the default template applies.
+metadata:
+  annotations:
+    gpm.rake.pro/managed: "true"
+```
 
 **The upstream is the ingress controller, not the Ingress backend Service.** gpm
 runs *outside* the cluster (on the edge host), so
@@ -424,9 +563,9 @@ must be a valid multi-label LDH hostname of at most 253 characters and fall
 within `allowedDomainSuffixes`; wildcards, single labels, underscores, URLs and
 anything with whitespace or control characters are rejected. An Ingress with no
 usable host is skipped. Nothing about an Ingress can supply an upstream, a
-certificate, a middleware or an access list — those come only from the template,
-so a cluster user who can edit an Ingress can never weaken the chain you
-configured.
+certificate, a middleware or an access list — those come only from the template
+or a named profile, and a profile is selected by *name* only, so a cluster user
+who can edit an Ingress can never weaken the chain you configured.
 
 **When the cluster cannot be read, discovery freezes.** A managed host is deleted
 **only** when a reconcile obtained a complete, successful, fully-paginated list of
@@ -439,7 +578,9 @@ is bounded to two minutes end to end, so a hung endpoint fails the run rather
 than holding the reconciler for the page limit times the per-request timeout. An
 annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
 **and** protects its existing host from deletion, so one bad manifest edit cannot
-take a host offline. An *empty successful* list is a different thing entirely: it
+take a host offline — the one exception being an unresolvable *profile*, which
+disables the existing host rather than freezing it (see "Resolution rules"). An
+*empty successful* list is a different thing entirely: it
 is a legitimate delete-all, applied and logged per host at WARN.
 
 **Writes land as one commit per reconcile** — every create, update and delete from
@@ -469,7 +610,7 @@ Conflict** while one is in flight, never queued);
 `GET /api/ingress-discovery/status` reports the last run, including `lastRun` vs
 `lastSuccess` — separate on purpose, so a frozen state cannot look fresh — and a
 per-host list of actions (`created` / `updated` / `unchanged` / `deleted` /
-`skipped`, with a reason for each skip). The cluster-side RBAC to apply is
+`skipped`, with the resolved `profile` and a reason for each skip). The cluster-side RBAC to apply is
 [`deploy/k8s-ingress-discovery-rbac.yaml`](../deploy/k8s-ingress-discovery-rbac.yaml).
 
 ---
@@ -514,7 +655,10 @@ is published unless asked for, and an opted-out host omits the `dns` key from it
 API responses entirely rather than returning an empty object. The backends
 themselves are configured once, in
 [`settings.dnsSync`](#dnssyncsettings-settingsdnssync); a policy flag with its
-backend disabled publishes nothing (the UI greys the toggle out).
+backend disabled publishes nothing, and the UI says so inline while leaving the
+toggle usable — setting the flag before the backend exists is legitimate staging
+(the host is the declaration; the syncer publishes once it is wired), so it is
+not refused.
 
 **HostTimeouts** (`timeouts`): `connectSeconds` caps establishing the TCP/TLS
 connection to the upstream; `readSeconds` caps time awaiting the upstream's

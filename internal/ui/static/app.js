@@ -816,10 +816,12 @@ async function hostEditor(c, name) {
             <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
             ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct')}
           </div>
+          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
           <div class="toggle-line">
             <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
             ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME')}
           </div>
+          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
         </div>
       </div>
 
@@ -889,13 +891,20 @@ async function hostEditor(c, name) {
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...');
   const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
 
-  // Grey out each DNS toggle whose backend is not configured, rather than
-  // accepting a flag that would silently publish nothing.
+  // These two DNS toggles stay USABLE when their backend is not configured, and
+  // say so inline instead. Deliberately unlike every other capability-gated
+  // control (which gateControl still greys out): setting the flag before the
+  // backend exists is legitimate staging - the host is the declaration, the
+  // syncer publishes whenever it is wired - not an error to be refused. And the
+  // capability probe is cached per page load, so a stale "not configured" would
+  // otherwise outlive the fact and block a perfectly valid edit.
   await loadCapabilities();
-  gateControl($('#f-dns-lan'), hasCapability('dnsSync.piholeEnabled'),
-    'Pi-hole DNS sync is not configured (Settings -> DNS sync).');
-  gateControl($('#f-dns-public'), hasCapability('dnsSync.cloudflareEnabled'),
-    'Cloudflare DNS sync is not configured (Settings -> DNS sync).');
+  const dnsHint = (id, available) => {
+    const el = $(id);
+    if (el) el.style.display = available ? 'none' : '';
+  };
+  dnsHint('#f-dns-lan-hint', hasCapability('dnsSync.piholeEnabled'));
+  dnsHint('#f-dns-public-hint', hasCapability('dnsSync.cloudflareEnabled'));
 
   // locations
   const locsWrap = $('#f-locs');
@@ -2410,6 +2419,7 @@ async function viewSettings(c) {
   idt.upstream = idt.upstream || {};
   idt.tls = idt.tls || {};
   idt.defaultDNS = idt.defaultDNS || {};
+  const idProfiles = (idc.profiles && typeof idc.profiles === 'object') ? idc.profiles : {};
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>Instance configuration and admin authentication.</p></div>
     <div class="grid-2" style="margin-bottom:16px">
@@ -2465,7 +2475,7 @@ async function viewSettings(c) {
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Kubernetes Ingress discovery</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">gpm.rake.pro/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">gpm.rake.pro/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template below, so a cluster manifest can never supply an upstream, a certificate or a middleware. Derived hosts feed the DNS sync above.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">gpm.rake.pro/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">gpm.rake.pro/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template or a named profile below, so a cluster manifest can never supply an upstream, a certificate or a middleware - only the <em>name</em> of a chain you wrote here. Derived hosts feed the DNS sync above.</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Ingress discovery</div><div class="ds">Reconcile annotated cluster Ingresses into managed proxy hosts</div></div>${switchHtml('set-id-on', !!idc.enabled, 'Ingress discovery')}</div>
       <div class="grid-2" style="margin-top:8px">
         <div>
@@ -2513,6 +2523,10 @@ async function viewSettings(c) {
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div><div class="ds">When the public-cname annotation is absent</div></div>${switchHtml('set-id-dns-pub', !!idt.defaultDNS.publicCname, 'Default public CNAME')}</div>
         </div>
       </div>
+      <p class="section-label" style="margin-top:14px">Named profiles</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">One template only fits a uniform fleet. Define a profile per chain you actually run - a deliberately public one with a rate limit and no access list, an SSO-gated one behind the VPN list - and an Ingress picks one with <span class="mono">gpm.rake.pro/profile: "&lt;name&gt;"</span>. <strong>The annotation carries a name and nothing else.</strong> Every profile is written here, by you; a cluster manifest chooses among them but cannot invent one and cannot name a middleware or a certificate. What it <em>can</em> do is pick the most permissive profile you defined: <strong>every profile is selectable by every annotating Ingress - define only profiles you are willing for any cluster tenant to choose.</strong> An Ingress naming a profile that does not exist is <strong>skipped</strong> (and if it already had a derived host, that host is <strong>disabled</strong>, so a retired profile cannot be pinned). An Ingress that names none gets the template above.</p>
+      <div id="set-id-profiles"></div>
+      <button class="btn ghost sm" id="addIdProfile" type="button" style="margin-top:6px">${ICON.plus}Add profile</button>
       <div id="set-id-status" class="hint" style="margin-top:12px"></div>
       <div id="set-id-hosts" style="margin-top:8px"></div>
       <button class="btn ghost sm" id="set-id-run" type="button" style="margin-top:6px">Reconcile now</button>
@@ -2609,6 +2623,63 @@ async function viewSettings(c) {
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
 
+  // Named discovery profiles. Same fields as the template above, because a
+  // profile IS a template - one an Ingress may select by name. The chip
+  // controllers are hung off the row so the save handler can read them back.
+  const pfWrap = $('#set-id-profiles');
+  let pfSeq = 0;
+  function profileRow(name, p) {
+    p = p || {};
+    const up = p.upstream || {};
+    const tls = p.tls || {};
+    const dns = p.defaultDNS || {};
+    const i = ++pfSeq;
+    const div = document.createElement('div');
+    div.className = 'panel id-profile';
+    div.style.cssText = 'padding:12px;margin-bottom:10px';
+    div.innerHTML = `
+      <div class="loc-row" style="margin-bottom:8px">
+        <input class="field mono pf-name" style="flex:1 1 180px" value="${esc(name || '')}" placeholder="profile name (e.g. sso-internal)" aria-label="Profile name" />
+        <button class="icon-btn pf-del" type="button" aria-label="Remove profile">${ICON.x}</button>
+      </div>
+      <div class="grid-2">
+        <div>
+          <div class="field-group">
+            <label>Upstream (ingress controller)</label>
+            <div class="loc-row">
+              <select class="field mono pf-up-scheme" style="flex:0 0 90px" aria-label="Upstream scheme">
+                <option value="http"${(up.scheme || 'http') === 'http' ? ' selected' : ''}>http</option>
+                <option value="https"${up.scheme === 'https' ? ' selected' : ''}>https</option>
+              </select>
+              <input class="field mono pf-up-host" style="flex:2 1 160px" value="${esc(up.host || '')}" placeholder="10.0.0.40" aria-label="Upstream host" />
+              <input class="field mono pf-up-port" style="flex:0 0 90px" value="${esc(up.port || '')}" placeholder="80" aria-label="Upstream port" />
+            </div>
+          </div>
+          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono pf-up-group" value="${esc(p.upstreamGroupRef || '')}" placeholder="k8s-nodes" aria-label="Upstream group" /><div class="hint">Mutually exclusive with the upstream above.</div></div>
+          <div class="field-group"><label>Certificate</label><input class="field mono pf-cert" value="${esc(tls.certificateRef || '')}" placeholder="wildcard" aria-label="Certificate" /><div class="hint">Required, exactly as for the template.</div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('pf-forcessl-' + i, !!tls.forceSSL, 'Force SSL')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">HTTP/2</div></div>${switchHtml('pf-http2-' + i, !!tls.http2, 'HTTP/2')}</div>
+        </div>
+        <div>
+          <div class="field-group"><label>Middlewares</label><div class="chip-input pf-mw"></div><div class="hint">Applied in order to every host that selects this profile.</div></div>
+          <div class="field-group"><label>Access lists</label><div class="chip-input pf-al"></div><div class="hint">Leave empty for a profile that is public on purpose.</div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Websockets</div></div>${switchHtml('pf-ws-' + i, !!p.websocketsUpgrade, 'Websockets')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div></div>${switchHtml('pf-dns-pub-' + i, !!dns.publicCname, 'Default public CNAME')}</div>
+        </div>
+      </div>`;
+    div.dataset.uid = String(i);
+    // The loaded profile, kept so the save handler can MERGE rather than rebuild.
+    // See the tls merge in the save handler for why this is load-bearing.
+    div._orig = p;
+    div.querySelector('.pf-del').addEventListener('click', () => div.remove());
+    pfWrap.appendChild(div);
+    div._mw = makeChipInput(div.querySelector('.pf-mw'), arr(p.middlewares), 'add middleware...');
+    div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
+  }
+  Object.keys(idProfiles).sort().forEach((n) => profileRow(n, idProfiles[n]));
+  $('#addIdProfile').addEventListener('click', () => profileRow('', {}));
+
   // Ingress-discovery status. The panel and the manual reconcile are only
   // meaningful once discovery is enabled, so they are greyed out rather than
   // offered as controls that cannot work.
@@ -2638,6 +2709,7 @@ async function viewSettings(c) {
         list.innerHTML = hosts.length ? `<div class="check-list">${hosts.map((h) => `
           <div class="check-item" style="cursor:default"><span class="mono">${esc(h.name || '')}</span>
           <span class="ci-ty">${esc(h.action || '')}</span>
+          ${h.profile ? `<span class="ci-ty" title="Resolved discovery profile">${esc(h.profile)}</span>` : ''}
           ${h.ingress ? `<span class="muted" style="font-size:11px">${esc(h.ingress)}</span>` : ''}
           ${h.reason ? `<span class="muted" style="font-size:11px">${esc(h.reason)}</span>` : ''}</div>`).join('')}</div>` : '';
       }
@@ -2746,11 +2818,19 @@ async function viewSettings(c) {
           port: parseInt($('#set-id-up-port').value, 10) || 0,
         },
         upstreamGroupRef: $('#set-id-up-group').value.trim() || undefined,
-        tls: {
+        // INVARIANT: tls is MERGED over what was loaded, never rebuilt from the
+        // three fields this form renders. A settings write is a full replacement
+        // server-side, and TLSSettings also carries clientAuth (mTLS),
+        // minTLSVersion and hsts - none of which have a control here. Rebuilding
+        // would strip a GitOps-authored `clientAuth: {caRef: corp-ca, mode:
+        // require}` on any unrelated save, and the next reconcile would push that
+        // silent downgrade onto every derived host. Any TLS field added to this
+        // form must be added to the overlay below, not left to the merge.
+        tls: Object.assign({}, idt.tls, {
           certificateRef: $('#set-id-cert').value.trim(),
           forceSSL: isOn('set-id-forcessl'),
           http2: isOn('set-id-http2'),
-        },
+        }),
         websocketsUpgrade: isOn('set-id-ws'),
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
@@ -2760,6 +2840,47 @@ async function viewSettings(c) {
     if (isOn('set-id-dns-lan') || isOn('set-id-dns-pub')) {
       ingressDiscovery.template.defaultDNS = { lanDirect: isOn('set-id-dns-lan'), publicCname: isOn('set-id-dns-pub') };
     }
+
+    // Null-prototype: the keys are operator-typed, and a name like __proto__ on a
+    // plain object would set the prototype instead of a key, silently dropping
+    // the profile. Here it becomes a normal key the server rejects by name.
+    const profiles = Object.create(null);
+    let pfDup = '';
+    $$('#set-id-profiles .id-profile').forEach((row) => {
+      const pname = row.querySelector('.pf-name').value.trim();
+      if (!pname) return; // an untouched blank row is not a profile
+      if (pname in profiles) pfDup = pname;
+      const uid = row.dataset.uid;
+      const group = row.querySelector('.pf-up-group').value.trim();
+      const prof = {
+        upstream: group ? undefined : {
+          scheme: row.querySelector('.pf-up-scheme').value,
+          host: row.querySelector('.pf-up-host').value.trim(),
+          port: parseInt(row.querySelector('.pf-up-port').value, 10) || 0,
+        },
+        upstreamGroupRef: group || undefined,
+        // Same invariant as the template block above: merge over the loaded
+        // profile so an unrelated save cannot strip a clientAuth / minTLSVersion /
+        // hsts this form does not render.
+        tls: Object.assign({}, (row._orig || {}).tls, {
+          certificateRef: row.querySelector('.pf-cert').value.trim(),
+          forceSSL: isOn('pf-forcessl-' + uid),
+          http2: isOn('pf-http2-' + uid),
+        }),
+        websocketsUpgrade: isOn('pf-ws-' + uid),
+        middlewares: row._mw.get(),
+        accessLists: row._al.get(),
+      };
+      if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
+        prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
+      }
+      profiles[pname] = prof;
+    });
+    if (pfDup) {
+      toast('Duplicate profile', `Two discovery profiles are both called "${pfDup}". Profile names must be unique - an Ingress selects one by name.`, 'err');
+      return;
+    }
+    if (Object.keys(profiles).length) ingressDiscovery.profiles = profiles;
     body.ingressDiscovery = ingressDiscovery;
 
     const btn = $('#set-save'); btn.disabled = true;
