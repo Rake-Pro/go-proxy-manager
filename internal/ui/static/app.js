@@ -2419,6 +2419,9 @@ async function viewSettings(c) {
   idt.upstream = idt.upstream || {};
   idt.tls = idt.tls || {};
   idt.defaultDNS = idt.defaultDNS || {};
+  // Left undefined when unset: an empty object here would round-trip a
+  // `timeouts: {}` onto the template (and from there onto every derived host).
+  const idTo = idt.timeouts || {};
   const idProfiles = (idc.profiles && typeof idc.profiles === 'object') ? idc.profiles : {};
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>Instance configuration and admin authentication.</p></div>
@@ -2515,10 +2518,20 @@ async function viewSettings(c) {
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect http to https on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">HTTP/2</div><div class="ds">Enable h2 on derived hosts</div></div>${switchHtml('set-id-http2', !!idt.tls.http2, 'HTTP/2')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Websockets</div><div class="ds">Allow upgrade on derived hosts</div></div>${switchHtml('set-id-ws', !!idt.websocketsUpgrade, 'Websockets')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing')}</div>
         </div>
         <div>
           <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw"></div><div class="hint">Applied to every derived host, in order.</div></div>
           <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-id-al"></div></div>
+          <div class="field-group">
+            <label>Upstream timeouts (seconds)</label>
+            <div class="loc-row">
+              <input class="field mono" id="set-id-to-connect" style="flex:1 1 90px" value="${esc(idTo.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
+              <input class="field mono" id="set-id-to-read" style="flex:1 1 90px" value="${esc(idTo.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
+            </div>
+            <div class="hint">Leave both blank for the shared pooled transport. Read caps time-to-first-byte only, so streaming upstreams stay safe.</div>
+          </div>
+          <div class="field-group"><label>Tags</label><div class="chip-input" id="set-id-tags"></div><div class="hint">Applied to every derived host, for grouping in the host list.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div><div class="ds">When the lan-direct annotation is absent</div></div>${switchHtml('set-id-dns-lan', !!idt.defaultDNS.lanDirect, 'Default LAN direct')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div><div class="ds">When the public-cname annotation is absent</div></div>${switchHtml('set-id-dns-pub', !!idt.defaultDNS.publicCname, 'Default public CNAME')}</div>
         </div>
@@ -2622,6 +2635,19 @@ async function viewSettings(c) {
   const idSuffixCtl = makeChipInput($('#set-id-suffixes'), arr(idc.allowedDomainSuffixes), 'add suffix...');
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
+  const idTagCtl = makeChipInput($('#set-id-tags'), arr(idt.tags), 'add tag...');
+
+  // Same MERGE invariant as the tls object in the save handler: `timeouts` is
+  // rebuilt from the two inputs this form renders, over whatever was loaded, so a
+  // field added to HostTimeouts later is not stripped by an unrelated save. Both
+  // inputs empty means "no override" and drops the key entirely, so the derived
+  // hosts carry no `timeouts` at all rather than a zero-valued one.
+  function timeoutsPayload(orig, connect, read) {
+    const c = parseInt(connect, 10) || 0;
+    const r = parseInt(read, 10) || 0;
+    if (!c && !r) return undefined;
+    return Object.assign({}, orig, { connectSeconds: c, readSeconds: r });
+  }
 
   // Named discovery profiles. Same fields as the template above, because a
   // profile IS a template - one an Ingress may select by name. The chip
@@ -2633,6 +2659,7 @@ async function viewSettings(c) {
     const up = p.upstream || {};
     const tls = p.tls || {};
     const dns = p.defaultDNS || {};
+    const to = p.timeouts || {};
     const i = ++pfSeq;
     const div = document.createElement('div');
     div.className = 'panel id-profile';
@@ -2663,7 +2690,17 @@ async function viewSettings(c) {
         <div>
           <div class="field-group"><label>Middlewares</label><div class="chip-input pf-mw"></div><div class="hint">Applied in order to every host that selects this profile.</div></div>
           <div class="field-group"><label>Access lists</label><div class="chip-input pf-al"></div><div class="hint">Leave empty for a profile that is public on purpose.</div></div>
+          <div class="field-group">
+            <label>Upstream timeouts (seconds)</label>
+            <div class="loc-row">
+              <input class="field mono pf-to-connect" style="flex:1 1 90px" value="${esc(to.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
+              <input class="field mono pf-to-read" style="flex:1 1 90px" value="${esc(to.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
+            </div>
+            <div class="hint">Blank for the shared pooled transport.</div>
+          </div>
+          <div class="field-group"><label>Tags</label><div class="chip-input pf-tags"></div><div class="hint">Applied to every host that selects this profile.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Websockets</div></div>${switchHtml('pf-ws-' + i, !!p.websocketsUpgrade, 'Websockets')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('pf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div></div>${switchHtml('pf-dns-pub-' + i, !!dns.publicCname, 'Default public CNAME')}</div>
         </div>
@@ -2676,6 +2713,7 @@ async function viewSettings(c) {
     pfWrap.appendChild(div);
     div._mw = makeChipInput(div.querySelector('.pf-mw'), arr(p.middlewares), 'add middleware...');
     div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
+    div._tags = makeChipInput(div.querySelector('.pf-tags'), arr(p.tags), 'add tag...');
   }
   Object.keys(idProfiles).sort().forEach((n) => profileRow(n, idProfiles[n]));
   $('#addIdProfile').addEventListener('click', () => profileRow('', {}));
@@ -2832,8 +2870,11 @@ async function viewSettings(c) {
           http2: isOn('set-id-http2'),
         }),
         websocketsUpgrade: isOn('set-id-ws'),
+        robotsNoIndex: isOn('set-id-robots'),
+        timeouts: timeoutsPayload(idt.timeouts, $('#set-id-to-connect').value, $('#set-id-to-read').value),
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
+        tags: idTagCtl.get(),
       },
     };
     if (isOn('set-id-on')) ingressDiscovery.enabled = true;
@@ -2868,8 +2909,11 @@ async function viewSettings(c) {
           http2: isOn('pf-http2-' + uid),
         }),
         websocketsUpgrade: isOn('pf-ws-' + uid),
+        robotsNoIndex: isOn('pf-robots-' + uid),
+        timeouts: timeoutsPayload((row._orig || {}).timeouts, row.querySelector('.pf-to-connect').value, row.querySelector('.pf-to-read').value),
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
+        tags: row._tags.get(),
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"gopkg.in/yaml.v3"
 )
 
 // baseSettings is a minimal valid discovery configuration pointed at f.
@@ -1797,5 +1798,165 @@ func TestReAddingTheProfileReEnablesTheHost(t *testing.T) {
 	}
 	if strings.Join(rec.upserts[0].Middlewares, ",") != "sso,rate-limit" {
 		t.Fatalf("middlewares = %v, want the restored profile's chain", rec.upserts[0].Middlewares)
+	}
+}
+
+// Cutting a service over to discovery used to SILENTLY drop its robotsNoIndex:
+// the template had no such field, so the derived host came back without one and
+// the only workaround was a headers middleware setting X-Robots-Tag - a second
+// mechanism for something the model already expresses. Both robotsNoIndex and
+// timeouts must now be inherited verbatim, exactly like the middleware chain.
+func TestDerivedHostInheritsRobotsAndTimeouts(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := baseSettings(f)
+	s.Template.RobotsNoIndex = true
+	s.Template.Timeouts = &model.HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7}
+	s.Template.Tags = []string{"cluster", "discovered"}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if !h.RobotsNoIndex {
+		t.Fatal("robotsNoIndex must be inherited from the template")
+	}
+	if h.Timeouts == nil || h.Timeouts.ConnectSeconds != 3 || h.Timeouts.ReadSeconds != 7 {
+		t.Fatalf("timeouts = %+v, want the template's", h.Timeouts)
+	}
+	if strings.Join(h.Tags, ",") != "cluster,discovered" {
+		t.Fatalf("tags = %v, want the template's in order", h.Tags)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
+// Profiles ARE IngressHostTemplate, so the same fields have to arrive through a
+// named profile without any extra plumbing. Proven, not assumed.
+func TestDerivedHostInheritsRobotsAndTimeoutsFromAProfile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.example.com"),
+		}, "")
+	}
+	s := profileSettings(f)
+	prof := s.Profiles["sso-internal"]
+	prof.RobotsNoIndex = true
+	prof.Timeouts = &model.HostTimeouts{ConnectSeconds: 5}
+	prof.Tags = []string{"sso"}
+	s.Profiles["sso-internal"] = prof
+	// A default that would be WRONG for this host, so inheriting any of it shows up.
+	s.Template.RobotsNoIndex = false
+	s.Template.Timeouts = &model.HostTimeouts{ConnectSeconds: 90, ReadSeconds: 90}
+	s.Template.Tags = []string{"default-chain"}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	h := rec.upserts[0]
+	if !h.RobotsNoIndex {
+		t.Fatal("robotsNoIndex must come from the resolved profile")
+	}
+	if h.Timeouts == nil || h.Timeouts.ConnectSeconds != 5 || h.Timeouts.ReadSeconds != 0 {
+		t.Fatalf("timeouts = %+v, want the profile's verbatim (never merged with the template's)", h.Timeouts)
+	}
+	if strings.Join(h.Tags, ",") != "sso" {
+		t.Fatalf("tags = %v, want the profile's verbatim", h.Tags)
+	}
+}
+
+// A template that sets neither must produce a host that carries neither - not a
+// zero-valued `timeouts: {}` / `tags: []` on every derived object. ProxyHost.DNS
+// needed a pointer for exactly this reason, so the encoded form is asserted, not
+// just the Go value.
+func TestDerivedHostOmitsUnsetRobotsAndTimeouts(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	h := rec.upserts[0]
+	if h.RobotsNoIndex || h.Timeouts != nil || h.Tags != nil {
+		t.Fatalf("unset template fields leaked onto the derived host: robots=%v timeouts=%+v tags=%v", h.RobotsNoIndex, h.Timeouts, h.Tags)
+	}
+	b, err := yaml.Marshal(h)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"robotsNoIndex", "timeouts", "tags"} {
+		if strings.Contains(string(b), key) {
+			t.Fatalf("derived host YAML carries a spurious %q key:\n%s", key, b)
+		}
+	}
+}
+
+// The aliasing rule the *ClientAuth copy established, extended to the two
+// reference types this change adds: a derived host must never share backing
+// memory with the settings object or with another derived host.
+func TestDerivedHostsDoNotShareTheTimeoutsOrTagsBacking(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			Timeouts: &model.HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7},
+			Tags:     []string{"cluster"},
+		},
+	}
+	mk := func(ns, name, host string) Ingress {
+		var ing Ingress
+		ing.Metadata.Namespace, ing.Metadata.Name = ns, name
+		ing.Metadata.Annotations = map[string]string{model.AnnotationManaged: "true"}
+		ing.Spec.Rules = []struct {
+			Host string `json:"host"`
+		}{{Host: host}}
+		return ing
+	}
+	p := planReconcile(model.Config{}, conf, []Ingress{
+		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
+	})
+	if len(p.upserts) != 2 {
+		t.Fatalf("upserts = %d, want 2", len(p.upserts))
+	}
+	a, b := p.upserts[0], p.upserts[1]
+	if a.Timeouts == nil || b.Timeouts == nil {
+		t.Fatal("both derived hosts must carry the template's timeouts")
+	}
+	if a.Timeouts == b.Timeouts || a.Timeouts == conf.Template.Timeouts {
+		t.Fatal("derived hosts share one *HostTimeouts with each other or with settings")
+	}
+	a.Timeouts.ConnectSeconds = 99
+	a.Tags[0] = "mutated"
+	if b.Timeouts.ConnectSeconds != 3 || conf.Template.Timeouts.ConnectSeconds != 3 {
+		t.Fatalf("mutating one host's timeouts leaked: b=%+v settings=%+v", b.Timeouts, conf.Template.Timeouts)
+	}
+	if b.Tags[0] != "cluster" || conf.Template.Tags[0] != "cluster" {
+		t.Fatalf("mutating one host's tags leaked: b=%v settings=%v", b.Tags, conf.Template.Tags)
 	}
 }

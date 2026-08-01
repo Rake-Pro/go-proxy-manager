@@ -116,9 +116,30 @@ type IngressHostTemplate struct {
 
 	WebsocketsUpgrade bool `json:"websocketsUpgrade,omitempty" yaml:"websocketsUpgrade,omitempty"`
 
+	// RobotsNoIndex is applied verbatim to every derived host, exactly as on a
+	// hand-written ProxyHost. Without it, cutting a service over to discovery
+	// silently DROPS its no-index header, and the only way back is a headers
+	// middleware setting X-Robots-Tag - a second mechanism for something the model
+	// already expresses, and one that has to be remembered per host.
+	RobotsNoIndex bool `json:"robotsNoIndex,omitempty" yaml:"robotsNoIndex,omitempty"`
+
+	// Timeouts is applied verbatim to every derived host and validated exactly
+	// like a proxy host's. A pointer so an unset template omits the key entirely
+	// rather than stamping a zero-valued `timeouts: {}` onto every derived object
+	// (the same reason ProxyHost.DNS is a pointer).
+	Timeouts *HostTimeouts `json:"timeouts,omitempty" yaml:"timeouts,omitempty"`
+
 	// Middlewares/AccessLists are applied to every derived host, in this order.
 	Middlewares []string `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+
+	// Tags are applied verbatim to every derived host's ObjectMeta, so the hosts
+	// a given profile produces can be grouped and filtered in the UI like any
+	// other host. They are free-form UI metadata with no validation rules and no
+	// data-plane effect, which is why they can be inherited from a profile an
+	// untrusted Ingress selects: the worst a tenant can do is pick a label the
+	// operator wrote.
+	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 
 	// DefaultDNS is the dns policy a derived host gets when the corresponding
 	// annotation is absent. Each flag is overridden individually by its
@@ -392,6 +413,12 @@ func (t IngressHostTemplate) validate(path string) error {
 	}
 	if err := t.TLS.validate(); err != nil {
 		return fmt.Errorf("settings: ingressDiscovery.%s.tls: %w", path, err)
+	}
+	// The SAME helper ProxyHost.Validate uses, not a re-statement of its rules: a
+	// template that would produce a host the config validator rejects has to fail
+	// the settings WRITE, and it has to fail it for the same reasons.
+	if err := t.Timeouts.validate(); err != nil {
+		return fmt.Errorf("settings: ingressDiscovery.%s: %w", path, err)
 	}
 	for i, m := range t.Middlewares {
 		if err := ValidateName(m); err != nil {

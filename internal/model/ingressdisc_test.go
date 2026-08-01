@@ -75,6 +75,19 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 			d.Template.Middlewares = []string{"sso"}
 			d.Template.AccessLists = []string{"lan-only"}
 		}, ""},
+		{"template timeouts accepted", func(d *IngressDiscoverySettings) {
+			d.Template.Timeouts = &HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7}
+		}, ""},
+		{"template robotsNoIndex and tags accepted", func(d *IngressDiscoverySettings) {
+			d.Template.RobotsNoIndex = true
+			d.Template.Tags = []string{"cluster"}
+		}, ""},
+		{"template connect timeout out of range", func(d *IngressDiscoverySettings) {
+			d.Template.Timeouts = &HostTimeouts{ConnectSeconds: 3601}
+		}, "template: timeouts.connectSeconds 3601 out of range (0-3600)"},
+		{"template read timeout negative", func(d *IngressDiscoverySettings) {
+			d.Template.Timeouts = &HostTimeouts{ReadSeconds: -1}
+		}, "template: timeouts.readSeconds -1 out of range (0-3600)"},
 
 		// A named profile is a full chain an untrusted Ingress can select, so it is
 		// held to EXACTLY the template's standard - and at settings-write time, not
@@ -124,6 +137,13 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 				TLS:      TLSSettings{CertificateRef: "wildcard", MinTLSVersion: "1.1"},
 			}}
 		}, `profiles["sso-internal"].tls`},
+		{"profile timeouts validated", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      TLSSettings{CertificateRef: "wildcard"},
+				Timeouts: &HostTimeouts{ReadSeconds: 4000},
+			}}
+		}, `profiles["sso-internal"]: timeouts.readSeconds 4000 out of range (0-3600)`},
 		{"profile name shape", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"Not A Name": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
@@ -299,8 +319,11 @@ func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
 			UpstreamGroupRef:  "k8s-nodes",
 			TLS:               TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
 			WebsocketsUpgrade: true,
+			RobotsNoIndex:     true,
+			Timeouts:          &HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7},
 			Middlewares:       []string{"sso", "rate-limit"},
 			AccessLists:       []string{"home-vpn"},
+			Tags:              []string{"sso"},
 			DefaultDNS:        &DNSSyncPolicy{LanDirect: true},
 		},
 	}
@@ -320,6 +343,63 @@ func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
 	}
 	if err := out.Validate(); err != nil {
 		t.Fatalf("round-tripped settings must still validate: %v", err)
+	}
+}
+
+// The timeouts rules are the proxy host's, reused - not restated. If the two
+// ever drift, a template could pass a settings write and then produce hosts the
+// config validator rejects as one batch, which is the failure mode ValidateRefs
+// exists to prevent. Asserting the same error TEXT is the cheapest way to pin
+// that they run through the same helper.
+func TestTemplateTimeoutsUseTheProxyHostRules(t *testing.T) {
+	bad := &HostTimeouts{ConnectSeconds: 3601}
+
+	host := ProxyHost{
+		ObjectMeta: ObjectMeta{Name: "app"},
+		Domains:    []string{"app.example.com"},
+		Upstream:   Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		Timeouts:   bad,
+	}
+	hostErr := host.Validate()
+	if hostErr == nil {
+		t.Fatal("fixture: the proxy host must reject these timeouts")
+	}
+
+	d := validIngressDiscovery()
+	d.Template.Timeouts = bad
+	tmplErr := d.Validate()
+	if tmplErr == nil {
+		t.Fatal("the template must reject the timeouts a proxy host rejects")
+	}
+
+	const want = "timeouts.connectSeconds 3601 out of range (0-3600)"
+	if !strings.Contains(hostErr.Error(), want) || !strings.Contains(tmplErr.Error(), want) {
+		t.Fatalf("error shapes differ:\n host: %v\n tmpl: %v", hostErr, tmplErr)
+	}
+}
+
+// An operator who sets none of the new fields must get exactly the config they
+// had before: no zero-valued keys anywhere in the encoded settings, and nothing
+// new on the derived hosts. ProxyHost.DNS needed a pointer to omit correctly,
+// so timeouts is asserted the same way rather than trusted.
+func TestUnsetTemplateFieldsAreOmittedFromTheEncodedSettings(t *testing.T) {
+	s := DefaultSettings()
+	s.IngressDiscovery = validIngressDiscovery()
+	s.IngressDiscovery.Profiles = map[string]IngressHostTemplate{"public": {
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+	}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("fixture must be valid: %v", err)
+	}
+	b, err := yaml.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"robotsNoIndex", "timeouts", "tags"} {
+		if strings.Contains(string(b), key) {
+			t.Fatalf("a template that sets no %q still encodes the key:\n%s", key, b)
+		}
 	}
 }
 

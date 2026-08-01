@@ -181,6 +181,9 @@ ingressDiscovery:
       forceSSL: true
       http2: true
     middlewares: [sso]
+    robotsNoIndex: true             # same field a hand-written host has
+    timeouts: { connectSeconds: 5, readSeconds: 60 }
+    tags: [cluster]
     defaultDNS: { lanDirect: true }
   profiles:                         # optional named chains, selected per Ingress
     public-ratelimited:
@@ -349,9 +352,16 @@ rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
 | `template.upstreamGroupRef` | string | Names an `upstream-groups` entry instead of a single address. **Prefer this when the ingress controller runs on more than one node** - otherwise every derived host is pinned to one node while hand-written hosts fail over. |
 | `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**. |
 | `template.websocketsUpgrade` | bool | Applied to every derived host. |
+| `template.robotsNoIndex` | bool | Applied to every derived host: sends `X-Robots-Tag: noindex, nofollow`, exactly as on a hand-written host. Omit it and derived hosts carry no such header - do **not** reach for a `headers` middleware instead. |
+| `template.timeouts` | HostTimeouts | Upstream `connectSeconds`/`readSeconds` override, applied to every derived host and validated by the **same rules as a proxy host's** (0-3600). Unset means the shared pooled transport. |
 | `template.middlewares` | []string | Applied to every derived host, in order. |
 | `template.accessLists` | []string | Applied to every derived host. |
+| `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No data-plane effect. |
 | `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
+
+A derived host's `displayName` is always `<namespace>/<name>` (where the Ingress
+came from) and is not templatable. `locations` are **deliberately not** a
+template field - see [below](#what-a-derived-host-cannot-express).
 | `profiles` | map[string]→ same shape as `template` | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
 
 **Opt-in annotations** (on the `Ingress`, never on gpm's side):
@@ -375,8 +385,8 @@ host keeps serving, with a chain nobody chose.
 `profiles` is a map of operator-defined chains, each with **exactly the same
 shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
 required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
-`websocketsUpgrade`, `defaultDNS`). An `Ingress` picks one with
-`gpm.rake.pro/profile`.
+`websocketsUpgrade`, `robotsNoIndex`, range-checked `timeouts`, `tags`,
+`defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
 
 **The annotation carries a name and nothing else — that is the security model.**
 An Ingress author is untrusted: in a shared cluster a tenant may be able to
@@ -447,6 +457,28 @@ never blocks an unrelated settings write.
 literal `template` for the default block), so you can audit what chain a given
 Ingress actually got.
 
+#### What a derived host cannot express
+
+A derived host is a full `ProxyHost` with two deliberate exceptions:
+
+- **`locations`** — path-scoped overrides with their own upstream and chain.
+  Discovery forwards **everything** to the cluster ingress controller by vhost,
+  and the controller does the path routing itself from the same `Ingress`, so a
+  template-wide location list would be applied to every derived host regardless
+  of the service. The useful version is per-service, and reading paths/upstreams
+  /chains out of a cluster manifest is exactly the self-service privilege grant
+  the annotation model forbids. If you need a per-path chain on a discovered
+  service, publish a second hostname (a second `Ingress`) and annotate it, or
+  hand-write the host and leave it out of discovery — an unlabelled host is never
+  touched. See [design/ingress-discovery.md §5](design/ingress-discovery.md).
+- **`displayName`** — always the source `<namespace>/<name>`, so the host list
+  says where a host came from. Not templatable, because one display name shared
+  by every derived host would carry no information.
+
+Everything else a hand-written proxy host can set — `robotsNoIndex`, `timeouts`,
+`tags`, TLS/mTLS, middlewares, access lists, websockets, DNS policy — is a
+template (and therefore a profile) field.
+
 Worked example, modelled on a mixed fleet:
 
 ```yaml
@@ -459,6 +491,8 @@ ingressDiscovery:
     upstreamGroupRef: k8s-nodes
     tls: { certificateRef: wildcard, forceSSL: true, http2: true }
     accessLists: [home-vpn]
+    robotsNoIndex: true          # internal by default: keep it out of search
+    tags: [cluster]
     defaultDNS: { lanDirect: true }
   profiles:
     # Public on purpose - rate-limited, and NO access list.
@@ -466,13 +500,17 @@ ingressDiscovery:
       upstreamGroupRef: k8s-nodes
       tls: { certificateRef: wildcard, forceSSL: true, http2: true }
       middlewares: [rate-limit]
+      tags: [cluster, public]
       defaultDNS: { lanDirect: true, publicCname: true }
-    # SSO-gated and VPN-restricted.
+    # SSO-gated and VPN-restricted, and slow to answer on a cold start.
     sso-internal:
       upstreamGroupRef: k8s-nodes
       tls: { certificateRef: wildcard, forceSSL: true, http2: true }
       middlewares: [sso, rate-limit]
       accessLists: [home-vpn]
+      robotsNoIndex: true
+      timeouts: { connectSeconds: 5, readSeconds: 60 }
+      tags: [cluster, sso]
       defaultDNS: { lanDirect: true }
 ```
 

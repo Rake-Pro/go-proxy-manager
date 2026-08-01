@@ -279,6 +279,7 @@ discovery takes effect without a restart.
 | ProxyHost field | Source | Notes |
 |---|---|---|
 | `name` | derived: `ing-<name>.<namespace>` | see "Naming" below |
+| `displayName` | derived: `<namespace>/<name>` | so the host list says where it came from |
 | `labels["gpm.rake.pro/managed-by"]` | constant `ingress-discovery` | the ownership marker; nothing else is ever touched |
 | `domains` | `spec.rules[].host` | lowercased, trailing dot stripped, de-duplicated, **sorted**, each one validated (below) |
 | `upstream` | **template** | the cluster ingress controller's address — *not* the Ingress backend |
@@ -286,8 +287,18 @@ discovery takes effect without a restart.
 | `middlewares` | **template** | |
 | `accessLists` | **template** | |
 | `websocketsUpgrade` | **template** | |
+| `robotsNoIndex` | **template** | |
+| `timeouts` | **template** | validated by the *same* helper `ProxyHost.Validate` uses; `nil` when the template sets none |
+| `tags` | **template** | free-form UI grouping labels, deep-copied per host |
 | `dns` | template default, overridden by the two DNS annotations | `nil` when both flags end up false |
+| `locations` | **never** — see below | |
 | everything else | zero | |
+
+Every reference type the template carries (`middlewares`, `accessLists`, `tags`,
+`*DNSSyncPolicy`, `tls.clientAuth`, `timeouts`) is **deep-copied** into each
+derived host. Assigning them through would give every derived host — and the
+loaded settings object they came from — one shared backing array or pointer, so
+a write to one host's mTLS mode or timeout would be visible on every other.
 
 ### The upstream is the ingress controller, not the Service
 
@@ -364,6 +375,56 @@ edit an Ingress can (a) publish a hostname within the allowed suffixes, (b)
 toggle two DNS booleans, and (c) **name** one of the operator's profiles — and
 can never weaken the auth/access chain the operator configured, nor point gpm at
 an address of their choosing.
+
+### `locations` is deliberately not a template field
+
+A hand-written `ProxyHost` can carry `locations`: path-scoped overrides, each
+with its own upstream (or upstream group) and its own middleware/access-list
+chain. The template does **not** have them, and this is a decision rather than
+an omission.
+
+Locations are **per-service path routing**. Discovery's whole model is the
+opposite: every derived host forwards **everything** to the cluster ingress
+controller, which then does the path routing itself, from the very `Ingress`
+object gpm read — `spec.rules[].http.paths` is the controller's business and it
+is already authoritative for it. A template-level location list would be applied
+verbatim to *every* host derived from that template or profile, so the only paths
+it could sensibly name are ones meaningful across an entire fleet, which is not
+what locations are for. The useful version is per-Ingress, and per-Ingress means
+reading paths, upstreams and chains out of a cluster manifest — exactly the
+self-service privilege grant §7 exists to forbid: `locations: [{path: /,
+middlewares: []}]` on a tenant's own Ingress would strip the operator's auth
+chain from a hostname at the edge.
+
+There is also nothing to gain. A per-path chain on a discovered service already
+has a home: express it in the cluster (a second `Ingress`, a second hostname)
+and annotate it, or hand-write the host and leave it out of discovery — the two
+mechanisms sit side by side and discovery never touches an unlabelled host.
+
+So: not now, and not by annotation ever. If a real need appears, the only shape
+that keeps the containment property is an operator-side one (locations written
+per profile in settings, chosen by name like everything else) — recorded in
+BACKLOG.md as deliberately deferred, not as a gap.
+
+### `robotsNoIndex`, `timeouts` and `tags` *are* template fields
+
+The three that were missing and are now present. The motivating incident:
+`robotsNoIndex` is a first-class `ProxyHost` field, so cutting a service over to
+discovery **silently dropped its no-index header** — the derived host simply had
+no way to express it. The available workaround, a `headers` middleware setting
+`X-Robots-Tag`, is a *second mechanism for something the model already
+expresses*, needs remembering per host, and diverges from what a hand-written
+host does. Parity here is cheap and the divergence is not.
+
+None of the three widens the tenant's capability: they are inherited from the
+operator-authored template or profile exactly like `middlewares`, and the
+annotation still carries only a name. `timeouts` reuses `ProxyHost`'s own
+validation helper, so a template can never pass a settings write and then produce
+hosts the config validator rejects as a batch (the failure mode `ValidateRefs`
+exists to prevent). `tags` are inert UI metadata with no validation rules and no
+data-plane effect, which is why inheriting them is trivially safe; `displayName`
+was already derived as `<namespace>/<name>` and stays that way, since a
+template-wide display name for every derived host would be worse than useless.
 
 ---
 
@@ -679,3 +740,9 @@ repo entirely rather than relying on placeholder discipline.
 - **Per-profile `allowedDomainSuffixes`**, so a permissive profile could be
   restricted to a subset of the published namespace. The current suffix list is
   global.
+- **`locations` on a template/profile** (§5, "`locations` is deliberately not a
+  template field"). Not a gap: locations are per-service path routing, and
+  discovery forwards everything to the cluster ingress controller by vhost so the
+  controller can do that routing from the same `Ingress`. Only an operator-side
+  shape (per-profile locations in settings, selected by name) would preserve the
+  containment property; a per-Ingress one is a self-service privilege grant.

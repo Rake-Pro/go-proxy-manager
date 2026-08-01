@@ -70,9 +70,11 @@ builds it with a narrower, more focused design:
   profiles** the manifest picks by name (read-only against the cluster, no
   `client-go`), which then feeds the same DNS sync; the annotation can only carry
   a profile *name*, never a middleware/access-list/upstream, so a cluster
-  manifest can never weaken a chain you configured; only gpm's own labelled
-  objects are ever touched, and it freezes rather than deleting when the cluster
-  cannot be read
+  manifest can never weaken a chain you configured; a derived host is a *full*
+  proxy host (TLS/mTLS, chains, websockets, `robotsNoIndex`, `timeouts`, tags),
+  so moving a service into discovery does not quietly drop half its settings;
+  only gpm's own labelled objects are ever touched, and it freezes rather than
+  deleting when the cluster cannot be read
 
 **Operations**
 - REST API + embedded single-page web UI

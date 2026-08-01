@@ -185,6 +185,18 @@ unattended. Transport hardening matches `dnssync`: TLS verified against the
 supplied CA with no skip-verify, redirects never followed, link-local
 destinations refused at connect time, bounded reads and bounded pagination.
 
+A derived host is a **full** `ProxyHost`, not a reduced one: the operator's
+template (or the profile an `Ingress` selected by name) supplies the upstream,
+TLS/mTLS, middleware and access-list chains, websockets, `robotsNoIndex`,
+`timeouts` and `tags`, and every reference type among them is deep-copied per
+host so two derived hosts never share backing memory with each other or with the
+loaded settings. Parity matters because the alternative is silent: a service
+moved into discovery that loses its no-index header or its upstream timeout keeps
+serving, just differently, and the workaround is a second mechanism (a `headers`
+middleware) for something the model already expresses. The one field a derived
+host deliberately cannot carry is `locations` — path routing belongs to the
+cluster ingress controller, which does it from the same `Ingress` gpm read.
+
 Three properties define the reconciler. It is **full-state** — the desired set is
 recomputed from a complete list on every poll and compared with the config, so a
 missed event is impossible by construction. It is **ownership-gated** — only
