@@ -502,3 +502,175 @@ func TestRevertPreservesAPITokens(t *testing.T) {
 		t.Fatal("the revert commit must include the preserved api-tokens")
 	}
 }
+
+// ApplyBatch is the Ingress-discovery reconciler's write primitive: one commit
+// for every upsert AND every delete in a run.
+func TestApplyBatchUpsertsAndDeletesInOneCommit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed two hosts through the ordinary path.
+	for _, name := range []string{"keep", "drop"} {
+		if _, err := s.Save(ctx, model.ProxyHost{
+			ObjectMeta: model.ObjectMeta{Name: name},
+			Domains:    []string{name + ".example.com"},
+			Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80},
+		}, Author{}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	before, err := s.RepoHistory(ctx, 100)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+
+	sha, err := s.ApplyBatch(ctx,
+		[]model.Object{
+			model.ProxyHost{
+				ObjectMeta: model.ObjectMeta{Name: "added"},
+				Domains:    []string{"added.example.com"},
+				Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.2", Port: 80},
+			},
+			model.ProxyHost{
+				ObjectMeta: model.ObjectMeta{Name: "keep"},
+				Domains:    []string{"keep2.example.com"},
+				Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80},
+			},
+		},
+		[]ObjectRef{{Kind: "ProxyHost", Name: "drop"}},
+		"Ingress discovery: reconcile (+1 ~1 -1)", Author{})
+	if err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if sha == "" {
+		t.Fatal("ApplyBatch must return the new commit")
+	}
+
+	after, err := s.RepoHistory(ctx, 100)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("batch produced %d commits, want exactly 1", len(after)-len(before))
+	}
+	if after[0].Message != "Ingress discovery: reconcile (+1 ~1 -1)" {
+		t.Fatalf("commit message = %q", after[0].Message)
+	}
+
+	cfg, _, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	names := map[string]string{}
+	for _, h := range cfg.ProxyHosts {
+		names[h.Name] = strings.Join(h.Domains, ",")
+	}
+	if _, gone := names["drop"]; gone {
+		t.Fatal("the deleted host is still present")
+	}
+	if names["added"] != "added.example.com" || names["keep"] != "keep2.example.com" {
+		t.Fatalf("post-batch hosts = %v", names)
+	}
+}
+
+// A steady-state reconcile must not produce empty revisions.
+func TestApplyBatchEmptyIsANoOp(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	before, _ := s.RepoHistory(ctx, 100)
+	sha, err := s.ApplyBatch(ctx, nil, nil, "nothing", Author{})
+	if err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if sha != "" {
+		t.Fatalf("an empty batch must not commit, got %q", sha)
+	}
+	after, _ := s.RepoHistory(ctx, 100)
+	if len(after) != len(before) {
+		t.Fatalf("an empty batch committed %d revisions", len(after)-len(before))
+	}
+}
+
+// The batch is all-or-nothing: an invalid member leaves the whole tree untouched.
+func TestApplyBatchRejectsInvalidWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	dir := s.Dir()
+	head, _ := s.Head(ctx)
+
+	_, err := s.ApplyBatch(ctx, []model.Object{
+		model.ProxyHost{
+			ObjectMeta: model.ObjectMeta{Name: "good"},
+			Domains:    []string{"good.example.com"},
+			Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80},
+		},
+		model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "bad"}}, // no domains, no upstream
+	}, nil, "batch", Author{})
+	if err == nil {
+		t.Fatal("an invalid member must fail the batch")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "proxy-hosts", "good.yaml")); statErr == nil {
+		t.Fatal("a rejected batch must write nothing at all")
+	}
+	if now, _ := s.Head(ctx); now != head {
+		t.Fatal("a rejected batch must not commit")
+	}
+}
+
+// A batch that would leave a dangling reference is refused, exactly like Delete.
+func TestApplyBatchRefusesDanglingDelete(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Save(ctx, sampleCert("wildcard"), Author{}); err != nil {
+		t.Fatalf("seed certificate: %v", err)
+	}
+	if _, err := s.Save(ctx, model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Domains:    []string{"app.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80},
+		TLS:        model.TLSSettings{CertificateRef: "wildcard"},
+	}, Author{}); err != nil {
+		t.Fatalf("seed host: %v", err)
+	}
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Certificate", Name: "wildcard"}}, "drop cert", Author{}); err == nil {
+		t.Fatal("deleting a referenced certificate in a batch must be refused")
+	}
+	cfg, _, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Certificates) != 1 {
+		t.Fatal("the refused delete must have left the certificate in place")
+	}
+}
+
+// The reconciler works from a snapshot, so an object already removed underneath
+// it is the desired end state, not an error.
+func TestApplyBatchIgnoresAbsentDeletes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	before, _ := s.RepoHistory(ctx, 100)
+	sha, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "never-existed"}}, "drop", Author{})
+	if err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if sha != "" {
+		t.Fatal("deleting nothing must not commit")
+	}
+	after, _ := s.RepoHistory(ctx, 100)
+	if len(after) != len(before) {
+		t.Fatal("deleting an absent object must not produce a revision")
+	}
+}
+
+func TestApplyBatchRejectsUnknownKindAndBadName(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "Nonsense", Name: "x"}}, "m", Author{}); err == nil {
+		t.Fatal("an unknown kind must be refused")
+	}
+	if _, err := s.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "ProxyHost", Name: "../escape"}}, "m", Author{}); err == nil {
+		t.Fatal("a name that is not a valid object name must be refused")
+	}
+}

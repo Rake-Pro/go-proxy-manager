@@ -54,6 +54,11 @@ type Settings struct {
 	// DNSSync configures the optional local/public DNS record reconcilers that
 	// publish CNAMEs for proxy hosts opted in via their dns policy.
 	DNSSync DNSSyncSettings `json:"dnsSync,omitempty" yaml:"dnsSync,omitempty"`
+
+	// IngressDiscovery configures the optional read-only Kubernetes Ingress
+	// reconciler that derives managed proxy hosts from annotated cluster
+	// Ingresses, which then feed DNSSync above.
+	IngressDiscovery IngressDiscoverySettings `json:"ingressDiscovery,omitempty" yaml:"ingressDiscovery,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -90,6 +95,9 @@ func (s Settings) Validate() error {
 		}
 	}
 	if err := s.DNSSync.Validate(); err != nil {
+		return err
+	}
+	if err := s.IngressDiscovery.Validate(); err != nil {
 		return err
 	}
 	return nil

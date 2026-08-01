@@ -322,6 +322,97 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	return s.git.CommitAll(ctx, message, author)
 }
 
+// ObjectRef names one object for ApplyBatch's delete list.
+type ObjectRef struct {
+	Kind string
+	Name string
+}
+
+// ApplyBatch writes every object in upserts and removes every object named in
+// deletes as ONE commit. It is SaveBatch plus removals: the whole merged graph
+// (upserts applied, deletes removed) is validated once - including the
+// dangling-reference check Delete performs per object - before anything touches
+// the working tree, so a batch is all-or-nothing and never commits an
+// intermediate state that never existed as a whole.
+//
+// It exists for the Ingress-discovery reconciler, whose unit of work is a whole
+// reconcile: a poll that adds two hosts and removes one is a single revision an
+// operator can read and revert, not four commits with a reload, webhook and DNS
+// trigger apiece (see docs/design/ingress-discovery.md §2).
+//
+// An empty batch is a no-op: it returns ("", nil) without committing, so a
+// steady-state reconcile produces no empty revisions. A delete naming an object
+// that does not exist is skipped rather than failing the batch - the reconciler
+// works from a snapshot, and an object removed underneath it is already in the
+// desired end state.
+func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes []ObjectRef, message string, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg, _, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+
+	type removal struct{ path string }
+	var removals []removal
+	merged := cfg
+	for _, o := range upserts {
+		if err := o.Validate(); err != nil {
+			return "", err
+		}
+		if _, ok := kindDir[o.Kind()]; !ok {
+			return "", fmt.Errorf("unknown object kind %q", o.Kind())
+		}
+		merged = withObject(&merged, o)
+	}
+	for _, ref := range deletes {
+		if err := model.ValidateName(ref.Name); err != nil {
+			return "", err
+		}
+		dir, ok := kindDir[ref.Kind]
+		if !ok {
+			return "", fmt.Errorf("unknown object kind %q", ref.Kind)
+		}
+		path := filepath.Join(s.dir, dir, ref.Name+".yaml")
+		if _, err := os.Stat(path); err != nil {
+			continue // already gone; the desired end state is satisfied
+		}
+		merged = withoutObject(&merged, ref.Kind, ref.Name)
+		removals = append(removals, removal{path: path})
+	}
+	if len(upserts) == 0 && len(removals) == 0 {
+		return "", nil
+	}
+
+	if err := merged.Validate(); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := s.checkGeoAvailable(merged); err != nil {
+		return "", err
+	}
+	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
+		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+
+	now := time.Now().UTC()
+	for _, o := range upserts {
+		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
+		if err := writeYAML(path, stampTimes(o, now)); err != nil {
+			return "", err
+		}
+	}
+	for _, r := range removals {
+		if err := os.Remove(r.path); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	if message == "" {
+		message = "Apply configuration batch"
+	}
+	return s.git.CommitAll(ctx, message, author)
+}
+
 // Head returns the current config repo HEAD commit hash.
 func (s *Store) Head(ctx context.Context) (string, error) {
 	return s.git.Head(ctx)

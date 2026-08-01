@@ -14,6 +14,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
+	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"gopkg.in/yaml.v3"
@@ -323,6 +324,16 @@ func TestScopeEnforcement(t *testing.T) {
 		{"dns-sync read blocks reconcile", []string{"dns-sync:read"}, "POST", "/dns-sync/reconcile", "", http.StatusForbidden},
 		{"dns-sync write reaches reconcile", []string{"dns-sync:write"}, "POST", "/dns-sync/reconcile", "", http.StatusNotImplemented},
 		{"unrelated scope blocks dns-sync", []string{"proxy-hosts:write"}, "GET", "/dns-sync/status", "", http.StatusForbidden},
+
+		{"ingress-discovery read scope", []string{"ingress-discovery:read"}, "GET", "/ingress-discovery/status", "", http.StatusNotImplemented},
+		{"ingress-discovery read blocks reconcile", []string{"ingress-discovery:read"}, "POST", "/ingress-discovery/reconcile", "", http.StatusForbidden},
+		{"ingress-discovery write reaches reconcile", []string{"ingress-discovery:write"}, "POST", "/ingress-discovery/reconcile", "", http.StatusNotImplemented},
+		{"ingress-discovery write implies read", []string{"ingress-discovery:write"}, "GET", "/ingress-discovery/status", "", http.StatusNotImplemented},
+		{"unrelated scope blocks ingress-discovery", []string{"proxy-hosts:write"}, "GET", "/ingress-discovery/status", "", http.StatusForbidden},
+		{"dns-sync scope does not reach ingress-discovery", []string{"dns-sync:write"}, "POST", "/ingress-discovery/reconcile", "", http.StatusForbidden},
+		{"wildcard read reaches ingress-discovery status", []string{"*:read"}, "GET", "/ingress-discovery/status", "", http.StatusNotImplemented},
+		{"wildcard read does not reach ingress-discovery reconcile", []string{"*:read"}, "POST", "/ingress-discovery/reconcile", "", http.StatusForbidden},
+		{"admin reaches ingress-discovery reconcile", []string{model.ScopeAdmin}, "POST", "/ingress-discovery/reconcile", "", http.StatusNotImplemented},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -515,5 +526,94 @@ func TestAPITokenLastUsedDecoration(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if got["lastUsed"] != "2026-03-04T05:06:07Z" {
 		t.Fatalf("lastUsed = %v", got["lastUsed"])
+	}
+}
+
+func TestIngressDiscoveryEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	runs := 0
+	var runErr error
+	h := api.New(api.Deps{
+		Store: st,
+		IngressDiscoveryReconcile: func(context.Context) error {
+			runs++
+			return runErr
+		},
+		IngressDiscoveryStatus: func() any { return map[string]any{"runs": runs} },
+	})
+
+	if w := do(t, h, "GET", "/ingress-discovery/status", ""); w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if w := do(t, h, "POST", "/ingress-discovery/reconcile", ""); w.Code != http.StatusOK {
+		t.Fatalf("reconcile = %d", w.Code)
+	}
+	if runs != 1 {
+		t.Fatalf("reconcile ran %d times, want 1", runs)
+	}
+
+	// A backend failure is a 502 - the cluster could not be read.
+	runErr = fmt.Errorf("api server unreachable")
+	if w := do(t, h, "POST", "/ingress-discovery/reconcile", ""); w.Code != http.StatusBadGateway {
+		t.Fatalf("failing reconcile = %d, want 502", w.Code)
+	}
+
+	// A run already in flight is a conflict, not a failure.
+	runErr = fmt.Errorf("manual run refused: %w", k8s.ErrReconcileInProgress)
+	if w := do(t, h, "POST", "/ingress-discovery/reconcile", ""); w.Code != http.StatusConflict {
+		t.Fatalf("reconcile while running = %d, want 409", w.Code)
+	}
+}
+
+func TestIngressDiscoveryEndpointsUnwired(t *testing.T) {
+	h, _ := newHandler(t)
+	if w := do(t, h, "GET", "/ingress-discovery/status", ""); w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", w.Code)
+	}
+	if w := do(t, h, "POST", "/ingress-discovery/reconcile", ""); w.Code != http.StatusNotImplemented {
+		t.Fatalf("reconcile = %d, want 501", w.Code)
+	}
+}
+
+// The SPA gates its discovery panel on this probe, so it has to report the
+// wired-AND-enabled truth rather than just "the binary supports it".
+func TestCapabilitiesReportIngressDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	enabled := false
+	h := api.New(api.Deps{Store: st, IngressDiscoveryEnabled: func() bool { return enabled }})
+
+	read := func() bool {
+		w := do(t, h, "GET", "/capabilities", "")
+		var caps struct {
+			IngressDiscovery struct {
+				Enabled bool `json:"enabled"`
+			} `json:"ingressDiscovery"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &caps); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return caps.IngressDiscovery.Enabled
+	}
+	if read() {
+		t.Fatal("discovery must report disabled until settings turn it on")
+	}
+	enabled = true
+	if !read() {
+		t.Fatal("discovery must report enabled once settings turn it on")
+	}
+
+	// Unwired entirely: reported disabled, never absent.
+	plain, _ := newHandler(t)
+	w := do(t, plain, "GET", "/capabilities", "")
+	if !strings.Contains(w.Body.String(), `"ingressDiscovery"`) {
+		t.Fatalf("capabilities must always carry the key: %s", w.Body.String())
 	}
 }

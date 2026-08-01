@@ -16,6 +16,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
+	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 )
@@ -74,15 +75,25 @@ type Deps struct {
 	// DNSSyncEnabled, if set, reports which DNS sync backends are configured,
 	// for the capability probe. May be nil (both reported disabled).
 	DNSSyncEnabled func() (pihole, cloudflare bool)
+	// IngressDiscoveryReconcile, if set, runs a full Ingress-discovery reconcile
+	// synchronously (POST /ingress-discovery/reconcile). May be nil (501).
+	IngressDiscoveryReconcile func(context.Context) error
+	// IngressDiscoveryStatus, if set, returns the last reconcile result
+	// (marshalled as-is) for GET /ingress-discovery/status. May be nil (501).
+	IngressDiscoveryStatus func() any
+	// IngressDiscoveryEnabled, if set, reports whether Ingress discovery is
+	// configured, for the capability probe. May be nil (reported disabled).
+	IngressDiscoveryEnabled func() bool
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
 // GET /capabilities. It is intentionally an object-of-objects so new capability
 // groups can be added without breaking existing clients.
 type capabilities struct {
-	GeoIP     geoIPCapability    `json:"geoip"`
-	APITokens apiTokenCapability `json:"apiTokens"`
-	DNSSync   dnsSyncCapability  `json:"dnsSync"`
+	GeoIP            geoIPCapability            `json:"geoip"`
+	APITokens        apiTokenCapability         `json:"apiTokens"`
+	DNSSync          dnsSyncCapability          `json:"dnsSync"`
+	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
 }
 
 type geoIPCapability struct {
@@ -101,6 +112,13 @@ type apiTokenCapability struct {
 type dnsSyncCapability struct {
 	PiholeEnabled     bool `json:"piholeEnabled"`
 	CloudflareEnabled bool `json:"cloudflareEnabled"`
+}
+
+type ingressDiscoveryCapability struct {
+	// Enabled reports that Kubernetes Ingress discovery is wired AND turned on in
+	// settings. The SPA uses it to show the status panel rather than offering a
+	// control that cannot work.
+	Enabled bool `json:"enabled"`
 }
 
 func (d Deps) author(r *http.Request) store.Author {
@@ -320,6 +338,9 @@ func New(d Deps) http.Handler {
 			GeoIP:     geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
 			APITokens: apiTokenCapability{Enabled: d.RequireScope != nil},
 			DNSSync:   dnsSyncCapability{PiholeEnabled: pihole, CloudflareEnabled: cloudflare},
+			IngressDiscovery: ingressDiscoveryCapability{
+				Enabled: d.IngressDiscoveryEnabled != nil && d.IngressDiscoveryEnabled(),
+			},
 		})
 	})
 
@@ -353,6 +374,39 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.DNSSyncStatus())
+	}))
+
+	// Kubernetes Ingress discovery: reconcile annotated cluster Ingresses into
+	// template-derived, managed-labelled proxy hosts (which then feed DNS sync),
+	// and report the last run. Writes are ownership-gated and the cluster read is
+	// strictly read-only; see docs/design/ingress-discovery.md.
+	mux.HandleFunc("POST /ingress-discovery/reconcile", d.scoped("ingress-discovery:write", func(w http.ResponseWriter, r *http.Request) {
+		if d.IngressDiscoveryReconcile == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			return
+		}
+		if err := d.IngressDiscoveryReconcile(r.Context()); err != nil {
+			// Same reasoning as the DNS reconcile: an in-flight run is a conflict,
+			// not a backend failure, and the manual endpoint never queues behind one.
+			if errors.Is(err, k8s.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if d.IngressDiscoveryStatus != nil {
+			writeJSON(w, http.StatusOK, d.IngressDiscoveryStatus())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
+	}))
+	mux.HandleFunc("GET /ingress-discovery/status", d.scoped("ingress-discovery:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.IngressDiscoveryStatus == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			return
+		}
+		writeJSON(w, http.StatusOK, d.IngressDiscoveryStatus())
 	}))
 
 	// Live upstream-group health (read-only): which upstreams each group currently
