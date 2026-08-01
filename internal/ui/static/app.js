@@ -2622,6 +2622,9 @@ async function viewSettings(c) {
         </div>
       </div>`;
     div.dataset.uid = String(i);
+    // The loaded profile, kept so the save handler can MERGE rather than rebuild.
+    // See the tls merge in the save handler for why this is load-bearing.
+    div._orig = p;
     div.querySelector('.pf-del').addEventListener('click', () => div.remove());
     pfWrap.appendChild(div);
     div._mw = makeChipInput(div.querySelector('.pf-mw'), arr(p.middlewares), 'add middleware...');
@@ -2762,11 +2765,19 @@ async function viewSettings(c) {
           port: parseInt($('#set-id-up-port').value, 10) || 0,
         },
         upstreamGroupRef: $('#set-id-up-group').value.trim() || undefined,
-        tls: {
+        // INVARIANT: tls is MERGED over what was loaded, never rebuilt from the
+        // three fields this form renders. A settings write is a full replacement
+        // server-side, and TLSSettings also carries clientAuth (mTLS),
+        // minTLSVersion and hsts - none of which have a control here. Rebuilding
+        // would strip a GitOps-authored `clientAuth: {caRef: corp-ca, mode:
+        // require}` on any unrelated save, and the next reconcile would push that
+        // silent downgrade onto every derived host. Any TLS field added to this
+        // form must be added to the overlay below, not left to the merge.
+        tls: Object.assign({}, idt.tls, {
           certificateRef: $('#set-id-cert').value.trim(),
           forceSSL: isOn('set-id-forcessl'),
           http2: isOn('set-id-http2'),
-        },
+        }),
         websocketsUpgrade: isOn('set-id-ws'),
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
@@ -2795,11 +2806,14 @@ async function viewSettings(c) {
           port: parseInt(row.querySelector('.pf-up-port').value, 10) || 0,
         },
         upstreamGroupRef: group || undefined,
-        tls: {
+        // Same invariant as the template block above: merge over the loaded
+        // profile so an unrelated save cannot strip a clientAuth / minTLSVersion /
+        // hsts this form does not render.
+        tls: Object.assign({}, (row._orig || {}).tls, {
           certificateRef: row.querySelector('.pf-cert').value.trim(),
           forceSSL: isOn('pf-forcessl-' + uid),
           http2: isOn('pf-http2-' + uid),
-        },
+        }),
         websocketsUpgrade: isOn('pf-ws-' + uid),
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
