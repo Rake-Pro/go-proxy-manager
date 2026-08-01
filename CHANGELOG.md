@@ -7,6 +7,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Changed
+
+- **The per-host "LAN direct" / "Public CNAME" toggles stay usable when their DNS
+  backend is not configured.** They were greyed out via `gateControl`; they now
+  render an inline note instead ("Pi-hole DNS sync is not configured yet - this
+  will take effect when it is"). Setting the flag ahead of the backend is
+  legitimate staging - the host is the declaration, the syncer publishes when it
+  is wired - not an error to refuse, and the capability probe is cached per page
+  load, so a stale "not configured" could otherwise outlive the fact and block a
+  valid edit. Every other capability-gated control still greys out.
+
 ### Added
 
 - **Ingress discovery: operator-defined named profiles, selected per Ingress.**
@@ -32,8 +43,9 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   among sanctioned chains and can never invent one, nor end up weaker than
   something the operator explicitly allowed. An **undefined** profile name
   **skips** the Ingress - never a silent fall back to the default, never a
-  partial chain - and the skip protects any existing derived host for that
-  Ingress from deletion, so a typo cannot take a service offline. Matching is
+  partial chain - and if that Ingress already has a derived host, the host is
+  **disabled** rather than left alone, so a retired or tightened profile cannot
+  be pinned (see Security below). Matching is
   exact (no prefix match, no case folding); a profile is applied verbatim rather
   than merged with the default, so the default's access list cannot leak onto a
   deliberately-public profile. Every profile validates at settings-**write** time
@@ -57,7 +69,73 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   operator's hand-written hosts kept failing over - a silent availability
   downgrade for anything discovery adopted.
 
+### Security
+
+- **Ingress discovery: revoking a profile now actually revokes it.** An annotated
+  Ingress whose profile does not resolve used to be treated like any other derive
+  failure - protected from deletion and otherwise untouched - which meant the
+  security property held for *creating* a host but not for *revoking* one. An
+  operator who tightened a profile (added `sso`, added an access list), renamed
+  it, or retired it could be defeated by a tenant flipping the annotation to a
+  name that does not exist: no upsert, no delete, and the live host kept serving
+  the pre-tightening, unauthenticated chain indefinitely. Deleting every profile
+  row in the settings UI froze every derived host the same way. Discovery now
+  plans an update setting `disabled: true` on the existing managed host instead -
+  fails closed, destroys nothing, and re-adding the profile re-enables it on the
+  next reconcile. Every **other** derive failure (malformed hostname, unusable
+  derived name) still freezes the existing host: the operator's policy has not
+  changed there, and failing closed would let any tenant take their own service
+  offline with a one-character manifest edit.
+
+- **A settings save no longer strips mTLS from discovery profiles or the
+  template.** The settings form rebuilt `tls` from exactly the three fields it
+  renders (`certificateRef`, `forceSSL`, `http2`), and a settings write is a full
+  replacement - so a template or profile authored in YAML/GitOps with
+  `tls.clientAuth: {caRef: …, mode: require}` silently lost its
+  client-certificate requirement (and its `minTLSVersion` and `hsts`) on **any**
+  unrelated Settings save, after which the next reconcile pushed the downgrade
+  onto every derived host. The handler now merges over the loaded object. The
+  template block had this bug since it shipped; profiles inherited it. A guard
+  test in `internal/ui` fails if the merge is ever rebuilt away.
+
+- **The data plane fails closed on an unresolvable middleware or access-list
+  name.** `buildChain` skipped any name it could not resolve, so a typo in a
+  host's `accessLists` turned a restricted host into an open one, with
+  `Config.Validate`'s reference check the single thing standing between the two.
+  An unresolvable reference now replaces that host's chain with a `503` and logs
+  at `error`. Scoped to the one host on purpose: a config that cannot pass
+  validation anyway must not take unrelated hosts down as a side effect.
+
+- **Derived hosts no longer share one `*ClientAuth` with the settings object.**
+  `TLSSettings` is a value but its `ClientAuth` is a pointer, so every host
+  derived from a template aliased the same mTLS struct (middlewares, access lists
+  and the DNS policy were already copied). Not exploitable through any current
+  path, but a mutation of one host's mTLS requirement could have reached every
+  other host's. Now deep-copied.
+
 ### Fixed
+
+- **One dangling reference in `ingressDiscovery` could wedge the entire
+  reconcile, forever.** `Settings.Validate` checks only the *shape* of the names
+  a template or profile carries, so a `certificateRef` / `upstreamGroupRef` /
+  middleware / access list / `clientAuth.caRef` naming an object that does not
+  exist passed `SaveSettings` - and then failed at `merged.Validate()` in
+  `ApplyBatch`, which rejects the **whole batch**. Every other tenant's create,
+  update and delete was therefore dropped on every poll, indefinitely, surfacing
+  only as an opaque batch-validation error in the reconcile status.
+  `SaveSettings` now cross-checks the template and every profile against the
+  loaded config (`IngressDiscoverySettings.ValidateRefs`), so the error lands on
+  the operator's own write with the offending name in it. A **disabled**
+  discovery block is not cross-checked, so a half-filled draft still never blocks
+  an unrelated settings write.
+
+- **The residual risk of profiles is now documented where operators read it.**
+  `docs/configuration.md` and the settings UI both claimed a manifest "can never
+  produce a host weaker than something you explicitly sanctioned" while the
+  worked example shipped a `public-ratelimited` profile with no access list. Both
+  now say the operative rule plainly: every profile is selectable by every
+  annotating Ingress, so define only profiles you are willing for any cluster
+  tenant to choose.
 
 - **The API-token form could not grant `ingress-discovery`.** The SPA rendered
   its scope checkboxes from a hand-maintained copy of `model.ScopePlurals`,
