@@ -243,7 +243,8 @@ rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
 | `labelSelector` | string | Optional server-side label selector. The opt-in annotation is still required — the Kubernetes API cannot select on annotations, so that filter is always client-side. |
 | `pollInterval` | duration | Go duration string. Default `1m`, **minimum `15s`** (a reconcile takes the store write lock). |
 | `allowedDomainSuffixes` | []string | **Required when enabled.** A discovered hostname must equal one of these or end in `.` + one of them. |
-| `template.upstream` | Upstream | Where every derived host forwards: the **cluster ingress controller's** address. |
+| `template.upstream` | Upstream | Where every derived host forwards: the **cluster ingress controller's** address. Mutually exclusive with `template.upstreamGroupRef`. |
+| `template.upstreamGroupRef` | string | Names an `upstream-groups` entry instead of a single address. **Prefer this when the ingress controller runs on more than one node** - otherwise every derived host is pinned to one node while hand-written hosts fail over. |
 | `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**. |
 | `template.websocketsUpgrade` | bool | Applied to every derived host. |
 | `template.middlewares` | []string | Applied to every derived host, in order. |

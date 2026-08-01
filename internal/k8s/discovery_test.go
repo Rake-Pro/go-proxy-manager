@@ -1126,3 +1126,39 @@ func TestEnabledIsAnsweredFromTheCachedFlag(t *testing.T) {
 		t.Fatalf("Enabled() loaded the config %d extra times; it must answer from the cache", loads-after)
 	}
 }
+
+// A derived host must be able to name an UpstreamGroup rather than a single
+// backend. The cluster ingress controller runs on every node, so pinning
+// discovery to one address would leave every discovered service single-node
+// while the operator's hand-written hosts keep failing over.
+func TestDerivedHostInheritsUpstreamGroup(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"}, "grafana.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	settings.IngressDiscovery.Template.Upstream = model.Upstream{}
+	settings.IngressDiscovery.Template.UpstreamGroupRef = "k8s-nodes"
+
+	rec := &recorder{}
+	cfg := &model.Config{}
+	d := newDiscoverer(f, cfg, settings, rec)
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if h.UpstreamGroupRef != "k8s-nodes" {
+		t.Fatalf("upstreamGroupRef = %q, want the template's group", h.UpstreamGroupRef)
+	}
+	if h.Upstream != (model.Upstream{}) {
+		t.Fatalf("upstream = %+v, want empty when a group is named (they are mutually exclusive)", h.Upstream)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}

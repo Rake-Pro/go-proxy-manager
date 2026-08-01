@@ -2494,7 +2494,9 @@ async function viewSettings(c) {
               <input class="field mono" id="set-id-up-host" style="flex:2 1 160px" value="${esc(idt.upstream.host || '')}" placeholder="10.0.0.40" aria-label="Upstream host" />
               <input class="field mono" id="set-id-up-port" style="flex:0 0 90px" value="${esc(idt.upstream.port || '')}" placeholder="80" aria-label="Upstream port" />
             </div>
+            <div class="hint">Leave blank and name an upstream group below instead when the controller runs on more than one node.</div>
           </div>
+          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" value="${esc(idt.upstreamGroupRef || '')}" placeholder="k8s-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
           <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required. Discovery never issues per-host certificates: point this at your wildcard certificate.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect http to https on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">HTTP/2</div><div class="ds">Enable h2 on derived hosts</div></div>${switchHtml('set-id-http2', !!idt.tls.http2, 'HTTP/2')}</div>
@@ -2692,11 +2694,14 @@ async function viewSettings(c) {
       pollInterval: $('#set-id-poll').value.trim(),
       allowedDomainSuffixes: idSuffixCtl.get(),
       template: {
-        upstream: {
+        // Mutually exclusive server-side, so send only the one that is filled
+        // in: an empty upstream object alongside a group ref would be rejected.
+        upstream: $('#set-id-up-group').value.trim() ? undefined : {
           scheme: $('#set-id-up-scheme').value,
           host: $('#set-id-up-host').value.trim(),
           port: parseInt($('#set-id-up-port').value, 10) || 0,
         },
+        upstreamGroupRef: $('#set-id-up-group').value.trim() || undefined,
         tls: {
           certificateRef: $('#set-id-cert').value.trim(),
           forceSSL: isOn('set-id-forcessl'),

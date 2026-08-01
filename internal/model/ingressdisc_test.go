@@ -48,6 +48,17 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"leading dot suffix accepted", func(d *IngressDiscoverySettings) { d.AllowedDomainSuffixes = []string{".example.com"} }, ""},
 		{"upstream required", func(d *IngressDiscoverySettings) { d.Template.Upstream = Upstream{} }, "template.upstream"},
 		{"upstream port range", func(d *IngressDiscoverySettings) { d.Template.Upstream.Port = 70000 }, "template.upstream"},
+		{"upstreamGroupRef replaces upstream", func(d *IngressDiscoverySettings) {
+			d.Template.Upstream = Upstream{}
+			d.Template.UpstreamGroupRef = "k8s-nodes"
+		}, ""},
+		{"upstream and group are mutually exclusive", func(d *IngressDiscoverySettings) {
+			d.Template.UpstreamGroupRef = "k8s-nodes"
+		}, "mutually exclusive"},
+		{"upstreamGroupRef name shape", func(d *IngressDiscoverySettings) {
+			d.Template.Upstream = Upstream{}
+			d.Template.UpstreamGroupRef = "Not A Name"
+		}, "template.upstreamGroupRef"},
 		{"certificateRef required", func(d *IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "" }, "certificateRef is required"},
 		{"certificateRef name shape", func(d *IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "Wild Card" }, "certificateRef"},
 		{"template tls validated", func(d *IngressDiscoverySettings) { d.Template.TLS.MinTLSVersion = "1.1" }, "minTLSVersion"},

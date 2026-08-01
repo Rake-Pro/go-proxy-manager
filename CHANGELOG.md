@@ -7,6 +7,16 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Added
+
+- **Ingress discovery templates can name an upstream group.**
+  `settings.ingressDiscovery.template.upstreamGroupRef` is an alternative to a
+  single `upstream` address, mutually exclusive with it exactly as on a proxy
+  host. A cluster ingress controller normally runs on every node, so pinning
+  discovery to one address made every discovered service single-node while the
+  operator's hand-written hosts kept failing over - a silent availability
+  downgrade for anything discovery adopted.
+
 ### Fixed
 
 - **The API-token form could not grant `ingress-discovery`.** The SPA rendered

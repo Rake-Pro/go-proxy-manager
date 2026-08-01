@@ -84,7 +84,15 @@ type IngressHostTemplate struct {
 	// at the edge). With https the Go transport derives SNI and certificate
 	// verification from THIS host, not from the forwarded Host header, so an https
 	// upstream must name a hostname the controller's certificate covers.
-	Upstream Upstream `json:"upstream" yaml:"upstream"`
+	// Exactly one of Upstream / UpstreamGroupRef is set, mirroring ProxyHost.
+	Upstream Upstream `json:"upstream,omitempty" yaml:"upstream,omitempty"`
+
+	// UpstreamGroupRef names an UpstreamGroup instead of a single backend, so
+	// derived hosts get the same failover the hand-written ones have. A cluster
+	// ingress controller usually runs on every node: pinning discovery to one of
+	// them would make every discovered service single-node while the operator's
+	// own hosts survive a node loss.
+	UpstreamGroupRef string `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
 
 	// TLS is applied verbatim to every derived host. certificateRef is required:
 	// discovery never creates a Certificate and never triggers ACME, so a single
@@ -206,8 +214,17 @@ func (d IngressDiscoverySettings) Validate() error {
 			return fmt.Errorf("settings: ingressDiscovery.allowedDomainSuffixes[%d] %q is not a valid domain suffix", i, s)
 		}
 	}
-	if err := d.Template.Upstream.validate(); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.template.upstream: %w", err)
+	if d.Template.UpstreamGroupRef == "" {
+		if err := d.Template.Upstream.validate(); err != nil {
+			return fmt.Errorf("settings: ingressDiscovery.template.upstream: %w", err)
+		}
+	} else {
+		if d.Template.Upstream != (Upstream{}) {
+			return fmt.Errorf("settings: ingressDiscovery.template: upstream and upstreamGroupRef are mutually exclusive")
+		}
+		if err := ValidateName(d.Template.UpstreamGroupRef); err != nil {
+			return fmt.Errorf("settings: ingressDiscovery.template.upstreamGroupRef: %w", err)
+		}
 	}
 	if err := ValidateName(d.Template.TLS.CertificateRef); err != nil {
 		return fmt.Errorf("settings: ingressDiscovery.template.tls.certificateRef is required when discovery is enabled (discovery never issues per-host certificates): %w", err)

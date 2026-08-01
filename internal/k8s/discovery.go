@@ -633,6 +633,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		},
 		Domains:           domains,
 		Upstream:          tmpl.Upstream,
+		UpstreamGroupRef:  tmpl.UpstreamGroupRef,
 		TLS:               tmpl.TLS,
 		WebsocketsUpgrade: tmpl.WebsocketsUpgrade,
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
