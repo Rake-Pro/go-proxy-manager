@@ -21,6 +21,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
+	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/geoip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -62,7 +63,7 @@ func main() {
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
-		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin-role gated)")
+		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin role + admin scope gated)")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -167,6 +168,19 @@ func main() {
 	})
 	authn.Configure(cfg, settings)
 
+	// Scoped API tokens. The authenticator caches this closure's result and drops
+	// the cache from reload() below, so a token created, disabled or deleted
+	// through the API takes effect immediately WITHOUT an unauthenticated bearer
+	// attempt being able to force a full config load per request.
+	authn.SetTokenSource(func() []model.APIToken {
+		c, _, err := st.Load(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("api token auth: failed to load config; refusing token authentication")
+			return nil
+		}
+		return c.APITokens
+	})
+
 	// Production guard for GPM_COOKIE_SECURE=0: an https externalBaseURL says
 	// this deployment is TLS-fronted, so non-Secure admin session cookies are a
 	// misconfiguration (they would ride any plain-HTTP request). Warn loudly
@@ -193,6 +207,9 @@ func main() {
 			return err
 		}
 		authn.Configure(c, st2)
+		// Every config change funnels through here, so this is the one place the
+		// cached API-token set has to be dropped.
+		authn.InvalidateTokenCache()
 		return nil
 	}
 
@@ -214,6 +231,14 @@ func main() {
 		return s2.Webhooks
 	})
 
+	// DNS sync: publishes CNAMEs for proxy hosts that opted in, into the local
+	// resolver (Pi-hole) and/or the public zone (Cloudflare). Like the webhook
+	// dispatcher it reads live config on every run, so nothing needs re-wiring
+	// when settings change.
+	dnsSyncer := dnssync.New(func(c context.Context) (model.Config, model.Settings, error) {
+		return st.Load(c)
+	})
+
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
 	apiHandler := api.New(api.Deps{
@@ -229,6 +254,14 @@ func main() {
 		},
 		OnEvent: func(action, kind, name, commit string) {
 			hooks.Dispatch(webhook.Event{Action: action, Kind: kind, Name: name, Commit: commit})
+			// Anything that can change a host's domains or its dns policy - a
+			// proxy-host write, a settings change, or a whole-tree
+			// restore/revert - asks the DNS reconciler for a run. Trigger is
+			// non-blocking and coalescing, so a bulk change costs one reconcile.
+			switch {
+			case kind == "ProxyHost", kind == "Settings", action == "restore", action == "revert":
+				dnsSyncer.Trigger()
+			}
 		},
 		RecentLogs: func() any {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
@@ -238,6 +271,11 @@ func main() {
 			return dp.UpstreamHealth()
 		},
 		RevokeSSOSessions: dataplane.RevokeAllSSOSessions,
+		RequireScope:      requireScope,
+		TokenLastUsed:     authn.TokenLastUsed,
+		DNSSyncReconcile:  dnsSyncer.ReconcileNow,
+		DNSSyncStatus:     func() any { return dnsSyncer.Status() },
+		DNSSyncEnabled:    dnsSyncer.Enabled,
 	})
 
 	uiHandler, err := ui.Handler()
@@ -257,6 +295,21 @@ func main() {
 	}
 	<-errc
 	log.Info().Msg("shutdown complete")
+}
+
+// requireScope is the API's scope gate. A session principal is never constrained
+// (auth.RequireScope returns nil for one); only API tokens are.
+//
+// No principal at all DENIES. The API mux is mounted behind RequireRole, so a
+// request can only arrive here with a principal attached - reaching this branch
+// means the wiring is broken, and the safe answer to a broken authorization
+// check is to refuse, not to wave the request through.
+func requireScope(r *http.Request, required string) error {
+	p, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		return fmt.Errorf("no authenticated principal on the request (refusing %q)", required)
+	}
+	return auth.RequireScope(p, required)
 }
 
 // sessionGC periodically purges expired sessions.

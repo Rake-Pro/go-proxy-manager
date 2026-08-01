@@ -9,6 +9,55 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **Scoped API tokens.** A new `APIToken` config object
+  (`config/api-tokens/<name>.yaml`) gives scripts and CI a bearer credential
+  instead of an admin session cookie. The secret (`gpm_` + 32 random bytes,
+  base64url) is generated **server-side** and returned exactly once, in the
+  response to the `PUT` that created it (or `?rotate=1`); only its SHA-256 digest
+  is committed, in a plain string field, so the git config never holds a usable
+  credential. Presented as `Authorization: Bearer gpm_...`, it is resolved before
+  the cookie path and never falls through to it, by constant-time digest compare
+  across the enabled, unexpired tokens. The token set is cached in the
+  authenticator and invalidated from the daemon's single config-reload path, so
+  revoking, disabling or expiring a token still takes effect on the next request
+  without an unauthenticated bearer attempt being able to force a full config load
+  per request. Scopes are `<plural>:read` / `<plural>:write` / `*:read` /
+  `*:write` / `admin` (write implies read; `admin` is required for token
+  management, `PUT /settings`, `GET /backup`, `POST /restore`, the whole-config
+  `POST /revert` and `/debug/pprof/*`). Sessions are unaffected: scopes constrain
+  API tokens only. The stored digest is never returned by any endpoint, and
+  reverting an `APIToken` is refused so a rotation always means revocation.
+  `GET /api/api-tokens` surfaces an in-memory `lastUsed` per token
+  (deliberately not persisted — the store is git-backed). New page in the web UI
+  with a scope picker, one-time reveal, rotate and delete
+  (`internal/model/apitoken.go`, `internal/auth/apitoken.go`, `internal/api`).
+- **DNS sync (Pi-hole + Cloudflare).** A new `internal/dnssync` subsystem
+  publishes CNAME records for the proxy hosts that opt in via a per-host
+  `dns` policy (`lanDirect` for the LAN resolver, `publicCname` for the public
+  zone), configured once under `settings.dnsSync`. Reconcile is **full-state**,
+  not diff-based: the desired set is recomputed from the whole config on every run
+  and compared with what each backend actually holds, so out-of-band drift is
+  repaired in both directions. Deletion is **ownership-gated** — on Pi-hole only a
+  CNAME whose target is exactly the configured `apexTarget`, on Cloudflare only a
+  record carrying the `managed-by:gpm` comment (re-checked inside the delete call
+  itself) — so a record gpm did not create is read and ignored, never removed.
+  Creation is gated the same way: a desired name that already exists as somebody
+  else's record is logged and skipped rather than shadowed. Reconciles fire
+  automatically after proxy-host/settings writes and whole-tree restore/revert
+  (non-blocking, bursts coalesced into a single follow-up run) and on demand via
+  `POST /api/dns-sync/reconcile`, which answers `409 Conflict` rather than
+  queueing while a run is in flight; `GET /api/dns-sync/status` reports
+  the last run per backend. The Pi-hole v6 client opens and explicitly releases its
+  session (Pi-hole has a small session pool) and reports a `403` as the distinct
+  "read-only session / `app_sudo` disabled" condition. The Cloudflare client is
+  separate from the ACME solver on purpose, so record lifecycle and certificate
+  issuance cannot break each other. Both use the webhook dispatcher's hardened
+  HTTP client (no redirects, link-local refused at connect time).
+- **`GET /api/capabilities` gains `apiTokens` and `dnsSync` groups**, so the SPA
+  greys out the per-host DNS toggles whose backend is not configured, and the
+  "API Tokens" nav entry and page when no token source is wired, instead of
+  accepting input that could not work (`internal/api`, `internal/ui`).
+
 - **`rewrite` middleware: exact-match request-path replacement.** A new
   middleware type (`type: rewrite`) with a `replacePath` map that swaps an
   incoming request path for a target before proxying, when the path matches a key
@@ -154,6 +203,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Changed
 
+- **Manual DNS reconciles no longer queue.** `POST /api/dns-sync/reconcile` used
+  a blocking lock acquire that ignored the request context, so repeated calls
+  piled goroutines (each holding a request-scoped context) up behind a slow
+  backend. It now uses `Syncer.ReconcileNow`, which refuses with
+  `ErrReconcileInProgress` → **409 Conflict**. The event-triggered path still
+  waits, which is what makes trigger coalescing correct (`internal/dnssync`,
+  `internal/api`).
+- **`ProxyHost.dns` is now omitted from JSON when unset.** `encoding/json`
+  ignores `omitempty` on a struct value, so every proxy-host response carried a
+  noise `"dns":{}`; the field is a pointer now (`internal/model`).
+
 - **Data-plane reverse proxy tuned for large/streamed upstream responses.** The
   shared upstream transport now sets `DisableCompression: true` (the proxy must
   not transparently gunzip upstream bodies — CPU cost, and it strips
@@ -179,6 +239,59 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   was ignored anyway, and via the proxy the edge owns it).
 
 ### Security
+
+- **`/debug/pprof/*` now requires the `admin` scope, not just the admin role.**
+  Every API-token principal is admin-*role* by construction (the coarse gate is
+  satisfied and the real authorization is the per-route scope check), so a
+  `proxy-hosts:read` token could fetch the heap profile and `cmdline` — which
+  carry resolved Cloudflare/Pi-hole credentials in cleartext. The profiling
+  endpoints now run an admin-scope check inside the role gate. Admin *sessions*
+  are unchanged (`internal/server`).
+- **`PUT /api/settings` now requires the `admin` scope.** `settings:write` was
+  admin-equivalent in practice: it could point `dnsSync.pihole.url` or a webhook
+  at an attacker-controlled URL with `${ENV:SOME_TOKEN}` as the credential, and
+  the settings write itself triggers the reconcile/dispatch that resolves and
+  sends that env var offsite — and it could rewrite `adminAuth` outright.
+  `GET /api/settings` stays on `settings:read` (reading resolves nothing). The
+  UI greys out the `settings` write box rather than offering a grant that no
+  longer does anything (`internal/api`, `internal/ui`).
+- **`GET /api/backup` now requires the `admin` scope** (was `*:read`). The
+  archive is the raw on-disk YAML, so unlike the JSON reads it carries the
+  api-tokens' stored digests — and it is the exact input `POST /api/restore`
+  takes, which was already admin-scoped (`internal/api`).
+- **`APIToken.tokenHash` is no longer returned by any endpoint** (`json:"-"`,
+  yaml tag unchanged so at-rest persistence is identical). It was previously
+  readable through `GET /api-tokens`, `GET /config` and `GET /backup` on a
+  read-only scope; a SHA-256 digest is offline-crackable, so handing it to a
+  read-only caller let them grind for the secret at leisure (`internal/model`).
+- **Rotation now means revocation: reverting an `APIToken` is refused.**
+  `POST /api/api-tokens/{name}/revert` restored an older token file — and with
+  it an older `tokenHash` — silently reviving a secret the operator had rotated
+  away, while the UI promised "the current secret stops working immediately".
+  `Store.RevertObject` refuses the kind with `ErrNotRevertible`, and the
+  whole-config `POST /api/revert` snapshots the `api-tokens` directory before the
+  tree restore and writes it back over the result, so it neither revives a
+  rotated digest nor resurrects a deleted token. Everything else still reverts
+  normally, and the UI copy now says so (`internal/store`, `internal/ui`).
+- **Unauthenticated bearer attempts no longer force a config load.** Resolving a
+  presented token read the whole git-backed config (directory walk, YAML parse,
+  whole-graph validation) on every request, and a failed bearer auth never
+  reaches the login rate gate — an unthrottled DoS lever for anything
+  internet-facing. The authenticator now caches the token set and drops it from
+  the daemon's single reload path, so token edits still take effect immediately
+  (`internal/auth`, `cmd/gpm`).
+- **The API scope gate fails closed on a missing principal.** The daemon's
+  `RequireScope` returned nil (allow) when no principal was on the request. That
+  is unreachable through the mounted route, which is exactly why it must deny: a
+  broken authorization wiring should refuse, not wave requests through. A nil
+  `Deps.RequireScope` still means "allow" and is documented as the unwired/test
+  case only (`cmd/gpm`, `internal/api`).
+- **Pi-hole DNS sync no longer overwrites an operator-owned CNAME.** The
+  reconciler compared only against records it already owned, so a name an
+  operator had deliberately pointed elsewhere got a second, shadowing entry. It
+  now builds a present-set from every returned record and skips-and-warns on a
+  name that exists with a different target — the behaviour the Cloudflare backend
+  already had (`internal/dnssync`).
 
 - **Aikido SAST suppression documented at the git exec site.** The
   command-injection finding on `internal/store/gitrepo.go` is a false

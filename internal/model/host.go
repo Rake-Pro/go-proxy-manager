@@ -148,6 +148,12 @@ type ProxyHost struct {
 
 	TLS TLSSettings `json:"tls,omitempty" yaml:"tls,omitempty"`
 
+	// DNS opts this host into automatic DNS record management for its domains
+	// (see settings.dnsSync). A nil policy publishes nothing. It is a POINTER
+	// because encoding/json ignores omitempty on a struct value: as a plain
+	// struct every proxy-host response carried a noise `"dns":{}`.
+	DNS *DNSSyncPolicy `json:"dns,omitempty" yaml:"dns,omitempty"`
+
 	// Middlewares/AccessLists apply host-wide (top-down), before any Location-scoped ones.
 	Middlewares []string   `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string   `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`

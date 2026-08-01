@@ -18,6 +18,7 @@ config/
   identity-providers/<name>.yaml
   access-lists/<name>.yaml
   middlewares/<name>.yaml
+  api-tokens/<name>.yaml
 ```
 
 One object per file; the file's base name must equal the object's `name`. The
@@ -85,6 +86,7 @@ Singleton application configuration.
 | `adminAuth.localLoginEnabled` | bool | Keep username/password login available (anti-lockout). Default true. |
 | `adminAuth.ssoOnly` | bool | Disable local login entirely. Requires at least one `providers` entry. Recovery from an SSO outage is by redeploying with local login re-enabled. |
 | `webhooks` | []WebhookConfig | Outbound lifecycle notifications (below). |
+| `dnsSync` | DNSSyncSettings | Optional DNS record reconcilers (below). |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
@@ -113,7 +115,82 @@ webhooks:
   - name: ci
     url: https://hooks.example.com/gpm
     secret: ${FILE:/run/secrets/gpm_webhook_secret}
+dnsSync:
+  pihole:
+    enabled: true
+    url: http://pihole.lan
+    appPassword: ${FILE:/run/secrets/pihole_app_password}
+    apexTarget: edge.example.com
+  cloudflare:
+    enabled: true
+    dnsProviderRef: cloudflare      # an existing dns-providers entry
+    zoneName: example.com
+    apexTarget: edge.example.com
+    proxied: false
 ```
+
+### DNSSyncSettings (`settings.dnsSync`)
+
+Publishes CNAME records for the proxy hosts that opted in via their
+[`dns` policy](#proxyhost-configproxy-hosts). Both backends are independently
+enabled; with both disabled (the default) the subsystem is inert and never
+contacts anything.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `pihole.enabled` | bool | Turn on local (LAN) CNAME reconciliation. |
+| `pihole.url` | string | Pi-hole base URL, absolute http/https, no `/api` suffix. Required when enabled. |
+| `pihole.appPassword` | Secret | Pi-hole **application password** (placeholder-resolved). Used for `POST /api/auth`. |
+| `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Also the ownership marker** — see below. |
+| `cloudflare.enabled` | bool | Turn on public zone reconciliation. |
+| `cloudflare.dnsProviderRef` | string | Name of an existing [DNSProvider](#dnsprovider-configdns-providers) whose `config.apiToken` is reused. Required when enabled. |
+| `cloudflare.zoneName` | string | Zone the records live in, e.g. `example.com`. Required when enabled. |
+| `cloudflare.apexTarget` | string | CNAME content every managed record points at. Required when enabled. |
+| `cloudflare.proxied` | bool | Cloudflare orange-cloud flag on created records. Default `false` (DNS only). |
+
+**Ownership — what gpm will and will not delete.** Reconcile is *full-state*: the
+desired set is recomputed from the whole config on every run, so a record deleted
+out of band is recreated and a host removed while gpm was down is still cleaned
+up. Deletion, however, is strictly limited to records gpm demonstrably owns:
+
+- **Pi-hole** — only a CNAME whose target is *exactly* `pihole.apexTarget`. A
+  hand-written entry pointing anywhere else is read and ignored, even when it
+  names a domain gpm also serves. If a desired name already exists with a
+  different target, gpm logs it and creates nothing for that name rather than
+  adding a second, shadowing entry.
+- **Cloudflare** — only a record carrying the comment `managed-by:gpm`, which gpm
+  writes on every record it creates. If a desired name already exists as somebody
+  else's record, gpm logs it and leaves both alone rather than creating a
+  duplicate or removing theirs.
+
+> **Changing `apexTarget` orphans the records created under the old one.**
+> Ownership on Pi-hole is target equality, so as soon as the apex changes, every
+> record gpm previously created stops matching and becomes, by its own rules,
+> somebody else's — it will never be updated or deleted again, and the names now
+> conflict with the desired set (so nothing is recreated either, per the
+> skip-and-warn above). The same applies on Cloudflare for records that predate
+> the `managed-by:gpm` comment. **Delete the stale records yourself before or
+> right after changing `apexTarget`**, then run
+> `POST /api/dns-sync/reconcile` to recreate them against the new target.
+
+Wildcard domains (`*.example.com`) are skipped by both backends, as is a domain
+equal to the apex target (which would be a CNAME loop). Disabled proxy hosts
+contribute nothing.
+
+`dnsProviderRef` is validated for *name shape* at settings-write time only:
+settings are a separate singleton from the object graph, so a reference to a
+missing DNSProvider surfaces at reconcile time in the sync status, not as a
+rejected write.
+
+A reconcile is triggered automatically after any proxy-host write, settings
+change, restore or whole-config revert (non-blocking, and bursts coalesce into a
+single run), and can be run on demand with `POST /api/dns-sync/reconcile`. The
+manual endpoint never queues: if a reconcile is already running it answers **409
+Conflict** rather than blocking, so repeated clicks cannot stack requests behind a
+slow backend. `GET /api/dns-sync/status` reports the last run per backend. A
+Pi-hole `403` is
+surfaced as a distinct error — it means the session is read-only or the instance
+was built without `webserver.api.app_sudo`, which retrying will not fix.
 
 ---
 
@@ -130,6 +207,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `robotsNoIndex` | bool | no | Emit `X-Robots-Tag: noindex, nofollow` (HTTP and HTTPS) to discourage search-engine indexing. A headers middleware that sets `X-Robots-Tag` explicitly still wins. |
 | `timeouts` | HostTimeouts | no | Per-host upstream timeout overrides (below). |
 | `tls` | TLSSettings | no | Certificate + TLS behaviour. |
+| `dns` | DNSSyncPolicy | no | Opt this host's domains into DNS record management (below). |
 | `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
 | `accessLists` | []string | no | Host-wide access-list names. |
 | `locations` | []Location | no | Path-scoped overrides (below). |
@@ -147,6 +225,16 @@ edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
 set `"1.3"` only on hosts where every client supports it (drops 1.2 — old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
 for public hosts to keep the widest client compatibility.
+
+**DNSSyncPolicy** (`dns`): `lanDirect` publishes each of the host's domains as a
+local CNAME on the LAN resolver (Pi-hole), so internal clients reach the edge
+directly instead of hairpinning through the WAN address; `publicCname` publishes
+them in the authoritative public zone (Cloudflare). Both default false — nothing
+is published unless asked for, and an opted-out host omits the `dns` key from its
+API responses entirely rather than returning an empty object. The backends
+themselves are configured once, in
+[`settings.dnsSync`](#dnssyncsettings-settingsdnssync); a policy flag with its
+backend disabled publishes nothing (the UI greys the toggle out).
 
 **HostTimeouts** (`timeouts`): `connectSeconds` caps establishing the TCP/TLS
 connection to the upstream; `readSeconds` caps time awaiting the upstream's
@@ -171,6 +259,7 @@ domains: [app.example.com]
 upstream: {scheme: http, host: backend, port: 8080}
 websocketsUpgrade: true
 tls: {certificateRef: wildcard, forceSSL: true}
+dns: {lanDirect: true, publicCname: true}
 middlewares: [require-sso]
 locations:
   - path: /metrics
@@ -639,3 +728,122 @@ any work); the access-list is evaluated ahead of auth, so a denied IP never
 reaches the IdP; path rewrites are innermost (closest to the backend), so every
 security tier above still sees the original client path. Host-wide middlewares run
 before any location-scoped ones.
+
+---
+
+## APIToken (`config/api-tokens/`)
+
+A non-interactive credential for the REST API: a bearer secret with an explicit
+scope list, used by scripts and CI instead of an admin session cookie.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `scopes` | []string | yes | What this token may do (below). At least one. |
+| `expiresAt` | RFC3339 time | no | Token stops authenticating after this instant. Unset never expires. |
+| `tokenHash` | string | **server-owned** | Lowercase SHA-256 hex digest of the secret. Written by the server; a client-supplied value is discarded, and it is **never returned by any endpoint** (`json:"-"`) — a digest is offline-crackable. It exists only in the YAML at rest. |
+| `disabled` | bool | no | Keep the token in config without it authenticating. |
+
+**The secret is never stored.** It is generated server-side (`gpm_` + 32 random
+bytes, base64url) and returned **exactly once**, as the `token` field in the
+response to the `PUT` that created it. Only its digest is committed, in a plain
+string field rather than a `Secret` — a digest is not a value to resolve from the
+environment, and the store refuses literal `Secret` values outright.
+
+```
+PUT  /api/api-tokens/ci            # create; response carries "token" once
+PUT  /api/api-tokens/ci            # ordinary edit; digest carried forward, no new secret
+PUT  /api/api-tokens/ci?rotate=1   # rotate; new secret returned once, old one dies
+```
+
+Use it as a bearer credential:
+
+```
+curl -H 'Authorization: Bearer gpm_...' https://gpm.example.com/api/proxy-hosts
+```
+
+### Scopes
+
+A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
+
+- **write implies read** on the same subject; read never implies write.
+- `*` matches any subject, but a concrete subject never satisfies a `*`
+  requirement — a whole-config read (`/api/config`, `/api/history`, `/api/logs`,
+  `/api/upstream-health`) genuinely needs `*:read`.
+- `admin` satisfies everything, and is the **only** scope that reaches:
+  - `/api/api-tokens` (a token that could mint tokens could widen itself),
+  - **`PUT /api/settings`** (see below),
+  - `GET /api/backup` — the archive is the raw on-disk YAML, so unlike the JSON
+    reads it carries the api-tokens' stored digests,
+  - `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`,
+  - `/debug/pprof/*` when profiling is enabled — a heap dump and the process
+    command line contain resolved backend credentials in cleartext, and every
+    token principal is admin-*role* by construction, so the role gate alone is
+    not a boundary there.
+
+**`settings:write` does not reach `PUT /api/settings`.** Writing settings is
+admin-equivalent and takes the `admin` scope: a settings write can point
+`dnsSync.pihole.url` or a webhook at an attacker-controlled URL while supplying
+`${ENV:SOME_TOKEN}` as its credential, and the write itself triggers the
+reconcile/dispatch that resolves that env var and sends it offsite — and it can
+rewrite `adminAuth` outright. `settings:read` still grants `GET /api/settings`
+(reading resolves nothing). `settings:write` remains a valid scope string for
+forward compatibility but grants nothing beyond `settings:read` today; the UI
+greys the box out rather than offering a grant that does nothing.
+
+**Reverting an `APIToken` is refused** — scoped (`POST
+/api/api-tokens/{name}/revert`) and whole-config (`POST /api/revert`, which
+preserves the `api-tokens` directory across the restore). Restoring an older
+token file would restore an older `tokenHash` and silently revive a secret the
+operator rotated away, so rotation would stop meaning revocation. Create a
+replacement token instead.
+
+Valid subjects are the REST resource plurals — `proxy-hosts`, `redirect-hosts`,
+`stream-hosts`, `dead-hosts`, `certificates`, `client-cas`, `dns-providers`,
+`identity-providers`, `upstream-groups`, `access-lists`, `middlewares`,
+`api-tokens` — plus two pseudo-resources for non-CRUD endpoint groups:
+`settings` and `dns-sync`. An unknown subject or verb is rejected at write time.
+`GET /api/capabilities` and `GET /api/me` need no scope: any authenticated caller
+may ask what the instance supports.
+
+Scopes constrain **API tokens only**. An admin session keeps full access exactly
+as before.
+
+```yaml
+name: ci-deploy
+scopes:
+  - proxy-hosts:write
+  - certificates:read
+expiresAt: 2027-01-01T00:00:00Z
+```
+
+**Auth mechanics.** A request carrying `Authorization: Bearer gpm_...` is
+resolved as a token *before* the cookie path and never falls through to it: a
+presented-but-invalid token is a `401`, not an invitation to try a session cookie
+riding along on the same request. Any other bearer scheme is left alone and the
+cookie path runs as usual. Token principals are **CSRF-exempt** — the
+double-submit check defends against a browser attaching ambient credentials, and
+a bearer token is never attached automatically. Successful and failed token
+authentications are logged (token name on success; never any secret material).
+Last-use is tracked **in memory only** and surfaced as `lastUsed` on
+`GET /api/api-tokens`; the config store is git-backed, so persisting a timestamp
+per request would be a commit flood. It resets on restart.
+
+---
+
+## Reserved / planned: Kubernetes Ingress annotations
+
+The following annotation keys on cluster `Ingress` objects are **reserved** for a
+planned phase-2 discovery feature (see [BACKLOG.md](../BACKLOG.md)). They are not
+read by any shipped code today; they are documented here so operators can start
+labelling and so the names are not claimed for anything else.
+
+| Annotation | Value | Meaning |
+|------------|-------|---------|
+| `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into gpm discovery. Absent or any other value means gpm ignores it entirely (opt-in, never opt-out). |
+| `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Desired `dns.lanDirect` on the derived proxy host. |
+| `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Desired `dns.publicCname` on the derived proxy host. |
+
+The intent is that gpm reconciles annotated Ingresses into
+template-derived, managed-labelled ProxyHost objects, which then feed the same
+DNS sync described above. Nothing else about an Ingress is authoritative: a
+proxy host gpm did not generate is never overwritten.

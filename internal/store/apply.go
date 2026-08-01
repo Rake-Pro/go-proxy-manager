@@ -45,6 +45,8 @@ func withObject(cfg *model.Config, obj model.Object) model.Config {
 		c.AccessLists = upsert(c.AccessLists, o)
 	case model.Middleware:
 		c.Middlewares = upsert(c.Middlewares, o)
+	case model.APIToken:
+		c.APITokens = upsert(c.APITokens, o)
 	}
 	return c
 }
@@ -76,6 +78,8 @@ func withoutObject(cfg *model.Config, kind, name string) model.Config {
 		c.AccessLists = dropNamed(c.AccessLists, name)
 	case "Middleware":
 		c.Middlewares = dropNamed(c.Middlewares, name)
+	case "APIToken":
+		c.APITokens = dropNamed(c.APITokens, name)
 	}
 	return c
 }
@@ -132,6 +136,9 @@ func stampTimes(obj model.Object, now time.Time) any {
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.Middleware:
+		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		return o
+	case model.APIToken:
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	}

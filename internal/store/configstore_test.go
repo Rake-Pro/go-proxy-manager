@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -369,5 +370,135 @@ func TestRevertObjectRollsBackOnInvalid(t *testing.T) {
 	}
 	if !clean {
 		t.Fatal("index/worktree dirty after refused revert; rollback incomplete")
+	}
+}
+
+func sampleToken(name, hash string) model.APIToken {
+	return model.APIToken{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		TokenHash:  hash,
+		Scopes:     []string{"proxy-hosts:read"},
+	}
+}
+
+// The tokenHash field is json:"-" so it never leaves through the API, but it is
+// still what has to persist: the YAML round trip must carry it unchanged.
+func TestAPITokenHashRoundTrips(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	const hash = "1111111111111111111111111111111111111111111111111111111111111111"
+	if _, err := st.Save(ctx, sampleToken("ci", hash), Author{}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.APITokens) != 1 {
+		t.Fatalf("tokens = %+v", cfg.APITokens)
+	}
+	if cfg.APITokens[0].TokenHash != hash {
+		t.Fatalf("tokenHash = %q, want %q (at-rest persistence must be unchanged)", cfg.APITokens[0].TokenHash, hash)
+	}
+	b, err := os.ReadFile(filepath.Join(st.Dir(), "api-tokens", "ci.yaml"))
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if !strings.Contains(string(b), "tokenHash:") || !strings.Contains(string(b), hash) {
+		t.Fatalf("token file does not carry the digest:\n%s", b)
+	}
+}
+
+// Rotation has to mean revocation: a scoped revert of an APIToken would restore
+// an older tokenHash and silently revive a secret the operator rotated away.
+func TestRevertObjectRefusedForAPIToken(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	const oldHash = "2222222222222222222222222222222222222222222222222222222222222222"
+	const newHash = "3333333333333333333333333333333333333333333333333333333333333333"
+	before, err := st.Save(ctx, sampleToken("ci", oldHash), Author{})
+	if err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+	if _, err := st.Save(ctx, sampleToken("ci", newHash), Author{}); err != nil {
+		t.Fatalf("rotate token: %v", err)
+	}
+
+	_, err = st.RevertObject(ctx, "APIToken", "ci", before, Author{})
+	if err == nil {
+		t.Fatal("reverting an API token must be refused")
+	}
+	if !errors.Is(err, ErrNotRevertible) {
+		t.Fatalf("want ErrNotRevertible, got %v", err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.APITokens[0].TokenHash != newHash {
+		t.Fatalf("tokenHash = %q, want the rotated-to digest %q", cfg.APITokens[0].TokenHash, newHash)
+	}
+}
+
+// A whole-tree revert rolls everything else back but must leave api-tokens
+// exactly as they are: neither reviving a rotated digest nor resurrecting a
+// token that has since been deleted.
+func TestRevertPreservesAPITokens(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	const oldHash = "4444444444444444444444444444444444444444444444444444444444444444"
+	const newHash = "5555555555555555555555555555555555555555555555555555555555555555"
+
+	if _, err := st.Save(ctx, sampleToken("ci", oldHash), Author{}); err != nil {
+		t.Fatalf("save ci: %v", err)
+	}
+	if _, err := st.Save(ctx, sampleToken("legacy", oldHash), Author{}); err != nil {
+		t.Fatalf("save legacy: %v", err)
+	}
+	target, err := st.Save(ctx, sampleHost("web"), Author{})
+	if err != nil {
+		t.Fatalf("save host: %v", err)
+	}
+
+	// After the revert target: ci is rotated, legacy is deleted, a new host lands.
+	if _, err := st.Save(ctx, sampleToken("ci", newHash), Author{}); err != nil {
+		t.Fatalf("rotate ci: %v", err)
+	}
+	if _, err := st.Delete(ctx, "APIToken", "legacy", Author{}); err != nil {
+		t.Fatalf("delete legacy: %v", err)
+	}
+	if _, err := st.Save(ctx, sampleHost("later"), Author{}); err != nil {
+		t.Fatalf("save later host: %v", err)
+	}
+
+	if _, err := st.Revert(ctx, target, Author{}); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load after revert: %v", err)
+	}
+	// Everything else really did roll back.
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].Name != "web" {
+		t.Fatalf("hosts = %+v, want only web (the revert must still roll other kinds back)", cfg.ProxyHosts)
+	}
+	if len(cfg.APITokens) != 1 {
+		t.Fatalf("tokens = %+v, want only ci (a deleted token must not be resurrected)", cfg.APITokens)
+	}
+	if cfg.APITokens[0].Name != "ci" || cfg.APITokens[0].TokenHash != newHash {
+		t.Fatalf("token = %+v, want ci with the rotated-to digest %q", cfg.APITokens[0], newHash)
+	}
+
+	// The preserved state is committed, not just sitting in the working tree.
+	clean, err := st.git.IsClean(ctx)
+	if err != nil {
+		t.Fatalf("is clean: %v", err)
+	}
+	if !clean {
+		t.Fatal("the revert commit must include the preserved api-tokens")
 	}
 }

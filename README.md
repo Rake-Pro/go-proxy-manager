@@ -55,6 +55,14 @@ builds it with a narrower, more focused design:
 - Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
 - Composable, ordered middleware chain per host and per location
 
+**Automation & DNS**
+- **Scoped API tokens** — bearer credentials for scripts and CI, minted
+  server-side and shown once (only a SHA-256 digest is committed), with
+  per-resource `read`/`write` scopes, optional expiry, and instant revocation
+- **DNS sync** — publishes CNAMEs for opted-in hosts to a local Pi-hole v6
+  resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
+  records it can prove it created
+
 **Operations**
 - REST API + embedded single-page web UI
 - Git-backed declarative config with full referential validation, per-commit
@@ -157,7 +165,14 @@ Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm import -npm-data <dir
 - All trust decisions are rooted in the connection peer IP, never a forwarded
   header, unless that peer is explicitly trusted.
 - Secrets are referenced, never stored: literal secret values are rejected at
-  commit time.
+  commit time. API token secrets are never stored at all — only their SHA-256
+  digest is committed, and the plaintext is shown exactly once at creation.
+- API tokens are scope-limited, not just role-limited: token management, writing
+  settings, backup, restore, whole-config revert and the pprof endpoints all
+  require the `admin` scope, so a resource-scoped automation credential cannot
+  widen itself. The stored digest is never returned by any endpoint, and
+  reverting an `APIToken` from history is refused so a rotation always means
+  revocation.
 
 For deployment hardening notes see [docs/deployment.md](docs/deployment.md).
 
@@ -169,6 +184,7 @@ internal/model/     config object types + validation
 internal/store/     git-backed config store
 internal/dataplane/ TLS, routing, middleware chain, reverse proxy
 internal/acme/      ACME DNS-01 issuance + renewal
+internal/dnssync/   Pi-hole / Cloudflare DNS record reconciler
 internal/auth/      sessions, OIDC, forward-auth, role mapping
 internal/oidc/      OIDC client (discovery, PKCE, token verification)
 internal/api/       REST API

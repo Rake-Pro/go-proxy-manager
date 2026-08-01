@@ -36,6 +36,7 @@ type Config struct {
 	UpstreamGroups    []UpstreamGroup    `json:"upstreamGroups,omitempty" yaml:"upstreamGroups,omitempty"`
 	AccessLists       []AccessList       `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Middlewares       []Middleware       `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
+	APITokens         []APIToken         `json:"apiTokens,omitempty" yaml:"apiTokens,omitempty"`
 }
 
 // Object is implemented by every first-class config type. Kind/Name give each

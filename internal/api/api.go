@@ -6,12 +6,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 )
@@ -48,19 +52,55 @@ type Deps struct {
 	// RevokeSSOSessions, if set, invalidates every outstanding data-plane SSO
 	// session (POST /sso/revoke). May be nil (endpoint responds 501).
 	RevokeSSOSessions func() error
+	// RequireScope, if set, gates every route on the calling principal's API
+	// token scopes, returning a non-nil error to refuse (403). It is injected
+	// rather than imported so the API stays testable unauthenticated.
+	//
+	// A nil RequireScope means "allow every route". That is the UNWIRED case
+	// only - tests, and any embedder that mounts this mux without API tokens.
+	// The daemon always wires it, and its implementation denies when there is no
+	// principal on the request, so the fail-open path is unreachable in
+	// production (see cmd/gpm/main.go).
+	RequireScope func(r *http.Request, required string) error
+	// TokenLastUsed, if set, returns the in-memory last-use timestamp per API
+	// token name, decorated onto GET /api-tokens responses. May be nil.
+	TokenLastUsed func() map[string]time.Time
+	// DNSSyncReconcile, if set, runs a full DNS reconcile synchronously
+	// (POST /dns-sync/reconcile). May be nil (endpoint responds 501).
+	DNSSyncReconcile func(context.Context) error
+	// DNSSyncStatus, if set, returns the last reconcile result (marshalled
+	// as-is) for GET /dns-sync/status. May be nil (endpoint responds 501).
+	DNSSyncStatus func() any
+	// DNSSyncEnabled, if set, reports which DNS sync backends are configured,
+	// for the capability probe. May be nil (both reported disabled).
+	DNSSyncEnabled func() (pihole, cloudflare bool)
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
 // GET /capabilities. It is intentionally an object-of-objects so new capability
 // groups can be added without breaking existing clients.
 type capabilities struct {
-	GeoIP geoIPCapability `json:"geoip"`
+	GeoIP     geoIPCapability    `json:"geoip"`
+	APITokens apiTokenCapability `json:"apiTokens"`
+	DNSSync   dnsSyncCapability  `json:"dnsSync"`
 }
 
 type geoIPCapability struct {
 	// DBLoaded is true when a GeoIP database is loaded and geo access-list rules
 	// can be evaluated (and saved). When false the UI should grey out geo controls.
 	DBLoaded bool `json:"dbLoaded"`
+}
+
+type apiTokenCapability struct {
+	// Enabled reports that scoped API tokens can be minted and used. It is true
+	// whenever the daemon wired a token source; the SPA uses it to show the
+	// API Tokens page rather than offering a page that cannot work.
+	Enabled bool `json:"enabled"`
+}
+
+type dnsSyncCapability struct {
+	PiholeEnabled     bool `json:"piholeEnabled"`
+	CloudflareEnabled bool `json:"cloudflareEnabled"`
 }
 
 func (d Deps) author(r *http.Request) store.Author {
@@ -83,6 +123,31 @@ func (d Deps) onChange() error {
 func (d Deps) onEvent(action, kind, name, commit string) {
 	if d.OnEvent != nil {
 		d.OnEvent(action, kind, name, commit)
+	}
+}
+
+// scope enforces the API-token scope required by a route, responding 403 and
+// returning false when the caller lacks it. With no RequireScope wired (tests,
+// and any caller that is not an API token) it always allows, so session
+// principals keep the unchanged full-admin access they have always had.
+func (d Deps) scope(w http.ResponseWriter, r *http.Request, required string) bool {
+	if d.RequireScope == nil {
+		return true
+	}
+	if err := d.RequireScope(r, required); err != nil {
+		writeErr(w, http.StatusForbidden, err)
+		return false
+	}
+	return true
+}
+
+// scoped wraps h in the scope gate for required.
+func (d Deps) scoped(required string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !d.scope(w, r, required) {
+			return
+		}
+		h(w, r)
 	}
 }
 
@@ -217,29 +282,93 @@ func New(d Deps) http.Handler {
 		},
 	})
 
+	// Scoped API tokens. Every route here requires the "admin" scope for a token
+	// principal (an admin SESSION is unaffected): a token that could create or
+	// edit tokens could mint itself a wider scope, so token management is never
+	// reachable through a per-resource scope.
+	register(mux, d, "api-tokens", resource[model.APIToken]{
+		kind:       "APIToken",
+		readScope:  model.ScopeAdmin,
+		writeScope: model.ScopeAdmin,
+		list:       func(c model.Config) []model.APIToken { return c.APITokens },
+		decode: func(b []byte, name string) (model.APIToken, error) {
+			var v model.APIToken
+			err := json.Unmarshal(b, &v)
+			v.Name = name
+			// TokenHash is server-owned: never accept one from the client, or a
+			// caller could install a digest whose preimage only they know. The
+			// field is json:"-" so it is already unreachable from the wire; this
+			// is the belt that survives that tag ever being loosened.
+			v.TokenHash = ""
+			return v, err
+		},
+		beforeSave: mintTokenSecret,
+		decorate:   d.decorateToken,
+	})
+
 	// Read-only runtime capability probe: lets the SPA discover which optional
 	// features are currently usable (e.g. geo rules need a loaded GeoIP DB). Auth
 	// is whatever the admin server applies to every other GET route on this mux.
+	// It is deliberately NOT scope-gated: any authenticated caller (session or
+	// token, whatever its scopes) may ask what this instance can do.
 	mux.HandleFunc("GET /capabilities", func(w http.ResponseWriter, r *http.Request) {
+		var pihole, cloudflare bool
+		if d.DNSSyncEnabled != nil {
+			pihole, cloudflare = d.DNSSyncEnabled()
+		}
 		writeJSON(w, http.StatusOK, capabilities{
-			GeoIP: geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
+			GeoIP:     geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
+			APITokens: apiTokenCapability{Enabled: d.RequireScope != nil},
+			DNSSync:   dnsSyncCapability{PiholeEnabled: pihole, CloudflareEnabled: cloudflare},
 		})
 	})
 
+	// DNS sync: reconcile every opted-in proxy host's domains into the configured
+	// local (Pi-hole) and public (Cloudflare) DNS backends, and report the last run.
+	mux.HandleFunc("POST /dns-sync/reconcile", d.scoped("dns-sync:write", func(w http.ResponseWriter, r *http.Request) {
+		if d.DNSSyncReconcile == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("DNS sync is not wired"))
+			return
+		}
+		if err := d.DNSSyncReconcile(r.Context()); err != nil {
+			// A run already in flight is a conflict, not a backend failure: the
+			// manual endpoint deliberately never queues behind one, so repeated
+			// clicks cannot pile blocked goroutines up behind a slow backend.
+			if errors.Is(err, dnssync.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if d.DNSSyncStatus != nil {
+			writeJSON(w, http.StatusOK, d.DNSSyncStatus())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
+	}))
+	mux.HandleFunc("GET /dns-sync/status", d.scoped("dns-sync:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.DNSSyncStatus == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("DNS sync is not wired"))
+			return
+		}
+		writeJSON(w, http.StatusOK, d.DNSSyncStatus())
+	}))
+
 	// Live upstream-group health (read-only): which upstreams each group currently
 	// considers healthy, for the UI status view and operational checks.
-	mux.HandleFunc("GET /upstream-health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /upstream-health", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		if d.UpstreamHealth == nil {
 			writeJSON(w, http.StatusOK, map[string]any{})
 			return
 		}
 		writeJSON(w, http.StatusOK, d.UpstreamHealth())
-	})
+	}))
 
 	// Revoke every outstanding data-plane SSO session (users re-authenticate at
 	// the IdP on their next request). Mutating POST, so the server's CSRF and
 	// admin-session gates apply like any other write.
-	mux.HandleFunc("POST /sso/revoke", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /sso/revoke", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 		if d.RevokeSSOSessions == nil {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("SSO revocation is not wired"))
 			return
@@ -249,28 +378,32 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
-	})
+	}))
 
-	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {
+	// Whole-config reads (config dump, repo history) expose every object at once,
+	// so they need the wildcard read scope - no single resource scope is enough.
+	mux.HandleFunc("GET /config", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		cfg, _, err := d.Store.Load(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, cfg)
-	})
-	mux.HandleFunc("GET /history", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /history", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		commits, err := d.Store.RepoHistory(r.Context(), 100)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, nonNilCommits(commits))
-	})
+	}))
 
 	// Revert the whole config to a past commit (recorded as a new commit, so the
 	// revert is itself revertible). Body: {"hash":"<commit>"}.
-	mux.HandleFunc("POST /revert", func(w http.ResponseWriter, r *http.Request) {
+	// Whole-tree revert rewrites every object, including api-tokens, so it is an
+	// admin-scope operation for a token principal.
+	mux.HandleFunc("POST /revert", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(w, r)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -293,19 +426,22 @@ func New(d Deps) http.Handler {
 		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
-	})
+	}))
 
 	// Recent data-plane access entries (newest first) for the in-UI log viewer.
-	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /logs", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		if d.RecentLogs == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
 			return
 		}
 		writeJSON(w, http.StatusOK, d.RecentLogs())
-	})
+	}))
 
-	// Download a portable archive of the entire config.
-	mux.HandleFunc("GET /backup", func(w http.ResponseWriter, r *http.Request) {
+	// Download a portable archive of the entire config. Admin scope, not "*:read":
+	// the archive is the raw on-disk YAML, so unlike the JSON reads it does carry
+	// the api-tokens' stored digests (which are offline-crackable). It is also the
+	// exact input POST /restore takes, which is admin-scoped for the same reason.
+	mux.HandleFunc("GET /backup", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 		archive, err := d.Store.Export(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
@@ -315,11 +451,11 @@ func New(d Deps) http.Handler {
 		w.Header().Set("Content-Disposition", `attachment; filename="gpm-config-backup.tar.gz"`)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(archive)
-	})
+	}))
 
 	// Restore the whole config from an uploaded archive (replaces current config,
 	// validated, committed as one revision; rolled back if it does not validate).
-	mux.HandleFunc("POST /restore", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /restore", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveBody))
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -335,16 +471,22 @@ func New(d Deps) http.Handler {
 		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
-	})
-	mux.HandleFunc("GET /settings", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /settings", d.scoped("settings:read", func(w http.ResponseWriter, r *http.Request) {
 		_, settings, err := d.Store.Load(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, settings)
-	})
-	mux.HandleFunc("PUT /settings", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	// Writing settings is admin-equivalent, so it takes the admin scope rather
+	// than a "settings:write" grant. A settings write can point dnsSync.pihole or
+	// a webhook at an attacker-controlled URL with a ${ENV:...} placeholder as its
+	// credential, and the write itself triggers the reconcile/dispatch that
+	// resolves and POSTs that env var offsite - and it can rewrite adminAuth. GET
+	// stays on "settings:read": reading settings resolves nothing.
+	mux.HandleFunc("PUT /settings", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 		body, err := readBody(w, r)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -365,7 +507,7 @@ func New(d Deps) http.Handler {
 		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, settings)
-	})
+	}))
 
 	return mux
 }
@@ -375,25 +517,57 @@ type resource[T model.Object] struct {
 	kind   string
 	list   func(model.Config) []T
 	decode func(body []byte, name string) (T, error) // json.Unmarshal then set Name=name
+
+	// readScope/writeScope override the default "<plural>:read"/"<plural>:write"
+	// API-token scopes for this resource. api-tokens sets both to "admin": a
+	// token must never be able to mint or edit other tokens (or itself) on the
+	// strength of a resource scope, which would be a privilege-escalation path.
+	readScope  string
+	writeScope string
+
+	// beforeSave, if set, runs on PUT after decoding and before the store write.
+	// It sees the current config so it can act on whether the object already
+	// exists, and returns extra top-level fields to merge into the JSON reply
+	// (nil for the plain object reply). It is how an API token secret is minted
+	// server-side and surfaced exactly once.
+	beforeSave func(r *http.Request, cfg model.Config, obj T) (T, map[string]any, error)
+
+	// decorate, if set, projects an object for GET responses (list and single),
+	// e.g. to attach runtime-only fields that are not part of the stored object.
+	decorate func(T) any
 }
 
 func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res resource[T]) {
 	base := "/" + plural
+	readScope, writeScope := res.readScope, res.writeScope
+	if readScope == "" {
+		readScope = plural + ":read"
+	}
+	if writeScope == "" {
+		writeScope = plural + ":write"
+	}
+	project := func(v T) any {
+		if res.decorate != nil {
+			return res.decorate(v)
+		}
+		return v
+	}
 
-	mux.HandleFunc("GET "+base, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+base, d.scoped(readScope, func(w http.ResponseWriter, r *http.Request) {
 		cfg, _, err := d.Store.Load(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		items := res.list(cfg)
-		if items == nil {
-			items = []T{}
+		src := res.list(cfg)
+		items := make([]any, 0, len(src))
+		for _, it := range src {
+			items = append(items, project(it))
 		}
 		writeJSON(w, http.StatusOK, items)
-	})
+	}))
 
-	mux.HandleFunc("GET "+base+"/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+base+"/{name}", d.scoped(readScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		cfg, _, err := d.Store.Load(r.Context())
 		if err != nil {
@@ -402,14 +576,14 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		for _, it := range res.list(cfg) {
 			if it.GetMeta().Name == name {
-				writeJSON(w, http.StatusOK, it)
+				writeJSON(w, http.StatusOK, project(it))
 				return
 			}
 		}
 		writeErr(w, http.StatusNotFound, errors.New(res.kind+" "+name+" not found"))
-	})
+	}))
 
-	mux.HandleFunc("PUT "+base+"/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if name == "" {
 			writeErr(w, http.StatusBadRequest, errors.New("name is required"))
@@ -425,6 +599,18 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		var extra map[string]any
+		if res.beforeSave != nil {
+			cfg, _, err := d.Store.Load(r.Context())
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			if obj, extra, err = res.beforeSave(r, cfg, obj); err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+		}
 		sha, err := d.Store.Save(r.Context(), obj, d.author(r))
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -434,10 +620,19 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			return
 		}
 		w.Header().Set(commitHeader, sha)
-		writeJSON(w, http.StatusOK, obj)
-	})
+		if extra == nil {
+			writeJSON(w, http.StatusOK, obj)
+			return
+		}
+		merged, err := mergeExtra(obj, extra)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, merged)
+	}))
 
-	mux.HandleFunc("DELETE "+base+"/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("DELETE "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if err := model.ValidateName(name); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -453,9 +648,9 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		w.Header().Set(commitHeader, sha)
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 
-	mux.HandleFunc("GET "+base+"/{name}/history", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+base+"/{name}/history", d.scoped(readScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if err := model.ValidateName(name); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -467,13 +662,13 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			return
 		}
 		writeJSON(w, http.StatusOK, nonNilCommits(commits))
-	})
+	}))
 
 	// Scoped revert: restore ONLY this object's file to its state at a past
 	// commit, committing just that change (every other object is left as-is).
 	// Body: {"hash":"<commit>"}. Contrast POST /revert, which resets the whole
 	// config tree. Same auth/CSRF/reload/webhook wiring as every other write.
-	mux.HandleFunc("POST "+base+"/{name}/revert", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+base+"/{name}/revert", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if err := model.ValidateName(name); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -501,7 +696,77 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
-	})
+	}))
+}
+
+// tokenRevealNote is returned alongside a freshly minted secret so a client (or
+// a human reading curl output) cannot mistake it for a value they can fetch again.
+const tokenRevealNote = "Copy this token now - it is shown once and cannot be retrieved again. Re-run the PUT with ?rotate=1 to mint a replacement."
+
+// mintTokenSecret is the api-tokens PUT hook. It generates a secret server-side
+// when the token is new, or when the caller asks for a rotation with ?rotate=1,
+// and otherwise carries the stored digest forward so an ordinary edit (scopes,
+// expiry, disabled) never silently invalidates a token in use. The plaintext is
+// returned once in the response and never persisted.
+func mintTokenSecret(r *http.Request, cfg model.Config, obj model.APIToken) (model.APIToken, map[string]any, error) {
+	var existing *model.APIToken
+	for i := range cfg.APITokens {
+		if cfg.APITokens[i].Name == obj.Name {
+			existing = &cfg.APITokens[i]
+			break
+		}
+	}
+	rotate := r.URL.Query().Get("rotate") == "1"
+	if existing != nil && existing.TokenHash != "" && !rotate {
+		obj.TokenHash = existing.TokenHash
+		if obj.CreatedAt.IsZero() {
+			obj.CreatedAt = existing.CreatedAt
+		}
+		return obj, nil, nil
+	}
+	secret, hash, err := auth.NewTokenSecret()
+	if err != nil {
+		return obj, nil, err
+	}
+	obj.TokenHash = hash
+	if existing != nil && obj.CreatedAt.IsZero() {
+		obj.CreatedAt = existing.CreatedAt
+	}
+	return obj, map[string]any{"token": secret, "tokenNote": tokenRevealNote}, nil
+}
+
+// decorateToken attaches the in-memory last-use timestamp to an API token in GET
+// responses. The value is runtime-only (see Authenticator.TokenLastUsed): it is
+// never written back to the git-backed store.
+func (d Deps) decorateToken(t model.APIToken) any {
+	out, err := mergeExtra(t, nil)
+	if err != nil {
+		return t
+	}
+	if d.TokenLastUsed != nil {
+		if ts, ok := d.TokenLastUsed()[t.Name]; ok {
+			out["lastUsed"] = ts.Format(time.RFC3339)
+		}
+	}
+	return out
+}
+
+// mergeExtra renders obj as a JSON object and merges extra's fields into it, so
+// a write can return the stored object plus one-time fields (the freshly minted
+// token secret) without a bespoke response type per resource.
+func mergeExtra(obj any, extra map[string]any) (map[string]any, error) {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out, nil
 }
 
 // deleteStatus maps a store.Delete error to an HTTP status: 404 when the object

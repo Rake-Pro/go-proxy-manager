@@ -27,6 +27,7 @@ var kindDir = map[string]string{
 	"UpstreamGroup":    "upstream-groups",
 	"AccessList":       "access-lists",
 	"Middleware":       "middlewares",
+	"APIToken":         "api-tokens",
 }
 
 const settingsFile = "settings.yaml"
@@ -42,7 +43,18 @@ var (
 	// at the write boundary keeps such a rule out of git entirely (fail closed),
 	// rather than committing a config that can only be served as deny-all.
 	ErrGeoDBUnavailable = errors.New("geo rules configured but no GeoIP database is loaded")
+	// ErrNotRevertible is returned when the object kind must never be restored
+	// from history. APIToken is the only one: its file carries a tokenHash, so
+	// restoring an older revision would silently revive a secret the operator
+	// rotated (or deleted) away. Rotation has to mean revocation, so the whole
+	// revert path refuses instead - and a whole-tree Revert leaves api-tokens
+	// exactly as they are (see Revert).
+	ErrNotRevertible = errors.New("object kind cannot be reverted")
 )
+
+// preservedOnRevert lists the config subdirectories a whole-tree Revert must not
+// roll back, for the ErrNotRevertible reason above.
+var preservedOnRevert = []string{"api-tokens"}
 
 // Store reads and writes the typed config objects as per-object YAML files in a
 // git repo. It is safe for concurrent use.
@@ -166,6 +178,9 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 		return cfg, model.Settings{}, err
 	}
 	if cfg.Middlewares, err = loadDir[model.Middleware](s.dir, "middlewares"); err != nil {
+		return cfg, model.Settings{}, err
+	}
+	if cfg.APITokens, err = loadDir[model.APIToken](s.dir, "api-tokens"); err != nil {
 		return cfg, model.Settings{}, err
 	}
 
@@ -351,8 +366,22 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 		return "", err
 	}
 
+	// Snapshot the never-reverted directories BEFORE the tree changes, and write
+	// them back over the restored tree, so the revert cannot resurrect a rotated
+	// or deleted API token digest (see ErrNotRevertible).
+	preserved, err := s.snapshotDirs(preservedOnRevert)
+	if err != nil {
+		return "", fmt.Errorf("revert: snapshot %v: %w", preservedOnRevert, err)
+	}
+
 	if err := s.git.RestoreTree(ctx, hash); err != nil {
 		return "", fmt.Errorf("revert: restore tree %q: %w", hash, err)
+	}
+	if err := s.writeDirs(preserved); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert: preserve %v: %w", preservedOnRevert, err)
 	}
 	restored, _, err := s.loadLocked()
 	if err != nil {
@@ -410,6 +439,11 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 	dir, ok := kindDir[kind]
 	if !ok {
 		return "", fmt.Errorf("unknown object kind %q", kind)
+	}
+	for _, d := range preservedOnRevert {
+		if d == dir {
+			return "", fmt.Errorf("%s %q: %w - restoring an older revision would restore its stored token digest and revive a secret that was rotated or deleted away; create a replacement token instead", kind, name, ErrNotRevertible)
+		}
 	}
 	rel := dir + "/" + name + ".yaml"
 
@@ -497,6 +531,66 @@ func loadDir[T any](root, sub string) ([]T, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// snapshotDirs reads every regular file directly under each named config
+// subdirectory into memory, keyed by "<sub>/<file>". A missing directory is not
+// an error - it just contributes nothing. Callers hold s.mu.
+func (s *Store) snapshotDirs(subs []string) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	for _, sub := range subs {
+		entries, err := os.ReadDir(filepath.Join(s.dir, sub))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(s.dir, sub, e.Name()))
+			if err != nil {
+				return nil, err
+			}
+			out[sub+"/"+e.Name()] = b
+		}
+	}
+	return out, nil
+}
+
+// writeDirs makes each snapshotted subdirectory contain exactly the files the
+// snapshot holds: files added by the intervening tree change are removed, so a
+// token deleted since the revert target stays deleted rather than coming back.
+// Callers hold s.mu.
+func (s *Store) writeDirs(files map[string][]byte) error {
+	for _, sub := range preservedOnRevert {
+		full := filepath.Join(s.dir, sub)
+		if err := os.MkdirAll(full, 0o750); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if _, keep := files[sub+"/"+e.Name()]; !keep {
+				if err := os.Remove(filepath.Join(full, e.Name())); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for rel, b := range files {
+		if err := os.WriteFile(filepath.Join(s.dir, filepath.FromSlash(rel)), b, 0o640); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readYAML(path string, v any) error {

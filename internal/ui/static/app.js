@@ -42,6 +42,7 @@ const NAV = [
   { id: 'middleware', label: 'Middleware', icon: ICON.layers },
   { id: 'upstreams', label: 'Upstream Groups', icon: ICON.server },
   { id: 'dns', label: 'DNS Providers', icon: ICON.globe },
+  { id: 'tokens', label: 'API Tokens', icon: ICON.lock },
   { id: 'logs', label: 'Access Logs', icon: ICON.history },
   { id: 'history', label: 'History', icon: ICON.history },
   { id: 'settings', label: 'Settings', icon: ICON.cog },
@@ -51,7 +52,7 @@ const TITLES = {
   overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
   dead: 'Dead hosts', certs: 'Certificates', identity: 'Identity', access: 'Access Lists',
   middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
-  history: 'History', settings: 'Settings',
+  tokens: 'API Tokens', logs: 'Access Logs', history: 'History', settings: 'Settings',
 };
 
 // plural API paths per section
@@ -59,7 +60,7 @@ const PLURAL = {
   hosts: 'proxy-hosts', redirects: 'redirect-hosts', streams: 'stream-hosts',
   dead: 'dead-hosts', certs: 'certificates', identity: 'identity-providers',
   access: 'access-lists', middleware: 'middlewares', upstreams: 'upstream-groups',
-  dns: 'dns-providers',
+  dns: 'dns-providers', tokens: 'api-tokens',
 };
 
 // Maps a store object Kind() (as it appears in a commit message) to its plural
@@ -69,6 +70,7 @@ const KIND_PLURAL = {
   DeadHost: 'dead-hosts', Certificate: 'certificates', ClientCA: 'client-cas',
   DNSProvider: 'dns-providers', IdentityProvider: 'identity-providers',
   UpstreamGroup: 'upstream-groups', AccessList: 'access-lists', Middleware: 'middlewares',
+  APIToken: 'api-tokens',
 };
 
 // parseObjectCommit recognises a single-object update commit (e.g.
@@ -415,6 +417,7 @@ async function route() {
       case 'redirects': await genericSection(c, 'redirects', sub); break;
       case 'streams': await genericSection(c, 'streams', sub); break;
       case 'dead': await genericSection(c, 'dead', sub); break;
+      case 'tokens': await viewTokens(c); break;
       case 'logs': await viewLogs(c); break;
       case 'history': await viewHistory(c); break;
       case 'settings': await viewSettings(c); break;
@@ -805,6 +808,19 @@ async function hostEditor(c, name) {
           </div>
           <div class="hint">Blank keeps the shared pooled transport. Read timeout caps time-to-first-byte; it does not cut off slow streaming/websocket bodies.</div>
         </div>
+
+        <div class="card form-section" id="f-dns-card">
+          <p class="section-label">DNS sync</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
+            ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct')}
+          </div>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
+            ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME')}
+          </div>
+        </div>
       </div>
 
       <div class="stack">
@@ -872,6 +888,14 @@ async function hostEditor(c, name) {
   // domains chip input
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...');
   const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
+
+  // Grey out each DNS toggle whose backend is not configured, rather than
+  // accepting a flag that would silently publish nothing.
+  await loadCapabilities();
+  gateControl($('#f-dns-lan'), hasCapability('dnsSync.piholeEnabled'),
+    'Pi-hole DNS sync is not configured (Settings -> DNS sync).');
+  gateControl($('#f-dns-public'), hasCapability('dnsSync.cloudflareEnabled'),
+    'Cloudflare DNS sync is not configured (Settings -> DNS sync).');
 
   // locations
   const locsWrap = $('#f-locs');
@@ -964,6 +988,10 @@ async function hostEditor(c, name) {
     if (isOn('f-disabled')) obj.disabled = true;
     if (isOn('f-ws')) obj.websocketsUpgrade = true;
     if (isOn('f-robots')) obj.robotsNoIndex = true;
+    const dns = {};
+    if (isOn('f-dns-lan')) dns.lanDirect = true;
+    if (isOn('f-dns-public')) dns.publicCname = true;
+    if (Object.keys(dns).length) obj.dns = dns;
     const toConnect = parseInt($('#f-to-connect').value, 10);
     const toRead = parseInt($('#f-to-read').value, 10);
     const timeouts = {};
@@ -2054,6 +2082,205 @@ const EDITORS = {
   upstreams: upstreamGroupEditor,
 };
 
+// ---------- API TOKENS ----------
+// Scope subjects offered in the create form. Kept in step with model.ScopePlurals
+// (internal/model/apitoken.go); an unknown subject is rejected server-side, so a
+// drift here shows up as a save error rather than a silent grant.
+const TOKEN_SUBJECTS = [
+  'proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts', 'certificates',
+  'client-cas', 'dns-providers', 'identity-providers', 'upstream-groups',
+  'access-lists', 'middlewares', 'api-tokens', 'settings', 'dns-sync',
+];
+
+// Subjects whose endpoints require Full admin however the per-subject boxes are
+// ticked, so the boxes are greyed out instead of granting nothing:
+//   api-tokens - a token that could mint tokens could widen itself,
+//   settings (write) - a settings write can aim dnsSync/webhooks at an attacker
+//     with a ${ENV:...} credential and trigger the delivery that resolves it,
+//     and can rewrite adminAuth, so it is admin-equivalent.
+const ADMIN_ONLY_SCOPES = {
+  'api-tokens': { read: true, write: true, why: 'Token management needs Full admin.' },
+  'settings': { read: false, write: true, why: 'Writing settings is admin-equivalent, so it needs Full admin. settings:read still allows GET /api/settings.' },
+};
+
+function tokenExpiryLabel(t) {
+  if (!t.expiresAt) return 'never';
+  const d = new Date(t.expiresAt);
+  if (isNaN(d.getTime())) return esc(t.expiresAt);
+  return fmtTime(t.expiresAt) + (d.getTime() < Date.now() ? ' (expired)' : '');
+}
+
+// One-time reveal. The secret exists only in this response, so it is shown in a
+// blocking panel with a copy button and never re-fetched.
+function revealToken(secret) {
+  const wrap = document.createElement('div');
+  wrap.className = 'card form-section';
+  wrap.style.cssText = 'border-color:var(--accent);margin-bottom:16px';
+  wrap.innerHTML = `
+    <p class="section-label">New token - shown once</p>
+    <p class="muted" style="font-size:11.5px;margin:0 0 10px">Copy this now. Only its SHA-256 digest is stored, so it cannot be shown again. Lost it? Rotate the token.</p>
+    <div class="loc-row">
+      <input class="field mono" id="tok-reveal" readonly value="${esc(secret)}" aria-label="New API token" style="flex:3 1 260px" />
+      <button class="btn primary sm" id="tok-copy" type="button">Copy</button>
+      <button class="btn ghost sm" id="tok-dismiss" type="button">Done</button>
+    </div>`;
+  const content = $('#content');
+  content.insertBefore(wrap, content.firstChild);
+  window.scrollTo(0, 0);
+  $('#tok-copy').addEventListener('click', async () => {
+    const inp = $('#tok-reveal');
+    inp.select();
+    try { await navigator.clipboard.writeText(secret); toast('Copied', 'Token copied to the clipboard.', 'ok'); }
+    catch (e) { toast('Copy manually', 'Select the field and copy it.', 'err'); }
+  });
+  $('#tok-dismiss').addEventListener('click', () => wrap.remove());
+}
+
+async function viewTokens(c) {
+  // The daemon publishes capabilities.apiTokens.enabled; without a wired token
+  // source the whole page cannot work, so say so instead of offering a form
+  // whose every save would fail.
+  await loadCapabilities();
+  if (!hasCapability('apiTokens.enabled')) {
+    c.innerHTML = viewHead('API Tokens',
+      'Non-interactive credentials for scripts and CI.') +
+      emptyState('API tokens are not available',
+        'This deployment did not wire an API token source, so tokens cannot be minted or used.');
+    return;
+  }
+  const tokens = arr((await api('/api/api-tokens')).data);
+  const rows = tokens.map((t) => `
+    <div class="card" data-name="${esc(t.name)}">
+      <div class="card-head">
+        <div><h3>${esc(t.name)}${t.disabled ? ' <span class="chip">disabled</span>' : ''}</h3></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
+          <button class="btn ghost sm danger tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
+        </div>
+      </div>
+      <div class="kv">
+        <span class="k">Scopes</span><span class="v">${esc(arr(t.scopes).join(', '))}</span>
+        <span class="k">Expires</span><span class="v">${tokenExpiryLabel(t)}</span>
+        <span class="k">Last used</span><span class="v">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never (since restart)'}</span>
+        <span class="k">Created</span><span class="v">${t.createdAt ? esc(fmtTime(t.createdAt)) : ''}</span>
+      </div>
+    </div>`).join('');
+
+  c.innerHTML = viewHead('API Tokens',
+    'Non-interactive credentials for scripts and CI. Send as Authorization: Bearer gpm_...; scopes limit what each token can reach.') +
+    `<div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Create token</p>
+      <div class="inline-fields">
+        <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" placeholder="ci-deploy" /><div class="hint">Immutable. Lowercase alphanumeric with <span class="mono">-_.</span></div></div>
+        <div class="field-group"><label>Expires</label><input class="field mono" id="tok-expires" type="date" /><div class="hint">Blank never expires.</div></div>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <label>Scopes</label>
+        <div class="toggle-line" style="padding-top:4px">
+          <div class="tl-text"><div class="nm">Full admin</div><div class="ds">Every endpoint, including token management, restore and whole-config revert</div></div>
+          ${switchHtml('tok-admin', false, 'Full admin')}
+        </div>
+        <div id="tok-scopes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px;margin-top:8px">
+          ${TOKEN_SUBJECTS.map((p) => `
+            <div class="loc-row" style="gap:6px;align-items:center">
+              <span class="mono" style="flex:1 1 auto;font-size:11.5px">${esc(p)}</span>
+              <label class="check-item"><input type="checkbox" class="tok-read" data-p="${esc(p)}" />read</label>
+              <label class="check-item"><input type="checkbox" class="tok-write" data-p="${esc(p)}" />write</label>
+            </div>`).join('')}
+        </div>
+        <div class="hint" style="margin-top:8px">Write implies read. <span class="mono">api-tokens</span>, <em>writing</em> <span class="mono">settings</span>, restore, whole-config revert and the pprof endpoints need Full admin.</div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px">
+        <button class="btn primary" id="tok-create" type="button">${ICON.plus}Create token</button>
+      </div>
+    </div>` +
+    (tokens.length ? `<div class="cards">${rows}</div>`
+      : emptyState('No API tokens yet', 'Create one above to script against this instance.'));
+
+  const adminSw = $('#tok-admin');
+  const scopeGrid = $('#tok-scopes');
+  const syncAdmin = () => {
+    const perSubject = !isOn('tok-admin');
+    gateControl(scopeGrid, perSubject, 'Full admin already covers every scope.');
+    // Re-disable the boxes that never grant anything, after the grid-wide gate
+    // has just re-enabled everything.
+    Object.entries(ADMIN_ONLY_SCOPES).forEach(([p, rule]) => {
+      ['read', 'write'].forEach((verb) => {
+        if (!rule[verb]) return;
+        const box = scopeGrid.querySelector(`.tok-${verb}[data-p="${p}"]`);
+        if (!box) return;
+        box.checked = false;
+        box.disabled = true;
+        box.title = rule.why;
+      });
+    });
+  };
+  adminSw.addEventListener('switchchange', syncAdmin);
+  syncAdmin();
+
+  function collectScopes() {
+    if (isOn('tok-admin')) return ['admin'];
+    const out = [];
+    $$('#tok-scopes .tok-write').forEach((i) => { if (i.checked) out.push(i.dataset.p + ':write'); });
+    $$('#tok-scopes .tok-read').forEach((i) => {
+      // write already implies read; don't send a redundant pair.
+      const w = scopeGrid.querySelector(`.tok-write[data-p="${i.dataset.p}"]`);
+      if (i.checked && !(w && w.checked)) out.push(i.dataset.p + ':read');
+    });
+    return out;
+  }
+
+  $('#tok-create').addEventListener('click', async () => {
+    const nm = $('#tok-name').value.trim();
+    if (!nm) { toast('Name required', 'Enter a token name.', 'err'); return; }
+    const scopes = collectScopes();
+    if (!scopes.length) { toast('Scope required', 'Pick at least one scope, or Full admin.', 'err'); return; }
+    const body = { scopes };
+    const exp = $('#tok-expires').value;
+    if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
+    const btn = $('#tok-create'); btn.disabled = true;
+    try {
+      const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body });
+      toastSaved(r.commit); refreshHeadSha();
+      const secret = r.data && r.data.token;
+      await viewTokens(c);
+      if (secret) revealToken(secret);
+    } catch (e) { toastErr(e); btn.disabled = false; }
+  });
+
+  $$('.tok-rotate').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const nm = b.dataset.name;
+      if (!confirm(`Rotate token "${nm}"? The current secret stops working immediately, and cannot be brought back - reverting an API token from history is refused so a rotation always means revocation.`)) return;
+      b.disabled = true;
+      const cur = tokens.find((t) => t.name === nm) || {};
+      const body = { scopes: arr(cur.scopes) };
+      if (cur.expiresAt) body.expiresAt = cur.expiresAt;
+      if (cur.disabled) body.disabled = true;
+      try {
+        const r = await api('/api/api-tokens/' + encodeURIComponent(nm) + '?rotate=1', { method: 'PUT', body });
+        toastSaved(r.commit); refreshHeadSha();
+        const secret = r.data && r.data.token;
+        await viewTokens(c);
+        if (secret) revealToken(secret);
+      } catch (e) { toastErr(e); b.disabled = false; }
+    });
+  });
+
+  $$('.tok-del').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const nm = b.dataset.name;
+      if (!confirm(`Delete API token "${nm}"? Anything using it stops working immediately.`)) return;
+      b.disabled = true;
+      try {
+        const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'DELETE' });
+        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'token removed', 'ok', { html: true });
+        refreshHeadSha(); await viewTokens(c);
+      } catch (e) { toastErr(e); b.disabled = false; }
+    });
+  });
+}
+
 // ---------- ACCESS LOGS ----------
 async function viewLogs(c) {
   const data = (await api('/api/logs')).data || {};
@@ -2166,6 +2393,9 @@ async function viewSettings(c) {
   const s = (await api('/api/settings')).data || {};
   const admin = s.adminAuth || {};
   const bg = admin.breakGlass || {};
+  const ds = Object.assign({ pihole: {}, cloudflare: {} }, s.dnsSync || {});
+  ds.pihole = ds.pihole || {};
+  ds.cloudflare = ds.cloudflare || {};
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>Instance configuration and admin authentication.</p></div>
     <div class="grid-2" style="margin-bottom:16px">
@@ -2193,6 +2423,27 @@ async function viewSettings(c) {
       <p class="muted" style="font-size:11.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
       <div id="set-webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">DNS sync</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state: gpm only ever deletes records it owns - a Pi-hole CNAME whose target is the apex below, or a Cloudflare record commented <span class="mono">managed-by:gpm</span>.</p>
+      <div class="grid-2">
+        <div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Pi-hole (LAN)</div><div class="ds">Local CNAMEs on the LAN resolver</div></div>${switchHtml('set-ph-on', !!ds.pihole.enabled, 'Pi-hole DNS sync')}</div>
+          <div class="field-group" style="margin-top:8px"><label>Pi-hole URL</label><input class="field mono" id="set-ph-url" value="${esc(ds.pihole.url || '')}" placeholder="http://pihole.lan" /></div>
+          <div class="field-group"><label>App password</label><input class="field mono" id="set-ph-pw" value="${esc(ds.pihole.appPassword || '')}" placeholder="\${ENV:PIHOLE_APP_PASSWORD}" /><div class="hint">Use a placeholder so no secret is committed.</div></div>
+          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-ph-apex" value="${esc(ds.pihole.apexTarget || '')}" placeholder="edge.example.com" /><div class="hint">Also the ownership marker: only CNAMEs pointing here are ever deleted.</div></div>
+        </div>
+        <div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Cloudflare (public)</div><div class="ds">Records in the authoritative zone</div></div>${switchHtml('set-cf-on', !!ds.cloudflare.enabled, 'Cloudflare DNS sync')}</div>
+          <div class="field-group" style="margin-top:8px"><label>DNS provider</label><input class="field mono" id="set-cf-ref" value="${esc(ds.cloudflare.dnsProviderRef || '')}" placeholder="cloudflare" /><div class="hint">Names a DNS Providers entry; its <span class="mono">apiToken</span> is reused.</div></div>
+          <div class="field-group"><label>Zone name</label><input class="field mono" id="set-cf-zone" value="${esc(ds.cloudflare.zoneName || '')}" placeholder="example.com" /></div>
+          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-cf-apex" value="${esc(ds.cloudflare.apexTarget || '')}" placeholder="edge.example.com" /></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Proxied</div><div class="ds">Cloudflare orange cloud (off = DNS only)</div></div>${switchHtml('set-cf-proxied', !!ds.cloudflare.proxied, 'Proxied')}</div>
+        </div>
+      </div>
+      <div id="set-dns-status" class="hint" style="margin-top:12px"></div>
+      <button class="btn ghost sm" id="set-dns-run" type="button" style="margin-top:6px">Reconcile now</button>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Data-plane SSO sessions</p>
@@ -2226,6 +2477,37 @@ async function viewSettings(c) {
   }
   arr(s.webhooks).forEach(webhookRow);
   $('#addWebhook').addEventListener('click', () => webhookRow({}));
+
+  // DNS sync status + manual reconcile. The status endpoint is only wired when
+  // the daemon has a syncer, so a 501 reads as "not available" rather than an error.
+  async function renderDNSStatus() {
+    const el = $('#set-dns-status');
+    if (!el) return;
+    try {
+      const st = (await api('/api/dns-sync/status')).data || {};
+      const line = (label, b) => {
+        if (!b || !b.enabled) return `${label}: off`;
+        if (b.error) return `${label}: FAILED - ${b.error}`;
+        return `${label}: ok (${b.desired} desired, +${b.created} / -${b.deleted})`;
+      };
+      el.textContent = (st.lastRun ? 'Last run ' + fmtTime(st.lastRun) + '. ' : 'Never run. ') +
+        line('Pi-hole', st.pihole) + ' | ' + line('Cloudflare', st.cloudflare) +
+        (st.error ? ' | ' + st.error : '');
+    } catch (e) {
+      el.textContent = e && e.status === 501 ? 'DNS sync is not wired in this deployment.' : 'Status unavailable: ' + (e.message || e);
+    }
+  }
+  renderDNSStatus();
+
+  $('#set-dns-run').addEventListener('click', async () => {
+    const btn = $('#set-dns-run'); btn.disabled = true;
+    try {
+      await api('/api/dns-sync/reconcile', { method: 'POST' });
+      toast('Reconciled', 'DNS records are back in step with the config.', 'ok');
+    } catch (e) { toastErr(e); }
+    await renderDNSStatus();
+    btn.disabled = false;
+  });
 
   $('#set-sso-revoke').addEventListener('click', async () => {
     if (!confirm('Revoke ALL data-plane SSO sessions? Every signed-in user re-authenticates at the IdP on their next request.')) return;
@@ -2263,6 +2545,25 @@ async function viewSettings(c) {
       webhooks.push(wh);
     });
     if (webhooks.length) body.webhooks = webhooks;
+
+    const dnsSync = { pihole: {}, cloudflare: {} };
+    const phPw = $('#set-ph-pw').value.trim();
+    if (phPw === '***') {
+      // A literal secret is redacted on read; saving it back would commit "***".
+      toast('Secret masked', 'The Pi-hole app password reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.', 'err');
+      return;
+    }
+    if (isOn('set-ph-on')) dnsSync.pihole.enabled = true;
+    dnsSync.pihole.url = $('#set-ph-url').value.trim();
+    dnsSync.pihole.appPassword = phPw;
+    dnsSync.pihole.apexTarget = $('#set-ph-apex').value.trim();
+    if (isOn('set-cf-on')) dnsSync.cloudflare.enabled = true;
+    dnsSync.cloudflare.dnsProviderRef = $('#set-cf-ref').value.trim();
+    dnsSync.cloudflare.zoneName = $('#set-cf-zone').value.trim();
+    dnsSync.cloudflare.apexTarget = $('#set-cf-apex').value.trim();
+    if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
+    body.dnsSync = dnsSync;
+
     const btn = $('#set-save'); btn.disabled = true;
     try {
       const r = await api('/api/settings', { method: 'PUT', body });
@@ -2290,10 +2591,20 @@ async function refreshHeadSha() {
   } catch (e) { /* ignore */ }
 }
 
+// Greys out sidebar entries whose backing capability is unavailable. Runs after
+// loadTopbar, which is what populates the capability probe (buildShell renders
+// the nav before any fetch has happened).
+function applyNavGating() {
+  const item = document.querySelector('#nav .nav-item[data-view="tokens"]');
+  gateControl(item, hasCapability('apiTokens.enabled'),
+    'API tokens are not wired in this deployment.');
+}
+
 // ---------- boot ----------
 async function boot() {
   buildShell();
   await loadTopbar();
+  applyNavGating();
   window.addEventListener('hashchange', route);
   await route();
 }

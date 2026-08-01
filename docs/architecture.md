@@ -38,6 +38,9 @@ trusted object-kind directory mapping) so objects created after that commit are
 left untouched. Both re-validate the whole graph before committing and roll the
 working tree back to HEAD if the result does not load cleanly; a per-object revert
 whose object is absent at the target commit is refused rather than deleting it.
+`APIToken` is exempt from both: its file carries a credential digest, so a
+per-object revert is refused (`ErrNotRevertible`) and the whole-tree revert
+preserves the `api-tokens` directory verbatim across the restore.
 
 **REST API + web UI** (`internal/api`, `internal/ui`). The API is a small
 JSON CRUD surface over the config objects; the UI is a vanilla-JS single-page app
@@ -55,6 +58,58 @@ PKCE). Sessions are server-side (SQLite), referenced by an opaque `gpm_session`
 cookie (`HttpOnly`, `SameSite=Lax`, `Secure` by default). OIDC group claims map to
 roles; there is no path by which a user outside the configured admin groups
 becomes an admin.
+
+**API tokens** (`internal/auth`, `internal/model`). Besides session cookies the
+admin API accepts scoped bearer tokens (`Authorization: Bearer gpm_...`). The
+secret is minted server-side and returned exactly once; only its SHA-256 digest is
+committed as an `APIToken` object, so the git config never holds a usable
+credential. Bearer resolution runs **before** the cookie path and never falls
+through to it, and matching is a constant-time digest compare across the enabled,
+unexpired tokens. The token set is **cached in the authenticator and invalidated
+from the single config-reload path**, so a revoked token stops working
+immediately while an unauthenticated bearer flood cannot force a full config load
+(walk + parse + whole-graph validate) per request — a failed bearer auth never
+reaches the login rate gate, so re-reading per request was an internet-facing DoS
+lever. A token principal is admin-role (satisfying the coarse gate) but
+scope-limited per route: `register()` wraps each resource route in a
+`<plural>:read` / `<plural>:write` check, with `admin` reserved for token
+management, **writing settings**, backup, restore, whole-config revert and the
+pprof endpoints. Scope enforcement is injected into the API as a closure, so the
+API package stays independent of `auth` for testing; the daemon's implementation
+**denies when no principal is on the request** (which the mounted route makes
+impossible — reaching it means broken wiring, and a broken authorization check
+must fail closed). A nil closure means "allow" and exists only for the unwired
+case, i.e. tests. `/debug/pprof/` is gated the same way plus its own admin-scope
+check, because a heap dump and the process command line carry resolved backend
+credentials in cleartext and every token principal is admin-*role*. Token
+principals are CSRF-exempt by
+construction: the double-submit token defends against *ambient* browser
+credentials, and a bearer header is never attached automatically. Last-use is
+tracked in memory only — persisting it would turn every API call into a git commit.
+
+**DNS sync** (`internal/dnssync`). An optional reconciler that publishes CNAMEs
+for the proxy hosts that opted in (`dns.lanDirect` / `dns.publicCname`), into a
+local Pi-hole v6 resolver and/or the authoritative Cloudflare zone. It follows the
+webhook dispatcher's shape — live settings read on every run, non-blocking
+triggers, a hardened HTTP client that never follows redirects and refuses
+link-local destinations at connect time — with two additions. Reconcile is
+**full-state**: the desired set is recomputed from the whole config and compared
+against what the backend actually holds, so out-of-band drift is repaired in both
+directions. And deletion is **ownership-gated**: on Pi-hole only a CNAME whose
+target is exactly the configured apex, on Cloudflare only a record carrying the
+`managed-by:gpm` comment (re-checked inside the delete call itself, so it cannot
+become an arbitrary-delete primitive). Creation is gated the same way in both
+backends: if a desired name already exists as somebody else's record — a Pi-hole
+CNAME pointing anywhere but the apex, or a Cloudflare record without the comment —
+it is logged and skipped rather than shadowed or replaced. Runs are serialised by
+a single-flight mutex. The event-triggered path *waits* for an in-flight run (that
+is what makes trigger coalescing correct: the follow-up must see the config that
+caused it), so a bulk restore costs one reconcile rather than one per object; the
+HTTP-triggered `ReconcileNow` instead refuses with `ErrReconcileInProgress` →
+**409**, so repeated manual runs cannot pile blocked goroutines up behind a slow
+backend. The Cloudflare client is separate
+from the ACME solver on purpose: record lifecycle management and certificate
+issuance should not be able to break each other.
 
 **ACME manager** (`internal/acme`). A background loop (12h interval) issues and
 renews `Certificate` objects of type `acme` via DNS-01: register/reuse an account
@@ -149,6 +204,31 @@ own address are rewritten to the public scheme/host.
 - **Fail-closed.** Misconfigured or unknown auth modes deny rather than pass; a
   nil/unparseable client IP is denied; an access list with no matching rule falls
   through to its `defaultAction` (deny by default).
+- **Least privilege for automation.** API tokens are scope-limited, not
+  role-limited: a CI token can hold `proxy-hosts:write` without being able to read
+  the whole config, mint another token, or restore an archive. Escalation paths are
+  closed deliberately — token management, **writing settings**, `backup`,
+  `restore`, whole-config `revert` and `/debug/pprof/` are `admin`-scope only, and
+  a client-supplied `tokenHash` is discarded so nobody can install a digest whose
+  preimage only they know. Writing settings counts as admin because a settings
+  write can aim DNS sync or a webhook at an attacker-controlled URL with a
+  `${ENV:...}` placeholder as its credential — and the write itself triggers the
+  delivery that resolves and sends it — as well as rewrite `adminAuth`.
+- **The stored digest never leaves the process.** `APIToken.TokenHash` is
+  `json:"-"`, so no endpoint returns it (not `GET /api-tokens`, not the config
+  dump); only the YAML at rest carries it. The backup archive *is* that raw YAML,
+  which is why downloading it is `admin`-scope rather than `*:read`.
+- **Rotation means revocation.** Reverting an `APIToken` — scoped or whole-tree —
+  would restore an older `tokenHash` and silently revive a secret the operator
+  rotated away. `Store.RevertObject` refuses the kind outright
+  (`ErrNotRevertible`), and `Store.Revert` snapshots the `api-tokens` directory
+  before the tree restore and writes it back over the result, so a whole-config
+  revert neither revives a rotated digest nor resurrects a deleted token.
+- **Ownership-gated external writes.** The DNS reconciler only ever deletes
+  records it can prove it created (Pi-hole: target equals the configured apex;
+  Cloudflare: `managed-by:gpm` comment). A name owned by a foreign record is left
+  alone rather than replaced, so a misconfiguration cannot take an operator's zone
+  apart.
 
 ## Dependencies
 

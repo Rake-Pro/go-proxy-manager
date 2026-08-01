@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 )
 
@@ -85,5 +86,55 @@ func TestPprofEnabledIsAdminGated(t *testing.T) {
 	s.http.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pprof enabled, admin session: expected 200, got %d", rec.Code)
+	}
+}
+
+// Every API-token principal is admin-ROLE by construction, so the role gate
+// alone would hand a resource-scoped token the heap profile and the process
+// command line - which carry resolved Cloudflare/Pi-hole secrets in cleartext.
+// pprof therefore requires the admin SCOPE from a token principal.
+func TestPprofRequiresAdminScopeForTokens(t *testing.T) {
+	sessStore, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sessStore.Close() })
+
+	scopedSecret, scopedHash, err := auth.NewTokenSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSecret, adminHash, err := auth.NewTokenSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
+	authn.SetTokenSource(func() []model.APIToken {
+		return []model.APIToken{
+			{ObjectMeta: model.ObjectMeta{Name: "reader"}, TokenHash: scopedHash, Scopes: []string{"proxy-hosts:read"}},
+			{ObjectMeta: model.ObjectMeta{Name: "root"}, TokenHash: adminHash, Scopes: []string{model.ScopeAdmin}},
+		}
+	})
+	s := New(":0", nil, authn, nil, nil, true)
+
+	for _, tc := range []struct {
+		name       string
+		secret     string
+		path       string
+		wantStatus int
+	}{
+		{"resource-scoped token is refused", scopedSecret, "/debug/pprof/", http.StatusForbidden},
+		{"resource-scoped token cannot read cmdline", scopedSecret, "/debug/pprof/cmdline", http.StatusForbidden},
+		{"admin-scoped token is allowed", adminSecret, "/debug/pprof/", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tc.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tc.secret)
+			s.http.Handler.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s = %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		})
 	}
 }

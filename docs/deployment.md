@@ -54,7 +54,7 @@ container deployments).
 | `-slow-request-ms` | `GPM_SLOW_REQUEST_MS` | `0` (off) | Warn on requests slower than N ms |
 | `-debug-headers` | `GPM_DEBUG_HEADERS` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info — keep off in production) |
 | `-upstream-response-header-timeout` | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `0` (unbounded) | Cap time-to-first-byte from an upstream |
-| `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin-role gated) |
+| `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin role **and** `admin` scope gated) |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
 preference:
@@ -160,6 +160,82 @@ upstream-group config — an older binary treats a host whose only backend is an
 (unknown to it) `upstreamGroupRef` as having no upstream and fails config
 validation.
 
+## API tokens (automation)
+
+Scripts and CI authenticate with a scoped bearer token instead of an admin
+session. Mint one from the **API Tokens** page, or over the API:
+
+```
+# Create. The plaintext secret is in the response ONCE and is never retrievable.
+curl -s -X PUT https://<admin>/api/api-tokens/ci-deploy \
+  -b "<admin session cookie>" -H "X-CSRF-Token: <token from /api/me>" \
+  -H 'Content-Type: application/json' \
+  -d '{"scopes":["proxy-hosts:write","certificates:read"]}' | jq -r .token
+
+# Use it. No CSRF header is needed - a bearer token carries no ambient authority.
+curl -s -H 'Authorization: Bearer gpm_...' https://<admin>/api/proxy-hosts | jq
+
+# Rotate (old secret dies immediately) / revoke.
+curl -s -X PUT    'https://<admin>/api/api-tokens/ci-deploy?rotate=1' ...
+curl -s -X DELETE  https://<admin>/api/api-tokens/ci-deploy ...
+```
+
+Verification: a token restricted to `proxy-hosts:read` must get `403` on
+`GET /api/settings` and on any `PUT`, and `401` once deleted or expired.
+`GET /api/api-tokens` shows each token's scopes, expiry and in-memory `lastUsed`
+(which resets on restart by design — see
+[configuration.md](configuration.md#apitoken-configapi-tokens)).
+
+No new flags or environment variables: tokens are ordinary config objects under
+`config/api-tokens/`, so they are versioned and reviewable like everything else -
+but deliberately **not revertible**: restoring an older token file would restore
+an older digest and revive a rotated secret, so both the scoped and the
+whole-config revert leave `api-tokens` alone. Deploy ordering note: an older binary does not know the
+`APIToken` kind, so roll the new binary **before** creating the first token —
+rolling back afterwards leaves `config/api-tokens/*.yaml` on disk, which an older
+loader ignores (the directory is not in its kind map) but which will reappear the
+moment the newer binary runs again.
+
+## DNS sync (Pi-hole + Cloudflare)
+
+Configure the backends once under **Settings -> DNS sync** (see
+[configuration.md](configuration.md#dnssyncsettings-settingsdnssync)), then opt
+individual hosts in with `dns.lanDirect` / `dns.publicCname`.
+
+Prerequisites:
+
+- **Pi-hole v6** with an application password, reachable from the gpm container.
+  The API session must be allowed to write configuration — a `403` means the
+  session is read-only or the instance lacks `webserver.api.app_sudo`, and is
+  surfaced verbatim in the sync status.
+- **Cloudflare**: an existing `dns-providers` entry whose `config.apiToken` has
+  `Zone:DNS:Edit` on the target zone. The same token the ACME solver uses is fine.
+
+```
+# Trigger a reconcile and read the result.
+curl -s -X POST https://<admin>/api/dns-sync/reconcile -H 'Authorization: Bearer gpm_...' | jq
+curl -s          https://<admin>/api/dns-sync/status    -H 'Authorization: Bearer gpm_...' | jq
+# {"lastRun":"...","pihole":{"enabled":true,"ok":true,"desired":12,"managed":12,"created":0,"deleted":0}, ...}
+```
+
+Reconciles also fire automatically after any proxy-host write, settings change,
+restore or whole-config revert. The manual endpoint does **not** queue: while a
+reconcile is in flight it answers `409 Conflict`, so a retry loop cannot stack
+requests behind a slow backend. Verification after enabling: `created` should
+equal the number of opted-in domains on the first run and `0` on the second, and
+`deleted` should stay `0` unless you removed a host. If `deleted` is non-zero
+unexpectedly, check that `apexTarget` matches what your existing records point
+at — on Pi-hole that value *is* the ownership marker.
+
+**Do not change `apexTarget` without cleaning up first.** Ownership on Pi-hole is
+target equality, so every record created under the old apex is orphaned the moment
+it changes: gpm will neither update nor delete it again, and the now-conflicting
+name stops it recreating the record either (it skips names owned by somebody
+else). Delete the stale records, then reconcile. See
+[configuration.md](configuration.md#dnssyncsettings-settingsdnssync).
+
+Scopes: `dns-sync:read` for status, `dns-sync:write` for reconcile.
+
 ## Migrating from Nginx Proxy Manager
 
 ```
@@ -190,11 +266,17 @@ material), and profiling itself costs CPU. Flip on for an investigation,
 capture what you need, flip back off.
 
 The endpoints are mounted on the **admin server** at `/debug/pprof/`, behind the
-same gate as `/api/` (same-origin guard + admin-role session). There is no
-token-in-URL or basic-auth mode - you authenticate with an admin browser
-session (`gpm_session` cookie), either on the LAN admin listener (`-admin-addr`,
-default `:8081`) or via a proxied admin domain if you've fronted the admin
-panel with a host (see "Admin OIDC" above).
+same gate as `/api/` (same-origin guard + admin-role session) **plus an `admin`
+scope check**. There is no token-in-URL or basic-auth mode - you authenticate with
+an admin browser session (`gpm_session` cookie), either on the LAN admin listener
+(`-admin-addr`, default `:8081`) or via a proxied admin domain if you've fronted
+the admin panel with a host (see "Admin OIDC" above).
+
+An API token works too, but **only one holding the `admin` scope**: a heap dump
+and `/debug/pprof/cmdline` contain resolved backend credentials (Cloudflare,
+Pi-hole) in cleartext, and every token principal is admin-*role* by construction,
+so the role gate alone would hand a `proxy-hosts:read` token the process memory.
+A resource-scoped token gets `403` here.
 
 | Endpoint | Answers |
 |----------|---------|
@@ -234,8 +316,8 @@ cookie (as above) and run `go tool pprof` against the local file instead.
 ## Hardening notes
 
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
-- Keep `-pprof` off unless actively profiling; it is admin-role gated but still
-  needless attack surface when idle.
+- Keep `-pprof` off unless actively profiling; it is admin-role **and**
+  admin-scope gated but still needless attack surface when idle.
 - Ensure `GPM_COOKIE_SECURE` is `1` (the default) whenever the admin plane is
   reached over HTTPS. gpm warns at startup when `GPM_COOKIE_SECURE=0` is
   combined with an `https://` `externalBaseURL` — that pairing is only sane for

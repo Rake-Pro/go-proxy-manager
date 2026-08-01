@@ -50,6 +50,10 @@ type Settings struct {
 
 	// Webhooks are outbound lifecycle notifications fired after every config change.
 	Webhooks []WebhookConfig `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+
+	// DNSSync configures the optional local/public DNS record reconcilers that
+	// publish CNAMEs for proxy hosts opted in via their dns policy.
+	DNSSync DNSSyncSettings `json:"dnsSync,omitempty" yaml:"dnsSync,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -84,6 +88,9 @@ func (s Settings) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("settings: webhook %q: url must be an absolute http(s) URL, got %q", w.Name, w.URL)
 		}
+	}
+	if err := s.DNSSync.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

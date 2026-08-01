@@ -83,6 +83,13 @@ func (c Config) Validate() error {
 			disabledUGs[o.Name] = true
 		}
 	}
+	tokens := map[string]bool{}
+	for _, o := range c.APITokens {
+		if err := o.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+		register("apiToken", o.Name, tokens)
+	}
 
 	seenHost := map[string]bool{}
 	for _, h := range c.ProxyHosts {

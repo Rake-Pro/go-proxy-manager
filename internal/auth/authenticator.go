@@ -38,6 +38,18 @@ type Authenticator struct {
 	idps     map[string]model.IdentityProvider
 	settings model.AdminAuthSettings
 	clients  map[string]*oidc.Client // cached OIDC clients by IdP name
+	tokens   func() []model.APIToken // live API-token source (see SetTokenSource)
+
+	tmu      sync.Mutex
+	tokenUse map[string]time.Time // in-memory, non-persisted last-use per token name
+
+	// tcmu guards the API-token cache (see currentTokens). It is separate from
+	// mu because a cache miss calls out to the injected source, which loads the
+	// whole config - work that must not be done holding the authenticator's
+	// general-purpose lock.
+	tcmu        sync.Mutex
+	tokenCache  []model.APIToken
+	tokenCached bool
 
 	pmu     sync.Mutex
 	pending map[string]pendingLogin // OIDC flow state -> login context
@@ -478,6 +490,12 @@ type Principal struct {
 	// CSRFToken is the session's anti-CSRF token, surfaced to the SPA via
 	// /api/me and required back as the X-CSRF-Token header on mutating requests.
 	CSRFToken string `json:"csrfToken,omitempty"`
+	// IsToken marks a principal authenticated by an API token rather than a
+	// session cookie. Such a principal is scope-limited and CSRF-exempt.
+	IsToken bool `json:"isToken,omitempty"`
+	// Scopes are the API token's granted scopes; empty for a session principal
+	// (whose access is governed by its role alone).
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // PrincipalFrom returns the authenticated principal, if any.
@@ -486,10 +504,15 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
-// RequireRole guards a handler: it requires a valid session cookie whose role
-// satisfies min. On unsafe (state-changing) methods it also enforces the session
-// CSRF token via the X-CSRF-Token header (double-submit). Otherwise it responds
-// 401 (no session/role) or 403 (CSRF).
+// RequireRole guards a handler: it requires a valid session cookie (or API
+// token) whose role satisfies min. On unsafe (state-changing) methods it also
+// enforces the session CSRF token via the X-CSRF-Token header (double-submit).
+// Otherwise it responds 401 (no session/role) or 403 (CSRF).
+//
+// API-token principals are exempt from the CSRF check: CSRF defends against a
+// browser attaching ambient credentials (cookies) to a cross-site request, and a
+// bearer token is never attached automatically - it must be set explicitly by
+// the caller, which a cross-origin attacker cannot do.
 func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := a.authenticate(w, r)
@@ -497,7 +520,7 @@ func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if !safeMethod(r.Method) && !csrfTokenValid(r, p.CSRFToken) {
+		if !p.IsToken && !safeMethod(r.Method) && !csrfTokenValid(r, p.CSRFToken) {
 			http.Error(w, "invalid or missing CSRF token", http.StatusForbidden)
 			return
 		}
@@ -505,10 +528,16 @@ func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 	})
 }
 
-// authenticate resolves the session cookie to a principal and applies sliding
-// expiry: an active session past the refresh threshold is extended in the store
-// and its cookie re-issued, so continued use keeps the session alive.
+// authenticate resolves the request to a principal. A gpm API token presented as
+// `Authorization: Bearer gpm_...` is resolved FIRST and never falls through to
+// the cookie path: a presented-but-invalid token is an authentication failure,
+// not an invitation to try another credential. Otherwise the session cookie is
+// resolved with sliding expiry - an active session past the refresh threshold is
+// extended in the store and its cookie re-issued, so continued use keeps it alive.
 func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+	if secret, ok := bearerTokenSecret(r); ok {
+		return a.authenticateToken(secret)
+	}
 	c, err := r.Cookie(a.cookieName)
 	if err != nil {
 		return Principal{}, false

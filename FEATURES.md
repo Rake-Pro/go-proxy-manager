@@ -175,6 +175,12 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - Ops hygiene: Admin UI (HTTPS) + API, **declarative/GitOps config** with secret
   placeholders, **honest versioning**, reversible migrations, **minimal deps**,
   GHCR multi-arch build, digest-pinned.
+- **DNS that follows the config** (✓ shipped, phase 1): a per-host `dns` policy
+  publishes CNAMEs to the LAN resolver (Pi-hole v6) and/or the public zone
+  (Cloudflare), so adding a host no longer means a second manual DNS edit in two
+  places. Full-state reconcile; deletion strictly limited to records gpm can prove
+  it created. Phase 2 (Kubernetes Ingress discovery feeding the same reconciler)
+  is scoped in [BACKLOG.md](BACKLOG.md).
 
 ### P1 - high-value, layer in next (parity + best community asks)
 - Redirect / stream (TCP/UDP) / 404 hosts (✓ shipped: the data plane now serves
@@ -196,6 +202,13 @@ earlier tiers or duplicating work (see "Architecture for extension").
   view, gated on the access-log toggle) or metrics.
 - Per-host OIDC relying-party gating on the data plane (✓ shipped: redirect →
   callback → signed SSO session cookie) and HSTS emission (✓ shipped).
+- **Scoped API tokens** for automation (✓ shipped): bearer credentials minted
+  server-side and shown once (only a SHA-256 digest is committed), with
+  per-resource `read`/`write` scopes, optional expiry, instant revocation, and
+  `admin`-only access to token management / settings writes / backup / restore /
+  whole-config revert / pprof. The stored digest is never served, and reverting a
+  token is refused so a rotation always means revocation. Closes the "scripting
+  against the API means handing out an admin session" gap.
 
 ### P2 - hardening (NPMplus-class) + community gaps
 - HTTP/3 (QUIC), hardened TLS (1.3; optional 1.2 off).

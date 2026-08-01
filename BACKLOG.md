@@ -37,6 +37,39 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
 - [x] Rate-limit / lockout on local login (per client IP); cap the pending-login
   and throttle maps; sliding session expiry (wired `Touch`). *(Low)*
 
+### Follow-ups from the API-token / DNS-sync review
+
+All findings from that review are remediated in the same change (see CHANGELOG
+`Security` and `Changed`); the one deliberately-deferred item is below.
+
+- [x] pprof requires the `admin` scope, not just the admin role. *(High)*
+- [x] `PUT /api/settings` requires the `admin` scope (`settings:write` was
+  admin-equivalent: env-var exfiltration via `dnsSync`/webhook targets, and
+  `adminAuth` rewrite). *(High)*
+- [x] Unauthenticated bearer attempts no longer force an uncached full config
+  load (token set cached, invalidated from the reload path). *(Medium)*
+- [x] Pi-hole sync skips-and-warns instead of shadowing an operator-owned CNAME
+  for the same name. *(Medium)*
+- [x] Rotation means revocation: `APIToken` revert refused, and the whole-config
+  revert preserves `api-tokens`. *(Medium)*
+- [x] `tokenHash` is `json:"-"`; `GET /api/backup` raised to `admin` scope (the
+  archive is the raw YAML that still carries the digest). *(Low-med)*
+- [x] `ProxyHost.dns` is a pointer, so an unset policy is omitted from JSON.
+  *(Low)*
+- [x] Manual DNS reconcile returns 409 instead of blocking on the run lock.
+  *(Low)*
+- [x] `apexTarget` change orphans previously-managed records — documented in
+  `docs/configuration.md` and `docs/deployment.md`. *(Low)*
+- [x] The SPA gates the API Tokens nav entry and page on
+  `capabilities.apiTokens.enabled`. *(Low)*
+- [x] The API scope gate denies when no principal is on the request. *(Info)*
+- [ ] **`Principal.SessionID` is serialised by `GET /api/me`.** The struct has no
+  `json:"-"` on `SessionID`, so the SPA's own session id is echoed back into the
+  page. Pre-existing, out of scope for the token/DNS change that surfaced it, and
+  low impact (the value is already in the caller's own cookie), but it should
+  either be tagged `json:"-"` or `/api/me` should serve a purpose-built response
+  type. *(Info)*
+
 ## Functionality gaps
 
 - [x] **HSTS emission.** The data plane now emits `Strict-Transport-Security` on
@@ -152,6 +185,53 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   per-upstream `weight`. Unhealthy demotion + connect-only retry unchanged.
 - Not planned until a need appears: slow-start after recovery, per-upstream
   max-connections caps.
+
+## DNS sync (phase 2: Kubernetes Ingress discovery)
+
+Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) is
+✓ shipped — see CHANGELOG `Added` and
+[docs/configuration.md](docs/configuration.md#dnssyncsettings-settingsdnssync).
+Phase 2 closes the remaining manual step: today a cluster service still has to be
+hand-entered as a proxy host before its DNS follows.
+
+- [ ] **Discover cluster Ingresses and reconcile them into managed proxy hosts.**
+  Opt-in per Ingress via annotations (never opt-out, and never a namespace-wide
+  sweep):
+
+  | Annotation | Value | Meaning |
+  |------------|-------|---------|
+  | `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into gpm discovery. Anything else (including absent) means gpm ignores it entirely. |
+  | `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Desired `dns.lanDirect` on the derived proxy host. |
+  | `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Desired `dns.publicCname` on the derived proxy host. |
+
+  The contract is already documented as **reserved/planned** in
+  [docs/configuration.md](docs/configuration.md#reserved--planned-kubernetes-ingress-annotations)
+  so operators can start labelling and the keys are not claimed for anything else.
+
+  Design constraints, settled up front:
+  - **Plain Kubernetes REST, no `client-go`.** The dependency budget is the whole
+    point of this project (see CLAUDE.md); `client-go` and its transitive tree
+    would dwarf the current direct-dependency set. `GET /apis/networking.k8s.io/v1/ingresses`
+    with `?watch=1` (or a poll interval) over the standard in-cluster
+    `https://kubernetes.default.svc` endpoint, the projected SA token and the
+    projected CA bundle, is enough.
+  - **Scoped read-only ServiceAccount.** A ClusterRole with `get`/`list`/`watch`
+    on `ingresses` only. gpm must never hold a token that can write to the cluster.
+  - **Template-derived, managed-labelled objects.** Each discovered Ingress
+    produces a ProxyHost from an operator-supplied template (upstream scheme/port,
+    TLS certificate ref, default middleware/access-list chain), carrying a
+    `gpm.rake.pro/managed-by: ingress-discovery` label. Reconciliation touches
+    **only** labelled objects: a hand-written proxy host with the same name is
+    never overwritten or deleted, mirroring the ownership rule the DNS backends
+    already use.
+  - **Feeds the existing DNS sync.** Discovery sets the `dns` policy on the
+    derived hosts and then does nothing else — the phase-1 reconciler publishes
+    the records, so there is one code path for DNS, not two.
+  - Open questions to resolve in a design doc before implementation: how a
+    discovered host picks its certificate (single wildcard ref vs per-host ACME),
+    whether writes land as one commit per reconcile or one per object, and what
+    happens to managed hosts when the API server is unreachable (freeze, the
+    likely answer, rather than delete).
 
 ## High availability (gpm itself)
 

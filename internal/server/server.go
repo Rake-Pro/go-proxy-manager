@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 	"github.com/Rake-Pro/go-proxy-manager/internal/version"
 	"github.com/rs/zerolog/log"
@@ -52,20 +53,20 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler))))
 	}
 
-	// net/http/pprof, opt-in and gated exactly like the REST API above (admin
-	// role + same-origin guard). Registered explicitly on this mux, never via the
-	// side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
-	// http.DefaultServeMux.
+	// net/http/pprof, opt-in and gated like the REST API above (admin role +
+	// same-origin guard) PLUS an admin-scope check. Registered explicitly on this
+	// mux, never via the side-effecting `_ "net/http/pprof"` import, so nothing is
+	// ever exposed on http.DefaultServeMux.
 	if pprofEnabled {
 		gate := func(h http.HandlerFunc) http.Handler {
-			return sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, h))
+			return sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, requireAdminScope(h)))
 		}
 		mux.Handle("/debug/pprof/", gate(pprof.Index))
 		mux.Handle("/debug/pprof/cmdline", gate(pprof.Cmdline))
 		mux.Handle("/debug/pprof/profile", gate(pprof.Profile))
 		mux.Handle("/debug/pprof/symbol", gate(pprof.Symbol))
 		mux.Handle("/debug/pprof/trace", gate(pprof.Trace))
-		log.Info().Msg("pprof profiling endpoints enabled on admin server at /debug/pprof/ (admin-role gated)")
+		log.Info().Msg("pprof profiling endpoints enabled on admin server at /debug/pprof/ (admin role + admin scope gated)")
 	}
 
 	// The embedded SPA at the catch-all root. More specific routes above win;
@@ -79,6 +80,25 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
+}
+
+// requireAdminScope refuses an API-token principal that does not hold the admin
+// scope. Every token principal is admin-ROLE by construction (the coarse gate is
+// satisfied and the real authorization is the per-route scope check), so the
+// role gate alone would hand a `proxy-hosts:read` token the heap profile and the
+// process command line - which carry resolved Cloudflare/Pi-hole credentials in
+// cleartext. Session principals are unaffected: RequireScope only ever
+// constrains tokens.
+func requireAdminScope(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := auth.PrincipalFrom(r.Context()); ok {
+			if err := auth.RequireScope(p, model.ScopeAdmin); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // securityHeaders sets baseline hardening headers on every admin/login response:
