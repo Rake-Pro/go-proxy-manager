@@ -335,6 +335,19 @@ deliberately no annotation that names a middleware, access list, certificate or
 upstream, because an Ingress author is untrusted. See
 [configuration.md](configuration.md#discovery-profiles).
 
+**Before you move an existing host into discovery, diff it against the template.**
+The template and every profile carry the same fields a hand-written proxy host
+does — including `robotsNoIndex`, `timeouts` and `tags` — but they are *template*
+fields, so anything the chosen profile does not set is not set on the derived
+host either. Check the host you are retiring for `robotsNoIndex`, a `timeouts`
+override and `tags`, and put them on the profile you are cutting over to.
+`locations` is the one thing that has no template equivalent by design: if the
+host you are moving has them, leave it hand-written (discovery never touches an
+unlabelled host) or publish the paths as their own annotated `Ingress`. After the
+cutover, `GET /api/ingress-discovery/status` names the profile each host
+resolved to; the derived object itself is in git, so `git show` on the reconcile
+commit is the authoritative diff.
+
 ```
 # Reconcile on demand and read the result.
 curl -s -X POST https://<admin>/api/ingress-discovery/reconcile -H 'Authorization: Bearer gpm_...' | jq

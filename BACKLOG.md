@@ -242,6 +242,15 @@ and the design record
     time via `Store.ApplyBatch`'s `ApplyGuard`, since the plan predates the list.
   - [x] **Feeds the existing DNS sync** — discovery sets the `dns` policy and
     reuses the phase-1 trigger, so there is one DNS code path.
+  - [x] **Template/profile parity with a hand-written host** (`robotsNoIndex`,
+    `timeouts`, `tags`). The template expressed the upstream, TLS, websockets,
+    chains and default DNS and nothing else, so cutting a service over to
+    discovery **silently dropped** its `robotsNoIndex` - and the only way back was
+    a `headers` middleware setting `X-Robots-Tag`, i.e. a second mechanism for
+    something the model already expresses. `timeouts` reuses `ProxyHost`'s own
+    validation helper at settings-write time; all three are deep-copied per
+    derived host, and a template that sets none of them produces exactly the
+    object it did before.
   - [x] Open questions resolved in the design doc:
     - **Certificates**: a single wildcard `certificateRef` from the template;
       discovery never issues per-host ACME (rate-limit blast radius on an
@@ -343,6 +352,23 @@ Deliberately deferred:
 
 Deliberately deferred (Ingress discovery; not planned until a need appears):
 
+- **`locations` on a discovery template/profile.** Decided against, not
+  overlooked. Locations are **per-service path routing** with their own upstream
+  and chain; discovery's model is the opposite - every derived host forwards
+  *everything* to the cluster ingress controller, which does the path routing
+  itself, from the same `Ingress` gpm read. A template-level location list would
+  be stamped onto every host derived from that template or profile, so the only
+  paths it could name are ones meaningful fleet-wide, which is not what locations
+  are for. The useful version is per-Ingress, and per-Ingress means reading
+  paths/upstreams/chains out of an untrusted cluster manifest - the exact
+  self-service privilege grant the annotation model forbids (`locations: [{path:
+  /, middlewares: []}]` on a tenant's own Ingress would strip the operator's auth
+  chain at the edge). Nothing is lost: publish a second annotated `Ingress` for
+  the path, or hand-write the host and leave it out of discovery (an unlabelled
+  host is never touched). If a need ever appears, the only shape that keeps the
+  containment property is operator-side: locations written per profile in
+  settings and selected by name like everything else. See
+  [docs/design/ingress-discovery.md §5](docs/design/ingress-discovery.md).
 - **Per-host ACME** for discovered names outside the wildcard's coverage. Would
   need its own rate-limit budget and a CT-disclosure note in the UI.
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.

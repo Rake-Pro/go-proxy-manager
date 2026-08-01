@@ -742,17 +742,30 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		tlsSettings.ClientAuth = &ca
 	}
 
+	// Timeouts is a POINTER for the same reason: assigning it straight through
+	// would give every derived host - and the settings object they came from - the
+	// same *HostTimeouts. nil stays nil so an unset template produces a host with
+	// no timeouts key at all.
+	var timeouts *model.HostTimeouts
+	if tmpl.Timeouts != nil {
+		to := *tmpl.Timeouts
+		timeouts = &to
+	}
+
 	host := model.ProxyHost{
 		ObjectMeta: model.ObjectMeta{
 			Name:        name,
 			DisplayName: ns + "/" + nm,
 			Labels:      map[string]string{model.ManagedByLabel: model.ManagedByIngressDiscovery},
+			Tags:        append([]string(nil), tmpl.Tags...),
 		},
 		Domains:           domains,
 		Upstream:          tmpl.Upstream,
 		UpstreamGroupRef:  tmpl.UpstreamGroupRef,
 		TLS:               tlsSettings,
 		WebsocketsUpgrade: tmpl.WebsocketsUpgrade,
+		RobotsNoIndex:     tmpl.RobotsNoIndex,
+		Timeouts:          timeouts,
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
 	}

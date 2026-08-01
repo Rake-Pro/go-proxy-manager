@@ -7,6 +7,41 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Added
+
+- **Discovery templates and profiles reach parity with a hand-written proxy
+  host: `robotsNoIndex`, `timeouts` and `tags`.** `IngressHostTemplate` carried
+  the upstream, TLS, websockets, middlewares, access lists and default DNS policy
+  and nothing else, so a service cut over to Ingress discovery **silently lost**
+  its `robotsNoIndex` — the derived host had no way to express a field the model
+  already has. The workaround, a `headers` middleware setting `X-Robots-Tag`, is
+  a second mechanism for the same thing and has to be remembered per host; it was
+  reverted in production, and `robotsNoIndex` was simply off for derived hosts
+  until this.
+
+  All three are applied verbatim to every derived host, and because a profile
+  *is* an `IngressHostTemplate`, profiles get them with no extra plumbing (tested,
+  not assumed). `timeouts` is validated by the **same helper** `ProxyHost.Validate`
+  uses, at settings-write time — a template that would produce a host the config
+  validator rejects fails the operator's own write instead of every tenant's
+  reconcile batch. `timeouts` is a pointer and `tags` a slice, so a template that
+  sets neither still produces exactly the object it did before (no `timeouts: {}`
+  in the YAML). Both, like `middlewares`/`accessLists`/`defaultDNS`/
+  `tls.clientAuth`, are **deep-copied** per host: no derived host shares backing
+  memory with another or with the loaded settings.
+
+  `locations` is **deliberately not** a template field, recorded as a decision in
+  `docs/design/ingress-discovery.md` §5 and `BACKLOG.md` rather than left as a
+  silent omission: locations are per-service path routing, and discovery forwards
+  everything to the cluster ingress controller by vhost so the controller can do
+  that routing from the same `Ingress`. `displayName` stays derived as
+  `<namespace>/<name>`. The Settings UI renders all three new fields on the
+  default template and on every profile row, and the save path **merges** the
+  nested `timeouts` object over what was loaded rather than rebuilding it — the
+  guard test in `internal/ui/settingsmerge_test.go` now covers the new fields, so
+  the rebuild-instead-of-merge regression (which has already stripped
+  `clientAuth`/`hsts`/`minTLSVersion` once) fails CI.
+
 ### Changed
 
 - **The per-host "LAN direct" / "Public CNAME" toggles stay usable when their DNS

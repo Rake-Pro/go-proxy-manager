@@ -194,7 +194,12 @@ earlier tiers or duplicating work (see "Architecture for extension").
   profiles** an Ingress selects with `gpm.rake.pro/profile` — the annotation
   carries a name and nothing else, so an untrusted manifest picks among chains
   you authored instead of describing one, and an undefined name skips rather than
-  silently downgrading to the default. See
+  silently downgrading to the default. A derived host is a **full** proxy host —
+  templates and profiles carry `robotsNoIndex`, `timeouts` and `tags` alongside
+  the upstream/TLS/chains, so moving a service into discovery does not quietly
+  drop settings it already had. The one deliberate exception is `locations`: path
+  routing belongs to the cluster ingress controller, which does it from the same
+  `Ingress`. See
   [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
 
 ### P1 - high-value, layer in next (parity + best community asks)
