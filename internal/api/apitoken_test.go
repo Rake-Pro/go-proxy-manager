@@ -380,15 +380,58 @@ func TestCapabilitiesReportsGroups(t *testing.T) {
 		DNSSyncEnabled: func() (bool, bool) { return true, false },
 	})
 	w := do(t, h, "GET", "/capabilities", "")
-	var caps map[string]map[string]any
+	var caps map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &caps); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if caps["apiTokens"]["enabled"] != true {
+	group := func(name string) map[string]any {
+		g, ok := caps[name].(map[string]any)
+		if !ok {
+			t.Fatalf("%s capability = %v", name, caps[name])
+		}
+		return g
+	}
+	if group("apiTokens")["enabled"] != true {
 		t.Fatalf("apiTokens capability = %v", caps["apiTokens"])
 	}
-	if caps["dnsSync"]["piholeEnabled"] != true || caps["dnsSync"]["cloudflareEnabled"] != false {
+	if group("dnsSync")["piholeEnabled"] != true || group("dnsSync")["cloudflareEnabled"] != false {
 		t.Fatalf("dnsSync capability = %v", caps["dnsSync"])
+	}
+}
+
+// The SPA renders the token form's scope checkboxes from this list. It used to
+// keep its own copy, which went stale the moment ingress-discovery was added -
+// leaving the UI unable to mint a token for a scope the server accepts. Serving
+// model.ScopePlurals verbatim is what keeps the two from drifting again.
+func TestCapabilitiesServesEveryScopeSubject(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	h := api.New(api.Deps{Store: st})
+
+	w := do(t, h, "GET", "/capabilities", "")
+	var caps struct {
+		ScopeSubjects []string `json:"scopeSubjects"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &caps); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(caps.ScopeSubjects) != len(model.ScopePlurals) {
+		t.Fatalf("scopeSubjects = %v, want %v", caps.ScopeSubjects, model.ScopePlurals)
+	}
+	got := make(map[string]bool, len(caps.ScopeSubjects))
+	for _, s := range caps.ScopeSubjects {
+		got[s] = true
+	}
+	for _, want := range model.ScopePlurals {
+		if !got[want] {
+			t.Fatalf("scopeSubjects is missing %q: %v", want, caps.ScopeSubjects)
+		}
+	}
+	if !got["ingress-discovery"] {
+		t.Fatal("scopeSubjects is missing ingress-discovery, the scope that exposed this drift")
 	}
 }
 

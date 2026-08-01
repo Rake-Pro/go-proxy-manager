@@ -2083,14 +2083,22 @@ const EDITORS = {
 };
 
 // ---------- API TOKENS ----------
-// Scope subjects offered in the create form. Kept in step with model.ScopePlurals
-// (internal/model/apitoken.go); an unknown subject is rejected server-side, so a
-// drift here shows up as a save error rather than a silent grant.
-const TOKEN_SUBJECTS = [
+// Fallback scope subjects for the create form. The live list comes from
+// capabilities.scopeSubjects (model.ScopePlurals) - this copy only covers a
+// capabilities fetch that failed, and is deliberately not the source of truth:
+// it silently went stale when ingress-discovery was added, leaving no way to
+// mint a token for it.
+const TOKEN_SUBJECTS_FALLBACK = [
   'proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts', 'certificates',
   'client-cas', 'dns-providers', 'identity-providers', 'upstream-groups',
   'access-lists', 'middlewares', 'api-tokens', 'settings', 'dns-sync',
+  'ingress-discovery',
 ];
+
+function tokenSubjects() {
+  const fromCaps = state.capabilities && state.capabilities.scopeSubjects;
+  return Array.isArray(fromCaps) && fromCaps.length ? fromCaps : TOKEN_SUBJECTS_FALLBACK;
+}
 
 // Subjects whose endpoints require Full admin however the per-subject boxes are
 // ticked, so the boxes are greyed out instead of granting nothing:
@@ -2181,7 +2189,7 @@ async function viewTokens(c) {
           ${switchHtml('tok-admin', false, 'Full admin')}
         </div>
         <div id="tok-scopes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px;margin-top:8px">
-          ${TOKEN_SUBJECTS.map((p) => `
+          ${tokenSubjects().map((p) => `
             <div class="loc-row" style="gap:6px;align-items:center">
               <span class="mono" style="flex:1 1 auto;font-size:11.5px">${esc(p)}</span>
               <label class="check-item"><input type="checkbox" class="tok-read" data-p="${esc(p)}" />read</label>

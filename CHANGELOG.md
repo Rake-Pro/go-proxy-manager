@@ -7,6 +7,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Fixed
+
+- **The API-token form could not grant `ingress-discovery`.** The SPA rendered
+  its scope checkboxes from a hand-maintained copy of `model.ScopePlurals`,
+  which went stale the moment Ingress discovery added a subject - so the server
+  accepted `ingress-discovery:read` while the UI offered no way to ask for it.
+  `GET /api/capabilities` now serves `scopeSubjects` (the authoritative list)
+  and the form renders from it, with the local list demoted to a
+  fetch-failure fallback. Covered by a test asserting the served list matches
+  `model.ScopePlurals` exactly.
+
 ### Added
 
 - **Kubernetes Ingress discovery (DNS sync phase 2).** A new `internal/k8s`

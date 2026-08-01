@@ -94,6 +94,11 @@ type capabilities struct {
 	APITokens        apiTokenCapability         `json:"apiTokens"`
 	DNSSync          dnsSyncCapability          `json:"dnsSync"`
 	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
+	// ScopeSubjects is model.ScopePlurals, served so the SPA renders the token
+	// form from the authoritative list instead of a hand-maintained copy. The
+	// copy drifted the moment ingress-discovery was added, granting the UI no
+	// way to mint a token for it.
+	ScopeSubjects []string `json:"scopeSubjects"`
 }
 
 type geoIPCapability struct {
@@ -341,6 +346,7 @@ func New(d Deps) http.Handler {
 			IngressDiscovery: ingressDiscoveryCapability{
 				Enabled: d.IngressDiscoveryEnabled != nil && d.IngressDiscoveryEnabled(),
 			},
+			ScopeSubjects: model.ScopePlurals,
 		})
 	})
 
