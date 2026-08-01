@@ -136,6 +136,11 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 - [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
   (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
   walk a host through redirect → callback → session).
+- [ ] **Kubernetes Ingress discovery** against the real cluster: apply
+  `deploy/k8s-ingress-discovery-rbac.yaml`, extract the token, enable discovery
+  with the wildcard `certificateRef`, annotate one Ingress, and confirm the
+  derived host appears, the DNS sync publishes its records, a second reconcile is
+  a no-op, and removing the annotation deletes the host in one revertible commit.
 
 ## Code hygiene
 
@@ -188,50 +193,58 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 ## DNS sync (phase 2: Kubernetes Ingress discovery)
 
-Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) is
-✓ shipped — see CHANGELOG `Added` and
-[docs/configuration.md](docs/configuration.md#dnssyncsettings-settingsdnssync).
-Phase 2 closes the remaining manual step: today a cluster service still has to be
-hand-entered as a proxy host before its DNS follows.
+Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) and
+phase 2 (Kubernetes Ingress discovery) are both ✓ shipped — see CHANGELOG
+`Added`, [docs/configuration.md](docs/configuration.md#ingressdiscoverysettings-settingsingressdiscovery)
+and the design record
+[docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
 
-- [ ] **Discover cluster Ingresses and reconcile them into managed proxy hosts.**
-  Opt-in per Ingress via annotations (never opt-out, and never a namespace-wide
-  sweep):
+- [x] **Discover cluster Ingresses and reconcile them into managed proxy hosts.**
+  Opt-in per Ingress via `gpm.rake.pro/managed: "true"` (never opt-out, never a
+  namespace-wide sweep), with `gpm.rake.pro/lan-direct` /
+  `gpm.rake.pro/public-cname` setting the derived host's `dns` policy.
+  - [x] **Plain Kubernetes REST, no `client-go`** (`internal/k8s`): `net/http` +
+    `encoding/json` against `/apis/networking.k8s.io/v1/ingresses`, in-cluster or
+    explicit `apiURL`/`tokenFile`/`caFile` (the latter is the real deployment —
+    gpm runs off-cluster on the edge host), token re-read on a TTL for projected
+    SA rotation, hardened transport, bounded pagination.
+  - [x] **Scoped read-only ServiceAccount**: `deploy/k8s-ingress-discovery-rbac.yaml`
+    grants `get`/`list`/`watch` on `ingresses` only. gpm never writes to the cluster.
+  - [x] **Template-derived, managed-labelled objects** carrying
+    `gpm.rake.pro/managed-by: ingress-discovery`; only those are written or
+    deleted, and a name collision with a hand-written host is skipped + warned.
+  - [x] **Feeds the existing DNS sync** — discovery sets the `dns` policy and
+    reuses the phase-1 trigger, so there is one DNS code path.
+  - [x] Open questions resolved in the design doc:
+    - **Certificates**: a single wildcard `certificateRef` from the template;
+      discovery never issues per-host ACME (rate-limit blast radius on an
+      externally-driven object set, and surprise permanent CT disclosure of
+      internal service names).
+    - **Commit granularity**: one commit per reconcile via the new
+      `Store.ApplyBatch` (the store's `Save` is load-validate-write-commit per
+      object; per-object would mean a commit storm plus a reload/webhook/DNS
+      trigger apiece, and intermediate revisions nobody wants to revert to).
+    - **API server unreachable**: freeze. A managed host is deleted *only* after a
+      complete, successful, fully-paginated list that no longer derives it; every
+      error path aborts before any write, and the client never returns a partial
+      list with a nil error, so "empty" and "failed" are different return shapes.
+  - [x] Poll (configurable `pollInterval`, default 1m, floor 15s) rather than
+    watch: a watch means hand-rolling resourceVersion tracking, `410 Gone`
+    re-lists and a reconnect loop over a LAN hop, for convergence that is not
+    latency-critical. A full-state poll self-heals from a missed event by
+    construction.
 
-  | Annotation | Value | Meaning |
-  |------------|-------|---------|
-  | `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into gpm discovery. Anything else (including absent) means gpm ignores it entirely. |
-  | `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Desired `dns.lanDirect` on the derived proxy host. |
-  | `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Desired `dns.publicCname` on the derived proxy host. |
+Deliberately deferred (not planned until a need appears):
 
-  The contract is already documented as **reserved/planned** in
-  [docs/configuration.md](docs/configuration.md#reserved--planned-kubernetes-ingress-annotations)
-  so operators can start labelling and the keys are not claimed for anything else.
-
-  Design constraints, settled up front:
-  - **Plain Kubernetes REST, no `client-go`.** The dependency budget is the whole
-    point of this project (see CLAUDE.md); `client-go` and its transitive tree
-    would dwarf the current direct-dependency set. `GET /apis/networking.k8s.io/v1/ingresses`
-    with `?watch=1` (or a poll interval) over the standard in-cluster
-    `https://kubernetes.default.svc` endpoint, the projected SA token and the
-    projected CA bundle, is enough.
-  - **Scoped read-only ServiceAccount.** A ClusterRole with `get`/`list`/`watch`
-    on `ingresses` only. gpm must never hold a token that can write to the cluster.
-  - **Template-derived, managed-labelled objects.** Each discovered Ingress
-    produces a ProxyHost from an operator-supplied template (upstream scheme/port,
-    TLS certificate ref, default middleware/access-list chain), carrying a
-    `gpm.rake.pro/managed-by: ingress-discovery` label. Reconciliation touches
-    **only** labelled objects: a hand-written proxy host with the same name is
-    never overwritten or deleted, mirroring the ownership rule the DNS backends
-    already use.
-  - **Feeds the existing DNS sync.** Discovery sets the `dns` policy on the
-    derived hosts and then does nothing else — the phase-1 reconciler publishes
-    the records, so there is one code path for DNS, not two.
-  - Open questions to resolve in a design doc before implementation: how a
-    discovered host picks its certificate (single wildcard ref vs per-host ACME),
-    whether writes land as one commit per reconcile or one per object, and what
-    happens to managed hosts when the API server is unreachable (freeze, the
-    likely answer, rather than delete).
+- **Per-host ACME** for discovered names outside the wildcard's coverage. Would
+  need its own rate-limit budget and a CT-disclosure note in the UI.
+- **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
+- **Gateway API** (`Gateway`/`HTTPRoute`) as a second discovery source.
+- **A dry-run endpoint** (`GET /ingress-discovery/plan`) reporting the diff
+  without writing. Cheap to add on top of the existing plan/apply split.
+- **Live validation** against the real cluster: the subsystem is unit-tested
+  hermetically (httptest fake API server) but has not yet run against
+  production RBAC and a real Ingress set.
 
 ## High availability (gpm itself)
 
@@ -262,6 +275,12 @@ MPTCP, Anubis, cosign signing).
 
 ### Design proposals
 
+- **Kubernetes Ingress discovery** —
+  [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md)
+  (✓ implemented). Settles the certificate strategy (template wildcard ref, not
+  per-host ACME), commit granularity (one per reconcile), freeze-on-error
+  semantics, poll-vs-watch, and the Ingress → ProxyHost field mapping for an
+  off-cluster gpm.
 - **High availability (gpm itself)** -
   [docs/design/ha.md](docs/design/ha.md) (design complete, implementation not
   started). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for

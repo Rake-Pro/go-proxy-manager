@@ -87,13 +87,14 @@ Singleton application configuration.
 | `adminAuth.ssoOnly` | bool | Disable local login entirely. Requires at least one `providers` entry. Recovery from an SSO outage is by redeploying with local login re-enabled. |
 | `webhooks` | []WebhookConfig | Outbound lifecycle notifications (below). |
 | `dnsSync` | DNSSyncSettings | Optional DNS record reconcilers (below). |
+| `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
 `X-GPM-Webhook-Secret` header), `disabled` (keep configured but do not fire). After
 every successful config change gpm POSTs a JSON event
 `{"action","kind","name","commit","time"}` to each enabled target. `action` is one
-of `save` | `delete` | `restore` | `revert` | `settings`. Delivery is asynchronous
+of `save` | `delete` | `restore` | `revert` | `settings` | `ingress-discovery`. Delivery is asynchronous
 and best-effort under a 10s timeout — a slow or unreachable endpoint never blocks
 or fails the config write, it is only logged. Because targets are admin-configured
 URLs, delivery is SSRF-bounded as defense in depth: **redirects are never
@@ -127,6 +128,21 @@ dnsSync:
     zoneName: example.com
     apexTarget: edge.example.com
     proxied: false
+ingressDiscovery:
+  enabled: true
+  apiURL: https://k8s.example.lan:6443
+  tokenFile: /run/secrets/gpm-k8s-token
+  caFile: /run/secrets/gpm-k8s-ca.crt
+  pollInterval: 60s
+  allowedDomainSuffixes: [example.com]
+  template:
+    upstream: { scheme: http, host: 10.0.0.40, port: 80 }   # the ingress controller
+    tls:
+      certificateRef: wildcard
+      forceSSL: true
+      http2: true
+    middlewares: [sso]
+    defaultDNS: { lanDirect: true }
 ```
 
 ### DNSSyncSettings (`settings.dnsSync`)
@@ -191,6 +207,100 @@ slow backend. `GET /api/dns-sync/status` reports the last run per backend. A
 Pi-hole `403` is
 surfaced as a distinct error — it means the session is read-only or the instance
 was built without `webserver.api.app_sudo`, which retrying will not fix.
+
+### IngressDiscoverySettings (`settings.ingressDiscovery`)
+
+Discovers annotated Kubernetes `Ingress` objects and reconciles them into
+template-derived proxy hosts, which then feed the DNS sync above. Disabled (the
+default) means the subsystem is inert and never contacts anything. The full
+rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `enabled` | bool | Turn discovery on. Everything below is validated only when this is true. |
+| `apiURL` | string | Kubernetes API base URL, **absolute https**. Empty uses the in-cluster endpoint (`KUBERNETES_SERVICE_HOST`/`_PORT`). |
+| `tokenFile` | string | Absolute path to the read-only ServiceAccount bearer token. Empty uses the projected in-cluster path. **Re-read from disk periodically** (5 min), so a rotated projected token keeps working. |
+| `caFile` | string | Absolute path to the PEM bundle that verifies the API server. Empty uses the projected in-cluster CA. There is no skip-verify option. |
+| `namespace` | string | Restrict the list to one namespace. Empty lists cluster-wide (still annotation-gated). |
+| `labelSelector` | string | Optional server-side label selector. The opt-in annotation is still required — the Kubernetes API cannot select on annotations, so that filter is always client-side. |
+| `pollInterval` | duration | Go duration string. Default `1m`, **minimum `15s`** (a reconcile takes the store write lock). |
+| `allowedDomainSuffixes` | []string | **Required when enabled.** A discovered hostname must equal one of these or end in `.` + one of them. |
+| `template.upstream` | Upstream | Where every derived host forwards: the **cluster ingress controller's** address. |
+| `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**. |
+| `template.websocketsUpgrade` | bool | Applied to every derived host. |
+| `template.middlewares` | []string | Applied to every derived host, in order. |
+| `template.accessLists` | []string | Applied to every derived host. |
+| `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
+
+**Opt-in annotations** (on the `Ingress`, never on gpm's side):
+
+| Annotation | Value | Meaning |
+|------------|-------|---------|
+| `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into discovery. Absent or any other value means gpm ignores it entirely. There is no opt-out mode and no namespace sweep. |
+| `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Sets `dns.lanDirect` on the derived host, overriding `template.defaultDNS`. |
+| `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Sets `dns.publicCname` on the derived host. |
+
+**The upstream is the ingress controller, not the Ingress backend Service.** gpm
+runs *outside* the cluster (on the edge host), so
+`<svc>.<ns>.svc.cluster.local` is neither resolvable nor routable from it. gpm
+therefore ignores `spec.rules[].http.paths[].backend` entirely and forwards every
+derived host to `template.upstream`; the controller then routes to the right
+workload **by vhost**, using the `Host` header the data plane preserves on the way
+through. Prefer `scheme: http` to the controller's plain port (TLS is terminated
+once, at the edge, and the edge→LB hop is a trusted LAN path). With
+`scheme: https` the Go transport derives SNI and certificate verification from the
+**upstream host**, not from the forwarded `Host`, so an https upstream must name a
+hostname the controller's certificate actually covers — pointing it at a bare IP
+will fail verification.
+
+**Derived objects.** Each opted-in Ingress produces one proxy host named
+`ing-<ingressName>.<namespace>` (e.g. `ing-grafana.monitoring`), carrying
+`labels["gpm.rake.pro/managed-by"] = "ingress-discovery"`. Its `domains` are the
+`spec.rules[].host` values, lowercased, de-duplicated and sorted. `spec.tls` is
+read but is **not** authoritative: it selects no certificate and contributes no
+domain.
+
+**Ownership — what discovery will and will not touch.** Only objects carrying the
+managed-by label are ever created, updated or deleted. A hand-written proxy host
+with the same name is **skipped with a warning**, never overwritten and never
+removed (the same rule the DNS backends apply to records they do not own). To
+adopt a discovered host permanently, remove the label: gpm then treats it as
+operator-authored and stops managing it.
+
+**Hostname validation.** Every string from the API server is untrusted. A host
+must be a valid multi-label LDH hostname of at most 253 characters and fall
+within `allowedDomainSuffixes`; wildcards, single labels, underscores, URLs and
+anything with whitespace or control characters are rejected. An Ingress with no
+usable host is skipped. Nothing about an Ingress can supply an upstream, a
+certificate, a middleware or an access list — those come only from the template,
+so a cluster user who can edit an Ingress can never weaken the chain you
+configured.
+
+**When the cluster cannot be read, discovery freezes.** A managed host is deleted
+**only** when a reconcile obtained a complete, successful, fully-paginated list of
+annotated Ingresses and the derived name is absent from it. Any transport error,
+timeout, non-`200` status, decode failure, or a page that fails mid-pagination
+aborts the run *before any write* — no creates, no updates, no deletes. An
+annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
+**and** protects its existing host from deletion, so one bad manifest edit cannot
+take a host offline. An *empty successful* list is a different thing entirely: it
+is a legitimate delete-all, applied and logged per host at WARN.
+
+**Writes land as one commit per reconcile** — every create, update and delete from
+one poll is a single revision (`Ingress discovery: reconcile (+N ~M -K)`, authored
+by `ingress-discovery`), so history stays readable and revert is meaningful. A
+reconcile that finds no drift writes nothing at all.
+
+Discovery publishes no DNS itself: it sets the `dns` policy on the derived hosts
+and asks the phase-1 reconciler for a run, so there is exactly one DNS code path.
+
+`POST /api/ingress-discovery/reconcile` runs a reconcile on demand (**409
+Conflict** while one is in flight, never queued);
+`GET /api/ingress-discovery/status` reports the last run, including `lastRun` vs
+`lastSuccess` — separate on purpose, so a frozen state cannot look fresh — and a
+per-host list of actions (`created` / `updated` / `unchanged` / `deleted` /
+`skipped`, with a reason for each skip). The cluster-side RBAC to apply is
+[`deploy/k8s-ingress-discovery-rbac.yaml`](../deploy/k8s-ingress-discovery-rbac.yaml).
 
 ---
 
@@ -800,8 +910,8 @@ replacement token instead.
 Valid subjects are the REST resource plurals — `proxy-hosts`, `redirect-hosts`,
 `stream-hosts`, `dead-hosts`, `certificates`, `client-cas`, `dns-providers`,
 `identity-providers`, `upstream-groups`, `access-lists`, `middlewares`,
-`api-tokens` — plus two pseudo-resources for non-CRUD endpoint groups:
-`settings` and `dns-sync`. An unknown subject or verb is rejected at write time.
+`api-tokens` — plus three pseudo-resources for non-CRUD endpoint groups:
+`settings`, `dns-sync` and `ingress-discovery`. An unknown subject or verb is rejected at write time.
 `GET /api/capabilities` and `GET /api/me` need no scope: any authenticated caller
 may ask what the instance supports.
 
@@ -830,20 +940,9 @@ per request would be a commit flood. It resets on restart.
 
 ---
 
-## Reserved / planned: Kubernetes Ingress annotations
+## Kubernetes Ingress annotations
 
-The following annotation keys on cluster `Ingress` objects are **reserved** for a
-planned phase-2 discovery feature (see [BACKLOG.md](../BACKLOG.md)). They are not
-read by any shipped code today; they are documented here so operators can start
-labelling and so the names are not claimed for anything else.
-
-| Annotation | Value | Meaning |
-|------------|-------|---------|
-| `gpm.rake.pro/managed` | `"true"` | Opt this Ingress into gpm discovery. Absent or any other value means gpm ignores it entirely (opt-in, never opt-out). |
-| `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Desired `dns.lanDirect` on the derived proxy host. |
-| `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Desired `dns.publicCname` on the derived proxy host. |
-
-The intent is that gpm reconciles annotated Ingresses into
-template-derived, managed-labelled ProxyHost objects, which then feed the same
-DNS sync described above. Nothing else about an Ingress is authoritative: a
-proxy host gpm did not generate is never overwritten.
+Shipped: see
+[IngressDiscoverySettings](#ingressdiscoverysettings-settingsingressdiscovery)
+above for the annotation contract, the derived-object rules, and the ownership
+and freeze behaviour.

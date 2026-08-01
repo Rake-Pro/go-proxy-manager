@@ -9,6 +9,48 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **Kubernetes Ingress discovery (DNS sync phase 2).** A new `internal/k8s`
+  subsystem reconciles annotated cluster `Ingress` objects into gpm-managed proxy
+  hosts, which then feed the phase-1 DNS reconciler — so a cluster service no
+  longer has to be hand-entered as a proxy host before its DNS follows. Opt-in is
+  per Ingress and absolute: `gpm.rake.pro/managed: "true"`, with
+  `gpm.rake.pro/lan-direct` / `gpm.rake.pro/public-cname` setting the derived
+  host's `dns` policy; anything else (including an absent annotation) is invisible,
+  and there is no namespace-sweep mode. Configured under
+  `settings.ingressDiscovery`, with an operator-supplied **template** that is the
+  only source for the upstream, certificate ref, middleware and access-list chain
+  — an Ingress contributes strictly-validated, suffix-restricted hostnames and two
+  booleans, nothing else. Because gpm runs off-cluster, in-cluster Service DNS is
+  unusable: the template upstream is the **cluster ingress controller's** address,
+  and the data plane's preserved `Host` header is what routes the request to the
+  right workload. The client is plain `net/http` + `encoding/json` against
+  `/apis/networking.k8s.io/v1` (no `client-go` — its transitive tree would dwarf
+  the whole direct dependency set), works in-cluster *or* with explicit
+  `apiURL`/`tokenFile`/`caFile`, re-reads the bearer token from disk on a TTL (and
+  drops it on a `401`) so a rotated projected ServiceAccount token keeps working,
+  and is hardened like `internal/dnssync`: CA-verified TLS with no skip-verify,
+  redirects never followed, link-local destinations refused at connect time,
+  bounded reads and bounded pagination. Reconcile is **full-state** and
+  **ownership-gated**: only proxy hosts labelled
+  `gpm.rake.pro/managed-by: ingress-discovery` are created, updated or deleted, and
+  a name collision with a hand-written host is skipped with a warning. It
+  **freezes on error** — a managed host is deleted only after a complete,
+  successful, fully-paginated list, and any transport/status/decode/pagination
+  failure aborts before any write (an empty *successful* list is a different
+  return shape entirely, and is a legitimate delete-all). A whole reconcile lands
+  as **one commit**; a no-drift run writes nothing. New endpoints
+  `GET /api/ingress-discovery/status` (`ingress-discovery:read`) and
+  `POST /api/ingress-discovery/reconcile` (`ingress-discovery:write`, **409** while
+  a run is in flight), a new `ingressDiscovery.enabled` capability, a settings
+  block + status panel in the web UI, and cluster-side RBAC at
+  [`deploy/k8s-ingress-discovery-rbac.yaml`](deploy/k8s-ingress-discovery-rbac.yaml).
+  Design record: [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
+- **`Store.ApplyBatch`.** Commits many upserts *and* deletes as a single
+  revision, validating the merged graph once (including the dangling-reference
+  check `Delete` performs) before touching the working tree. It is what makes
+  "one commit per reconcile" possible for Ingress discovery; an empty batch is a
+  no-op that commits nothing.
+
 - **Scoped API tokens.** A new `APIToken` config object
   (`config/api-tokens/<name>.yaml`) gives scripts and CI a bearer credential
   instead of an admin session cookie. The secret (`gpm_` + 32 random bytes,

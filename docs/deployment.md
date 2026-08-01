@@ -236,6 +236,86 @@ else). Delete the stale records, then reconcile. See
 
 Scopes: `dns-sync:read` for status, `dns-sync:write` for reconcile.
 
+## Kubernetes Ingress discovery
+
+Turns annotated cluster `Ingress` objects into managed proxy hosts, which then
+feed the DNS sync above. Configure it under **Settings -> Kubernetes Ingress
+discovery** (full field reference in
+[configuration.md](configuration.md#ingressdiscoverysettings-settingsingressdiscovery),
+rationale in [design/ingress-discovery.md](design/ingress-discovery.md)).
+
+**gpm reads the cluster; it never writes to it.** Apply the shipped RBAC, which
+grants `get`/`list`/`watch` on `ingresses` and nothing else:
+
+```
+kubectl apply -f deploy/k8s-ingress-discovery-rbac.yaml
+```
+
+Then extract the credential for the (normal) off-cluster deployment, where gpm
+runs on the edge host and there is no kubelet to project a token into it:
+
+```
+kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
+  -o jsonpath='{.data.token}' | base64 -d > /run/secrets/gpm-k8s-token
+kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > /run/secrets/gpm-k8s-ca.crt
+chmod 0400 /run/secrets/gpm-k8s-token /run/secrets/gpm-k8s-ca.crt
+```
+
+Mount both into the container and point `tokenFile` / `caFile` at them. gpm
+re-reads the token from disk every 5 minutes (and immediately after a `401`), so
+replacing the file rotates the credential with no restart. If you instead run gpm
+*as a pod in the cluster*, leave `apiURL`, `tokenFile` and `caFile` empty: the
+projected ServiceAccount values are used automatically.
+
+Then annotate the Ingresses you want published — and only those:
+
+```yaml
+metadata:
+  annotations:
+    gpm.rake.pro/managed: "true"
+    gpm.rake.pro/lan-direct: "true"      # optional, overrides template.defaultDNS
+    gpm.rake.pro/public-cname: "false"   # optional
+```
+
+```
+# Reconcile on demand and read the result.
+curl -s -X POST https://<admin>/api/ingress-discovery/reconcile -H 'Authorization: Bearer gpm_...' | jq
+curl -s          https://<admin>/api/ingress-discovery/status    -H 'Authorization: Bearer gpm_...' | jq
+# {"enabled":true,"lastRun":"...","lastSuccess":"...","discovered":7,"managed":7,
+#  "created":0,"updated":0,"deleted":0,"skipped":0,"hosts":[...]}
+```
+
+**Deploy ordering.** The template's `certificateRef` must name a `Certificate`
+that already exists, and any `middlewares`/`accessLists` must exist too —
+otherwise the first reconcile's batch fails referential integrity and writes
+nothing (reported in `status.error`). Create those objects, *then* enable
+discovery.
+
+**Verification after enabling.** On the first successful run `created` equals the
+number of annotated Ingresses whose hosts pass validation; on the second run
+everything should read `unchanged` and no commit should appear in
+`GET /api/history`. Anything in `hosts[]` with `action: "skipped"` carries a
+`reason` — the usual ones are a hostname outside `allowedDomainSuffixes` and a
+name already taken by a proxy host you wrote by hand.
+
+**Freeze on failure is expected behaviour, not an outage.** If the API server is
+unreachable, returns an error, or a paginated list fails part-way, the run aborts
+before any write and the managed hosts stay exactly as they are. `status.error`
+says why and `lastSuccess` says how stale the state is — watch that pair, not
+`lastRun`, when alerting. The only condition that deletes a managed host is a
+*complete, successful* list that no longer derives it (which includes an Ingress
+that simply lost its annotation).
+
+**Upstream gotcha.** `template.upstream` is the **ingress controller's** address,
+not a Service: gpm is off-cluster, so `*.svc.cluster.local` cannot be resolved or
+reached. Use `scheme: http` to the controller's plain port unless you have a
+reason not to — with `https` the upstream host is what SNI and certificate
+verification use, so a bare IP will fail the handshake.
+
+Scopes: `ingress-discovery:read` for status, `ingress-discovery:write` for
+reconcile.
+
 ## Migrating from Nginx Proxy Manager
 
 ```

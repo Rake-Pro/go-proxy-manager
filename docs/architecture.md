@@ -111,6 +111,38 @@ backend. The Cloudflare client is separate
 from the ACME solver on purpose: record lifecycle management and certificate
 issuance should not be able to break each other.
 
+**Kubernetes Ingress discovery** (`internal/k8s`). An optional, read-only poll
+loop that turns annotated cluster `Ingress` objects into gpm-managed proxy hosts,
+which then feed the DNS reconciler above — one DNS code path, not two. The client
+is plain `net/http` + `encoding/json` against `/apis/networking.k8s.io/v1`
+(no `client-go`: its transitive tree would dwarf this project's entire direct
+dependency set), with in-cluster *or* explicit `apiURL`/`tokenFile`/`caFile`
+config — the latter is the real deployment, because gpm runs on the edge host
+rather than as a pod. The bearer token is re-read from disk on a TTL, and dropped
+immediately on a `401`, so a rotated projected ServiceAccount token keeps working
+unattended. Transport hardening matches `dnssync`: TLS verified against the
+supplied CA with no skip-verify, redirects never followed, link-local
+destinations refused at connect time, bounded reads and bounded pagination.
+
+Three properties define the reconciler. It is **full-state** — the desired set is
+recomputed from a complete list on every poll and compared with the config, so a
+missed event is impossible by construction. It is **ownership-gated** — only
+proxy hosts labelled `gpm.rake.pro/managed-by: ingress-discovery` are ever
+written or deleted, and a name collision with a hand-written host is skipped with
+a warning, exactly as the DNS backends treat a record they do not own. And it
+**freezes on error** — a managed host is deleted only after a complete,
+successful, fully-paginated list; any transport error, non-`200`, decode failure
+or mid-pagination failure aborts before any write, and the client never returns a
+partial list with a nil error, so "empty" and "failed" are different return
+shapes rather than different values of one. Everything security-relevant on a
+derived host (upstream, certificate, middleware, access lists) comes from the
+operator's template; the Ingress contributes only strictly-validated,
+suffix-restricted hostnames and two DNS booleans. Because gpm is off-cluster,
+in-cluster Service DNS is unusable, so the upstream is the ingress controller's
+address and the data plane's preserved `Host` header is what routes the request
+to the right workload. A whole reconcile lands as **one commit**
+(`Store.ApplyBatch`), and a no-drift run writes nothing at all.
+
 **ACME manager** (`internal/acme`). A background loop (12h interval) issues and
 renews `Certificate` objects of type `acme` via DNS-01: register/reuse an account
 key per directory URL, create the order, write the `_acme-challenge` TXT record
@@ -228,7 +260,14 @@ own address are rewritten to the public scheme/host.
   records it can prove it created (Pi-hole: target equals the configured apex;
   Cloudflare: `managed-by:gpm` comment). A name owned by a foreign record is left
   alone rather than replaced, so a misconfiguration cannot take an operator's zone
-  apart.
+  apart. Ingress discovery applies the same rule inward: only proxy hosts carrying
+  its managed-by label are written or deleted, and it deletes at all only on the
+  strength of a complete, successful cluster list (freeze on error).
+- **Discovery is opt-in and read-only.** gpm never writes to the cluster — the
+  shipped RBAC grants `get`/`list`/`watch` on `ingresses` and nothing else — and
+  an `Ingress` without `gpm.rake.pro/managed: "true"` is invisible. There is no
+  namespace-sweep mode, and no field of an Ingress can supply an upstream, a
+  certificate, a middleware or an access list.
 
 ## Dependencies
 

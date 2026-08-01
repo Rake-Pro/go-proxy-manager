@@ -1,0 +1,67 @@
+# Cluster-side RBAC for gpm's Kubernetes Ingress discovery.
+#
+# gpm reads Ingress objects and NOTHING ELSE. There is no write verb anywhere in
+# this file, so even a compromised gpm cannot change cluster state through this
+# credential. Apply with:
+#
+#   kubectl apply -f deploy/k8s-ingress-discovery-rbac.yaml
+#
+# Then extract the token and CA bundle for gpm (see docs/deployment.md):
+#
+#   kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
+#     -o jsonpath='{.data.token}' | base64 -d > /run/secrets/gpm-k8s-token
+#   kubectl -n gpm-discovery get secret gpm-ingress-discovery-token \
+#     -o jsonpath='{.data\.ca\.crt}' | base64 -d > /run/secrets/gpm-k8s-ca.crt
+#   chmod 0400 /run/secrets/gpm-k8s-token /run/secrets/gpm-k8s-ca.crt
+#
+# The Secret below is a long-lived, manually-managed ServiceAccount token
+# (kubernetes.io/service-account-token). That is deliberate for the OFF-CLUSTER
+# deployment: gpm runs on the edge host, so there is no kubelet to project a
+# rotating token into it. If you instead run gpm as a pod in this cluster, delete
+# the Secret, give the pod this ServiceAccount, and leave apiURL/tokenFile/caFile
+# empty in settings - gpm then uses the projected token and re-reads it from disk
+# as it rotates.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpm-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpm-ingress-discovery
+  namespace: gpm-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpm-ingress-discovery
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpm-ingress-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpm-ingress-discovery
+subjects:
+  - kind: ServiceAccount
+    name: gpm-ingress-discovery
+    namespace: gpm-discovery
+---
+# Long-lived token for the off-cluster deployment. Kubernetes populates .data.token
+# and .data["ca.crt"] once the ServiceAccount exists.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gpm-ingress-discovery-token
+  namespace: gpm-discovery
+  annotations:
+    kubernetes.io/service-account.name: gpm-ingress-discovery
+type: kubernetes.io/service-account-token

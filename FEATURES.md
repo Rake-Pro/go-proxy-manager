@@ -179,8 +179,13 @@ earlier tiers or duplicating work (see "Architecture for extension").
   publishes CNAMEs to the LAN resolver (Pi-hole v6) and/or the public zone
   (Cloudflare), so adding a host no longer means a second manual DNS edit in two
   places. Full-state reconcile; deletion strictly limited to records gpm can prove
-  it created. Phase 2 (Kubernetes Ingress discovery feeding the same reconciler)
-  is scoped in [BACKLOG.md](BACKLOG.md).
+  it created. **Phase 2 (✓ shipped): Kubernetes Ingress discovery** — an annotated
+  cluster `Ingress` becomes a template-derived, managed-labelled proxy host that
+  feeds the same reconciler, so a cluster service no longer has to be hand-entered
+  first. Read-only against the cluster (stdlib REST, no `client-go`), opt-in per
+  Ingress, one commit per reconcile, and freeze-not-delete when the API server
+  cannot be read. See
+  [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
 
 ### P1 - high-value, layer in next (parity + best community asks)
 - Redirect / stream (TCP/UDP) / 404 hosts (✓ shipped: the data plane now serves
