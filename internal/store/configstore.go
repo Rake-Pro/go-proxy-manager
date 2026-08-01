@@ -33,6 +33,13 @@ var kindDir = map[string]string{
 
 const settingsFile = "settings.yaml"
 
+// dnsLedgerFile is the DNS record-ownership ledger singleton (see
+// model.DNSLedger). It is deliberately NOT part of Config/Settings: the DNS
+// reconciler rewrites it whenever it creates, adopts or drops a record, and
+// folding that into settings.yaml would make every reconcile rewrite the
+// operator's settings - which in turn triggers another reconcile.
+const dnsLedgerFile = "dns-ledger.yaml"
+
 // Sentinel errors so callers can branch on outcome without matching message text.
 var (
 	// ErrNotFound is returned when an object does not exist.
@@ -765,6 +772,50 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 		return "", err
 	}
 	return s.git.CommitAll(ctx, "Settings: update", author)
+}
+
+// LoadDNSLedger reads the DNS record-ownership ledger. A missing file is an
+// EMPTY ledger, not an error: that is the state every deployment starts in, and
+// it means "gpm owns nothing yet", which the reconciler treats as adopt-only -
+// it can never be read as "everything is unowned, delete it".
+func (s *Store) LoadDNSLedger() (model.DNSLedger, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var l model.DNSLedger
+	path := filepath.Join(s.dir, dnsLedgerFile)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return model.DNSLedger{SchemaVersion: model.SchemaVersion}, nil
+		}
+		return l, err
+	}
+	if err := readYAML(path, &l); err != nil {
+		return l, fmt.Errorf("%s: %w", dnsLedgerFile, err)
+	}
+	if err := l.Validate(); err != nil {
+		return l, fmt.Errorf("%s: %w", dnsLedgerFile, err)
+	}
+	return l, nil
+}
+
+// SaveDNSLedger validates and writes the ledger singleton, then commits. Writing
+// an unchanged ledger produces no commit (CommitAll is a no-op on a clean tree),
+// so a steady-state reconcile leaves no history noise.
+func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Author) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := l.Validate(); err != nil {
+		return "", err
+	}
+	if l.SchemaVersion == 0 {
+		l.SchemaVersion = model.SchemaVersion
+	}
+	if err := writeYAML(filepath.Join(s.dir, dnsLedgerFile), l); err != nil {
+		return "", err
+	}
+	return s.git.CommitAll(ctx, "DNS sync ledger: update", author)
 }
 
 func loadDir[T any](root, sub string) ([]T, error) {

@@ -170,8 +170,8 @@ func (c *cloudflareClient) createCNAME(ctx context.Context, zoneID, name, conten
 
 // deleteRecord removes a record by ID, but only after re-checking the ownership
 // comment on the record it was handed. The guard is deliberately duplicated here
-// (the caller already filtered) so no future caller can turn this into an
-// arbitrary-delete primitive against the operator's zone.
+// (the caller already checked the ledger AND the comment) so no future caller can
+// turn this into an arbitrary-delete primitive against the operator's zone.
 func (c *cloudflareClient) deleteRecord(ctx context.Context, zoneID string, rec cfRecord) error {
 	if rec.Comment != ManagedComment {
 		return fmt.Errorf("cloudflare: refusing to delete %s (%q): not gpm-managed", rec.Name, rec.Comment)
@@ -183,77 +183,140 @@ func (c *cloudflareClient) deleteRecord(ctx context.Context, zoneID string, rec 
 	return err
 }
 
-// syncCloudflare reconciles the public CNAMEs for hosts opted into publicCname.
-// The API credential is not stored here: it is read from the referenced
-// DNSProvider's config["apiToken"], so rotating the ACME token rotates this too.
-func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync) BackendStatus {
-	st := BackendStatus{}
-	fail := func(err error) BackendStatus {
-		st.Error = err.Error()
-		return st
-	}
+// cloudflareState is one read of the zone: the CNAME target of every name it
+// holds, plus the record itself (the delete call needs its ID and comment).
+type cloudflareState struct {
+	zoneID  string
+	present map[string]string   // name -> target
+	byName  map[string]cfRecord // name -> the record it came from
+}
 
+// cloudflareConnect resolves the zone and lists its CNAMEs - the read-only half
+// both the reconcile and the dry-run planner need.
+func (s *Syncer) cloudflareConnect(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync) (*cloudflareClient, cloudflareState, error) {
 	token, err := cloudflareToken(cfg, conf.DNSProviderRef)
 	if err != nil {
-		return fail(err)
+		return nil, cloudflareState{}, err
 	}
-	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
-	desired := desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.PublicCname }, apex)
-	st.Desired = len(desired)
-
 	c := &cloudflareClient{token: token, base: cfBaseURL, client: s.client}
 	zoneID, err := c.zone(ctx, conf.ZoneName)
 	if err != nil {
-		return fail(err)
+		return nil, cloudflareState{}, err
 	}
 	records, err := c.listCNAMEs(ctx, zoneID)
 	if err != nil {
-		return fail(err)
+		return nil, cloudflareState{}, err
 	}
-
-	managed := map[string]cfRecord{} // name -> our record
-	present := map[string]bool{}     // every CNAME name in the zone, ours or not
+	state := cloudflareState{zoneID: zoneID, present: map[string]string{}, byName: map[string]cfRecord{}}
 	for _, rec := range records {
 		name := strings.ToLower(strings.TrimSuffix(rec.Name, "."))
-		present[name] = true
-		if rec.Comment == ManagedComment {
-			managed[name] = rec
+		if _, dup := state.present[name]; dup {
+			continue
 		}
+		state.present[name] = strings.ToLower(strings.TrimSuffix(rec.Content, "."))
+		state.byName[name] = rec
 	}
-	st.Managed = len(managed)
+	return c, state, nil
+}
 
-	want := map[string]bool{}
-	for _, d := range desired {
-		want[d] = true
-		if _, mine := managed[d]; mine {
-			continue
-		}
-		if present[d] {
-			// The name exists but is somebody else's record. Creating a second
-			// CNAME would either be rejected or shadow a deliberate entry, and
-			// deleting theirs is exactly what the ownership rule forbids.
-			log.Warn().Str("name", d).Msg("dnssync: cloudflare CNAME exists but is not gpm-managed; leaving it alone")
-			continue
-		}
-		if err := c.createCNAME(ctx, zoneID, d, apex, conf.Proxied); err != nil {
-			return fail(err)
-		}
-		st.Created++
-		log.Info().Str("name", d).Str("target", apex).Bool("proxied", conf.Proxied).Msg("dnssync: cloudflare CNAME created")
+// cloudflareDecisions works out what a reconcile would do to the zone. Unlike
+// Pi-hole, Cloudflare records CAN carry a marker, so the "managed-by:gpm" comment
+// stays in force as a SECOND, independent condition: the ledger authorises a
+// delete and the comment still has to agree. That is strictly stronger than the
+// comment alone, so nothing this backend already guaranteed is weakened.
+func cloudflareDecisions(cfg model.Config, apex string, state cloudflareState, owned map[string]string) (decisions, []string) {
+	desired := desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.PublicCname }, apex)
+	mark := func(name string) bool { return state.byName[name].Comment == ManagedComment }
+	return decide("cloudflare", desired, state.present, apex, owned, mark), desired
+}
+
+// planCloudflare is the read-only preview: it resolves the zone, lists it and
+// reports the decisions without issuing a single write.
+func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]string) BackendPlan {
+	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
+	_, state, err := s.cloudflareConnect(ctx, cfg, conf)
+	if err != nil {
+		return BackendPlan{Error: err.Error()}
 	}
-	for name, rec := range managed {
-		if want[name] {
-			continue
-		}
-		if err := c.deleteRecord(ctx, zoneID, rec); err != nil {
+	d, _ := cloudflareDecisions(cfg, apex, state, owned)
+	return d.plan()
+}
+
+// syncCloudflare reconciles the public CNAMEs for hosts opted into publicCname
+// and returns the ownership ledger the run ended with. The API credential is not
+// stored here: it is read from the referenced DNSProvider's config["apiToken"],
+// so rotating the ACME token rotates this too.
+func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]string) (BackendStatus, map[string]string) {
+	st := BackendStatus{}
+	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
+
+	c, state, err := s.cloudflareConnect(ctx, cfg, conf)
+	if err != nil {
+		st.Error = err.Error()
+		st.Desired = len(desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.PublicCname }, apex))
+		return st, owned
+	}
+
+	d, desired := cloudflareDecisions(cfg, apex, state, owned)
+	st.Desired = len(desired)
+	st.Skipped = len(d.skip)
+	st.Untouched = d.untouched
+
+	live := map[string]string{}
+	for k, v := range owned {
+		live[k] = v
+	}
+	fail := func(err error) (BackendStatus, map[string]string) {
+		st.Error = err.Error()
+		st.Managed = len(live)
+		return st, live
+	}
+
+	for _, name := range d.adopt {
+		live[name] = apex
+		st.Adopted++
+		log.Info().Str("name", name).Str("target", apex).
+			Msg("dnssync: cloudflare CNAME already present, correct and gpm-commented; adopted as gpm-managed")
+	}
+	for _, name := range d.retarget {
+		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
 			return fail(err)
 		}
+		delete(live, name)
+		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
+			return fail(err)
+		}
+		live[name] = apex
+		st.Retargeted++
+		log.Info().Str("name", name).Str("from", state.present[name]).Str("to", apex).
+			Msg("dnssync: cloudflare CNAME retargeted")
+	}
+	for _, name := range d.create {
+		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
+			return fail(err)
+		}
+		live[name] = apex
+		st.Created++
+		log.Info().Str("name", name).Str("target", apex).Bool("proxied", conf.Proxied).Msg("dnssync: cloudflare CNAME created")
+	}
+	for _, name := range d.del {
+		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
+			return fail(err)
+		}
+		delete(live, name)
 		st.Deleted++
 		log.Info().Str("name", name).Msg("dnssync: cloudflare CNAME removed")
 	}
+	live = d.owned
 
+	st.Managed = len(live)
 	st.OK = true
-	return st
+	if st.Adopted > 0 || st.Untouched > 0 {
+		log.Info().Str("backend", "cloudflare").Int("adopted", st.Adopted).Int("untouched", st.Untouched).
+			Int("created", st.Created).Int("deleted", st.Deleted).
+			Msg("dnssync: reconcile complete; records gpm does not own were left exactly as they were")
+	}
+	return st, live
 }
 
 // cloudflareToken resolves the API token from the referenced DNSProvider object.

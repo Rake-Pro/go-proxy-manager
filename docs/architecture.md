@@ -95,13 +95,39 @@ triggers, a hardened HTTP client that never follows redirects and refuses
 link-local destinations at connect time — with two additions. Reconcile is
 **full-state**: the desired set is recomputed from the whole config and compared
 against what the backend actually holds, so out-of-band drift is repaired in both
-directions. And deletion is **ownership-gated**: on Pi-hole only a CNAME whose
-target is exactly the configured apex, on Cloudflare only a record carrying the
-`managed-by:gpm` comment (re-checked inside the delete call itself, so it cannot
-become an arbitrary-delete primitive). Creation is gated the same way in both
-backends: if a desired name already exists as somebody else's record — a Pi-hole
-CNAME pointing anywhere but the apex, or a Cloudflare record without the comment —
-it is logged and skipped rather than shadowed or replaced. Runs are serialised by
+directions. And deletion is **ledger-gated**: gpm removes only records it recorded
+creating.
+
+That ledger (`model.DNSLedger`, persisted as the singleton `config/dns-ledger.yaml`
+next to `settings.yaml`) is the subsystem's load-bearing piece, and it exists
+because the thing it replaced was not ownership at all. Pi-hole/dnsmasq CNAMEs
+carry no comment field, so the original backend inferred ownership from target
+equality — "this CNAME points at `apexTarget`, therefore gpm made it". On a shared
+apex that is simply false, and on 2026-08-01 it cost an operator 19 hand-written
+LAN CNAMEs: they enabled the backend for the first time, no host carried
+`dns.lanDirect` yet, so the desired set was empty, every one of those records
+looked managed, and the first reconcile deleted the lot. Ownership is now recorded
+rather than inferred: `decide()` (in `dnssync.go`) is the single place the rules
+live, and both backends plus the dry-run planner call it, so a preview cannot
+disagree with the run it previews. Per desired name it **creates** what is absent,
+**adopts** what is already correct but not yet in the ledger (the migration path —
+an empty ledger makes a first reconcile adopt-only, never a purge), **retargets** a
+record that still holds exactly what gpm wrote after `apexTarget` moved, and
+**skips and warns** on a name held by a record it does not own rather than
+shadowing or replacing it. It **deletes** only ledger entries the config no longer
+wants, and only while the record still matches what the ledger says gpm left there
+— re-pointed out of band, it is disowned instead. A name absent from the ledger is
+never in a delete list, whatever it points at. Cloudflare keeps its
+`managed-by:gpm` record comment as an independent second condition on both
+adoption and deletion (re-checked inside the delete call itself, so it cannot
+become an arbitrary-delete primitive); the ledger is authoritative, the comment is
+additive. The ledger lives in the config repo rather than beside it so it is
+committed, diffable and reverted with everything else — rolling the config back to
+before a host existed also rolls back gpm's claim on the record that host
+published. It is written by the reconciler alone (there is no CRUD route onto it,
+which would amount to an "authorise a DNS deletion" API), and an unchanged ledger
+produces no commit. `GET /dns-sync/plan` renders the same decisions as a read-only
+dry run, so enabling a backend is checkable before it is done. Runs are serialised by
 a single-flight mutex. The event-triggered path *waits* for an in-flight run (that
 is what makes trigger coalescing correct: the follow-up must see the config that
 caused it), so a bulk restore costs one reconcile rather than one per object; the
@@ -271,9 +297,12 @@ own address are rewritten to the public scheme/host.
   before the tree restore and writes it back over the result, so a whole-config
   revert neither revives a rotated digest nor resurrects a deleted token.
 - **Ownership-gated external writes.** The DNS reconciler only ever deletes
-  records it can prove it created (Pi-hole: target equals the configured apex;
-  Cloudflare: `managed-by:gpm` comment). A name owned by a foreign record is left
-  alone rather than replaced, so a misconfiguration cannot take an operator's zone
+  records it *recorded creating*, in the git-backed ownership ledger
+  (`config/dns-ledger.yaml`); Cloudflare additionally requires its
+  `managed-by:gpm` comment. Nothing is inferred from a record's target, because
+  inferring it deleted 19 of an operator's hand-written CNAMEs on 2026-08-01. A
+  name owned by a foreign record is left alone rather than replaced, so a
+  misconfiguration cannot take an operator's zone
   apart. Ingress discovery applies the same rule inward: only proxy hosts carrying
   its managed-by label are written or deleted — and only when neither the derived
   name nor any of its domains is already claimed by a host it does not own — and it

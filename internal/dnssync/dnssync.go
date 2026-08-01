@@ -10,11 +10,30 @@
 //     from the whole config on every run and compared with what the backend
 //     actually holds, so a record lost to an out-of-band edit is restored and a
 //     host deleted while gpm was down is still cleaned up.
-//   - Deletion is limited to records gpm demonstrably owns. On Pi-hole that
-//     means a CNAME whose target is exactly the configured apexTarget; on
-//     Cloudflare a record carrying the "managed-by:gpm" comment. Anything else
-//     in the zone - including records for hosts gpm does not know about - is
-//     read and ignored, never removed.
+//   - Deletion is limited to records gpm CREATED ITSELF, recorded explicitly in
+//     the git-backed ownership ledger (model.DNSLedger). A record that is not in
+//     the ledger is never deleted, whatever its name and whatever it points at.
+//
+// The ledger replaces an inference that was not ownership. Pi-hole ownership used
+// to be "the CNAME target equals apexTarget", because dnsmasq CNAMEs have no
+// comment field to mark. On 2026-08-01 an operator enabled the Pi-hole backend for
+// the first time with 19 hand-written LAN CNAMEs already pointing at that same
+// edge host and no proxy host yet carrying dns.lanDirect: the desired set was
+// empty, every one of those records looked "managed", and the first reconcile
+// deleted the lot. LAN DNS broke until they were restored by hand.
+//
+// So ownership is now recorded, not guessed, and the first reconcile of an
+// existing deployment is an adopt-only run:
+//
+//   - desired, absent            -> create, and record ownership
+//   - desired, present, right target, not owned -> ADOPT (record ownership, do
+//     not recreate)
+//   - desired, present, wrong target, not owned -> skip and warn, never overwrite
+//   - owned, no longer desired   -> delete, and drop from the ledger
+//   - not owned                  -> untouched, always
+//
+// Cloudflare keeps its "managed-by:gpm" record comment as a second, independent
+// mark: a delete there needs BOTH the ledger entry and the comment.
 //
 // Delivery follows the webhook dispatcher's shape: settings are read live on
 // every run, triggers are non-blocking, and a failing backend is reported in
@@ -27,6 +46,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -55,12 +75,20 @@ type BackendStatus struct {
 	Error   string    `json:"error,omitempty"`
 	LastRun time.Time `json:"lastRun,omitempty"`
 	// Desired is how many records the config asks for; Managed is how many
-	// gpm-owned records the backend already held; Created/Deleted count the
-	// changes this run made.
-	Desired int `json:"desired"`
-	Managed int `json:"managed"`
-	Created int `json:"created"`
-	Deleted int `json:"deleted"`
+	// records gpm owns (ledger entries) once the run finished; Created, Adopted,
+	// Retargeted and Deleted count the changes this run made; Skipped counts
+	// desired names held by a record gpm does not own and will not overwrite.
+	Desired    int `json:"desired"`
+	Managed    int `json:"managed"`
+	Created    int `json:"created"`
+	Adopted    int `json:"adopted"`
+	Retargeted int `json:"retargeted"`
+	Deleted    int `json:"deleted"`
+	Skipped    int `json:"skipped"`
+	// Untouched is how many records the backend holds that gpm does not own and
+	// therefore never considered changing. It is the number the operator wants
+	// after a first-enable: it should equal everything they wrote by hand.
+	Untouched int `json:"untouched"`
 }
 
 // Status is the full result of the last reconcile, served by GET /dns-sync/status.
@@ -71,9 +99,80 @@ type Status struct {
 	Cloudflare BackendStatus `json:"cloudflare"`
 }
 
+// BackendPlan is what a reconcile WOULD do to one backend, computed without
+// changing anything. Every list holds domain names, sorted, so a plan is
+// diffable against the next one.
+type BackendPlan struct {
+	Enabled bool   `json:"enabled"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	// Create is desired names with no record; Adopt is desired names that already
+	// hold the right record but are not in the ledger yet (first-enable
+	// migration); Retarget is owned names whose record still carries the target
+	// gpm published it with while the configured apex has since changed; Delete is
+	// owned names the config no longer wants; Skip is desired names held by a
+	// record gpm does not own and will not overwrite.
+	Create   []string `json:"create"`
+	Adopt    []string `json:"adopt"`
+	Retarget []string `json:"retarget"`
+	Delete   []string `json:"delete"`
+	Skip     []string `json:"skip"`
+	// Untouched counts records in the backend gpm does not own and will not
+	// consider. On a first enable this is the count an operator should recognise
+	// as "everything I wrote by hand".
+	Untouched int `json:"untouched"`
+}
+
+// Plan is the read-only preview served by GET /dns-sync/plan.
+type Plan struct {
+	GeneratedAt time.Time   `json:"generatedAt"`
+	Error       string      `json:"error,omitempty"`
+	Pihole      BackendPlan `json:"pihole"`
+	Cloudflare  BackendPlan `json:"cloudflare"`
+}
+
+// decisions is the backend-independent outcome of comparing the desired set, the
+// records a backend holds and the ownership ledger. Both backends compute one and
+// then either render it (Plan) or apply it (Reconcile), so a preview can never
+// disagree with the run it previews.
+type decisions struct {
+	create    []string
+	adopt     []string
+	retarget  []string
+	del       []string
+	skip      []string
+	untouched int
+	// owned is the ledger state the run would end with if every step succeeded.
+	owned map[string]string
+}
+
+func (d decisions) plan() BackendPlan {
+	return BackendPlan{
+		OK:        true,
+		Create:    d.create,
+		Adopt:     d.adopt,
+		Retarget:  d.retarget,
+		Delete:    d.del,
+		Skip:      d.skip,
+		Untouched: d.untouched,
+	}
+}
+
+// Ledger persists the record-ownership ledger across restarts. It is an
+// interface so the syncer depends on the two operations it needs rather than on
+// the config store, and so tests can supply an in-memory one.
+//
+// A nil Ledger puts the syncer in a deliberately inert mode: it owns nothing, so
+// it creates and adopts but NEVER deletes. That is the safe direction to fail.
+type Ledger interface {
+	Load() (model.DNSLedger, error)
+	Save(ctx context.Context, l model.DNSLedger) error
+}
+
 // Syncer reconciles DNS records for the opted-in proxy hosts.
 type Syncer struct {
 	load   func(context.Context) (model.Config, model.Settings, error)
+	ledger Ledger
 	client *http.Client
 
 	mu     sync.Mutex
@@ -94,13 +193,17 @@ type Syncer struct {
 // changes take effect without re-wiring (the webhook dispatcher's live-targets
 // pattern). A nil load makes every reconcile a no-op error.
 //
+// ledger is the ownership store that decides what may be deleted; passing nil
+// means gpm owns nothing and deletes nothing (see Ledger).
+//
 // The HTTP client is hardened the same way the webhook client is: redirects are
 // never followed, and link-local destinations are refused at connect time
 // (post-DNS) so an admin-configured Pi-hole URL cannot be pointed at a cloud
 // metadata service. Private ranges stay allowed - a LAN Pi-hole is the point.
-func New(load func(context.Context) (model.Config, model.Settings, error)) *Syncer {
+func New(load func(context.Context) (model.Config, model.Settings, error), ledger Ledger) *Syncer {
 	return &Syncer{
-		load: load,
+		load:   load,
+		ledger: ledger,
 		client: &http.Client{
 			Timeout: 20 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -223,6 +326,62 @@ func (s *Syncer) ReconcileNow(ctx context.Context) error {
 	return s.reconcileLocked(ctx)
 }
 
+// Plan computes what a reconcile WOULD do, without changing anything: it reads
+// the config, the ledger and each enabled backend's records, and returns the same
+// decisions Reconcile would take. Nothing is created, adopted or deleted, and the
+// ledger is not written.
+//
+// It exists so enabling a backend is previewable. The 2026-08-01 incident was
+// unpreviewable: the only way to find out what the first reconcile would do was
+// to run it, and by then 19 records were gone.
+//
+// Like ReconcileNow it refuses rather than queues behind a run in flight - a
+// preview of a moving target is worth less than an honest 409, and Pi-hole has
+// few session slots to spend on overlapping reads.
+func (s *Syncer) Plan(ctx context.Context) (Plan, error) {
+	if s == nil || s.load == nil {
+		return Plan{}, fmt.Errorf("dnssync: no configuration source wired")
+	}
+	if !s.single.TryLock() {
+		return Plan{}, ErrReconcileInProgress
+	}
+	defer s.single.Unlock()
+
+	p := Plan{GeneratedAt: time.Now().UTC()}
+	cfg, settings, err := s.load(ctx)
+	if err != nil {
+		return p, fmt.Errorf("dnssync: load config: %w", err)
+	}
+	ledger, err := s.loadLedger()
+	if err != nil {
+		return p, err
+	}
+	if c := settings.DNSSync.Pihole; c.Enabled {
+		p.Pihole = s.planPihole(ctx, cfg, c, model.DNSLedgerMap(ledger.Pihole))
+		p.Pihole.Enabled = true
+	}
+	if c := settings.DNSSync.Cloudflare; c.Enabled {
+		p.Cloudflare = s.planCloudflare(ctx, cfg, c, model.DNSLedgerMap(ledger.Cloudflare))
+		p.Cloudflare.Enabled = true
+	}
+	return p, nil
+}
+
+// loadLedger reads the ownership ledger, or returns an empty one when no ledger
+// store is wired. A read failure is fatal to the run: continuing with an empty
+// ledger would be safe for deletion (nothing is owned, so nothing is deleted) but
+// would re-adopt and re-create records on every run, so it is reported instead.
+func (s *Syncer) loadLedger() (model.DNSLedger, error) {
+	if s.ledger == nil {
+		return model.DNSLedger{}, nil
+	}
+	l, err := s.ledger.Load()
+	if err != nil {
+		return model.DNSLedger{}, fmt.Errorf("dnssync: load ownership ledger: %w", err)
+	}
+	return l, nil
+}
+
 // reconcileLocked does the work; callers hold s.single.
 func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	now := time.Now().UTC()
@@ -233,22 +392,160 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("dnssync: load config: %w", err)
 	}
+	ledger, err := s.loadLedger()
+	if err != nil {
+		// Refuse to touch any backend without knowing what gpm owns.
+		s.mu.Lock()
+		s.status = Status{LastRun: now, Error: err.Error()}
+		s.mu.Unlock()
+		return err
+	}
 
 	st := Status{LastRun: now}
+	next := ledger
+	// Each backend returns the ledger state it actually reached, even on a partial
+	// failure, so a record created just before an error is still recorded as owned.
+	// A disabled backend's entries are left exactly as they are: turning a backend
+	// off must not silently disown the records it published.
 	if p := settings.DNSSync.Pihole; p.Enabled {
-		st.Pihole = s.syncPihole(ctx, cfg, p)
+		var owned map[string]string
+		st.Pihole, owned = s.syncPihole(ctx, cfg, p, model.DNSLedgerMap(ledger.Pihole))
 		st.Pihole.Enabled = true
 		st.Pihole.LastRun = now
+		next.Pihole = model.DNSLedgerEntries(owned)
 	}
 	if c := settings.DNSSync.Cloudflare; c.Enabled {
-		st.Cloudflare = s.syncCloudflare(ctx, cfg, c)
+		var owned map[string]string
+		st.Cloudflare, owned = s.syncCloudflare(ctx, cfg, c, model.DNSLedgerMap(ledger.Cloudflare))
 		st.Cloudflare.Enabled = true
 		st.Cloudflare.LastRun = now
+		next.Cloudflare = model.DNSLedgerEntries(owned)
+	}
+	if s.ledger != nil && !ledgerEqual(ledger, next) {
+		if err := s.ledger.Save(ctx, next); err != nil {
+			// The records are already changed at the backend; failing to persist that
+			// is serious (a later run would not know it owns them), so it is surfaced
+			// in status rather than swallowed.
+			st.Error = fmt.Sprintf("dns records reconciled but the ownership ledger could not be saved: %v", err)
+			log.Error().Err(err).Msg("dnssync: could not persist the DNS ownership ledger")
+		}
 	}
 	s.mu.Lock()
 	s.status = st
 	s.mu.Unlock()
 	return nil
+}
+
+// ledgerEqual reports whether two ledgers hold the same entries, so a reconcile
+// that changed nothing does not write (and commit) an identical file.
+func ledgerEqual(a, b model.DNSLedger) bool {
+	return slices.Equal(a.Pihole, b.Pihole) && slices.Equal(a.Cloudflare, b.Cloudflare)
+}
+
+// decide compares the desired set against what a backend actually holds and
+// against the ownership ledger, and returns what to do. It is the single place
+// the create/adopt/retarget/delete/skip rules live: both backends call it, and so
+// does the dry-run planner, so a preview can never disagree with the reconcile it
+// previews.
+//
+// present maps every record name the backend holds to its CNAME target. owned is
+// the ledger for this backend (name -> the target gpm published it with). mark
+// reports whether the backend's own secondary ownership marker is on the record -
+// Cloudflare's "managed-by:gpm" comment, and unconditionally true on Pi-hole,
+// whose dnsmasq CNAMEs have nowhere to put one. That asymmetry is the whole
+// reason the ledger exists.
+//
+// The one invariant every branch below preserves: a name absent from owned is
+// NEVER put in the delete list, whatever it points at.
+func decide(backend string, desired []string, present map[string]string, apex string, owned map[string]string, mark func(name string) bool) decisions {
+	d := decisions{owned: make(map[string]string, len(owned))}
+	for k, v := range owned {
+		d.owned[k] = v
+	}
+	want := make(map[string]bool, len(desired))
+	for _, name := range desired {
+		want[name] = true
+	}
+
+	for _, name := range desired {
+		cur, exists := present[name]
+		ledgerTarget, isOwned := owned[name]
+		switch {
+		case !exists:
+			// Either brand new, or one gpm created that has been removed out of band.
+			// A full-state reconcile (re)creates it either way.
+			d.create = append(d.create, name)
+			d.owned[name] = apex
+		case cur == apex && isOwned:
+			// Already exactly right, and already ours. Nothing to do beyond keeping
+			// the recorded target honest.
+			d.owned[name] = apex
+		case cur == apex && mark(name):
+			// ADOPTION. The record the config asks for is already there, carrying
+			// whatever mark this backend can hold, but predates the ledger. Claim it
+			// instead of recreating it - and, above all, instead of deleting it. This
+			// is what makes enabling a backend on an existing deployment a no-op.
+			d.adopt = append(d.adopt, name)
+			d.owned[name] = apex
+		case isOwned && cur == ledgerTarget && mark(name):
+			// Ours, and still holding exactly what gpm wrote, but the configured apex
+			// has moved since. Replacing it is safe precisely because it is unchanged.
+			d.retarget = append(d.retarget, name)
+			d.owned[name] = apex
+		default:
+			// Somebody else's record on a name gpm also wants. Adding a second entry
+			// would shadow a deliberate one and removing theirs is exactly what the
+			// ownership rule forbids, so gpm reports it and does neither.
+			d.skip = append(d.skip, name)
+			log.Warn().Str("backend", backend).Str("domain", name).Str("target", cur).
+				Msg("dnssync: the name is held by a record gpm does not own; leaving it alone")
+			if isOwned {
+				delete(d.owned, name)
+			}
+		}
+	}
+
+	// Removals: only ever names the ledger says gpm created, and only when the
+	// record still is the one gpm left behind.
+	var stale []string
+	for name := range owned {
+		if !want[name] {
+			stale = append(stale, name)
+		}
+	}
+	sort.Strings(stale)
+	for _, name := range stale {
+		cur, exists := present[name]
+		switch {
+		case !exists:
+			// Already gone (deleted out of band): stop claiming it.
+			delete(d.owned, name)
+		case cur != owned[name] || !mark(name):
+			// It no longer holds what gpm wrote, so an operator has taken it over.
+			// Disown it rather than delete it - being wrong here is how records get
+			// lost.
+			log.Warn().Str("backend", backend).Str("domain", name).Str("target", cur).
+				Msg("dnssync: a record gpm owned has changed out of band; disowning it instead of deleting it")
+			delete(d.owned, name)
+		default:
+			d.del = append(d.del, name)
+			delete(d.owned, name)
+		}
+	}
+
+	// Untouched: records the backend holds that this run neither owns nor changes.
+	// It is the number that matters after a first enable - it should be everything
+	// the operator wrote by hand.
+	touched := make(map[string]bool, len(d.del))
+	for _, name := range d.del {
+		touched[name] = true
+	}
+	for name := range present {
+		if _, ours := d.owned[name]; !ours && !touched[name] {
+			d.untouched++
+		}
+	}
+	return d
 }
 
 // desiredDomains collects the domains every enabled proxy host asks to publish

@@ -324,6 +324,12 @@ func TestScopeEnforcement(t *testing.T) {
 		{"dns-sync read blocks reconcile", []string{"dns-sync:read"}, "POST", "/dns-sync/reconcile", "", http.StatusForbidden},
 		{"dns-sync write reaches reconcile", []string{"dns-sync:write"}, "POST", "/dns-sync/reconcile", "", http.StatusNotImplemented},
 		{"unrelated scope blocks dns-sync", []string{"proxy-hosts:write"}, "GET", "/dns-sync/status", "", http.StatusForbidden},
+		// The dry run reads the backends and changes nothing, so it is a read.
+		{"dns-sync read reaches plan", []string{"dns-sync:read"}, "GET", "/dns-sync/plan", "", http.StatusNotImplemented},
+		{"dns-sync write implies read for plan", []string{"dns-sync:write"}, "GET", "/dns-sync/plan", "", http.StatusNotImplemented},
+		{"wildcard read reaches plan", []string{"*:read"}, "GET", "/dns-sync/plan", "", http.StatusNotImplemented},
+		{"unrelated scope blocks plan", []string{"proxy-hosts:read"}, "GET", "/dns-sync/plan", "", http.StatusForbidden},
+		{"ingress-discovery scope does not reach plan", []string{"ingress-discovery:write"}, "GET", "/dns-sync/plan", "", http.StatusForbidden},
 
 		{"ingress-discovery read scope", []string{"ingress-discovery:read"}, "GET", "/ingress-discovery/status", "", http.StatusNotImplemented},
 		{"ingress-discovery read blocks reconcile", []string{"ingress-discovery:read"}, "POST", "/ingress-discovery/reconcile", "", http.StatusForbidden},
@@ -542,6 +548,47 @@ func TestDNSSyncEndpointsUnwired(t *testing.T) {
 	}
 	if w := do(t, h, "POST", "/dns-sync/reconcile", ""); w.Code != http.StatusNotImplemented {
 		t.Fatalf("reconcile = %d, want 501", w.Code)
+	}
+	if w := do(t, h, "GET", "/dns-sync/plan", ""); w.Code != http.StatusNotImplemented {
+		t.Fatalf("plan = %d, want 501", w.Code)
+	}
+}
+
+// The dry run must be able to say "a run is already in flight" (409) and "the
+// backend could not be read" (502) without either looking like the other.
+func TestDNSSyncPlanEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	var planErr error
+	calls := 0
+	h := api.New(api.Deps{
+		Store: st,
+		DNSSyncPlan: func(context.Context) (any, error) {
+			calls++
+			if planErr != nil {
+				return nil, planErr
+			}
+			return map[string]any{"pihole": map[string]any{"delete": []string{}}}, nil
+		},
+	})
+
+	w := do(t, h, "GET", "/dns-sync/plan", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("plan called %d times, want 1", calls)
+	}
+	planErr = fmt.Errorf("preview refused: %w", dnssync.ErrReconcileInProgress)
+	if w := do(t, h, "GET", "/dns-sync/plan", ""); w.Code != http.StatusConflict {
+		t.Fatalf("plan while running = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	planErr = fmt.Errorf("pihole unreachable")
+	if w := do(t, h, "GET", "/dns-sync/plan", ""); w.Code != http.StatusBadGateway {
+		t.Fatalf("failing plan = %d, want 502", w.Code)
 	}
 }
 

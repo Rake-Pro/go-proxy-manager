@@ -26,6 +26,9 @@ type fakeCloudflare struct {
 	// deleted records the IDs the client asked to remove, so a test can assert
 	// that an unmanaged record was never even attempted.
 	deleted []string
+	// writes counts every mutating call, so a test can assert that a dry run
+	// touched nothing at all.
+	writes int
 }
 
 func (f *fakeCloudflare) handler() http.Handler {
@@ -82,6 +85,7 @@ func (f *fakeCloudflare) handler() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.writes++
 		f.nextID++
 		body.ID = "rec-" + strconv.Itoa(f.nextID)
 		f.records = append(f.records, body)
@@ -94,6 +98,7 @@ func (f *fakeCloudflare) handler() http.Handler {
 		id := r.PathValue("id")
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.writes++
 		f.deleted = append(f.deleted, id)
 		out := f.records[:0]
 		for _, rec := range f.records {
@@ -155,7 +160,19 @@ func publicHost(name string, domains ...string) model.ProxyHost {
 	}
 }
 
+func startCloudflare(t *testing.T, f *fakeCloudflare) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func cloudflareSyncer(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost, proxied bool) *Syncer {
+	t.Helper()
+	return cloudflareSyncerWith(t, srv, hosts, proxied, &memLedger{})
+}
+
+func cloudflareSyncerWith(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost, proxied bool, ledger Ledger) *Syncer {
 	t.Helper()
 	t.Setenv("GPM_CF_TOKEN", "cf-token")
 	prev := cfBaseURL
@@ -179,7 +196,7 @@ func cloudflareSyncer(t *testing.T, srv *httptest.Server, hosts []model.ProxyHos
 					Proxied:        proxied,
 				}},
 			}, nil
-	})
+	}, ledger)
 }
 
 func TestCloudflareReconcileCreates(t *testing.T) {
@@ -212,19 +229,81 @@ func TestCloudflareReconcileNoOpAndDelete(t *testing.T) {
 		{ID: "keep", Type: "CNAME", Name: "app.example.com", Content: "edge.example.com", Comment: ManagedComment},
 		{ID: "stale", Type: "CNAME", Name: "old.example.com", Content: "edge.example.com", Comment: ManagedComment},
 	}}
-	srv := httptest.NewServer(fake.handler())
-	defer srv.Close()
+	srv := startCloudflare(t, fake)
 
-	s := cloudflareSyncer(t, srv, []model.ProxyHost{publicHost("app", "app.example.com")}, false)
+	led := ownsCloudflare("app.example.com", "edge.example.com", "old.example.com", "edge.example.com")
+	s := cloudflareSyncerWith(t, srv, []model.ProxyHost{publicHost("app", "app.example.com")}, false, led)
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	st := s.Status().Cloudflare
-	if st.Created != 0 || st.Deleted != 1 || st.Managed != 2 {
+	if st.Created != 0 || st.Deleted != 1 || st.Managed != 1 {
 		t.Fatalf("status = %+v", st)
 	}
 	if got := fake.names(); len(got) != 1 || !strings.HasPrefix(got[0], "app.example.com|") {
 		t.Fatalf("records = %v", got)
+	}
+	wantLedger(t, led.cloudflare(), "app.example.com", "edge.example.com")
+}
+
+// The Pi-hole incident, replayed against Cloudflare: the comment marker already
+// made this safe, and the ledger must not have weakened it. Commented records
+// that gpm never recorded creating are not deleted either - the ledger is
+// authoritative, and the comment is only ever an additional condition.
+func TestCloudflareFirstEnableDeletesNothing(t *testing.T) {
+	fake := &fakeCloudflare{zoneName: "example.com", zoneID: "zone-1", records: []cfRecord{
+		{ID: "hand-1", Type: "CNAME", Name: "docs.example.com", Content: "edge.example.com", Comment: ""},
+		{ID: "hand-2", Type: "CNAME", Name: "blog.example.com", Content: "edge.example.com", Comment: "hand written"},
+		{ID: "commented", Type: "CNAME", Name: "old.example.com", Content: "edge.example.com", Comment: ManagedComment},
+	}}
+	srv := startCloudflare(t, fake)
+
+	led := &memLedger{}
+	s := cloudflareSyncerWith(t, srv, nil, false, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	fake.mu.Lock()
+	deleted := append([]string(nil), fake.deleted...)
+	fake.mu.Unlock()
+	if len(deleted) != 0 {
+		t.Fatalf("REGRESSION: first reconcile with an empty ledger deleted %v", deleted)
+	}
+	st := s.Status().Cloudflare
+	if st.Deleted != 0 || st.Created != 0 || st.Adopted != 0 || st.Untouched != 3 {
+		t.Fatalf("status = %+v", st)
+	}
+	if len(led.cloudflare()) != 0 {
+		t.Fatalf("ledger = %v, want empty", led.cloudflare())
+	}
+}
+
+// Migration for an existing Cloudflare deployment: records the config wants that
+// already carry the managed-by comment are adopted into the ledger on the first
+// run, so they stay deletable later. A record with the right content but no
+// comment is NOT adopted - Cloudflare deletion requires both marks.
+func TestCloudflareAdoptsOnlyCommentedDesiredRecords(t *testing.T) {
+	fake := &fakeCloudflare{zoneName: "example.com", zoneID: "zone-1", records: []cfRecord{
+		{ID: "ours", Type: "CNAME", Name: "app.example.com", Content: "edge.example.com", Comment: ManagedComment},
+		{ID: "theirs", Type: "CNAME", Name: "docs.example.com", Content: "edge.example.com", Comment: ""},
+	}}
+	srv := startCloudflare(t, fake)
+
+	led := &memLedger{}
+	s := cloudflareSyncerWith(t, srv, []model.ProxyHost{
+		publicHost("app", "app.example.com"),
+		publicHost("docs", "docs.example.com"),
+	}, false, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Cloudflare
+	if st.Adopted != 1 || st.Created != 0 || st.Deleted != 0 || st.Skipped != 1 {
+		t.Fatalf("status = %+v, want one adoption and one skip", st)
+	}
+	wantLedger(t, led.cloudflare(), "app.example.com", "edge.example.com")
+	if len(fake.names()) != 2 {
+		t.Fatalf("records = %v, want both untouched", fake.names())
 	}
 }
 
@@ -240,7 +319,8 @@ func TestCloudflareNeverTouchesUnmanagedRecords(t *testing.T) {
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
 
-	s := cloudflareSyncer(t, srv, []model.ProxyHost{publicHost("app", "app.example.com")}, false)
+	led := ownsCloudflare("old.example.com", "edge.example.com")
+	s := cloudflareSyncerWith(t, srv, []model.ProxyHost{publicHost("app", "app.example.com")}, false, led)
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -317,7 +397,7 @@ func TestCloudflareMissingProviderRef(t *testing.T) {
 		return model.Config{}, model.Settings{DNSSync: model.DNSSyncSettings{
 			Cloudflare: model.CloudflareDNSSync{Enabled: true, DNSProviderRef: "nope", ZoneName: "example.com", ApexTarget: "edge.example.com"},
 		}}, nil
-	})
+	}, &memLedger{})
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

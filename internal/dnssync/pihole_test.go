@@ -28,6 +28,9 @@ type fakePihole struct {
 	logins       int
 	logouts      int
 	sawSID       []string
+	// writes counts every mutating call (PUT/DELETE on cnameRecords), so a test
+	// can assert that a dry run touched nothing at all.
+	writes int
 }
 
 func (f *fakePihole) handler() http.Handler {
@@ -75,6 +78,7 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
+		f.writes++
 		f.records = append(f.records, rec)
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
@@ -90,6 +94,7 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
+		f.writes++
 		out := f.records[:0]
 		for _, r0 := range f.records {
 			if r0 != rec {
@@ -144,7 +149,17 @@ func lanHost(name string, domains ...string) model.ProxyHost {
 	}
 }
 
-func piholeSyncer(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost) *Syncer {
+func startPihole(t *testing.T, f *fakePihole) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// piholeSyncerWith builds a syncer against the fake Pi-hole with an explicit
+// ownership ledger. Passing an empty ledger models a first enable: gpm owns
+// nothing, so it may create and adopt but must delete nothing.
+func piholeSyncerWith(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost, ledger Ledger) *Syncer {
 	t.Helper()
 	t.Setenv("GPM_PIHOLE_PW", "secret")
 	return New(func(context.Context) (model.Config, model.Settings, error) {
@@ -156,7 +171,12 @@ func piholeSyncer(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost) *
 				ApexTarget:  "edge.example.com",
 			}},
 		}, nil
-	})
+	}, ledger)
+}
+
+func piholeSyncer(t *testing.T, srv *httptest.Server, hosts []model.ProxyHost) *Syncer {
+	t.Helper()
+	return piholeSyncerWith(t, srv, hosts, &memLedger{})
 }
 
 func TestPiholeReconcileAddsMissing(t *testing.T) {
@@ -203,32 +223,191 @@ func TestPiholeReconcileIsIdempotent(t *testing.T) {
 	}
 }
 
+// Deletion is by ledger and by ledger alone: an entry gpm recorded and no longer
+// wants goes, and the ledger loses it.
 func TestPiholeReconcileRemovesStale(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
 		"gone.example.com,edge.example.com", // ours, no longer wanted
 		"app.example.com,edge.example.com",  // ours, still wanted
 	}}
-	srv := httptest.NewServer(fake.handler())
-	defer srv.Close()
+	srv := startPihole(t, fake)
 
-	s := piholeSyncer(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")})
+	led := ownsPihole("gone.example.com", "edge.example.com", "app.example.com", "edge.example.com")
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	st := s.Status().Pihole
-	if st.Deleted != 1 || st.Created != 0 {
+	if st.Deleted != 1 || st.Created != 0 || st.Adopted != 0 {
 		t.Fatalf("status = %+v", st)
 	}
 	if got := fake.snapshot(); len(got) != 1 || got[0] != "app.example.com,edge.example.com" {
 		t.Fatalf("records = %v", got)
 	}
+	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
 }
 
-// The ownership rule: only CNAMEs whose target is exactly the configured apex
-// belong to gpm. Everything else in Pi-hole is read and left strictly alone,
-// even when it names a domain gpm also serves - and in particular a name an
-// operator points elsewhere is NOT given a second, shadowing entry (the same
-// skip-and-warn the Cloudflare backend does).
+// THE 2026-08-01 INCIDENT, as a test. An operator enables the Pi-hole backend for
+// the first time. Their resolver already holds 19 hand-written LAN CNAMEs aimed
+// at the very host apexTarget names (their LAN-direct bypass list). No proxy host
+// carries dns.lanDirect yet, so the desired set is EMPTY, and the ledger is empty
+// because gpm has never created anything.
+//
+// The old backend inferred ownership from target equality, decided all 19 were
+// its own, found none of them wanted, and deleted every one. LAN DNS broke.
+//
+// The guarantee this asserts: a record gpm did not create is never deleted,
+// however exactly its target matches. Zero deletions, zero writes of any kind.
+func TestPiholeFirstEnableWithSharedApexDeletesNothing(t *testing.T) {
+	var records []string
+	for _, name := range []string{
+		"plex", "argo", "cloud", "wiki", "paste", "speed", "pantry", "cdn", "go",
+		"extensions", "gamewarden", "dotfiles", "ntfy", "grafana", "jackett",
+		"qbit", "sonarr", "radarr", "nas",
+	} {
+		records = append(records, name+".example.com,edge.example.com")
+	}
+	fake := &fakePihole{password: "secret", records: records}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{} // never reconciled before: gpm owns nothing
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	st := s.Status().Pihole
+	if st.Deleted != 0 {
+		t.Fatalf("REGRESSION: first enable deleted %d hand-written records (status %+v)", st.Deleted, st)
+	}
+	if st.Created != 0 || st.Adopted != 0 {
+		t.Fatalf("nothing is desired, so nothing may be created or adopted: %+v", st)
+	}
+	if st.Untouched != len(records) {
+		t.Fatalf("untouched = %d, want all %d hand-written records reported as left alone", st.Untouched, len(records))
+	}
+	if got := fake.snapshot(); len(got) != len(records) {
+		t.Fatalf("records = %d, want all %d still present:\n%v", len(got), len(records), got)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("gpm must not claim ownership of records it did not create: %v", led.pihole())
+	}
+}
+
+// The migration case: a record the config DOES want is already there with the
+// right target but predates the ledger. It is adopted - claimed, not recreated
+// and above all not deleted - and everything else stays untouched.
+func TestPiholeAdoptsMatchingRecordsOnFirstEnable(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{
+		"app.example.com,edge.example.com",  // desired, right target: adopt
+		"plex.example.com,edge.example.com", // same target, NOT desired: leave alone
+		"nas.example.com,truenas.lan",       // unrelated: leave alone
+		"other.example.com,other-proxy.lan", // desired name, wrong target: skip
+	}}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{}
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{
+		lanHost("app", "app.example.com"),
+		lanHost("other", "other.example.com"),
+	}, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	st := s.Status().Pihole
+	if st.Adopted != 1 || st.Created != 0 || st.Deleted != 0 || st.Skipped != 1 {
+		t.Fatalf("status = %+v, want exactly one adoption and one skip", st)
+	}
+	if st.Untouched != 3 {
+		t.Fatalf("untouched = %d, want the 3 records gpm has no claim on", st.Untouched)
+	}
+	// The record was adopted, not recreated: no duplicate entry appeared.
+	got := fake.snapshot()
+	want := []string{
+		"app.example.com,edge.example.com",
+		"nas.example.com,truenas.lan",
+		"other.example.com,other-proxy.lan",
+		"plex.example.com,edge.example.com",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("records = %v\nwant %v", got, want)
+	}
+	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
+
+	// And now that it is owned, dropping the host removes exactly that record and
+	// still leaves the hand-written ones alone.
+	s2 := piholeSyncerWith(t, srv, nil, led)
+	if err := s2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if st := s2.Status().Pihole; st.Deleted != 1 {
+		t.Fatalf("status = %+v, want the adopted record removed once unwanted", st)
+	}
+	if got := fake.snapshot(); len(got) != 3 {
+		t.Fatalf("records = %v, want only the adopted one removed", got)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("ledger = %v, want empty", led.pihole())
+	}
+}
+
+// A ledger entry authorises a delete only while the record still holds what gpm
+// wrote. Re-pointed out of band, it is disowned rather than deleted.
+func TestPiholeDisownsRecordChangedOutOfBand(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{
+		"app.example.com,someone-elses-proxy.lan",
+	}}
+	srv := startPihole(t, fake)
+
+	led := ownsPihole("app.example.com", "edge.example.com")
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if st := s.Status().Pihole; st.Deleted != 0 {
+		t.Fatalf("status = %+v, want no deletion of a record gpm no longer recognises", st)
+	}
+	if got := fake.snapshot(); len(got) != 1 || got[0] != "app.example.com,someone-elses-proxy.lan" {
+		t.Fatalf("records = %v", got)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("ledger = %v, want the entry dropped", led.pihole())
+	}
+}
+
+// Changing apexTarget used to orphan every record gpm had made, because ownership
+// WAS the target. With the ledger, a record gpm created and nobody has touched is
+// still recognisably gpm's, so it is retargeted rather than abandoned.
+func TestPiholeRetargetsOwnedRecordsAfterApexChange(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{
+		"app.example.com,old-edge.example.com",
+		"hand.example.com,old-edge.example.com", // not ours: must not move
+	}}
+	srv := startPihole(t, fake)
+
+	led := ownsPihole("app.example.com", "old-edge.example.com")
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Pihole
+	if st.Retargeted != 1 || st.Created != 0 || st.Deleted != 0 {
+		t.Fatalf("status = %+v, want one retarget", st)
+	}
+	got := fake.snapshot()
+	want := []string{"app.example.com,edge.example.com", "hand.example.com,old-edge.example.com"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("records = %v\nwant %v", got, want)
+	}
+	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
+}
+
+// The ownership rule: only CNAMEs recorded in the ledger belong to gpm.
+// Everything else in Pi-hole is read and left strictly alone, even when it names
+// a domain gpm also serves - and in particular a name an operator points
+// elsewhere is NOT given a second, shadowing entry (the same skip-and-warn the
+// Cloudflare backend does).
 func TestPiholeNeverTouchesUnmanagedRecords(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
 		"nas.example.com,truenas.lan",       // someone else's entry
@@ -239,7 +418,10 @@ func TestPiholeNeverTouchesUnmanagedRecords(t *testing.T) {
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
 
-	s := piholeSyncer(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")})
+	// stale is the only one gpm ever created, so it is the only one that can go -
+	// note that legacy and nas are NOT in the ledger and survive regardless.
+	led := ownsPihole("stale.example.com", "edge.example.com")
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

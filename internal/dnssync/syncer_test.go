@@ -14,7 +14,7 @@ import (
 func TestReconcileWithBothBackendsDisabled(t *testing.T) {
 	s := New(func(context.Context) (model.Config, model.Settings, error) {
 		return model.Config{}, model.Settings{}, nil
-	})
+	}, &memLedger{})
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestReconcileWithBothBackendsDisabled(t *testing.T) {
 func TestReconcileLoadFailureRecorded(t *testing.T) {
 	s := New(func(context.Context) (model.Config, model.Settings, error) {
 		return model.Config{}, model.Settings{}, errors.New("boom")
-	})
+	}, &memLedger{})
 	err := s.Reconcile(context.Background())
 	if err == nil {
 		t.Fatal("a load failure must be returned")
@@ -56,7 +56,7 @@ func TestEnabledReportsBackends(t *testing.T) {
 		return model.Config{}, model.Settings{DNSSync: model.DNSSyncSettings{
 			Pihole: model.PiholeDNSSync{Enabled: true},
 		}}, nil
-	})
+	}, &memLedger{})
 	p, c := s.Enabled()
 	if !p || c {
 		t.Fatalf("Enabled() = %v, %v", p, c)
@@ -82,7 +82,7 @@ func TestTriggerCoalescesBursts(t *testing.T) {
 			<-release // hold the first run open while the burst arrives
 		}
 		return model.Config{}, model.Settings{}, nil
-	})
+	}, &memLedger{})
 
 	s.Trigger()
 	select {
@@ -126,7 +126,7 @@ func TestReconcileNowRefusesWhileRunning(t *testing.T) {
 		once.Do(func() { close(started) })
 		<-release
 		return model.Config{}, model.Settings{}, nil
-	})
+	}, &memLedger{})
 
 	done := make(chan error, 1)
 	go func() { done <- s.ReconcileNow(context.Background()) }()

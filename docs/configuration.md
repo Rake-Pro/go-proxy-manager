@@ -9,6 +9,7 @@ API, or write the files directly and let the daemon load them on start/reload.
 ```
 config/
   settings.yaml            # singleton app settings
+  dns-ledger.yaml          # singleton DNS record-ownership ledger (reconciler-written)
   proxy-hosts/<name>.yaml
   redirect-hosts/<name>.yaml
   stream-hosts/<name>.yaml
@@ -175,7 +176,7 @@ contacts anything.
 | `pihole.enabled` | bool | Turn on local (LAN) CNAME reconciliation. |
 | `pihole.url` | string | Pi-hole base URL, absolute http/https, no `/api` suffix. Required when enabled. |
 | `pihole.appPassword` | Secret | Pi-hole **application password** (placeholder-resolved). Used for `POST /api/auth`. |
-| `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Also the ownership marker** — see below. |
+| `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Not an ownership marker** — see below. |
 | `cloudflare.enabled` | bool | Turn on public zone reconciliation. |
 | `cloudflare.dnsProviderRef` | string | Name of an existing [DNSProvider](#dnsprovider-configdns-providers) whose `config.apiToken` is reused. Required when enabled. |
 | `cloudflare.zoneName` | string | Zone the records live in, e.g. `example.com`. Required when enabled. |
@@ -185,27 +186,59 @@ contacts anything.
 **Ownership — what gpm will and will not delete.** Reconcile is *full-state*: the
 desired set is recomputed from the whole config on every run, so a record deleted
 out of band is recreated and a host removed while gpm was down is still cleaned
-up. Deletion, however, is strictly limited to records gpm demonstrably owns:
+up. Deletion, however, is limited to records **gpm created itself**, recorded
+explicitly in the ownership ledger at `config/dns-ledger.yaml`:
 
-- **Pi-hole** — only a CNAME whose target is *exactly* `pihole.apexTarget`. A
-  hand-written entry pointing anywhere else is read and ignored, even when it
-  names a domain gpm also serves. If a desired name already exists with a
-  different target, gpm logs it and creates nothing for that name rather than
-  adding a second, shadowing entry.
-- **Cloudflare** — only a record carrying the comment `managed-by:gpm`, which gpm
-  writes on every record it creates. If a desired name already exists as somebody
-  else's record, gpm logs it and leaves both alone rather than creating a
-  duplicate or removing theirs.
+```yaml
+# config/dns-ledger.yaml - written by the reconciler, committed like everything else
+schemaVersion: 1
+pihole:
+  - domain: app.example.com
+    target: edge.example.com
+cloudflare:
+  - domain: www.example.com
+    target: edge.example.com
+```
 
-> **Changing `apexTarget` orphans the records created under the old one.**
-> Ownership on Pi-hole is target equality, so as soon as the apex changes, every
-> record gpm previously created stops matching and becomes, by its own rules,
-> somebody else's — it will never be updated or deleted again, and the names now
-> conflict with the desired set (so nothing is recreated either, per the
-> skip-and-warn above). The same applies on Cloudflare for records that predate
-> the `managed-by:gpm` comment. **Delete the stale records yourself before or
-> right after changing `apexTarget`**, then run
-> `POST /api/dns-sync/reconcile` to recreate them against the new target.
+Per desired record, on every run:
+
+| Backend state | What gpm does |
+|---------------|---------------|
+| absent | **create**, and record ownership |
+| present, right target, **not** in the ledger | **adopt** — record ownership, do not recreate (logged at info) |
+| present, right target, already owned | nothing |
+| present, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** — replace it and update the ledger |
+| present, different target, not owned | **skip and warn** — never shadowed, never replaced |
+| in the ledger, no longer desired | **delete**, and drop from the ledger |
+| **not in the ledger** | **never deleted**, whatever it points at |
+
+`apexTarget` is *not* an ownership marker. It says where managed records point,
+nothing more. A hand-written CNAME aimed at the same host is adopted only if a
+proxy host asks for that exact name, and is otherwise left completely alone.
+
+**Cloudflare keeps a second marker.** Every record gpm creates there also carries
+the comment `managed-by:gpm`, and deletion needs **both** the ledger entry and
+the comment (re-checked inside the delete call itself). Adoption likewise only
+claims records that already carry the comment; a record with the right content
+but no comment is somebody else's and is skipped. Pi-hole/dnsmasq CNAMEs have no
+comment field at all, which is exactly why the ledger exists.
+
+**Enabling a backend for the first time is safe, and previewable.** With an empty
+ledger gpm owns nothing, so it can only create and adopt: records matching the
+desired set are adopted, and every other record on the backend is left untouched
+and counted in the `untouched` field of the status. Run
+`GET /api/dns-sync/plan` (or **Preview changes** in the settings UI) first — it
+reads the backends and the ledger and reports exactly what a reconcile would
+create, adopt, retarget and delete, without writing anything.
+
+> **Do not hand-edit `config/dns-ledger.yaml`.** It is what authorises a DNS
+> deletion. An entry with a missing domain or target, or a duplicate domain, is
+> rejected at load and stops the reconcile rather than being acted on. To make gpm
+> forget a record, delete the entry — that disowns it, it is not a deletion of the
+> record itself. It is reverted along with the rest of the config by
+> `POST /api/restore` / a whole-tree revert, which is deliberate: rolling the
+> config back to before a host existed also rolls back gpm's claim on the record
+> that host published.
 
 Wildcard domains (`*.example.com`) are skipped by both backends, as is a domain
 equal to the apex target (which would be a CNAME loop). Disabled proxy hosts
@@ -221,8 +254,11 @@ change, restore or whole-config revert (non-blocking, and bursts coalesce into a
 single run), and can be run on demand with `POST /api/dns-sync/reconcile`. The
 manual endpoint never queues: if a reconcile is already running it answers **409
 Conflict** rather than blocking, so repeated clicks cannot stack requests behind a
-slow backend. `GET /api/dns-sync/status` reports the last run per backend. A
-Pi-hole `403` is
+slow backend. `GET /api/dns-sync/status` reports the last run per backend
+(`desired`, `managed`, `created`, `adopted`, `retargeted`, `deleted`, `skipped`,
+`untouched`), and `GET /api/dns-sync/plan` returns the same decisions as a dry
+run without touching anything (`409` while a reconcile is in flight, for the same
+reason). Both take `dns-sync:read`. A Pi-hole `403` is
 surfaced as a distinct error — it means the session is read-only or the instance
 was built without `webserver.api.app_sudo`, which retrying will not fix.
 

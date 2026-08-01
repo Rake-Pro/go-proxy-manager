@@ -7,6 +7,81 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Fixed
+
+- **DNS sync deleted 19 records it did not create. It can no longer delete
+  anything it did not create.** On 2026-08-01 an operator enabled
+  `settings.dnsSync.pihole` for the first time. Their Pi-hole already held 19
+  hand-written LAN CNAMEs (their LAN-direct bypass list: `plex`, `argo`, `cloud`,
+  `wiki`, ...) pointing at the same edge host they had just configured as
+  `apexTarget`. No proxy host carried `dns.lanDirect` yet, so the desired set was
+  empty. The Pi-hole backend treated *any* CNAME whose target equalled
+  `apexTarget` as gpm-managed, found all 19 unwanted, and deleted every one on the
+  very first reconcile. LAN DNS broke until they were restored by hand.
+
+  The bug was the ownership test. Pi-hole/dnsmasq CNAMEs have no comment field, so
+  target equality was used as a stand-in for "gpm created this" — and on a shared
+  apex that is not ownership at all, it is a coincidence. (The Cloudflare backend
+  was safe in the identical situation only because its marker, the
+  `managed-by:gpm` record comment, is one pre-existing records do not carry.)
+
+  **The guarantee now: gpm deletes only DNS records it recorded creating.**
+  Ownership is written down, not inferred, in a new git-backed ledger
+  (`model.DNSLedger`, the singleton `config/dns-ledger.yaml`). A record absent from
+  that ledger is never in a delete list, whatever its name and whatever it points
+  at. `apexTarget` says where managed records point and nothing more.
+
+  What a reconcile does per desired name: **create** what is absent (recording
+  ownership); **adopt** a record that already holds the right target but predates
+  the ledger — claimed, not recreated, logged at info; **retarget** a record that
+  still holds exactly what gpm wrote after `apexTarget` moved; **skip and warn** on
+  a name held by a record gpm does not own (unchanged — never shadowed, never
+  replaced). It **deletes** only ledger entries the config no longer wants, and
+  only while the record still matches what gpm left there; re-pointed out of band,
+  it is disowned rather than deleted.
+
+  **Migration for existing deployments is a no-op plus adoptions.** An empty ledger
+  means gpm owns nothing, so a first reconcile can only create and adopt: records
+  matching the desired set are adopted, every other record on the backend is left
+  exactly as it is, and the run logs a one-line summary of both counts. Nothing has
+  to be done before upgrading, and no ledger file has to be seeded.
+
+  Cloudflare is held to the same discipline: the ledger is authoritative for
+  deletion and the `managed-by:gpm` comment remains an independent second
+  condition (adoption there requires the comment too), so none of that backend's
+  existing guarantees are weakened.
+
+  Regression coverage names the incident directly: pre-existing records pointing
+  at `apexTarget`, an empty desired set and an empty ledger must produce **zero**
+  deletions, on both backends.
+
+### Added
+
+- **`GET /api/dns-sync/plan` — dry run before you enable.** Reads both backends and
+  the ownership ledger and reports exactly what a reconcile would create, adopt,
+  retarget, delete and skip, plus how many records it would leave alone, without
+  issuing a single write. Scope `dns-sync:read`; `409 Conflict` while a reconcile
+  is in flight, for the same reason the manual reconcile refuses to queue. Wired
+  into the settings UI as **Preview changes**, next to *Reconcile now*. The
+  2026-08-01 incident was unpreviewable — the only way to learn what the first
+  reconcile would do was to run it, and by then the records were gone.
+
+### Changed
+
+- **`GET /api/dns-sync/status` reports adoption.** Each backend now carries
+  `adopted`, `retargeted`, `skipped` and `untouched` alongside `created` and
+  `deleted`. `managed` changes meaning from "records whose target matched the
+  apex" to "records gpm owns" (the ledger entry count after the run). `untouched`
+  is the number to check after a first enable: it should equal everything you
+  maintain by hand on that backend.
+- **Changing `apexTarget` no longer orphans records.** Previously ownership *was*
+  target equality, so moving the apex made every record gpm had created
+  unrecognisable to it — never updated, never deleted, and never recreated either
+  because the name now conflicted. With the ledger, a record gpm created and
+  nobody has touched since is still identifiably gpm's, so it is retargeted on the
+  next reconcile. The manual-cleanup warning in `docs/configuration.md` and
+  `docs/deployment.md` is retired.
+
 ### Added
 
 - **Ingress discovery templates can name an upstream group.**

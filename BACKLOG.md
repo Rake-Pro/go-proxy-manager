@@ -58,8 +58,10 @@ All findings from that review are remediated in the same change (see CHANGELOG
   *(Low)*
 - [x] Manual DNS reconcile returns 409 instead of blocking on the run lock.
   *(Low)*
-- [x] `apexTarget` change orphans previously-managed records — documented in
-  `docs/configuration.md` and `docs/deployment.md`. *(Low)*
+- [x] `apexTarget` change orphans previously-managed records — **fixed, not just
+  documented**, by the ownership ledger: a record gpm created and nobody has
+  touched since is still recognisably gpm's after the apex moves, so it is
+  retargeted on the next reconcile instead of being orphaned. *(Low)*
 - [x] The SPA gates the API Tokens nav entry and page on
   `capabilities.apiTokens.enabled`. *(Low)*
 - [x] The API scope gate denies when no principal is on the request. *(Info)*
@@ -243,14 +245,47 @@ and the design record
     latency-critical. A full-state poll self-heals from a missed event by
     construction.
 
-Deliberately deferred (not planned until a need appears):
+### DNS record ownership (2026-08-01 incident)
+
+Enabling `dnsSync.pihole` for the first time deleted 19 hand-written LAN CNAMEs
+that pointed at the configured `apexTarget` (see CHANGELOG `Fixed`). Remediated in
+one change:
+
+- [x] **Explicit ownership ledger** (`model.DNSLedger`, singleton
+  `config/dns-ledger.yaml`) replaces target-equality inference. A record absent
+  from the ledger is never deleted, whatever it points at.
+- [x] **Adopt, don't purge, on first enable** — a present record matching the
+  desired set is claimed rather than recreated; everything else is left alone and
+  counted as `untouched`.
+- [x] **Dry run**: `GET /api/dns-sync/plan` (`dns-sync:read`), wired into the
+  settings UI as *Preview changes*, reporting the same decisions the reconcile
+  would take without writing anything.
+- [x] **Cloudflare on the same discipline** — the ledger is authoritative for
+  deletion, the `managed-by:gpm` comment stays as an independent second condition.
+- [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
+  created and deleted.
+
+Deliberately deferred:
+
+- **Migrating a pre-ledger deployment's Cloudflare records without the comment.**
+  A record with the right content but no `managed-by:gpm` comment is not adopted
+  (Cloudflare deletion needs both marks), so it is reported as `skipped` forever.
+  Adopting it would mean weakening the comment guarantee; add the comment by hand
+  if you want gpm to own it.
+- **A ledger-repair endpoint** (adopt / disown a named record on request).
+  Hand-editing `config/dns-ledger.yaml` and reloading already does it, and an API
+  route onto the ledger is an "authorise a DNS deletion" primitive worth thinking
+  twice about.
+
+Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 - **Per-host ACME** for discovered names outside the wildcard's coverage. Would
   need its own rate-limit budget and a CT-disclosure note in the UI.
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
 - **Gateway API** (`Gateway`/`HTTPRoute`) as a second discovery source.
 - **A dry-run endpoint** (`GET /ingress-discovery/plan`) reporting the diff
-  without writing. Cheap to add on top of the existing plan/apply split.
+  without writing. Cheap to add on top of the existing plan/apply split — the DNS
+  sync's `GET /dns-sync/plan` is now the worked example to copy.
 - **Live validation** against the real cluster: the subsystem is unit-tested
   hermetically (httptest fake API server) but has not yet run against
   production RBAC and a real Ingress set.
