@@ -50,7 +50,8 @@ type HostResult struct {
 	// see what the Ingress asked for. Empty for a delete (no Ingress is left to
 	// ask). This is the audit trail for "what chain did that host actually get".
 	Profile string `json:"profile,omitempty"`
-	// Reason explains a skip (and only a skip).
+	// Reason explains a skip, and the one update that is not a normal derive: a
+	// host disabled because its profile no longer resolves.
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -387,6 +388,10 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 	// Deletion follows from absence in a healthy list, never from a parse failure -
 	// one bad manifest edit must not take a host offline.
 	protected := map[string]bool{}
+	// disable holds managed hosts this run must FAIL CLOSED on: their Ingress
+	// names a profile that no longer resolves, so the chain they are still serving
+	// is one nobody can point at any more (see the switch below).
+	disable := map[string]model.ProxyHost{}
 
 	for _, ing := range ingresses {
 		if ing.Metadata.Annotations[model.AnnotationManaged] != "true" {
@@ -398,6 +403,35 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		if err != nil {
 			if name != "" {
 				protected[name] = true
+			}
+			// Two derive failures, two opposite safe answers.
+			//
+			// A MALFORMED Ingress (bad hostname, unusable derived name) is a tenant
+			// typo against a chain the operator still sanctions: the host on disk is
+			// the last good rendering of a policy that has not changed, so freezing it
+			// keeps a working service up while the manifest is fixed. Failing closed
+			// there would let any tenant take their own service offline with a
+			// one-character edit, and would do nothing for security.
+			//
+			// An UNRESOLVABLE PROFILE is the opposite: the chain that host is serving
+			// is one the operator has just tightened, renamed or retired, or one the
+			// tenant is pointing away from. Freezing would let a tenant pin a revoked
+			// chain forever simply by flipping the annotation to a name that does not
+			// exist - the security property would hold for creating a host but not for
+			// REVOKING one. So the host is disabled instead: the object is preserved
+			// (nothing is destroyed, the operator can re-add the profile and the very
+			// next reconcile re-enables it), but it stops serving the revoked chain.
+			if cur, ok := managed[name]; ok && isUnknownProfile(err) && !cur.Disabled {
+				off := cur
+				off.Disabled = true
+				disable[name] = off
+				p.updated++
+				p.results = append(p.results, HostResult{Name: name, Ingress: ref, Domains: cur.Domains,
+					Action: ActionUpdated, Profile: prof,
+					Reason: "disabled (fails closed rather than keep serving a chain that no longer resolves): " + err.Error()})
+				log.Warn().Str("host", name).Str("ingress", ref).Err(err).
+					Msg("ingress discovery: profile no longer resolves; disabling the derived host rather than leaving it serving the old chain")
+				continue
 			}
 			p.skipped++
 			p.results = append(p.results, HostResult{Name: name, Ingress: ref, Action: ActionSkipped, Profile: prof, Reason: err.Error()})
@@ -513,6 +547,16 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		}
 	}
 
+	// The fail-closed writes. They are plain upserts of an existing managed object
+	// with disabled: true, so they go through the same ownership guard and the same
+	// single commit as everything else. Their domains were already re-asserted by
+	// the claim loop above (the host is neither rewritten nor doomed), so a
+	// later-sorted derived host cannot pick up a hostname a disabled host is
+	// holding - the disable is a hold, not a handover.
+	for _, name := range sortedKeys(disable) {
+		p.upserts = append(p.upserts, disable[name])
+	}
+
 	for _, name := range sortedKeys(managed) {
 		if !doomed[name] {
 			continue
@@ -575,6 +619,21 @@ func sameHost(a, b model.ProxyHost) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// unknownProfileError marks the one derive failure planReconcile treats
+// differently from every other: the named profile does not resolve. It is a
+// distinct type rather than a string match so the wording of the operator-facing
+// message can change without silently changing the fail-closed behaviour.
+type unknownProfileError struct{ err error }
+
+func (e unknownProfileError) Error() string { return e.err.Error() }
+func (e unknownProfileError) Unwrap() error { return e.err }
+
+// isUnknownProfile reports whether err came from profile resolution.
+func isUnknownProfile(err error) bool {
+	var u unknownProfileError
+	return errors.As(err, &u)
+}
+
 // derive builds the proxy host for one annotated Ingress, returning the derived
 // name, the host, and the profile it resolved to. It returns the derived name
 // even on failure when the name itself was computable, so the caller can protect
@@ -620,8 +679,9 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		prof = ellipsize(prof, 64)
 		log.Warn().Str("ingress", ns+"/"+nm).Str("profile", prof).Strs("defined", conf.ProfileNames()).
 			Msg("ingress discovery: Ingress names an undefined discovery profile; skipping rather than applying the default chain")
-		return name, model.ProxyHost{}, prof, fmt.Errorf("profile %q is not defined in settings.ingressDiscovery.profiles (defined: %s); "+
-			"refusing to fall back to the default template", prof, strings.Join(conf.ProfileNames(), ", "))
+		return name, model.ProxyHost{}, prof, unknownProfileError{fmt.Errorf(
+			"profile %q is not defined in settings.ingressDiscovery.profiles (defined: %s); "+
+				"refusing to fall back to the default template", prof, strings.Join(conf.ProfileNames(), ", "))}
 	}
 
 	var domains []string
@@ -670,6 +730,18 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		}
 	}
 
+	// TLSSettings is a value, but ClientAuth inside it is a POINTER: assigning
+	// tmpl.TLS verbatim would hand every derived host - and the loaded settings
+	// object they were derived from - the same *ClientAuth. Middlewares,
+	// AccessLists and DefaultDNS are already copied for the same reason; this
+	// closes the last aliasing hole, so no writer of one host's mTLS requirement
+	// can reach any other host's.
+	tlsSettings := tmpl.TLS
+	if tlsSettings.ClientAuth != nil {
+		ca := *tlsSettings.ClientAuth
+		tlsSettings.ClientAuth = &ca
+	}
+
 	host := model.ProxyHost{
 		ObjectMeta: model.ObjectMeta{
 			Name:        name,
@@ -679,7 +751,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		Domains:           domains,
 		Upstream:          tmpl.Upstream,
 		UpstreamGroupRef:  tmpl.UpstreamGroupRef,
-		TLS:               tmpl.TLS,
+		TLS:               tlsSettings,
 		WebsocketsUpgrade: tmpl.WebsocketsUpgrade,
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),

@@ -450,7 +450,7 @@ derived:
 | absent | the default `template` block |
 | present but empty or whitespace-only | treated as absent → the default `template` |
 | exact match on a defined profile (surrounding whitespace trimmed) | that profile, **verbatim** |
-| anything else | the Ingress is **SKIPPED**, with the requested name in the status reason and a `warn` log |
+| anything else | the Ingress is **SKIPPED** (and an existing derived host is **DISABLED**), with the requested name in the status reason and a `warn` log |
 
 The two rules that matter:
 
@@ -458,10 +458,28 @@ The two rules that matter:
 is precisely the silent downgrade the feature exists to prevent — an Ingress that
 asked for `public-ratelimited` and received the default's `home-vpn`, or worse,
 one that asked for `sso-internal`, hit a typo, and got a chain with no `sso` in
-it. A skip is loud, visible in `GET /ingress-discovery/status`, and leaves
-whatever is on disk untouched. For the same reason a skipped Ingress **protects**
-its existing derived host from deletion: a typo in an annotation must not take a
-service offline either.
+it. A skip is loud and visible in `GET /ingress-discovery/status`, and it never
+**creates** a host.
+
+**An unknown profile disables an existing derived host — it does not freeze it.**
+This is the one place where "leave what is on disk alone" is the wrong answer.
+Freezing preserves the last chain the host was given, which is fine while the
+operator's policy is unchanged, but revocation is exactly the case where it has
+changed. If an operator tightens `public-open` (adds `sso`, adds `vpn-only`),
+renames it, or retires it, a tenant who flips their annotation to a name that
+does not exist would get no upsert *and* no delete — and their host would go on
+serving the pre-tightening, unauthenticated chain indefinitely. Deleting every
+profile row in the UI would do the same to every derived host at once. So the
+plan instead upserts the existing managed host with `disabled: true`: the object
+is preserved, nothing is destroyed, re-adding the profile re-enables it on the
+next reconcile, but the revoked chain stops being served. Without this the
+security property holds for **creating** a host and not for **revoking** one.
+
+Every other derive failure still freezes and **protects** the existing host from
+deletion — a bad hostname or an unusable derived name is a tenant typo against a
+policy that has not changed, the host on disk is its last good rendering, and
+failing closed there would let any tenant take their own service offline with a
+one-character edit while buying no security at all.
 
 **A profile is applied verbatim, never merged with the default.** A merge would
 mean the default's access list leaks onto a profile that is public on purpose —
@@ -481,6 +499,19 @@ and access-list reference, plus `ValidateName` on the profile's own key. It runs
 at `Settings.Validate`, so an invalid profile fails the settings **write**, where
 an operator sees it, rather than surfacing hours later as a skipped host in a
 reconcile status nobody is watching.
+
+`Settings.Validate` can only check name **shape** — a `Settings` value knows
+nothing about the rest of the config — so `SaveSettings` additionally
+cross-checks every name the block carries (`IngressDiscoverySettings.ValidateRefs`)
+against the loaded `Config`. A dangling `certificateRef` / `upstreamGroupRef` /
+middleware / access list / `clientAuth.caRef` is not a localised problem later:
+the reconciler stamps it onto every derived host, `ApplyBatch` validates the
+whole merged graph as ONE unit, and the rejection therefore drops every *other*
+tenant's create, update and delete as well, on every poll, forever — surfacing
+only as an opaque batch-validation error in the reconcile status. One bad profile
+would wedge the entire subsystem. A **disabled** block is not cross-checked, for
+the same reason `Validate` does not shape-check it: a half-filled draft must not
+block an unrelated settings write.
 
 #### Backwards compatibility
 

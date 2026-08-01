@@ -1290,11 +1290,10 @@ func TestReconcileAppliesTheNamedProfileVerbatim(t *testing.T) {
 	}
 }
 
-// Naming a profile that does not exist is a SKIP. It must NOT get the default
-// chain (that is the silent-downgrade bug), must not be adopted with a partial
-// chain, and must not disturb the host that is already there for that Ingress -
-// a typo in an annotation cannot take a service offline.
-func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
+// Naming a profile that does not exist NEVER creates a host: it must not get the
+// default chain (that is the silent-downgrade bug) and must not be adopted with a
+// partial chain.
+func TestReconcileSkipsAnUndefinedProfileWithNoExistingHost(t *testing.T) {
 	f := newFakeAPI(t, "tok")
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
 		writeList(w, []string{
@@ -1305,11 +1304,7 @@ func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
 	}
 	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
 	settings.IngressDiscovery.Template.Middlewares = []string{"should-not-appear"}
-
-	// The host this Ingress already produced, under a chain it was given earlier.
-	existing := managedHostFixture("ing-paste.web", "paste.example.com")
-	existing.Middlewares = []string{"rate-limit"}
-	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	cfg := &model.Config{}
 	rec := &recorder{}
 	d := newDiscoverer(f, cfg, settings, rec)
 
@@ -1317,14 +1312,11 @@ func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if rec.calls != 0 {
-		t.Fatalf("apply was called %d times; an unresolvable profile must write NOTHING (no create, no update, no delete)", rec.calls)
+		t.Fatalf("apply was called %d times; an unresolvable profile must never CREATE a host", rec.calls)
 	}
 	st := d.Status()
 	if st.Skipped != 1 || st.Created != 0 || st.Updated != 0 || st.Deleted != 0 {
 		t.Fatalf("status = %+v, want exactly one skip", st)
-	}
-	if len(st.Hosts) != 1 {
-		t.Fatalf("hosts = %+v, want one result", st.Hosts)
 	}
 	r := st.Hosts[0]
 	if r.Action != ActionSkipped {
@@ -1336,11 +1328,134 @@ func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
 	if r.Profile != "no-such-profile" {
 		t.Fatalf("status must report the REQUESTED profile so the operator can see the typo, got %q", r.Profile)
 	}
-	if st.Managed != 1 {
-		t.Fatalf("managed = %d, want the existing host still counted (the skip protects it from deletion)", st.Managed)
+}
+
+// REVOCATION. An Ingress whose profile no longer resolves must not keep serving
+// the chain it was last given: freezing it would let a tenant pin a chain the
+// operator has just tightened or retired simply by pointing the annotation at a
+// name that does not exist. The host is DISABLED instead - preserved, reversible,
+// but off the data plane - and it is still never deleted.
+func TestUnresolvableProfileDisablesTheExistingHost(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+		// retire drops every profile from settings, which is what "the operator
+		// retired the profile" and "the operator cleared the profile rows in the
+		// UI" both look like from here.
+		retire bool
+	}{
+		{name: "tenant points at an undefined name", annotation: "public-open-x"},
+		{name: "operator retired the profile", annotation: "sso-internal", retire: true},
 	}
-	// And the same at plan level, where deletion is actually decided: the derived
-	// name must be protected rather than fall out of the desired set as garbage.
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t, "tok")
+			f.handler = func(w http.ResponseWriter, r *http.Request) {
+				writeList(w, []string{
+					ingressJSON("web", "paste", map[string]string{
+						model.AnnotationManaged: "true", model.AnnotationProfile: tc.annotation,
+					}, "paste.example.com"),
+				}, "")
+			}
+			settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+			settings.IngressDiscovery.Template.Middlewares = []string{"should-not-appear"}
+			if tc.retire {
+				settings.IngressDiscovery.Profiles = nil
+			}
+
+			// The live host, still serving the pre-revocation (unauthenticated) chain.
+			existing := managedHostFixture("ing-paste.web", "paste.example.com")
+			existing.Middlewares = []string{"rate-limit"}
+			cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+			rec := &recorder{}
+			d := newDiscoverer(f, cfg, settings, rec)
+
+			if err := d.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if len(rec.upserts) != 1 || len(rec.deletes) != 0 {
+				t.Fatalf("upserts=%d deletes=%d, want exactly one disabling update and no delete", len(rec.upserts), len(rec.deletes))
+			}
+			got := rec.upserts[0]
+			if got.Name != "ing-paste.web" || !got.Disabled {
+				t.Fatalf("upsert = %+v, want ing-paste.web with disabled: true", got)
+			}
+			// Nothing else about the object may change: this is a hold, not a rewrite.
+			if strings.Join(got.Middlewares, ",") != "rate-limit" || len(got.Domains) != 1 || got.Domains[0] != "paste.example.com" {
+				t.Fatalf("upsert = %+v, want the stored object untouched apart from disabled", got)
+			}
+			st := d.Status()
+			if st.Updated != 1 || st.Created != 0 || st.Deleted != 0 || st.Skipped != 0 {
+				t.Fatalf("status = %+v, want exactly one update", st)
+			}
+			if len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUpdated ||
+				!strings.Contains(st.Hosts[0].Reason, "disabled") {
+				t.Fatalf("hosts = %+v, want one update whose reason says the host was disabled", st.Hosts)
+			}
+			if st.Hosts[0].Profile != tc.annotation {
+				t.Fatalf("profile = %q, want the REQUESTED name %q", st.Hosts[0].Profile, tc.annotation)
+			}
+
+			// Steady state: once disabled, the next reconcile writes nothing at all.
+			cfg.ProxyHosts[0] = got
+			rec2 := &recorder{}
+			d2 := newDiscoverer(f, cfg, settings, rec2)
+			if err := d2.Reconcile(context.Background()); err != nil {
+				t.Fatalf("second reconcile: %v", err)
+			}
+			if rec2.calls != 0 {
+				t.Fatalf("apply called %d times on the second run; an already-disabled host must not churn", rec2.calls)
+			}
+		})
+	}
+}
+
+// The fail-closed rule is scoped to PROFILE RESOLUTION. Every other derive
+// failure - a malformed hostname, an unusable derived name - still freezes: the
+// operator's policy has not changed there, and disabling would let any tenant
+// take their own service offline with a one-character manifest edit.
+func TestMalformedIngressStillFreezesRatherThanDisabling(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "*.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	existing := managedHostFixture("ing-paste.web", "paste.example.com")
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("apply was called %d times; a malformed Ingress must leave its host exactly as it is", rec.calls)
+	}
+	st := d.Status()
+	if st.Skipped != 1 || st.Updated != 0 || st.Deleted != 0 {
+		t.Fatalf("status = %+v, want one skip and no write", st)
+	}
+	if st.Managed != 1 {
+		t.Fatalf("managed = %d, want the existing host still counted (the skip protects it)", st.Managed)
+	}
+}
+
+// An unresolvable profile must never take an OPERATOR-authored host down: the
+// disable is an ownership-scoped write like every other, so a hand-written host
+// that happens to carry the derived name is left completely alone.
+func TestUnresolvableProfileNeverDisablesAnUnownedHost(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+		},
+	}
 	var ing Ingress
 	ing.Metadata.Namespace, ing.Metadata.Name = "web", "paste"
 	ing.Metadata.Annotations = map[string]string{
@@ -1349,9 +1464,16 @@ func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
 	ing.Spec.Rules = []struct {
 		Host string `json:"host"`
 	}{{Host: "paste.example.com"}}
-	p := planReconcile(*cfg, settings.IngressDiscovery, []Ingress{ing})
-	if len(p.deletes) != 0 || len(p.upserts) != 0 {
-		t.Fatalf("plan = +%d -%d, want neither: the host is protected, not rewritten", len(p.upserts), len(p.deletes))
+
+	// Same name, but hand-written: no managed-by label.
+	operator := model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: "ing-paste.web"},
+		Domains:    []string{"paste.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.9", Port: 80},
+	}
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Ingress{ing})
+	if len(p.upserts) != 0 || len(p.deletes) != 0 {
+		t.Fatalf("plan = +%d -%d, want neither: the host is not one discovery owns", len(p.upserts), len(p.deletes))
 	}
 }
 
@@ -1594,5 +1716,86 @@ func TestUndefinedProfileReasonIsBounded(t *testing.T) {
 	if len(p.results[0].Profile) > 128 || len(p.results[0].Reason) > 512 {
 		t.Fatalf("status echoed %d bytes of profile and %d of reason from one annotation",
 			len(p.results[0].Profile), len(p.results[0].Reason))
+	}
+}
+
+// TLSSettings is a value but its ClientAuth is a POINTER. Every derived host must
+// get its own copy, or a later writer of one host's mTLS requirement reaches into
+// the settings object and every other host derived from it.
+func TestDerivedHostsDoNotShareTheClientAuthPointer(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS: model.TLSSettings{
+				CertificateRef: "wildcard",
+				ForceSSL:       true,
+				ClientAuth:     &model.ClientAuth{CARef: "corp-ca", Mode: "require"},
+			},
+		},
+	}
+	mk := func(ns, name, host string) Ingress {
+		var ing Ingress
+		ing.Metadata.Namespace, ing.Metadata.Name = ns, name
+		ing.Metadata.Annotations = map[string]string{model.AnnotationManaged: "true"}
+		ing.Spec.Rules = []struct {
+			Host string `json:"host"`
+		}{{Host: host}}
+		return ing
+	}
+	p := planReconcile(model.Config{}, conf, []Ingress{
+		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
+	})
+	if len(p.upserts) != 2 {
+		t.Fatalf("upserts = %d, want 2", len(p.upserts))
+	}
+	a, b := p.upserts[0], p.upserts[1]
+	if a.TLS.ClientAuth == nil || b.TLS.ClientAuth == nil {
+		t.Fatal("both derived hosts must carry the template's mTLS requirement")
+	}
+	if a.TLS.ClientAuth == b.TLS.ClientAuth {
+		t.Fatal("two derived hosts share one *ClientAuth")
+	}
+	if a.TLS.ClientAuth == conf.Template.TLS.ClientAuth {
+		t.Fatal("a derived host aliases the settings object's *ClientAuth")
+	}
+	// Mutating one must not be visible anywhere else.
+	a.TLS.ClientAuth.Mode = "optional"
+	if b.TLS.ClientAuth.Mode != "require" || conf.Template.TLS.ClientAuth.Mode != "require" {
+		t.Fatalf("mutating one host's clientAuth leaked: b=%+v settings=%+v", b.TLS.ClientAuth, conf.Template.TLS.ClientAuth)
+	}
+}
+
+// The disable is reversible: it preserves the object, so re-adding the profile
+// puts the host straight back on the data plane at the next reconcile. That is
+// what makes failing closed acceptable rather than destructive.
+func TestReAddingTheProfileReEnablesTheHost(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	disabled := managedHostFixture("ing-paste.web", "paste.example.com")
+	disabled.Disabled = true
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{disabled}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want the host rewritten from the restored profile", len(rec.upserts))
+	}
+	if rec.upserts[0].Disabled {
+		t.Fatal("the host must be re-enabled once its profile resolves again")
+	}
+	if strings.Join(rec.upserts[0].Middlewares, ",") != "sso,rate-limit" {
+		t.Fatalf("middlewares = %v, want the restored profile's chain", rec.upserts[0].Middlewares)
 	}
 }
