@@ -29,7 +29,10 @@
 //   - desired, present, right target, not owned -> ADOPT (record ownership, do
 //     not recreate)
 //   - desired, present, wrong target, not owned -> skip and warn, never overwrite
-//   - owned, no longer desired   -> delete, and drop from the ledger
+//   - CREATED by gpm, no longer desired -> delete, and drop from the ledger
+//   - ADOPTED by gpm, no longer desired -> RELEASE: drop from the ledger and warn,
+//     never delete. Adoption is a claim on a record somebody else made, so it must
+//     not become a licence to destroy it: gpm deletes only what it created.
 //   - not owned                  -> untouched, always
 //
 // Cloudflare keeps its "managed-by:gpm" record comment as a second, independent
@@ -46,7 +49,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -143,7 +145,7 @@ type decisions struct {
 	skip      []string
 	untouched int
 	// owned is the ledger state the run would end with if every step succeeded.
-	owned map[string]string
+	owned map[string]model.DNSClaim
 }
 
 func (d decisions) plan() BackendPlan {
@@ -164,9 +166,15 @@ func (d decisions) plan() BackendPlan {
 //
 // A nil Ledger puts the syncer in a deliberately inert mode: it owns nothing, so
 // it creates and adopts but NEVER deletes. That is the safe direction to fail.
+//
+// Load also returns an opaque revision for the state it read, and Save is handed
+// that revision back. A reconcile is a read-modify-write of a file another writer
+// (a config revert) can rewrite in between, and the revision is what lets the
+// store refuse the write rather than silently re-establishing claims the revert
+// withdrew. An implementation that cannot version its state may return "".
 type Ledger interface {
-	Load() (model.DNSLedger, error)
-	Save(ctx context.Context, l model.DNSLedger) error
+	Load(ctx context.Context) (model.DNSLedger, string, error)
+	Save(ctx context.Context, l model.DNSLedger, rev string) error
 }
 
 // Syncer reconciles DNS records for the opted-in proxy hosts.
@@ -352,7 +360,7 @@ func (s *Syncer) Plan(ctx context.Context) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("dnssync: load config: %w", err)
 	}
-	ledger, err := s.loadLedger()
+	ledger, _, err := s.loadLedger(ctx)
 	if err != nil {
 		return p, err
 	}
@@ -371,15 +379,15 @@ func (s *Syncer) Plan(ctx context.Context) (Plan, error) {
 // store is wired. A read failure is fatal to the run: continuing with an empty
 // ledger would be safe for deletion (nothing is owned, so nothing is deleted) but
 // would re-adopt and re-create records on every run, so it is reported instead.
-func (s *Syncer) loadLedger() (model.DNSLedger, error) {
+func (s *Syncer) loadLedger(ctx context.Context) (model.DNSLedger, string, error) {
 	if s.ledger == nil {
-		return model.DNSLedger{}, nil
+		return model.DNSLedger{}, "", nil
 	}
-	l, err := s.ledger.Load()
+	l, rev, err := s.ledger.Load(ctx)
 	if err != nil {
-		return model.DNSLedger{}, fmt.Errorf("dnssync: load ownership ledger: %w", err)
+		return model.DNSLedger{}, "", fmt.Errorf("dnssync: load ownership ledger: %w", err)
 	}
-	return l, nil
+	return l, rev, nil
 }
 
 // reconcileLocked does the work; callers hold s.single.
@@ -392,7 +400,7 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("dnssync: load config: %w", err)
 	}
-	ledger, err := s.loadLedger()
+	ledger, rev, err := s.loadLedger(ctx)
 	if err != nil {
 		// Refuse to touch any backend without knowing what gpm owns.
 		s.mu.Lock()
@@ -408,21 +416,21 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	// A disabled backend's entries are left exactly as they are: turning a backend
 	// off must not silently disown the records it published.
 	if p := settings.DNSSync.Pihole; p.Enabled {
-		var owned map[string]string
-		st.Pihole, owned = s.syncPihole(ctx, cfg, p, model.DNSLedgerMap(ledger.Pihole))
+		var owned map[string]model.DNSClaim
+		st.Pihole, owned = s.syncPihole(ctx, cfg, p, model.DNSLedgerMap(ledger.Pihole), rev)
 		st.Pihole.Enabled = true
 		st.Pihole.LastRun = now
 		next.Pihole = model.DNSLedgerEntries(owned)
 	}
 	if c := settings.DNSSync.Cloudflare; c.Enabled {
-		var owned map[string]string
-		st.Cloudflare, owned = s.syncCloudflare(ctx, cfg, c, model.DNSLedgerMap(ledger.Cloudflare))
+		var owned map[string]model.DNSClaim
+		st.Cloudflare, owned = s.syncCloudflare(ctx, cfg, c, model.DNSLedgerMap(ledger.Cloudflare), rev)
 		st.Cloudflare.Enabled = true
 		st.Cloudflare.LastRun = now
 		next.Cloudflare = model.DNSLedgerEntries(owned)
 	}
 	if s.ledger != nil && !ledgerEqual(ledger, next) {
-		if err := s.ledger.Save(ctx, next); err != nil {
+		if err := s.saveLedger(ctx, ledger, next, rev); err != nil {
 			// The records are already changed at the backend; failing to persist that
 			// is serious (a later run would not know it owns them), so it is surfaced
 			// in status rather than swallowed.
@@ -439,7 +447,62 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 // ledgerEqual reports whether two ledgers hold the same entries, so a reconcile
 // that changed nothing does not write (and commit) an identical file.
 func ledgerEqual(a, b model.DNSLedger) bool {
-	return slices.Equal(a.Pihole, b.Pihole) && slices.Equal(a.Cloudflare, b.Cloudflare)
+	return model.DNSLedgerEntriesEqual(a.Pihole, b.Pihole) &&
+		model.DNSLedgerEntriesEqual(a.Cloudflare, b.Cloudflare)
+}
+
+// saveLedger persists the ledger this run ended with. A reconcile is a
+// read-modify-write over a file a concurrent config REVERT can also rewrite, so
+// the store is handed the revision the ledger was read at and refuses the write
+// if the config repo has moved since. On that refusal the current ledger is
+// re-read and the write is retried ONCE, with the concurrent writer's
+// withdrawals honoured: a claim the revert removed stays removed, and a claim it
+// restored is not resurrected. Both of those are the direction that cannot
+// delete a record - a claim gpm drops only means it stops managing a record, a
+// claim it re-establishes is a licence to delete one.
+func (s *Syncer) saveLedger(ctx context.Context, base, next model.DNSLedger, rev string) error {
+	err := s.ledger.Save(ctx, next, rev)
+	if err == nil {
+		return nil
+	}
+	current, curRev, loadErr := s.ledger.Load(ctx)
+	if loadErr != nil || curRev == rev {
+		// Not a staleness problem (or the ledger cannot be re-read): report the
+		// original failure rather than retrying into the same wall.
+		return err
+	}
+	merged := model.DNSLedger{
+		SchemaVersion: next.SchemaVersion,
+		Pihole:        mergeLedgerEntries(base.Pihole, current.Pihole, next.Pihole),
+		Cloudflare:    mergeLedgerEntries(base.Cloudflare, current.Cloudflare, next.Cloudflare),
+	}
+	log.Warn().Err(err).Str("readAt", rev).Str("now", curRev).
+		Msg("dnssync: the ownership ledger changed under this reconcile (a config revert?); re-writing it without the claims that were withdrawn")
+	return s.ledger.Save(ctx, merged, curRev)
+}
+
+// mergeLedgerEntries returns next minus every claim that was withdrawn between
+// base (what this run read) and current (what is on disk now). Claims that only
+// appear in current are deliberately NOT carried over: an entry gpm did not put
+// there this run is a restored claim, and re-adopting one is how a revert
+// resurrects the authority to delete a record an operator has since recreated.
+func mergeLedgerEntries(base, current, next []model.DNSLedgerEntry) []model.DNSLedgerEntry {
+	was := model.DNSLedgerMap(base)
+	now := model.DNSLedgerMap(current)
+	out := make([]model.DNSLedgerEntry, 0, len(next))
+	for _, e := range next {
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(e.Domain), "."))
+		if _, known := was[key]; known {
+			if _, kept := now[key]; !kept {
+				continue // withdrawn while this run was in flight
+			}
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // decide compares the desired set against what a backend actually holds and
@@ -449,16 +512,18 @@ func ledgerEqual(a, b model.DNSLedger) bool {
 // previews.
 //
 // present maps every record name the backend holds to its CNAME target. owned is
-// the ledger for this backend (name -> the target gpm published it with). mark
-// reports whether the backend's own secondary ownership marker is on the record -
-// Cloudflare's "managed-by:gpm" comment, and unconditionally true on Pi-hole,
-// whose dnsmasq CNAMEs have nowhere to put one. That asymmetry is the whole
-// reason the ledger exists.
+// the ledger for this backend (name -> the claim gpm recorded: the target it
+// published, and whether the claim came from adoption). mark reports whether the
+// backend's own secondary ownership marker is on the record - Cloudflare's
+// "managed-by:gpm" comment, and unconditionally true on Pi-hole, whose dnsmasq
+// CNAMEs have nowhere to put one. That asymmetry is the whole reason the ledger
+// exists.
 //
-// The one invariant every branch below preserves: a name absent from owned is
-// NEVER put in the delete list, whatever it points at.
-func decide(backend string, desired []string, present map[string]string, apex string, owned map[string]string, mark func(name string) bool) decisions {
-	d := decisions{owned: make(map[string]string, len(owned))}
+// Two invariants every branch below preserves: a name absent from owned is NEVER
+// put in the delete list, whatever it points at; and a name gpm ADOPTED rather
+// than created is never put there either - it is released instead.
+func decide(backend string, desired []string, present map[string]string, apex string, owned map[string]model.DNSClaim, mark func(name string) bool) decisions {
+	d := decisions{owned: make(map[string]model.DNSClaim, len(owned))}
 	for k, v := range owned {
 		d.owned[k] = v
 	}
@@ -469,29 +534,33 @@ func decide(backend string, desired []string, present map[string]string, apex st
 
 	for _, name := range desired {
 		cur, exists := present[name]
-		ledgerTarget, isOwned := owned[name]
+		claim, isOwned := owned[name]
 		switch {
 		case !exists:
 			// Either brand new, or one gpm created that has been removed out of band.
-			// A full-state reconcile (re)creates it either way.
+			// A full-state reconcile (re)creates it either way - and whatever the
+			// claim used to say, the record that will be there is one gpm made.
 			d.create = append(d.create, name)
-			d.owned[name] = apex
+			d.owned[name] = model.DNSClaim{Target: apex}
 		case cur == apex && isOwned:
 			// Already exactly right, and already ours. Nothing to do beyond keeping
-			// the recorded target honest.
-			d.owned[name] = apex
+			// the recorded target honest; the provenance is carried over untouched.
+			d.owned[name] = model.DNSClaim{Target: apex, Adopted: claim.Adopted}
 		case cur == apex && mark(name):
 			// ADOPTION. The record the config asks for is already there, carrying
 			// whatever mark this backend can hold, but predates the ledger. Claim it
 			// instead of recreating it - and, above all, instead of deleting it. This
-			// is what makes enabling a backend on an existing deployment a no-op.
+			// is what makes enabling a backend on an existing deployment a no-op. The
+			// claim is recorded AS an adoption, so gpm can manage the record without
+			// ever acquiring the right to destroy it.
 			d.adopt = append(d.adopt, name)
-			d.owned[name] = apex
-		case isOwned && cur == ledgerTarget && mark(name):
+			d.owned[name] = model.DNSClaim{Target: apex, Adopted: true}
+		case isOwned && cur == claim.Target && mark(name):
 			// Ours, and still holding exactly what gpm wrote, but the configured apex
-			// has moved since. Replacing it is safe precisely because it is unchanged.
+			// has moved since. Replacing it is safe precisely because it is unchanged,
+			// and what stands there afterwards is a record gpm created.
 			d.retarget = append(d.retarget, name)
-			d.owned[name] = apex
+			d.owned[name] = model.DNSClaim{Target: apex}
 		default:
 			// Somebody else's record on a name gpm also wants. Adding a second entry
 			// would shadow a deliberate one and removing theirs is exactly what the
@@ -520,12 +589,22 @@ func decide(backend string, desired []string, present map[string]string, apex st
 		case !exists:
 			// Already gone (deleted out of band): stop claiming it.
 			delete(d.owned, name)
-		case cur != owned[name] || !mark(name):
+		case cur != owned[name].Target || !mark(name):
 			// It no longer holds what gpm wrote, so an operator has taken it over.
 			// Disown it rather than delete it - being wrong here is how records get
 			// lost.
 			log.Warn().Str("backend", backend).Str("domain", name).Str("target", cur).
 				Msg("dnssync: a record gpm owned has changed out of band; disowning it instead of deleting it")
+			delete(d.owned, name)
+		case owned[name].Adopted:
+			// gpm never created this record, it only claimed one that was already
+			// there and already correct. Losing interest in a name is not authority to
+			// destroy somebody else's record, so the claim is RELEASED and the record
+			// left standing. Without this, adoption would be a one-way trap: turn on
+			// dns.lanDirect for a name an operator had hand-written, turn it off
+			// again, and the next reconcile would delete their record.
+			log.Warn().Str("backend", backend).Str("domain", name).Str("target", cur).
+				Msg("dnssync: releasing a record gpm adopted but no longer manages; it was not created by gpm, so it is left in place rather than deleted")
 			delete(d.owned, name)
 		default:
 			d.del = append(d.del, name)

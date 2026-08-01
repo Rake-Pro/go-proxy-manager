@@ -63,7 +63,8 @@ builds it with a narrower, more focused design:
   resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
   records it *recorded creating*, in a git-backed ownership ledger. Enabling it on
   a resolver full of hand-written records adopts what matches and touches nothing
-  else, and `GET /api/dns-sync/plan` previews the whole run before you commit to it
+  else — and a record it adopted is later *released*, never deleted —
+  and `GET /api/dns-sync/plan` previews the whole run before you commit to it
 - **Kubernetes Ingress discovery** — opt an `Ingress` in with one annotation and
   gpm derives a proxy host from your template (read-only against the cluster, no
   `client-go`), which then feeds the same DNS sync; only its own labelled objects

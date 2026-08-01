@@ -25,9 +25,13 @@ type fakePihole struct {
 	// forbidConfig makes every config write answer 403, the shape Pi-hole uses
 	// for a read-only session or an instance without app_sudo.
 	forbidConfig bool
-	logins       int
-	logouts      int
-	sawSID       []string
+	// failAddRecord makes a PUT fail for exactly this record, so a test can fail
+	// the create half of a retarget while leaving the rollback that restores the
+	// original able to succeed.
+	failAddRecord string
+	logins        int
+	logouts       int
+	sawSID        []string
 	// writes counts every mutating call (PUT/DELETE on cnameRecords), so a test
 	// can assert that a dry run touched nothing at all.
 	writes int
@@ -62,7 +66,9 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
-		recs := append([]string(nil), f.records...)
+		// Always a list, never null: a real Pi-hole with no CNAMEs answers with an
+		// empty array, and the distinction matters (see TestPiholeCnameRecordsShapes).
+		recs := append([]string{}, f.records...)
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"config": map[string]any{"dns": map[string]any{"cnameRecords": recs}},
@@ -78,6 +84,11 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
+		if f.failAddRecord != "" && rec == f.failAddRecord {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		f.writes++
 		f.records = append(f.records, rec)
 		f.mu.Unlock()
@@ -334,21 +345,25 @@ func TestPiholeAdoptsMatchingRecordsOnFirstEnable(t *testing.T) {
 		t.Fatalf("records = %v\nwant %v", got, want)
 	}
 	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
+	if !led.pihole()["app.example.com"].Adopted {
+		t.Fatal("an adopted record must be recorded AS adopted, or gpm acquires the right to delete it")
+	}
 
-	// And now that it is owned, dropping the host removes exactly that record and
-	// still leaves the hand-written ones alone.
+	// And the adoption is not a trap: dropping the host RELEASES the claim and
+	// leaves the operator's record exactly where it was. gpm never created it, so
+	// gpm never deletes it.
 	s2 := piholeSyncerWith(t, srv, nil, led)
 	if err := s2.Reconcile(context.Background()); err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
-	if st := s2.Status().Pihole; st.Deleted != 1 {
-		t.Fatalf("status = %+v, want the adopted record removed once unwanted", st)
+	if st := s2.Status().Pihole; st.Deleted != 0 {
+		t.Fatalf("REGRESSION: status = %+v, an adopted record must be released, not deleted", st)
 	}
-	if got := fake.snapshot(); len(got) != 3 {
-		t.Fatalf("records = %v, want only the adopted one removed", got)
+	if got := fake.snapshot(); len(got) != 4 {
+		t.Fatalf("records = %v, want all four still present", got)
 	}
 	if len(led.pihole()) != 0 {
-		t.Fatalf("ledger = %v, want empty", led.pihole())
+		t.Fatalf("ledger = %v, want the released claim dropped", led.pihole())
 	}
 }
 
@@ -523,6 +538,236 @@ func TestPiholeBadPasswordReported(t *testing.T) {
 	st := s.Status().Pihole
 	if st.OK || !strings.Contains(st.Error, "appPassword") {
 		t.Fatalf("status = %+v", st)
+	}
+}
+
+// THE ADOPTION TRAP. An operator hand-writes a LAN CNAME. Later a proxy host is
+// given dns.lanDirect for that same name, so gpm adopts the record. Later still
+// the flag is removed. Before this was fixed the next reconcile DELETED their
+// record: adoption had quietly converted somebody else's record into one gpm
+// believed it had made. The incident, deferred by one config edit.
+func TestPiholeAdoptionIsNotAOneWayTrapToDeletion(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{"x.example.com,edge.example.com"}}
+	srv := startPihole(t, fake)
+
+	led := &memLedger{}
+	// Step 1: the operator turns on dns.lanDirect for a name they wrote by hand.
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("x", "x.example.com")}, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("adopting reconcile: %v", err)
+	}
+	if st := s.Status().Pihole; st.Adopted != 1 || st.Created != 0 {
+		t.Fatalf("status = %+v, want the hand-written record adopted", st)
+	}
+
+	// Step 2: they change their mind and take the flag off again.
+	s2 := piholeSyncerWith(t, srv, nil, led)
+	if err := s2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("releasing reconcile: %v", err)
+	}
+	st := s2.Status().Pihole
+	if st.Deleted != 0 {
+		t.Fatalf("REGRESSION: adoption became a licence to delete: %+v", st)
+	}
+	if got := fake.snapshot(); len(got) != 1 || got[0] != "x.example.com,edge.example.com" {
+		t.Fatalf("REGRESSION: the operator's record is %v, want it untouched", got)
+	}
+	if len(led.pihole()) != 0 {
+		t.Fatalf("ledger = %v, want the claim released", led.pihole())
+	}
+}
+
+// A ledger written before provenance was recorded says nothing about who made
+// each record. The only reading of that silence which cannot destroy an
+// operator's record is "adopted", so an upgrade must never delete on the strength
+// of a legacy entry.
+func TestPiholeLegacyLedgerEntryIsNeverDeleted(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{"old.example.com,edge.example.com"}}
+	srv := startPihole(t, fake)
+
+	// No `adopted` field at all - exactly what the previous version wrote.
+	led := &memLedger{l: model.DNSLedger{Pihole: []model.DNSLedgerEntry{
+		{Domain: "old.example.com", Target: "edge.example.com"},
+	}}}
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if st := s.Status().Pihole; st.Deleted != 0 {
+		t.Fatalf("REGRESSION: an upgrade deleted on the strength of a ledger entry with no provenance: %+v", st)
+	}
+	if got := fake.snapshot(); len(got) != 1 {
+		t.Fatalf("records = %v, want the record left in place", got)
+	}
+}
+
+// A record gpm CREATED is still deleted when it is no longer wanted - the point
+// is that gpm deletes what it made, not that it stops deleting.
+func TestPiholeCreatedRecordIsStillDeleted(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{"gone.example.com,edge.example.com"}}
+	srv := startPihole(t, fake)
+
+	led := ownsPihole("gone.example.com", "edge.example.com") // recorded as created
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if st := s.Status().Pihole; st.Deleted != 1 {
+		t.Fatalf("status = %+v, want the record gpm created removed", st)
+	}
+	if got := fake.snapshot(); len(got) != 0 {
+		t.Fatalf("records = %v, want gpm's own record gone", got)
+	}
+}
+
+// A delete is the one operation that destroys something, and the authority for it
+// is a recorded claim that a config revert can make older than the tree it is
+// applied to. It has to be loud, and it has to name the revision it read.
+func TestPiholeDeleteLogsTheClaimItActedOn(t *testing.T) {
+	fake := &fakePihole{password: "secret", records: []string{"gone.example.com,edge.example.com"}}
+	srv := startPihole(t, fake)
+
+	led := ownsPihole("gone.example.com", "edge.example.com")
+	led.rev = "abc123"
+	logs := captureLogs(t)
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, "on the authority of the ownership ledger") {
+		t.Fatalf("a deletion must warn about the claim it acted on, logs:\n%s", out)
+	}
+	if !strings.Contains(out, `"ledgerRev":"abc123"`) {
+		t.Fatalf("a deletion must name the ledger revision that authorised it, logs:\n%s", out)
+	}
+}
+
+// The session must be released even when the run was cut short. logout runs on a
+// deferred path, so reusing the caller's (cancelled) context is exactly how a
+// disconnecting HTTP client leaks a Pi-hole session slot - and Pi-hole has very
+// few of them.
+func TestPiholeLogoutSurvivesCancelledContext(t *testing.T) {
+	fake := &fakePihole{password: "secret"}
+	srv := startPihole(t, fake)
+
+	c := newPiholeClient(srv.URL, "secret", srv.Client())
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := c.login(ctx); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	cancel() // the caller went away mid-run
+	c.logout(ctx)
+
+	fake.mu.Lock()
+	logins, logouts := fake.logins, fake.logouts
+	fake.mu.Unlock()
+	if logins != 1 || logouts != 1 {
+		t.Fatalf("REGRESSION: logins=%d logouts=%d - a cancelled caller leaked the session", logins, logouts)
+	}
+}
+
+// A retarget is a delete followed by a create. If the create fails the record is
+// simply gone, and "it heals on the next reconcile" is not an answer for a name
+// that stops resolving in the meantime: the original must be put back, the run
+// must fail loudly, and the status must not claim nothing happened.
+func TestPiholeRetargetRestoresTheOriginalWhenTheCreateFails(t *testing.T) {
+	fake := &fakePihole{
+		password:      "secret",
+		records:       []string{"app.example.com,old-edge.example.com"},
+		failAddRecord: "app.example.com,edge.example.com", // only the NEW record fails to land
+	}
+	srv := startPihole(t, fake)
+
+	led := ownsPihole("app.example.com", "old-edge.example.com")
+	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Pihole
+	if st.OK || st.Error == "" {
+		t.Fatalf("a destroyed-and-not-replaced record must fail the run: %+v", st)
+	}
+	if !strings.Contains(st.Error, "restored") {
+		t.Fatalf("error = %q, want it to say the original was restored", st.Error)
+	}
+	if st.Retargeted != 1 {
+		t.Fatalf("REGRESSION: status = %+v, a landed delete must be counted even when the create fails", st)
+	}
+	if got := fake.snapshot(); len(got) != 1 || got[0] != "app.example.com,old-edge.example.com" {
+		t.Fatalf("REGRESSION: records = %v, want the original record restored", got)
+	}
+	// The claim survives with its original target, matching what is actually there.
+	wantLedger(t, led.pihole(), "app.example.com", "old-edge.example.com")
+}
+
+// A Pi-hole that answers with a shape this code cannot read must be an ERROR. A
+// nil slice reads as "the resolver holds nothing", which a full-state reconciler
+// answers by emptying the ledger and reporting a clean run - the same failure
+// class as a frozen client returning no objects.
+func TestPiholeCnameRecordsShapes(t *testing.T) {
+	tests := []struct {
+		name, body string
+		wantErr    bool
+		wantLen    int
+	}{
+		{"well formed", `{"config":{"dns":{"cnameRecords":["a.example.com,edge.example.com"]}}}`, false, 1},
+		{"legitimately empty", `{"config":{"dns":{"cnameRecords":[]}}}`, false, 0},
+		{"field renamed", `{"config":{"dns":{"cnames":["a.example.com,edge.example.com"]}}}`, true, 0},
+		{"field null", `{"config":{"dns":{"cnameRecords":null}}}`, true, 0},
+		{"dns section gone", `{"config":{}}`, true, 0},
+		{"envelope gone", `{}`, true, 0},
+		{"error body", `{"error":{"key":"bad_request"}}`, true, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := newPiholeClient(srv.URL, "secret", srv.Client())
+			c.sid = "sid-123"
+			got, err := c.cnameRecords(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("REGRESSION: %q decoded to %v records instead of failing", tc.body, len(got))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if len(got) != tc.wantLen {
+				t.Fatalf("records = %v, want %d", got, tc.wantLen)
+			}
+		})
+	}
+}
+
+// And the same shape change, seen through a whole reconcile: it must report a
+// failed run rather than a successful one that wiped the ledger.
+func TestPiholeUnreadableListingDoesNotWipeTheLedger(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"session":{"valid":true,"sid":"sid-123"}}`))
+			return
+		}
+		// The listing endpoint answers with a renamed field.
+		_, _ = w.Write([]byte(`{"config":{"dns":{"cnames":[]}}}`))
+	}))
+	defer srv.Close()
+
+	led := ownsPihole("app.example.com", "edge.example.com")
+	s := piholeSyncerWith(t, srv, nil, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if st := s.Status().Pihole; st.OK || st.Error == "" {
+		t.Fatalf("REGRESSION: an unreadable listing reported a clean run: %+v", st)
+	}
+	if len(led.pihole()) != 1 {
+		t.Fatalf("REGRESSION: the ledger was emptied by an unreadable listing: %v", led.pihole())
 	}
 }
 

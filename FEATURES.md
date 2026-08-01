@@ -182,7 +182,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
   *recorded creating*, in the git-backed ownership ledger
   `config/dns-ledger.yaml` — inferring ownership from a record's target instead
   cost an operator 19 hand-written CNAMEs on 2026-08-01. First enable adopts what
-  matches and touches nothing else, and `GET /api/dns-sync/plan` previews the run.
+  matches and touches nothing else; an adopted record is *released* rather than
+  deleted when the config stops asking for it, so adoption never becomes a licence
+  to destroy somebody else's record. `GET /api/dns-sync/plan` previews the run.
   **Phase 2 (✓ shipped): Kubernetes Ingress discovery** — an annotated
   cluster `Ingress` becomes a template-derived, managed-labelled proxy host that
   feeds the same reconciler, so a cluster service no longer has to be hand-entered

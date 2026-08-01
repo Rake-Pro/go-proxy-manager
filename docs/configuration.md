@@ -195,22 +195,37 @@ schemaVersion: 1
 pihole:
   - domain: app.example.com
     target: edge.example.com
+    adopted: false      # gpm created this record, so gpm may delete it
 cloudflare:
   - domain: www.example.com
     target: edge.example.com
+    adopted: true       # the record was already there; gpm only claimed it
 ```
+
+`adopted` records **how** the claim was acquired, and it is what decides whether
+the record can ever be deleted. An entry with no `adopted` key at all (a ledger
+written before this field existed) is read as **adopted**, deliberately: it is the
+only reading of a missing field that cannot destroy a record on upgrade.
 
 Per desired record, on every run:
 
 | Backend state | What gpm does |
 |---------------|---------------|
-| absent | **create**, and record ownership |
-| present, right target, **not** in the ledger | **adopt** — record ownership, do not recreate (logged at info) |
+| absent | **create**, and record ownership (`adopted: false`) |
+| present, right target, **not** in the ledger | **adopt** — record ownership (`adopted: true`), do not recreate (logged at info) |
 | present, right target, already owned | nothing |
-| present, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** — replace it and update the ledger |
+| present, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget** — replace it and update the ledger (the replacement is a record gpm created) |
 | present, different target, not owned | **skip and warn** — never shadowed, never replaced |
-| in the ledger, no longer desired | **delete**, and drop from the ledger |
+| in the ledger as **created by gpm**, no longer desired | **delete**, and drop from the ledger (logged at warn, with the ledger revision that authorised it) |
+| in the ledger as **adopted**, no longer desired | **released, not deleted** — the claim is dropped and the record left exactly where it is (logged at warn) |
 | **not in the ledger** | **never deleted**, whatever it points at |
+
+**A record gpm adopted is released, not deleted.** Adoption claims a record
+somebody else made; it is not, and must never become, permission to destroy it.
+So turning `dns.lanDirect` on for a name an operator had hand-written, and then
+turning it off again, leaves their record untouched — gpm simply stops managing
+it. The flip side is that gpm will not clean up an adopted record for you: once
+released it is yours to remove by hand.
 
 `apexTarget` is *not* an ownership marker. It says where managed records point,
 nothing more. A hand-written CNAME aimed at the same host is adopted only if a
@@ -232,13 +247,31 @@ reads the backends and the ledger and reports exactly what a reconcile would
 create, adopt, retarget and delete, without writing anything.
 
 > **Do not hand-edit `config/dns-ledger.yaml`.** It is what authorises a DNS
-> deletion. An entry with a missing domain or target, or a duplicate domain, is
-> rejected at load and stops the reconcile rather than being acted on. To make gpm
-> forget a record, delete the entry — that disowns it, it is not a deletion of the
-> record itself. It is reverted along with the rest of the config by
-> `POST /api/restore` / a whole-tree revert, which is deliberate: rolling the
-> config back to before a host existed also rolls back gpm's claim on the record
-> that host published.
+> deletion. An entry with a missing domain or target, or a duplicate domain
+> (compared case-insensitively, as the reconciler indexes it), is rejected at load
+> and stops the reconcile rather than being acted on. To make gpm forget a record,
+> delete the entry — that disowns it, it is not a deletion of the record itself.
+> It is reverted along with the rest of the config by `POST /api/restore` / a
+> whole-tree revert, which is deliberate: rolling the config back to before a host
+> existed also rolls back gpm's claim on the record that host published.
+
+> **Caveat: a revert can restore an ownership claim that is no longer true.** The
+> ledger reverts with the tree, and history does not know what happened at the DNS
+> backend in the meantime. If gpm created `x.example.com`, later deleted it, and an
+> operator then recreated that name by hand, a revert to a commit from before the
+> deletion restores gpm's claim on it — and the next reconcile, finding the name
+> unwanted and the record matching what the claim says gpm left there, deletes the
+> operator's record. The `adopted` rule above does **not** cover this case: the
+> restored entry is one gpm genuinely created at the time it was written.
+>
+> Two things limit the damage. A reconcile whose ledger write is refused because
+> the repo moved under it (which is what a concurrent revert looks like) re-reads
+> and rewrites *without* the claims the revert withdrew, so a revert cannot be
+> silently undone by a run already in flight. And every deletion is logged at
+> **warn** with the ledger revision that authorised it (`ledgerRev`), so a record
+> removed on the strength of a stale claim is identifiable after the fact. After
+> reverting a config that ever contained DNS-synced hosts, run
+> `GET /api/dns-sync/plan` before letting a reconcile proceed.
 
 Wildcard domains (`*.example.com`) are skipped by both backends, as is a domain
 equal to the apex target (which would be a CNAME loop). Disabled proxy hosts

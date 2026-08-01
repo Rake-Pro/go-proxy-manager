@@ -71,6 +71,9 @@ type cfRecord struct {
 	Name    string `json:"name"`
 	Content string `json:"content"`
 	Comment string `json:"comment"`
+	// Proxied is carried so a retarget that has to be rolled back can put the
+	// record back exactly as it was, orange cloud included.
+	Proxied bool `json:"proxied"`
 }
 
 func (c *cloudflareClient) do(ctx context.Context, method, urlStr string, body any) (*cfEnvelope, error) {
@@ -131,15 +134,30 @@ func (c *cloudflareClient) zone(ctx context.Context, name string) (string, error
 	return c.zoneID, nil
 }
 
+// cfPageSize is the per_page value every listing asks for, and therefore what a
+// FULL page looks like. cfMaxPages bounds the walk so a backend that keeps
+// answering with full pages cannot spin here forever.
+const (
+	cfPageSize = 100
+	cfMaxPages = 1000
+)
+
 // listCNAMEs returns every CNAME in the zone, following pagination. The whole
 // zone is read (not just gpm's records) because reconcile has to know that a
 // desired name is already taken by a record it does not own.
+//
+// Termination is driven by the page itself: a short page is the end of the
+// listing. result_info is only advisory - it can be absent, or zero, and
+// trusting it as the sole terminator meant a full page with no result_info
+// stopped the walk at page 1. That truncation reads as "the zone does not hold
+// these records", which orphans ledger entries and re-attempts creates that
+// already exist. So the advisory can extend the walk, never cut it short.
 func (c *cloudflareClient) listCNAMEs(ctx context.Context, zoneID string) ([]cfRecord, error) {
 	var out []cfRecord
-	for page := 1; ; page++ {
+	for page := 1; page <= cfMaxPages; page++ {
 		q := url.Values{}
 		q.Set("type", "CNAME")
-		q.Set("per_page", "100")
+		q.Set("per_page", strconv.Itoa(cfPageSize))
 		q.Set("page", strconv.Itoa(page))
 		env, err := c.do(ctx, http.MethodGet, c.base+"/zones/"+zoneID+"/dns_records?"+q.Encode(), nil)
 		if err != nil {
@@ -150,10 +168,11 @@ func (c *cloudflareClient) listCNAMEs(ctx context.Context, zoneID string) ([]cfR
 			return nil, fmt.Errorf("cloudflare: decode dns records: %w", err)
 		}
 		out = append(out, recs...)
-		if len(recs) == 0 || env.Info.TotalPages <= page {
+		if len(recs) == 0 || (len(recs) < cfPageSize && env.Info.TotalPages <= page) {
 			return out, nil
 		}
 	}
+	return nil, fmt.Errorf("cloudflare: zone listing did not terminate within %d pages", cfMaxPages)
 }
 
 func (c *cloudflareClient) createCNAME(ctx context.Context, zoneID, name, content string, proxied bool) error {
@@ -224,7 +243,7 @@ func (s *Syncer) cloudflareConnect(ctx context.Context, cfg model.Config, conf m
 // stays in force as a SECOND, independent condition: the ledger authorises a
 // delete and the comment still has to agree. That is strictly stronger than the
 // comment alone, so nothing this backend already guaranteed is weakened.
-func cloudflareDecisions(cfg model.Config, apex string, state cloudflareState, owned map[string]string) (decisions, []string) {
+func cloudflareDecisions(cfg model.Config, apex string, state cloudflareState, owned map[string]model.DNSClaim) (decisions, []string) {
 	desired := desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.PublicCname }, apex)
 	mark := func(name string) bool { return state.byName[name].Comment == ManagedComment }
 	return decide("cloudflare", desired, state.present, apex, owned, mark), desired
@@ -232,7 +251,7 @@ func cloudflareDecisions(cfg model.Config, apex string, state cloudflareState, o
 
 // planCloudflare is the read-only preview: it resolves the zone, lists it and
 // reports the decisions without issuing a single write.
-func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]string) BackendPlan {
+func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]model.DNSClaim) BackendPlan {
 	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
 	_, state, err := s.cloudflareConnect(ctx, cfg, conf)
 	if err != nil {
@@ -246,7 +265,11 @@ func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf mode
 // and returns the ownership ledger the run ended with. The API credential is not
 // stored here: it is read from the referenced DNSProvider's config["apiToken"],
 // so rotating the ACME token rotates this too.
-func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]string) (BackendStatus, map[string]string) {
+//
+// ledgerRev identifies the config-repo revision the ledger was read at; it is
+// logged with every deletion so an operator can tell which recorded claim
+// authorised destroying a record (see the revert caveat in docs/configuration.md).
+func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]model.DNSClaim, ledgerRev string) (BackendStatus, map[string]model.DNSClaim) {
 	st := BackendStatus{}
 	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
 
@@ -262,32 +285,46 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 	st.Skipped = len(d.skip)
 	st.Untouched = d.untouched
 
-	live := map[string]string{}
+	live := map[string]model.DNSClaim{}
 	for k, v := range owned {
 		live[k] = v
 	}
-	fail := func(err error) (BackendStatus, map[string]string) {
+	fail := func(err error) (BackendStatus, map[string]model.DNSClaim) {
 		st.Error = err.Error()
 		st.Managed = len(live)
 		return st, live
 	}
 
 	for _, name := range d.adopt {
-		live[name] = apex
+		live[name] = model.DNSClaim{Target: apex, Adopted: true}
 		st.Adopted++
 		log.Info().Str("name", name).Str("target", apex).
-			Msg("dnssync: cloudflare CNAME already present, correct and gpm-commented; adopted as gpm-managed")
+			Msg("dnssync: cloudflare CNAME already present, correct and gpm-commented; adopted as gpm-managed (gpm will never delete it, only release it)")
 	}
 	for _, name := range d.retarget {
-		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
+		// Delete then create, with no atomic update in between: the counter is bumped
+		// as soon as the DELETE lands so a failure afterwards cannot be reported as a
+		// run that changed nothing.
+		rec := state.byName[name]
+		if err := c.deleteRecord(ctx, state.zoneID, rec); err != nil {
 			return fail(err)
 		}
 		delete(live, name)
-		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
-			return fail(err)
-		}
-		live[name] = apex
 		st.Retargeted++
+		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
+			// Restore the record exactly as it was rather than leaving the name
+			// unresolved until some later reconcile happens to heal it.
+			if rbErr := c.createCNAME(ctx, state.zoneID, name, rec.Content, rec.Proxied); rbErr != nil {
+				log.Error().Err(rbErr).Str("name", name).Str("content", rec.Content).
+					Msg("dnssync: cloudflare retarget failed AND the original record could not be restored; the name is currently unresolved")
+				return fail(fmt.Errorf("cloudflare: retarget %s: %w (restoring the original record also failed: %v)", name, err, rbErr))
+			}
+			live[name] = owned[name]
+			log.Error().Err(err).Str("name", name).Str("content", rec.Content).
+				Msg("dnssync: cloudflare retarget failed; the original record was restored")
+			return fail(fmt.Errorf("cloudflare: retarget %s: %w (the original record was restored)", name, err))
+		}
+		live[name] = model.DNSClaim{Target: apex}
 		log.Info().Str("name", name).Str("from", state.present[name]).Str("to", apex).
 			Msg("dnssync: cloudflare CNAME retargeted")
 	}
@@ -295,17 +332,21 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
 			return fail(err)
 		}
-		live[name] = apex
+		live[name] = model.DNSClaim{Target: apex}
 		st.Created++
 		log.Info().Str("name", name).Str("target", apex).Bool("proxied", conf.Proxied).Msg("dnssync: cloudflare CNAME created")
 	}
 	for _, name := range d.del {
+		// Loud on purpose, and stamped with the ledger revision that authorised it:
+		// a whole-tree revert restores the ledger with everything else, so a claim
+		// can outlive the record gpm created (see docs/configuration.md).
+		log.Warn().Str("name", name).Str("target", state.present[name]).Str("ledgerRev", ledgerRev).
+			Msg("dnssync: deleting a cloudflare CNAME on the authority of the ownership ledger")
 		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
 			return fail(err)
 		}
 		delete(live, name)
 		st.Deleted++
-		log.Info().Str("name", name).Msg("dnssync: cloudflare CNAME removed")
 	}
 	live = d.owned
 

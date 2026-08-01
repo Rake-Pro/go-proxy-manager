@@ -2440,7 +2440,7 @@ async function viewSettings(c) {
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a backend on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a backend on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. A record gpm <i>adopted</i> is released rather than deleted when a host stops asking for it, so it stays in your resolver for you to remove by hand. Use <b>Preview changes</b> first to see it.</p>
       <div class="grid-2">
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Pi-hole (LAN)</div><div class="ds">Local CNAMEs on the LAN resolver</div></div>${switchHtml('set-ph-on', !!ds.pihole.enabled, 'Pi-hole DNS sync')}</div>

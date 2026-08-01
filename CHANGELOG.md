@@ -9,6 +9,77 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Fixed
 
+- **A record gpm ADOPTED is never deleted — it is released.** Adoption used to be
+  a one-way trap. An operator hand-writes `x.example.com`; a proxy host is later
+  given `dns.lanDirect` for that name, so the reconcile adopts the existing record
+  into the ownership ledger; the operator later takes the flag off again — and the
+  next reconcile **deleted their record**, because the ledger no longer
+  distinguished a record gpm made from one it had merely claimed. On Pi-hole,
+  where every correctly-targeted record is adoptable, that was the 2026-08-01
+  incident deferred by one config edit.
+
+  **The guarantee now: gpm deletes only DNS records it CREATED.** Ledger entries
+  record their provenance (`adopted: true|false`), and an adopted entry the config
+  no longer wants is *released* — dropped from the ledger with a warning, with the
+  record left exactly where it stands. Deletion remains available for records gpm
+  created itself. Existing ledgers upgrade safely: an entry written before the
+  field existed carries no provenance, and a missing `adopted` is read as
+  **adopted**, the only reading that cannot destroy a record on upgrade. The
+  trade-off is stated in `docs/configuration.md`: gpm will not clean up an adopted
+  record for you.
+
+- **Pi-hole sessions leaked whenever a run was cut short.** `logout` ran on the
+  caller's context, so an HTTP client disconnecting mid-reconcile cancelled the
+  logout along with the run (measurably: one login, zero logouts). Pi-hole has a
+  small fixed session pool, so a leak per aborted run eventually locks the
+  operator out of their own admin UI. Logout now runs on a detached context with a
+  5s deadline.
+
+- **A failed retarget no longer destroys the record.** Neither backend can update
+  a CNAME in place, so a retarget is delete-then-create; a create that failed left
+  the name unresolved until some later reconcile happened to heal it, while the
+  status reported `Deleted:0 Retargeted:0` — a run that destroyed something and
+  said nothing had happened. The original record is now restored (Cloudflare
+  included, orange-cloud flag and all), the run fails loudly, and the counter is
+  incremented as soon as the *delete* lands.
+
+- **A Pi-hole API shape change is an error, not a silent ledger wipe.** A renamed
+  or missing `config.dns.cnameRecords` field decoded to a nil slice, which a
+  full-state reconciler reads as "the resolver holds nothing" — status OK, zero
+  counters, ledger emptied and committed. The field is now required to be present
+  and a list; anything else fails the run with the ledger intact.
+
+- **Cloudflare pagination no longer truncates when `result_info` is absent.** A
+  full 100-record page with no (or a zeroed) `result_info` stopped the walk at
+  page 1, hiding the rest of the zone: no false deletes, but orphaned ledger
+  entries and repeated creates of records that already exist. Termination is now
+  driven by a short page; `result_info` is advisory.
+
+- **A reconcile can no longer clobber a concurrent revert of the ownership
+  ledger.** The reconcile's read-modify-write spans minutes of backend I/O, and
+  `Revert` rewrites `dns-ledger.yaml` with the rest of the tree; a reconcile that
+  had loaded the ledger first would write its own version back afterwards,
+  re-establishing claims the revert withdrew — and a claim authorises a deletion.
+  `SaveDNSLedger` now takes the repo revision the ledger was read at and refuses a
+  stale write (`ErrLedgerStale`); the reconciler re-reads and rewrites *without*
+  the withdrawn claims rather than resurrecting them.
+
+- **A revert can still restore an ownership claim reality has moved past** (gpm
+  created a record, deleted it, an operator recreated it by hand, the config is
+  reverted to before the deletion). This is documented prominently beside the
+  existing revert note in `docs/configuration.md`, and every deletion is now
+  logged at **warn** with the ledger revision that authorised it, so a record
+  removed on the strength of a stale claim is identifiable after the fact.
+
+- **Ledger duplicate-domain validation is case-insensitive**, matching the
+  normalised form the reconciler indexes by. `Foo.lan` and `foo.lan` could both
+  validate, leaving one claim silently shadowing the other.
+
+- **The ledger commit survives a cancelled request.** The reconciler's ledger save
+  passed the (possibly request-scoped) context to `git.CommitAll`, so a cancelled
+  reconcile could leave the file written but uncommitted, to be swept into an
+  unrelated commit later. It now writes on a detached context.
+
 - **DNS sync deleted 19 records it did not create. It can no longer delete
   anything it did not create.** On 2026-08-01 an operator enabled
   `settings.dnsSync.pihole` for the first time. Their Pi-hole already held 19

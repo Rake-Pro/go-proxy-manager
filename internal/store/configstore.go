@@ -774,40 +774,71 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 	return s.git.CommitAll(ctx, "Settings: update", author)
 }
 
-// LoadDNSLedger reads the DNS record-ownership ledger. A missing file is an
-// EMPTY ledger, not an error: that is the state every deployment starts in, and
-// it means "gpm owns nothing yet", which the reconciler treats as adopt-only -
-// it can never be read as "everything is unowned, delete it".
-func (s *Store) LoadDNSLedger() (model.DNSLedger, error) {
+// LoadDNSLedger reads the DNS record-ownership ledger, together with the config
+// repo HEAD it was read at. A missing file is an EMPTY ledger, not an error: that
+// is the state every deployment starts in, and it means "gpm owns nothing yet",
+// which the reconciler treats as adopt-only - it can never be read as "everything
+// is unowned, delete it".
+//
+// The HEAD is returned because a reconcile is a read-modify-write that spans
+// minutes of backend I/O, while a Revert can rewrite the very same file in
+// between. Handing that revision back to SaveDNSLedger is what turns a lost
+// update into a refusal (see SaveDNSLedger).
+func (s *Store) LoadDNSLedger(ctx context.Context) (model.DNSLedger, string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return model.DNSLedger{}, "", err
+	}
 	var l model.DNSLedger
 	path := filepath.Join(s.dir, dnsLedgerFile)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return model.DNSLedger{SchemaVersion: model.SchemaVersion}, nil
+			return model.DNSLedger{SchemaVersion: model.SchemaVersion}, head, nil
 		}
-		return l, err
+		return l, head, err
 	}
 	if err := readYAML(path, &l); err != nil {
-		return l, fmt.Errorf("%s: %w", dnsLedgerFile, err)
+		return l, head, fmt.Errorf("%s: %w", dnsLedgerFile, err)
 	}
 	if err := l.Validate(); err != nil {
-		return l, fmt.Errorf("%s: %w", dnsLedgerFile, err)
+		return l, head, fmt.Errorf("%s: %w", dnsLedgerFile, err)
 	}
-	return l, nil
+	return l, head, nil
 }
+
+// ErrLedgerStale is returned by SaveDNSLedger when the config repo has moved on
+// since the ledger was read, so writing would silently discard whatever the other
+// writer did (in practice: a Revert withdrawing ownership claims). The caller is
+// expected to re-read and decide, not to retry blindly.
+var ErrLedgerStale = errors.New("dns ledger changed since it was read")
 
 // SaveDNSLedger validates and writes the ledger singleton, then commits. Writing
 // an unchanged ledger produces no commit (CommitAll is a no-op on a clean tree),
 // so a steady-state reconcile leaves no history noise.
-func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Author) (string, error) {
+//
+// baseHead is the repo HEAD the caller read the ledger at (see LoadDNSLedger).
+// If HEAD has moved since, the write is refused with ErrLedgerStale rather than
+// clobbering it: the ledger authorises DNS deletions, so re-establishing a claim
+// a concurrent revert withdrew is not a lost update anybody can afford. Passing
+// "" opts out of the check, for callers that have no revision to offer.
+func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Author, baseHead string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := l.Validate(); err != nil {
 		return "", err
+	}
+	if baseHead != "" {
+		head, err := s.git.Head(ctx)
+		if err != nil {
+			return "", err
+		}
+		if head != baseHead {
+			return "", fmt.Errorf("%w: read at %s, HEAD is now %s", ErrLedgerStale, baseHead, head)
+		}
 	}
 	if l.SchemaVersion == 0 {
 		l.SchemaVersion = model.SchemaVersion

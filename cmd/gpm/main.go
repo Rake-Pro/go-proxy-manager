@@ -439,9 +439,18 @@ func secretFromEnv(key string) string {
 // reconciler instead of as whichever operator happened to trigger the run.
 type dnsLedgerStore struct{ st *store.Store }
 
-func (d dnsLedgerStore) Load() (model.DNSLedger, error) { return d.st.LoadDNSLedger() }
+func (d dnsLedgerStore) Load(ctx context.Context) (model.DNSLedger, string, error) {
+	return d.st.LoadDNSLedger(ctx)
+}
 
-func (d dnsLedgerStore) Save(ctx context.Context, l model.DNSLedger) error {
-	_, err := d.st.SaveDNSLedger(ctx, l, store.Author{Name: "dns-sync", Email: "gpm@localhost"})
+// Save detaches the write from the caller's context. A reconcile can be driven by
+// an HTTP request, and the client hanging up must not cancel the commit half way:
+// SaveDNSLedger writes the file and then commits it, so a cancellation between
+// the two leaves the ledger on disk but out of git, to be swept into whatever
+// unrelated commit lands next. The write is short, local and already ordered
+// after the DNS changes it records, so seeing it through is strictly safer than
+// abandoning it.
+func (d dnsLedgerStore) Save(ctx context.Context, l model.DNSLedger, rev string) error {
+	_, err := d.st.SaveDNSLedger(context.WithoutCancel(ctx), l, store.Author{Name: "dns-sync", Email: "gpm@localhost"}, rev)
 	return err
 }

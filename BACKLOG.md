@@ -265,6 +265,31 @@ one change:
 - [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
   created and deleted.
 
+Adversarial review of that change (2026-08-01), all remediated:
+
+- [x] **Adoption was a one-way trap** — an adopted record the config later stopped
+  wanting was deleted. Ledger entries now record provenance (`adopted`) and an
+  adopted entry is *released*, never deleted; a missing field reads as adopted so
+  upgrades cannot destroy anything. *(High)*
+- [x] **Pi-hole session leaked on context cancellation** — `logout` ran on the
+  caller's (cancelled) context. It now uses a detached 5s context. *(High)*
+- [x] **Retarget had no rollback** — a failed create after a successful delete
+  destroyed the record and under-reported the run. The original is restored, the
+  run fails loudly, and the counter increments as soon as the delete lands. *(Med)*
+- [x] **A Pi-hole API shape change read as "zero records"** and wiped the ledger.
+  The record list is now required to be present. *(Med)*
+- [x] **Cloudflare pagination truncated** when `result_info` was absent or zero.
+  Termination is by short page; `result_info` is advisory. *(Med)*
+- [x] **Ledger read-modify-write raced a concurrent Revert** (confirmed). The save
+  carries the revision it read at and is refused when the tree moved; the run then
+  re-writes without the claims the revert withdrew. *(Med)*
+- [x] **A revert can resurrect a stale claim** — documented beside the existing
+  revert note, and deletions now log at warn with the authorising `ledgerRev`.
+  *(Med)*
+- [x] Ledger duplicate-domain validation is case-insensitive. *(Low)*
+- [x] The ledger commit runs on a context detached from the reconcile's. *(Low)*
+- [x] Plan/reconcile agreement is asserted on names, not counts. *(Low)*
+
 Deliberately deferred:
 
 - **Migrating a pre-ledger deployment's Cloudflare records without the comment.**

@@ -11,9 +11,38 @@ import (
 // later reconcile can tell a record it created and nobody has touched from one an
 // operator has since re-pointed - the first is safe to retarget or remove, the
 // second is not gpm's to touch.
+//
+// Adopted records HOW the claim was acquired, which decides whether gpm may ever
+// delete the record: false means gpm created the record itself (so removing it
+// only undoes gpm's own write), true means the record already existed and gpm
+// merely claimed it (so removing it would destroy something an operator made).
+// gpm deletes only what it created; an adopted record that is no longer wanted is
+// RELEASED from the ledger, never deleted.
+//
+// It is a *bool rather than a bool so that "the field is absent" is a third,
+// distinguishable state. Ledgers written before this field existed carry no
+// provenance at all, and the two possible readings are not equally safe: reading
+// them as "created" would let an upgrade delete records gpm had adopted (exactly
+// the incident this whole subsystem exists to prevent), while reading them as
+// "adopted" can only ever leave a record in place. Absent therefore means
+// ADOPTED - see IsAdopted.
 type DNSLedgerEntry struct {
-	Domain string `json:"domain" yaml:"domain"`
-	Target string `json:"target" yaml:"target"`
+	Domain  string `json:"domain" yaml:"domain"`
+	Target  string `json:"target" yaml:"target"`
+	Adopted *bool  `json:"adopted" yaml:"adopted"`
+}
+
+// IsAdopted reports whether the record must be treated as one gpm adopted rather
+// than created, and so must never be deleted. An entry with no recorded
+// provenance (a ledger written before the field existed) reads as adopted: it is
+// the only reading of a missing field that cannot destroy an operator's record.
+func (e DNSLedgerEntry) IsAdopted() bool { return e.Adopted == nil || *e.Adopted }
+
+// DNSClaim is one ledger entry as the reconciler works with it: the target gpm
+// recorded for the name, and whether the claim came from adoption.
+type DNSClaim struct {
+	Target  string
+	Adopted bool
 }
 
 // DNSLedger is the singleton record-ownership ledger, stored as
@@ -59,35 +88,70 @@ func (l DNSLedger) Validate() error {
 			if strings.TrimSpace(e.Target) == "" {
 				return fmt.Errorf("dns ledger: %s[%d] (%s): target is required", b.name, i, e.Domain)
 			}
-			if _, dup := seen[e.Domain]; dup {
+			// Keyed on the normalised form the reconciler indexes by (DNSLedgerMap),
+			// so "Foo.lan" and "foo.lan" cannot both validate and then have one
+			// silently shadow the other.
+			key := normaliseDomain(e.Domain)
+			if _, dup := seen[key]; dup {
 				return fmt.Errorf("dns ledger: %s: duplicate domain %q", b.name, e.Domain)
 			}
-			seen[e.Domain] = struct{}{}
+			seen[key] = struct{}{}
 		}
 	}
 	return nil
 }
 
-// DNSLedgerMap indexes entries as domain -> target for lookup during a reconcile.
-func DNSLedgerMap(entries []DNSLedgerEntry) map[string]string {
-	out := make(map[string]string, len(entries))
+// normaliseDomain is the single form a ledger domain (or target) is compared and
+// indexed by: lowercased, trimmed, no trailing dot.
+func normaliseDomain(s string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
+}
+
+// DNSLedgerMap indexes entries as domain -> claim for lookup during a reconcile.
+func DNSLedgerMap(entries []DNSLedgerEntry) map[string]DNSClaim {
+	out := make(map[string]DNSClaim, len(entries))
 	for _, e := range entries {
-		out[strings.ToLower(strings.TrimSuffix(e.Domain, "."))] = strings.ToLower(strings.TrimSuffix(e.Target, "."))
+		out[normaliseDomain(e.Domain)] = DNSClaim{Target: normaliseDomain(e.Target), Adopted: e.IsAdopted()}
 	}
 	return out
 }
 
-// DNSLedgerEntries turns a domain -> target map back into a sorted entry list, so
+// DNSLedgerEntries turns a domain -> claim map back into a sorted entry list, so
 // the committed YAML is stable and a reconcile that changed nothing produces no
-// diff (and therefore no commit).
-func DNSLedgerEntries(m map[string]string) []DNSLedgerEntry {
+// diff (and therefore no commit). Provenance is always written explicitly, so an
+// entry written by this version is never read back as the safe-default "adopted".
+func DNSLedgerEntries(m map[string]DNSClaim) []DNSLedgerEntry {
 	if len(m) == 0 {
 		return nil
 	}
 	out := make([]DNSLedgerEntry, 0, len(m))
-	for d, t := range m {
-		out = append(out, DNSLedgerEntry{Domain: d, Target: t})
+	for d, c := range m {
+		adopted := c.Adopted
+		out = append(out, DNSLedgerEntry{Domain: d, Target: c.Target, Adopted: &adopted})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
 	return out
+}
+
+// DNSLedgerEntriesEqual compares two entry lists by value. It exists because the
+// entries hold a pointer field: slices.Equal would compare the pointers, so a
+// ledger that is byte-identical after a round trip would look changed (or, worse,
+// a legacy entry with no provenance would look identical to an explicit one and
+// never be normalised).
+func DNSLedgerEntriesEqual(a, b []DNSLedgerEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Domain != b[i].Domain || a[i].Target != b[i].Target {
+			return false
+		}
+		if (a[i].Adopted == nil) != (b[i].Adopted == nil) {
+			return false
+		}
+		if a[i].Adopted != nil && *a[i].Adopted != *b[i].Adopted {
+			return false
+		}
+	}
+	return true
 }

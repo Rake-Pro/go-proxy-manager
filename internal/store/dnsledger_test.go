@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 func TestDNSLedgerMissingFileIsEmpty(t *testing.T) {
 	st := newTestStore(t)
 
-	l, err := st.LoadDNSLedger()
+	l, _, err := st.LoadDNSLedger(context.Background())
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestDNSLedgerRoundTripAndCommit(t *testing.T) {
 		},
 		Cloudflare: []model.DNSLedgerEntry{{Domain: "www.example.com", Target: "edge.example.com"}},
 	}
-	commit, err := st.SaveDNSLedger(ctx, l, Author{Name: "dns-sync", Email: "gpm@localhost"})
+	commit, err := st.SaveDNSLedger(ctx, l, Author{Name: "dns-sync", Email: "gpm@localhost"}, "")
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestDNSLedgerRoundTripAndCommit(t *testing.T) {
 		t.Fatal("saving a ledger must commit")
 	}
 
-	got, err := st.LoadDNSLedger()
+	got, _, err := st.LoadDNSLedger(ctx)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestDNSLedgerRoundTripAndCommit(t *testing.T) {
 	}
 
 	// Saving an identical ledger changes nothing, so it must not commit again.
-	again, err := st.SaveDNSLedger(ctx, l, Author{Name: "dns-sync", Email: "gpm@localhost"})
+	again, err := st.SaveDNSLedger(ctx, l, Author{Name: "dns-sync", Email: "gpm@localhost"}, "")
 	if err != nil {
 		t.Fatalf("re-save: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestDNSLedgerRevertsWithTheTree(t *testing.T) {
 
 	before, err := st.SaveDNSLedger(ctx, model.DNSLedger{
 		Pihole: []model.DNSLedgerEntry{{Domain: "app.example.com", Target: "edge.example.com"}},
-	}, author)
+	}, author, "")
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -106,19 +107,91 @@ func TestDNSLedgerRevertsWithTheTree(t *testing.T) {
 			{Domain: "app.example.com", Target: "edge.example.com"},
 			{Domain: "later.example.com", Target: "edge.example.com"},
 		},
-	}, author); err != nil {
+	}, author, ""); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 
 	if _, err := st.Revert(ctx, before, Author{Name: "admin", Email: "admin@example.com"}); err != nil {
 		t.Fatalf("revert: %v", err)
 	}
-	got, err := st.LoadDNSLedger()
+	got, _, err := st.LoadDNSLedger(ctx)
 	if err != nil {
 		t.Fatalf("load after revert: %v", err)
 	}
 	if len(got.Pihole) != 1 || got.Pihole[0].Domain != "app.example.com" {
 		t.Fatalf("ledger after revert = %+v, want the earlier state", got)
+	}
+}
+
+// A reconcile reads the ledger, spends minutes talking to DNS backends, then
+// writes it back. A Revert can rewrite the very same file in between, and a blind
+// write would silently re-establish the ownership claims the revert withdrew -
+// claims that authorise DELETING records. The write is refused instead, and the
+// revert's state stands.
+func TestDNSLedgerSaveRefusesAStaleWrite(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	author := Author{Name: "dns-sync", Email: "gpm@localhost"}
+
+	if _, err := st.SaveDNSLedger(ctx, model.DNSLedger{
+		Pihole: []model.DNSLedgerEntry{{Domain: "app.example.com", Target: "edge.example.com"}},
+	}, author, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A reconcile reads the ledger here...
+	_, rev, err := st.LoadDNSLedger(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if rev == "" {
+		t.Fatal("a load must report the revision it read at, or a stale write cannot be detected")
+	}
+
+	// ...and another writer moves the config repo on while it is off talking to
+	// Pi-hole (a revert, in the case that matters).
+	if _, err := st.Save(ctx, sampleHost("concurrent"), Author{Name: "admin", Email: "admin@example.com"}); err != nil {
+		t.Fatalf("concurrent write: %v", err)
+	}
+
+	_, err = st.SaveDNSLedger(ctx, model.DNSLedger{
+		Pihole: []model.DNSLedgerEntry{
+			{Domain: "app.example.com", Target: "edge.example.com"},
+			{Domain: "resurrected.example.com", Target: "edge.example.com"},
+		},
+	}, author, rev)
+	if !errors.Is(err, ErrLedgerStale) {
+		t.Fatalf("REGRESSION: a stale ledger write returned %v, want ErrLedgerStale", err)
+	}
+	got, newRev, err := st.LoadDNSLedger(ctx)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(got.Pihole) != 1 {
+		t.Fatalf("REGRESSION: the refused write landed anyway: %+v", got)
+	}
+	// And the write succeeds once it is based on what is actually there.
+	if _, err := st.SaveDNSLedger(ctx, got, author, newRev); err != nil {
+		t.Fatalf("re-based save: %v", err)
+	}
+}
+
+// A ledger file written before provenance existed carries no `adopted` key. It
+// must load as ADOPTED - the only reading that cannot let an upgrade delete an
+// operator's record.
+func TestDNSLedgerWithoutProvenanceLoadsAsAdopted(t *testing.T) {
+	st := newTestStore(t)
+
+	legacy := "schemaVersion: 1\npihole:\n  - domain: app.example.com\n    target: edge.example.com\n"
+	if err := os.WriteFile(filepath.Join(st.Dir(), "dns-ledger.yaml"), []byte(legacy), 0o640); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, _, err := st.LoadDNSLedger(context.Background())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(got.Pihole) != 1 || !got.Pihole[0].IsAdopted() {
+		t.Fatalf("REGRESSION: a legacy entry loaded as %+v, want it treated as adopted (never auto-deleted)", got.Pihole)
 	}
 }
 
@@ -129,21 +202,21 @@ func TestDNSLedgerRejectsInvalid(t *testing.T) {
 	ctx := context.Background()
 
 	bad := model.DNSLedger{Pihole: []model.DNSLedgerEntry{{Domain: "app.example.com"}}}
-	if _, err := st.SaveDNSLedger(ctx, bad, Author{}); err == nil {
+	if _, err := st.SaveDNSLedger(ctx, bad, Author{}, ""); err == nil {
 		t.Fatal("a ledger entry with no target must be rejected")
 	}
 	dup := model.DNSLedger{Pihole: []model.DNSLedgerEntry{
 		{Domain: "app.example.com", Target: "a"},
 		{Domain: "app.example.com", Target: "b"},
 	}}
-	if _, err := st.SaveDNSLedger(ctx, dup, Author{}); err == nil {
+	if _, err := st.SaveDNSLedger(ctx, dup, Author{}, ""); err == nil {
 		t.Fatal("a duplicated domain must be rejected")
 	}
 
 	if err := os.WriteFile(filepath.Join(st.Dir(), "dns-ledger.yaml"), []byte("pihole:\n  - domain: x\n"), 0o640); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := st.LoadDNSLedger(); err == nil {
+	if _, _, err := st.LoadDNSLedger(ctx); err == nil {
 		t.Fatal("loading an invalid ledger must fail rather than be acted on")
 	}
 }

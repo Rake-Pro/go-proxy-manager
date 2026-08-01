@@ -255,6 +255,15 @@ nobody has touched since are **retargeted** on the next reconcile. Records that
 predate the ledger, or that somebody has re-pointed, are left alone and reported
 as `skipped` / disowned — clean those up by hand.
 
+Two things to expect in the logs. A record gpm **adopted** (rather than created)
+is *released* when the config stops asking for it: a warn line, the ledger entry
+dropped, and the record left in the resolver for you to remove by hand — gpm
+deletes only what it created. And every deletion is logged at warn with the
+`ledgerRev` that authorised it, because a whole-tree revert restores ownership
+claims along with everything else; after reverting a config that ever contained
+DNS-synced hosts, run `/api/dns-sync/plan` before letting a reconcile proceed
+(see the revert caveat in [configuration.md](configuration.md#dnssyncsettings-settingsdnssync)).
+
 Scopes: `dns-sync:read` for status and plan, `dns-sync:write` for reconcile.
 
 ## Kubernetes Ingress discovery
