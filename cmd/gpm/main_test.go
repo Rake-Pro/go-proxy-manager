@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
+	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 )
 
 // A request that never went through RequireRole carries no principal. api.Deps
@@ -74,5 +77,42 @@ func TestRequireScopeWithPrincipal(t *testing.T) {
 				t.Fatalf("requireScope(%q) = %v, wantErr %v", tc.required, got, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A reconcile can be driven by an HTTP request, and the client hanging up cancels
+// that request's context. SaveDNSLedger writes the ledger file and THEN commits
+// it, so a cancellation reaching git leaves the file on disk and out of history,
+// to be swept into whatever unrelated commit lands next. The adapter therefore
+// detaches the write from the caller's context.
+func TestDNSLedgerSaveCommitsDespiteACancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	head, err := st.Head(context.Background())
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has already gone away
+	adapter := dnsLedgerStore{st: st}
+	if err := adapter.Save(ctx, model.DNSLedger{
+		Pihole: []model.DNSLedgerEntry{{Domain: "app.example.com", Target: "edge.example.com"}},
+	}, ""); err != nil {
+		t.Fatalf("save with a cancelled context: %v", err)
+	}
+
+	after, err := st.Head(context.Background())
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if after == head {
+		t.Fatal("REGRESSION: the ledger was written but never committed, leaving it to be swept into an unrelated commit")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dns-ledger.yaml")); err != nil {
+		t.Fatalf("ledger file: %v", err)
 	}
 }

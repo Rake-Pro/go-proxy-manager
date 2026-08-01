@@ -178,8 +178,14 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - **DNS that follows the config** (✓ shipped, phase 1): a per-host `dns` policy
   publishes CNAMEs to the LAN resolver (Pi-hole v6) and/or the public zone
   (Cloudflare), so adding a host no longer means a second manual DNS edit in two
-  places. Full-state reconcile; deletion strictly limited to records gpm can prove
-  it created. **Phase 2 (✓ shipped): Kubernetes Ingress discovery** — an annotated
+  places. Full-state reconcile; deletion strictly limited to records gpm
+  *recorded creating*, in the git-backed ownership ledger
+  `config/dns-ledger.yaml` — inferring ownership from a record's target instead
+  cost an operator 19 hand-written CNAMEs on 2026-08-01. First enable adopts what
+  matches and touches nothing else; an adopted record is *released* rather than
+  deleted when the config stops asking for it, so adoption never becomes a licence
+  to destroy somebody else's record. `GET /api/dns-sync/plan` previews the run.
+  **Phase 2 (✓ shipped): Kubernetes Ingress discovery** — an annotated
   cluster `Ingress` becomes a template-derived, managed-labelled proxy host that
   feeds the same reconciler, so a cluster service no longer has to be hand-entered
   first. Read-only against the cluster (stdlib REST, no `client-go`), opt-in per

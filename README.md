@@ -61,7 +61,10 @@ builds it with a narrower, more focused design:
   per-resource `read`/`write` scopes, optional expiry, and instant revocation
 - **DNS sync** — publishes CNAMEs for opted-in hosts to a local Pi-hole v6
   resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
-  records it can prove it created
+  records it *recorded creating*, in a git-backed ownership ledger. Enabling it on
+  a resolver full of hand-written records adopts what matches and touches nothing
+  else - and a record it adopted is later *released*, never deleted or retargeted -
+  and `GET /api/dns-sync/plan` previews the whole run before you commit to it
 - **Kubernetes Ingress discovery** — opt an `Ingress` in with one annotation and
   gpm derives a proxy host from your template (read-only against the cluster, no
   `client-go`), which then feeds the same DNS sync; only its own labelled objects
