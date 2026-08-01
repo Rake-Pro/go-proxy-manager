@@ -184,7 +184,11 @@ earlier tiers or duplicating work (see "Architecture for extension").
   feeds the same reconciler, so a cluster service no longer has to be hand-entered
   first. Read-only against the cluster (stdlib REST, no `client-go`), opt-in per
   Ingress, one commit per reconcile, and freeze-not-delete when the API server
-  cannot be read. See
+  cannot be read. Heterogeneous fleets are handled by **operator-defined named
+  profiles** an Ingress selects with `gpm.rake.pro/profile` — the annotation
+  carries a name and nothing else, so an untrusted manifest picks among chains
+  you authored instead of describing one, and an undefined name skips rather than
+  silently downgrading to the default. See
   [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
 
 ### P1 - high-value, layer in next (parity + best community asks)

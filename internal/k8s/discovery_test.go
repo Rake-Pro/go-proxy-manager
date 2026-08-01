@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
@@ -469,7 +470,7 @@ func TestHostnameValidationAndSuffixGate(t *testing.T) {
 					Host string `json:"host"`
 				}{Host: h})
 			}
-			_, host, err := derive(ing, conf)
+			_, host, _, err := derive(ing, conf)
 			if tc.want == "" {
 				if err == nil {
 					t.Fatalf("expected a derivation failure, got domains %v", host.Domains)
@@ -516,7 +517,7 @@ func TestDerivedNaming(t *testing.T) {
 			ing.Spec.Rules = []struct {
 				Host string `json:"host"`
 			}{{Host: "app.example.com"}}
-			got, _, err := derive(ing, conf)
+			got, _, _, err := derive(ing, conf)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected a failure, got name %q", got)
@@ -576,8 +577,7 @@ func TestDNSPolicyFromAnnotations(t *testing.T) {
 			var ing Ingress
 			ing.Metadata.Namespace, ing.Metadata.Name = "ns", "app"
 			ing.Metadata.Annotations = tc.ann
-			conf := model.IngressDiscoverySettings{Template: model.IngressHostTemplate{DefaultDNS: tc.def}}
-			got := dnsPolicy(ing, conf)
+			got := dnsPolicy(ing, model.IngressHostTemplate{DefaultDNS: tc.def})
 			if tc.wantNil {
 				if got != nil {
 					t.Fatalf("policy = %+v, want nil (a host that publishes nothing carries no dns key)", got)
@@ -1160,5 +1160,439 @@ func TestDerivedHostInheritsUpstreamGroup(t *testing.T) {
 	}
 	if err := h.Validate(); err != nil {
 		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
+// ---------- discovery profiles ----------
+
+// profileSettings adds the two named profiles the docs use as the worked
+// example: one deliberately public with a rate limit and NO access list, one
+// SSO-gated behind the VPN list. The default template stays as baseSettings has
+// it (no middlewares, no access lists).
+func profileSettings(f *fakeAPI) model.IngressDiscoverySettings {
+	s := baseSettings(f)
+	s.Profiles = map[string]model.IngressHostTemplate{
+		"public-ratelimited": {
+			Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
+			Middlewares: []string{"rate-limit"},
+		},
+		"sso-internal": {
+			UpstreamGroupRef:  "k8s-nodes",
+			TLS:               model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, MinTLSVersion: "1.3"},
+			WebsocketsUpgrade: true,
+			Middlewares:       []string{"sso", "rate-limit"},
+			AccessLists:       []string{"home-vpn"},
+			DefaultDNS:        &model.DNSSyncPolicy{LanDirect: true},
+		},
+	}
+	return s
+}
+
+// REGRESSION: an Ingress that names no profile must behave exactly as it did
+// before profiles existed - the default `template` chain, verbatim. Every
+// deployed config is in this state, so this is the compatibility gate.
+func TestReconcileWithoutProfileAnnotationUsesTheDefaultTemplate(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"}, "grafana.example.com"),
+			// An empty annotation value is "absent", not "a profile called ''".
+			ingressJSON("monitoring", "loki", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "",
+			}, "loki.example.com"),
+			// So is a whitespace-only one.
+			ingressJSON("monitoring", "tempo", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "   ",
+			}, "tempo.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	settings.IngressDiscovery.Template.Middlewares = []string{"rate-limit"}
+	settings.IngressDiscovery.Template.AccessLists = []string{"home-vpn"}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 3 || len(rec.deletes) != 0 {
+		t.Fatalf("upserts=%d deletes=%d, want all three derived from the default template", len(rec.upserts), len(rec.deletes))
+	}
+	for _, h := range rec.upserts {
+		if strings.Join(h.Middlewares, ",") != "rate-limit" || strings.Join(h.AccessLists, ",") != "home-vpn" {
+			t.Fatalf("%s got mw=%v al=%v, want the DEFAULT template's chain", h.Name, h.Middlewares, h.AccessLists)
+		}
+		if h.Upstream != (model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
+			t.Fatalf("%s upstream = %+v, want the default template's", h.Name, h.Upstream)
+		}
+	}
+	for _, r := range d.Status().Hosts {
+		if r.Profile != model.DefaultProfileName {
+			t.Fatalf("status for %s reports profile %q, want %q", r.Name, r.Profile, model.DefaultProfileName)
+		}
+	}
+}
+
+// A named profile is applied VERBATIM - the whole chain, not a merge with the
+// default. A merge would mean the default's access list silently leaks onto a
+// profile that is public on purpose.
+func TestReconcileAppliesTheNamedProfileVerbatim(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	// A default that would be WRONG for this host, so inheriting any of it shows up.
+	settings.IngressDiscovery.Template.Middlewares = []string{"joplin-login-lan"}
+	settings.IngressDiscovery.Template.AccessLists = []string{"lan-only"}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	want := settings.IngressDiscovery.Profiles["sso-internal"]
+	if strings.Join(h.Middlewares, ",") != "sso,rate-limit" {
+		t.Fatalf("middlewares = %v, want the profile's chain in order", h.Middlewares)
+	}
+	if strings.Join(h.AccessLists, ",") != "home-vpn" {
+		t.Fatalf("accessLists = %v, want the profile's", h.AccessLists)
+	}
+	if h.TLS != want.TLS {
+		t.Fatalf("tls = %+v, want the profile's %+v", h.TLS, want.TLS)
+	}
+	if h.UpstreamGroupRef != "k8s-nodes" || h.Upstream != (model.Upstream{}) {
+		t.Fatalf("upstream = %+v / group = %q, want the profile's group and no single upstream", h.Upstream, h.UpstreamGroupRef)
+	}
+	if !h.WebsocketsUpgrade {
+		t.Fatal("websocketsUpgrade must come from the profile")
+	}
+	if h.DNS == nil || !h.DNS.LanDirect {
+		t.Fatalf("dns = %+v, want the profile's defaultDNS", h.DNS)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+	st := d.Status()
+	if len(st.Hosts) != 1 || st.Hosts[0].Profile != "sso-internal" {
+		t.Fatalf("status must report the resolved profile for the audit trail: %+v", st.Hosts)
+	}
+}
+
+// Naming a profile that does not exist is a SKIP. It must NOT get the default
+// chain (that is the silent-downgrade bug), must not be adopted with a partial
+// chain, and must not disturb the host that is already there for that Ingress -
+// a typo in an annotation cannot take a service offline.
+func TestReconcileSkipsAnUndefinedProfile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "no-such-profile",
+			}, "paste.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	settings.IngressDiscovery.Template.Middlewares = []string{"should-not-appear"}
+
+	// The host this Ingress already produced, under a chain it was given earlier.
+	existing := managedHostFixture("ing-paste.web", "paste.example.com")
+	existing.Middlewares = []string{"rate-limit"}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("apply was called %d times; an unresolvable profile must write NOTHING (no create, no update, no delete)", rec.calls)
+	}
+	st := d.Status()
+	if st.Skipped != 1 || st.Created != 0 || st.Updated != 0 || st.Deleted != 0 {
+		t.Fatalf("status = %+v, want exactly one skip", st)
+	}
+	if len(st.Hosts) != 1 {
+		t.Fatalf("hosts = %+v, want one result", st.Hosts)
+	}
+	r := st.Hosts[0]
+	if r.Action != ActionSkipped {
+		t.Fatalf("action = %q, want %q", r.Action, ActionSkipped)
+	}
+	if !strings.Contains(r.Reason, "no-such-profile") || !strings.Contains(r.Reason, "not defined") {
+		t.Fatalf("reason = %q, want it to name the undefined profile", r.Reason)
+	}
+	if r.Profile != "no-such-profile" {
+		t.Fatalf("status must report the REQUESTED profile so the operator can see the typo, got %q", r.Profile)
+	}
+	if st.Managed != 1 {
+		t.Fatalf("managed = %d, want the existing host still counted (the skip protects it from deletion)", st.Managed)
+	}
+	// And the same at plan level, where deletion is actually decided: the derived
+	// name must be protected rather than fall out of the desired set as garbage.
+	var ing Ingress
+	ing.Metadata.Namespace, ing.Metadata.Name = "web", "paste"
+	ing.Metadata.Annotations = map[string]string{
+		model.AnnotationManaged: "true", model.AnnotationProfile: "no-such-profile",
+	}
+	ing.Spec.Rules = []struct {
+		Host string `json:"host"`
+	}{{Host: "paste.example.com"}}
+	p := planReconcile(*cfg, settings.IngressDiscovery, []Ingress{ing})
+	if len(p.deletes) != 0 || len(p.upserts) != 0 {
+		t.Fatalf("plan = +%d -%d, want neither: the host is protected, not rewritten", len(p.upserts), len(p.deletes))
+	}
+}
+
+// The profile name is untrusted input from a cluster manifest. Every junk value
+// must either match a defined profile EXACTLY or be skipped - never a partial
+// match, never a fall back to the default, never a panic.
+func TestUndefinedProfileNamesAreAllRejected(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			AccessLists: []string{"home-vpn"},
+		},
+		Profiles: map[string]model.IngressHostTemplate{
+			"public-ratelimited": {
+				Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+				Middlewares: []string{"rate-limit"},
+			},
+		},
+	}
+	tests := []struct {
+		name    string
+		value   string
+		wantMW  string // "" = the Ingress must be skipped
+		wantAL  string
+		profile string
+	}{
+		{"absent", "", "", "home-vpn", model.DefaultProfileName},
+		{"whitespace only", "  \t ", "", "home-vpn", model.DefaultProfileName},
+		{"exact", "public-ratelimited", "rate-limit", "", "public-ratelimited"},
+		{"padded exact", " public-ratelimited ", "rate-limit", "", "public-ratelimited"},
+		{"unknown", "nope", "skip", "", ""},
+		{"prefix of a real profile", "public", "skip", "", ""},
+		{"suffix of a real profile", "ratelimited", "skip", "", ""},
+		{"real profile with a suffix", "public-ratelimited-x", "skip", "", ""},
+		{"case folded", "PUBLIC-RATELIMITED", "skip", "", ""},
+		{"the reserved default name", model.DefaultProfileName, "skip", "", ""},
+		{"path traversal", "../../etc/passwd", "skip", "", ""},
+		{"path traversal onto a profile", "../public-ratelimited", "skip", "", ""},
+		{"glob", "*", "skip", "", ""},
+		{"comma list", "public-ratelimited,sso", "skip", "", ""},
+		{"newline injection", "public-ratelimited\nsso", "skip", "", ""},
+		{"null byte", "public-ratelimited\x00", "skip", "", ""},
+		{"template injection", "${public-ratelimited}", "skip", "", ""},
+		{"unicode lookalike", "рublic-ratelimited", "skip", "", ""}, // Cyrillic 'р'
+		{"very long", strings.Repeat("z", 16384), "skip", "", ""},
+		{"long with a real name inside", strings.Repeat("z", 8192) + "public-ratelimited", "skip", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var ing Ingress
+			ing.Metadata.Namespace, ing.Metadata.Name = "web", "app"
+			ing.Metadata.Annotations = map[string]string{
+				model.AnnotationManaged: "true",
+				model.AnnotationProfile: tc.value,
+			}
+			ing.Spec.Rules = []struct {
+				Host string `json:"host"`
+			}{{Host: "app.example.com"}}
+
+			p := planReconcile(model.Config{}, conf, []Ingress{ing})
+			if tc.wantMW == "skip" {
+				if len(p.upserts) != 0 || p.skipped != 1 {
+					t.Fatalf("upserts=%d skipped=%d, want the Ingress skipped", len(p.upserts), p.skipped)
+				}
+				if len(p.results) != 1 || !strings.Contains(p.results[0].Reason, "not defined") {
+					t.Fatalf("results = %+v, want a not-defined skip reason", p.results)
+				}
+				return
+			}
+			if len(p.upserts) != 1 {
+				t.Fatalf("upserts = %d, want 1 (%q must resolve)", len(p.upserts), tc.value)
+			}
+			h := p.upserts[0]
+			if strings.Join(h.Middlewares, ",") != tc.wantMW || strings.Join(h.AccessLists, ",") != tc.wantAL {
+				t.Fatalf("mw=%v al=%v, want mw=%q al=%q", h.Middlewares, h.AccessLists, tc.wantMW, tc.wantAL)
+			}
+			if p.results[0].Profile != tc.profile {
+				t.Fatalf("profile = %q, want %q", p.results[0].Profile, tc.profile)
+			}
+		})
+	}
+}
+
+// Two Ingresses selecting different profiles in one reconcile must each get
+// their own chain - profile resolution is per-Ingress, not per-run.
+func TestReconcileDerivesTwoProfilesInOneRun(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "public-ratelimited",
+			}, "paste.example.com"),
+			ingressJSON("media", "radarr", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "radarr.example.com"),
+			// And one on the default, to prove all three coexist.
+			ingressJSON("monitoring", "grafana", map[string]string{
+				model.AnnotationManaged: "true",
+			}, "grafana.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 3 {
+		t.Fatalf("upserts = %d, want 3", len(rec.upserts))
+	}
+	got := map[string]model.ProxyHost{}
+	for _, h := range rec.upserts {
+		got[h.Name] = h
+	}
+	// Deliberately public: a rate limit and NO access list. The default's access
+	// list must not have leaked onto it.
+	pub := got["ing-paste.web"]
+	if strings.Join(pub.Middlewares, ",") != "rate-limit" || len(pub.AccessLists) != 0 {
+		t.Fatalf("public host: mw=%v al=%v, want rate-limit and no access list", pub.Middlewares, pub.AccessLists)
+	}
+	sso := got["ing-radarr.media"]
+	if strings.Join(sso.Middlewares, ",") != "sso,rate-limit" || strings.Join(sso.AccessLists, ",") != "home-vpn" {
+		t.Fatalf("sso host: mw=%v al=%v", sso.Middlewares, sso.AccessLists)
+	}
+	if sso.UpstreamGroupRef != "k8s-nodes" {
+		t.Fatalf("sso host upstreamGroupRef = %q, want the profile's", sso.UpstreamGroupRef)
+	}
+	def := got["ing-grafana.monitoring"]
+	if len(def.Middlewares) != 0 || len(def.AccessLists) != 0 || def.UpstreamGroupRef != "" {
+		t.Fatalf("default host picked up a profile's chain: %+v", def)
+	}
+	profiles := map[string]string{}
+	for _, r := range d.Status().Hosts {
+		profiles[r.Name] = r.Profile
+	}
+	want := map[string]string{
+		"ing-paste.web":          "public-ratelimited",
+		"ing-radarr.media":       "sso-internal",
+		"ing-grafana.monitoring": model.DefaultProfileName,
+	}
+	for name, w := range want {
+		if profiles[name] != w {
+			t.Fatalf("status profile for %s = %q, want %q", name, profiles[name], w)
+		}
+	}
+}
+
+// The domain-shadowing gate is orthogonal to profiles: naming a profile must not
+// buy an Ingress a domain an operator-authored host already serves.
+func TestProfileDoesNotBypassDomainShadowing(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("tenant", "grab", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "public-ratelimited",
+			}, "sso.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "sso"},
+		Domains:    []string{"sso.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.9", Port: 80},
+	}}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("apply was called; a profile must not let an Ingress shadow an operator host")
+	}
+	st := d.Status()
+	if st.Skipped != 1 || !strings.Contains(st.Hosts[0].Reason, "already claimed") {
+		t.Fatalf("status = %+v, want a domain-claim skip", st.Hosts)
+	}
+}
+
+// The rejected profile name is echoed into the status payload and the log, and
+// it comes from a cluster annotation, so it must be bounded - and cut on a rune
+// boundary, or a truncated multi-byte sequence would put invalid UTF-8 into the
+// JSON response.
+func TestEllipsizeBoundsUntrustedNames(t *testing.T) {
+	tests := []struct {
+		in  string
+		max int
+	}{
+		{"short", 64},
+		{strings.Repeat("a", 64), 64},
+		{strings.Repeat("a", 65), 64},
+		{strings.Repeat("z", 16384), 64},
+		{strings.Repeat("é", 100), 9}, // 2 bytes per rune: the cut lands mid-rune
+		{strings.Repeat("é世", 50), 7},
+	}
+	for _, tc := range tests {
+		got := ellipsize(tc.in, tc.max)
+		if len(got) > tc.max+3 {
+			t.Fatalf("ellipsize(len %d, %d) returned %d bytes", len(tc.in), tc.max, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("ellipsize produced invalid UTF-8 from a %d-byte input", len(tc.in))
+		}
+		if len(tc.in) <= tc.max && got != tc.in {
+			t.Fatalf("ellipsize must not touch a string within the bound, got %q", got)
+		}
+	}
+}
+
+// End to end: a 16 KiB annotation value must not put 16 KiB into the status.
+func TestUndefinedProfileReasonIsBounded(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+		},
+	}
+	var ing Ingress
+	ing.Metadata.Namespace, ing.Metadata.Name = "web", "app"
+	ing.Metadata.Annotations = map[string]string{
+		model.AnnotationManaged: "true",
+		model.AnnotationProfile: strings.Repeat("q", 16384),
+	}
+	ing.Spec.Rules = []struct {
+		Host string `json:"host"`
+	}{{Host: "app.example.com"}}
+
+	p := planReconcile(model.Config{}, conf, []Ingress{ing})
+	if p.skipped != 1 || len(p.results) != 1 {
+		t.Fatalf("plan = %+v, want one skip", p.results)
+	}
+	if len(p.results[0].Profile) > 128 || len(p.results[0].Reason) > 512 {
+		t.Fatalf("status echoed %d bytes of profile and %d of reason from one annotation",
+			len(p.results[0].Profile), len(p.results[0].Reason))
 	}
 }

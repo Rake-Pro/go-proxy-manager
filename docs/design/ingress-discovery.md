@@ -358,11 +358,135 @@ CNAME), so a discovered wildcard host would silently publish nothing.
 
 No annotation, label, or field of an Ingress can contribute a middleware
 reference, an access-list reference, an upstream, a certificate, a path, or a
-header. The template is the **only** source for everything security-relevant.
-This is the core containment property: a cluster user who can edit an Ingress
-can (a) publish a hostname within the allowed suffixes and (b) toggle two DNS
-booleans — and can never weaken the auth/access chain the operator configured,
-nor point gpm at an address of their choosing.
+header. The operator's profile set is the **only** source for everything
+security-relevant. This is the core containment property: a cluster user who can
+edit an Ingress can (a) publish a hostname within the allowed suffixes, (b)
+toggle two DNS booleans, and (c) **name** one of the operator's profiles — and
+can never weaken the auth/access chain the operator configured, nor point gpm at
+an address of their choosing.
+
+---
+
+## 5a. Named profiles: one template does not fit a real fleet
+
+### The problem
+
+The original design derived every host from one `template`, which supplies the
+middleware and access-list chain. A real fleet is heterogeneous. Ours looks like
+this:
+
+| host | middlewares | access lists |
+|---|---|---|
+| `paste` | `rate-limit` | *(none — deliberately public)* |
+| `notes` | `joplin-login-lan` | `home-vpn` |
+| `wiki` | `rate-limit` | `home-vpn` |
+| `cloud` | `nextcloud-login-lan` | *(none — public)* |
+| `plex` | *(none)* | *(none — public)* |
+| `radarr` / `jackett` | `sso` / `sso-lan` | `home-vpn` |
+| `alertmanager` | `sso-lan` | `home-vpn` |
+| most others | *(none)* | `home-vpn` |
+
+Only the last group matches the single template. Adopting anything else into
+discovery would either **drop** its `sso` / `rate-limit` / login middleware, or
+**impose** `home-vpn` on a host that is public on purpose. Both are
+security-relevant regressions, and both are silent — the host keeps serving, just
+with a chain nobody chose. So in practice discovery could only ever adopt the
+uniform tail of the fleet, which is not where the operational cost is.
+
+### Options
+
+- **A. Per-Ingress fields.** Annotations that name middlewares, access lists,
+  upstreams, certificates. Maximum flexibility.
+- **B. Operator-defined named profiles, selected by annotation.** The operator
+  writes N chains in settings; an Ingress names one.
+- **C. Selector-based mapping.** Operator writes rules in settings
+  (`namespace == x AND label y ⇒ profile p`). Nothing on the Ingress at all.
+
+### Decision: **B — named profiles, selected by name only.**
+
+#### Threat model: the Ingress author is untrusted
+
+This is the whole design constraint, so state it plainly. A cluster tenant may be
+able to create or edit an `Ingress` — that is normal RBAC in a shared cluster,
+and it is *why* discovery is opt-in and suffix-bounded in the first place. gpm
+sits at the edge in front of everything. Therefore an Ingress author must never
+be able to:
+
+- invent a chain that no operator ever wrote down,
+- name an arbitrary middleware, access list, certificate or upstream,
+- produce a host **weaker** than something the operator explicitly sanctioned.
+
+Option A fails all three by construction. `gpm.rake.pro/access-lists: ""` on your
+own namespace's Ingress is a self-service removal of `home-vpn` from a hostname
+at the edge; `gpm.rake.pro/upstream: http://10.0.0.99:80` aims the edge at an
+address of the tenant's choosing. There is no validation that fixes this, because
+the vocabulary itself is the privilege — any middleware the operator has defined
+is by definition one the operator considered acceptable *somewhere*, not
+everywhere.
+
+Option B moves the entire vocabulary into settings, which lives in the config git
+repo and is written by the operator. The annotation carries **a name and nothing
+else**, and every name it can carry maps to a chain the operator authored in
+full. The tenant's power reduces to *choosing among sanctioned configurations* —
+still a real capability (a tenant can pick the most permissive profile you
+defined), but bounded by a set you control and can audit, rather than unbounded.
+The mitigation for the residual is that you only define profiles you are willing
+for any annotating tenant to select; if that is too coarse, option C is the
+escalation path.
+
+Option C is strictly stronger (nothing on the Ingress selects anything) but
+inverts the ergonomics: the operator has to maintain a rule table that mirrors
+the cluster's shape, and every new service needs a settings commit before it can
+be published — which is most of the toil discovery exists to remove. Deferred,
+not rejected: profiles are the substrate a selector layer would sit on.
+
+#### Resolution rules
+
+`gpm.rake.pro/profile` is resolved before anything else about the Ingress is
+derived:
+
+| annotation | result |
+|---|---|
+| absent | the default `template` block |
+| present but empty or whitespace-only | treated as absent → the default `template` |
+| exact match on a defined profile (surrounding whitespace trimmed) | that profile, **verbatim** |
+| anything else | the Ingress is **SKIPPED**, with the requested name in the status reason and a `warn` log |
+
+The two rules that matter:
+
+**An unknown profile is a skip, never a fall back to the default.** Falling back
+is precisely the silent downgrade the feature exists to prevent — an Ingress that
+asked for `public-ratelimited` and received the default's `home-vpn`, or worse,
+one that asked for `sso-internal`, hit a typo, and got a chain with no `sso` in
+it. A skip is loud, visible in `GET /ingress-discovery/status`, and leaves
+whatever is on disk untouched. For the same reason a skipped Ingress **protects**
+its existing derived host from deletion: a typo in an annotation must not take a
+service offline either.
+
+**A profile is applied verbatim, never merged with the default.** A merge would
+mean the default's access list leaks onto a profile that is public on purpose —
+the exact failure the feature is meant to eliminate. Each profile is a complete,
+independently-valid chain.
+
+There is no prefix matching, no case folding and no nearest-neighbour guess:
+those are the ways a junk or hostile annotation value turns into a chain nobody
+chose. The name `template` is reserved for the default block, so the profile
+reported in status is never ambiguous.
+
+#### Validation
+
+Every profile validates **exactly** as the template does — `certificateRef`
+required, `upstream` XOR `upstreamGroupRef`, `ValidateName` on every middleware
+and access-list reference, plus `ValidateName` on the profile's own key. It runs
+at `Settings.Validate`, so an invalid profile fails the settings **write**, where
+an operator sees it, rather than surfacing hours later as a skipped host in a
+reconcile status nobody is watching.
+
+#### Backwards compatibility
+
+`template` stays exactly what it was and becomes the default profile. A config
+with no `profiles` key, and Ingresses with no `profile` annotation, behaves
+identically to before — covered by a regression test.
 
 ### Naming of derived objects
 
@@ -426,7 +550,8 @@ takes a `load` func and an `apply` func and imports neither `store` nor `api`.
 |---|---|
 | gpm never writes to the cluster | shipped ClusterRole grants `list` on `ingresses` only (the reconciler never gets by name and never watches); no write verb exists to call |
 | Opt-in only | `gpm.rake.pro/managed: "true"` exactly; absent/any other value = invisible. No namespace sweep mode exists |
-| No privilege inheritance from cluster manifests | every security-relevant field comes from the template; the Ingress contributes hostnames (validated, suffix-restricted) and two booleans |
+| No privilege inheritance from cluster manifests | every security-relevant field comes from an operator-written profile; the Ingress contributes hostnames (validated, suffix-restricted), two booleans, and the *name* of one profile — never a chain, a middleware, an access list, a certificate or an upstream (§5a) |
+| Untrusted profile selection | exact-match only against `settings.ingressDiscovery.profiles`; an undefined name **skips** the Ingress rather than falling back to the default (which would be a silent downgrade), and a profile is applied verbatim rather than merged with the default |
 | Untrusted strings | strict hostname validation + allowed-suffix gate + `model.ValidateName` on the derived name; upstream is never built from Ingress input |
 | Credential handling | bearer token read from a file, re-read on a TTL (projected SA tokens rotate), never logged, never returned by any endpoint, never committed to git |
 | Transport | TLS with the supplied CA bundle, redirects never followed, bounded response reads, bounded timeouts — the same hardening as `internal/dnssync` |
@@ -497,3 +622,10 @@ repo entirely rather than relying on placeholder discipline.
 - A dry-run mode (`GET /ingress-discovery/plan`) that reports the diff without
   writing. Cheap to add on top of the reconciler's existing plan/apply split if
   operators ask for it.
+- **Operator-side profile selection** (option C in §5a): mapping rules in
+  settings (`namespace`/label ⇒ profile) so the Ingress selects nothing at all.
+  Strictly stronger than the annotation, at the cost of a settings commit per new
+  service. Profiles are the substrate it would sit on.
+- **Per-profile `allowedDomainSuffixes`**, so a permissive profile could be
+  restricted to a subset of the published namespace. The current suffix list is
+  global.

@@ -289,9 +289,19 @@ Then annotate the Ingresses you want published — and only those:
 metadata:
   annotations:
     gpm.rake.pro/managed: "true"
-    gpm.rake.pro/lan-direct: "true"      # optional, overrides template.defaultDNS
+    gpm.rake.pro/profile: "sso-internal" # optional, names a settings profile
+    gpm.rake.pro/lan-direct: "true"      # optional, overrides the profile's defaultDNS
     gpm.rake.pro/public-cname: "false"   # optional
 ```
+
+`gpm.rake.pro/profile` names one of `settings.ingressDiscovery.profiles`; omit it
+and the default `template` applies. Naming a profile that is not defined
+**skips** the Ingress (visible in the status below) rather than falling back to
+the default, so a typo shows up instead of silently changing a host's middleware
+or access-list chain. The annotation can only carry a *name* — there is
+deliberately no annotation that names a middleware, access list, certificate or
+upstream, because an Ingress author is untrusted. See
+[configuration.md](configuration.md#discovery-profiles).
 
 ```
 # Reconcile on demand and read the result.

@@ -63,10 +63,13 @@ builds it with a narrower, more focused design:
   resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
   records it can prove it created
 - **Kubernetes Ingress discovery** — opt an `Ingress` in with one annotation and
-  gpm derives a proxy host from your template (read-only against the cluster, no
-  `client-go`), which then feeds the same DNS sync; only its own labelled objects
-  are ever touched, and it freezes rather than deleting when the cluster cannot
-  be read
+  gpm derives a proxy host from your template, or from one of your **named
+  profiles** the manifest picks by name (read-only against the cluster, no
+  `client-go`), which then feeds the same DNS sync; the annotation can only carry
+  a profile *name*, never a middleware/access-list/upstream, so a cluster
+  manifest can never weaken a chain you configured; only gpm's own labelled
+  objects are ever touched, and it freezes rather than deleting when the cluster
+  cannot be read
 
 **Operations**
 - REST API + embedded single-page web UI

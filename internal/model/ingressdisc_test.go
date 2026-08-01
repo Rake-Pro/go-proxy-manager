@@ -1,9 +1,12 @@
 package model
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func validIngressDiscovery() IngressDiscoverySettings {
@@ -72,6 +75,67 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 			d.Template.Middlewares = []string{"sso"}
 			d.Template.AccessLists = []string{"lan-only"}
 		}, ""},
+
+		// A named profile is a full chain an untrusted Ingress can select, so it is
+		// held to EXACTLY the template's standard - and at settings-write time, not
+		// at reconcile time where an operator would never see the failure.
+		{"valid profile accepted", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"public-ratelimited": {
+				Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+				Middlewares: []string{"rate-limit"},
+			}}
+		}, ""},
+		{"profile without certificateRef", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			}}
+		}, `profiles["sso-internal"].tls.certificateRef is required`},
+		{"profile with both upstream and group", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream:         Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				UpstreamGroupRef: "k8s-nodes",
+				TLS:              TLSSettings{CertificateRef: "wildcard"},
+			}}
+		}, `profiles["sso-internal"]: upstream and upstreamGroupRef are mutually exclusive`},
+		{"profile with a bad middleware name", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:         TLSSettings{CertificateRef: "wildcard"},
+				Middlewares: []string{"Bad Name"},
+			}}
+		}, `profiles["sso-internal"].middlewares[0]`},
+		{"profile with a bad access list name", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:         TLSSettings{CertificateRef: "wildcard"},
+				AccessLists: []string{""},
+			}}
+		}, `profiles["sso-internal"].accessLists[0]`},
+		{"profile with an invalid upstream", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 70000},
+				TLS:      TLSSettings{CertificateRef: "wildcard"},
+			}}
+		}, `profiles["sso-internal"].upstream`},
+		{"profile tls validated", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      TLSSettings{CertificateRef: "wildcard", MinTLSVersion: "1.1"},
+			}}
+		}, `profiles["sso-internal"].tls`},
+		{"profile name shape", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"Not A Name": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      TLSSettings{CertificateRef: "wildcard"},
+			}}
+		}, "profiles"},
+		{"profile may not be called template", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{DefaultProfileName: {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      TLSSettings{CertificateRef: "wildcard"},
+			}}
+		}, "reserved"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,6 +170,166 @@ func TestSettingsValidateIncludesIngressDiscovery(t *testing.T) {
 	s.IngressDiscovery.AllowedDomainSuffixes = []string{"example.com"}
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Settings.Validate() = %v", err)
+	}
+}
+
+// An invalid profile must be rejected by the WHOLE-settings gate too - a
+// settings PUT is the only place an operator will ever see the error.
+func TestSettingsValidateIncludesProfiles(t *testing.T) {
+	s := DefaultSettings()
+	s.IngressDiscovery = validIngressDiscovery()
+	s.IngressDiscovery.Profiles = map[string]IngressHostTemplate{
+		"public-ratelimited": {Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}},
+	}
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "certificateRef is required") {
+		t.Fatalf("Settings.Validate() = %v, want the profile's missing certificateRef", err)
+	}
+	s.IngressDiscovery.Profiles["public-ratelimited"] = IngressHostTemplate{
+		Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+		Middlewares: []string{"rate-limit"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Settings.Validate() = %v", err)
+	}
+}
+
+// The profile annotation is attacker-controlled: a cluster tenant may be able to
+// create or edit an Ingress. Every value must either match a defined profile
+// EXACTLY or fail to resolve; there is no partial match, no case folding, no
+// nearest-neighbour guess, and never a silent fall back to the default for a
+// value that named something.
+func TestResolveProfile(t *testing.T) {
+	sso := IngressHostTemplate{
+		Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+		Middlewares: []string{"sso"},
+		AccessLists: []string{"home-vpn"},
+	}
+	def := IngressHostTemplate{
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+	}
+	d := IngressDiscoverySettings{
+		Template: def,
+		Profiles: map[string]IngressHostTemplate{"sso-internal": sso, "public-ratelimited": {}},
+	}
+
+	tests := []struct {
+		name     string
+		raw      string
+		wantName string
+		wantOK   bool
+	}{
+		{"absent", "", DefaultProfileName, true},
+		{"whitespace only is absent", "   ", DefaultProfileName, true},
+		{"tab and newline only is absent", "\t\n", DefaultProfileName, true},
+		{"exact match", "sso-internal", "sso-internal", true},
+		{"surrounding whitespace trimmed", "  sso-internal  ", "sso-internal", true},
+		{"unknown name", "does-not-exist", "does-not-exist", false},
+		{"prefix must not match", "sso", "sso", false},
+		{"suffix must not match", "internal", "internal", false},
+		{"substring must not match", "so-intern", "so-intern", false},
+		{"case must not fold", "SSO-Internal", "SSO-Internal", false},
+		{"reserved default name is not a profile", DefaultProfileName, DefaultProfileName, false},
+		{"path traversal", "../../etc/passwd", "../../etc/passwd", false},
+		{"path traversal onto a real profile", "../sso-internal", "../sso-internal", false},
+		{"separator injection", "sso-internal,public-ratelimited", "sso-internal,public-ratelimited", false},
+		{"null byte", "sso-internal\x00", "sso-internal\x00", false},
+		{"newline injection", "sso-internal\nrate-limit", "sso-internal\nrate-limit", false},
+		{"glob", "*", "*", false},
+		{"yaml-ish", "{sso-internal}", "{sso-internal}", false},
+		{"template injection", "${sso-internal}", "${sso-internal}", false},
+		{"unicode lookalike", "ѕso-internal", "ѕso-internal", false}, // Cyrillic 'ѕ'
+		{"unicode zero width", "sso-​internal", "sso-​internal", false},
+		{"unicode normalisation is not applied", "sso-internaĺ", "sso-internaĺ", false},
+		{"very long", strings.Repeat("a", 8192), strings.Repeat("a", 8192), false},
+		{"long with a real name inside", strings.Repeat("a", 4096) + "sso-internal", strings.Repeat("a", 4096) + "sso-internal", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, name, ok := d.ResolveProfile(tc.raw)
+			if ok != tc.wantOK || name != tc.wantName {
+				t.Fatalf("ResolveProfile(%q) = (_, %q, %v), want (%q, %v)", tc.raw, name, ok, tc.wantName, tc.wantOK)
+			}
+			if !ok {
+				// A failed resolution must hand back nothing usable: a caller that
+				// ignored ok must not accidentally build a host from a real chain.
+				if got.TLS.CertificateRef != "" || len(got.Middlewares) != 0 || len(got.AccessLists) != 0 {
+					t.Fatalf("a failed resolution returned a usable template: %+v", got)
+				}
+				return
+			}
+			want := def
+			if name != DefaultProfileName {
+				want = d.Profiles[name]
+			}
+			if got.TLS.CertificateRef != want.TLS.CertificateRef ||
+				strings.Join(got.Middlewares, ",") != strings.Join(want.Middlewares, ",") ||
+				strings.Join(got.AccessLists, ",") != strings.Join(want.AccessLists, ",") {
+				t.Fatalf("ResolveProfile(%q) returned %+v, want %+v", tc.raw, got, want)
+			}
+		})
+	}
+
+	// With no profiles configured at all, only the default resolves - naming
+	// anything fails closed rather than matching a nil map loosely.
+	bare := IngressDiscoverySettings{Template: def}
+	if _, name, ok := bare.ResolveProfile(""); !ok || name != DefaultProfileName {
+		t.Fatalf("no profiles configured: absent annotation must still give the default, got %q/%v", name, ok)
+	}
+	if _, _, ok := bare.ResolveProfile("anything"); ok {
+		t.Fatal("no profiles configured: naming one must not resolve")
+	}
+}
+
+// Settings are persisted as YAML, so a profile map that did not round-trip would
+// be silently dropped on the next save - the chain would vanish and every host
+// selecting it would start being skipped.
+func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
+	in := DefaultSettings()
+	in.IngressDiscovery = validIngressDiscovery()
+	in.IngressDiscovery.Profiles = map[string]IngressHostTemplate{
+		"public-ratelimited": {
+			Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			Middlewares: []string{"rate-limit"},
+		},
+		"sso-internal": {
+			UpstreamGroupRef:  "k8s-nodes",
+			TLS:               TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			WebsocketsUpgrade: true,
+			Middlewares:       []string{"sso", "rate-limit"},
+			AccessLists:       []string{"home-vpn"},
+			DefaultDNS:        &DNSSyncPolicy{LanDirect: true},
+		},
+	}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("fixture must be valid: %v", err)
+	}
+	b, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Settings
+	if err := yaml.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in.IngressDiscovery.Profiles, out.IngressDiscovery.Profiles) {
+		t.Fatalf("profiles did not round-trip:\n got %+v\nwant %+v", out.IngressDiscovery.Profiles, in.IngressDiscovery.Profiles)
+	}
+	if err := out.Validate(); err != nil {
+		t.Fatalf("round-tripped settings must still validate: %v", err)
+	}
+}
+
+func TestProfileNamesSorted(t *testing.T) {
+	d := IngressDiscoverySettings{Profiles: map[string]IngressHostTemplate{"z": {}, "a": {}, "m": {}}}
+	if got := strings.Join(d.ProfileNames(), ","); got != "a,m,z" {
+		t.Fatalf("ProfileNames() = %q, want a deterministic sorted list", got)
+	}
+	if got := (IngressDiscoverySettings{}).ProfileNames(); len(got) != 0 {
+		t.Fatalf("ProfileNames() on an empty config = %v", got)
 	}
 }
 

@@ -144,9 +144,18 @@ per-reconcile deadline, or a `200` whose body is not a `kind: IngressList` abort
 before any write, and the client never returns a partial list with a nil error,
 so "empty" and "failed" are different return shapes rather than different values
 of one. Everything security-relevant on a
-derived host (upstream, certificate, middleware, access lists) comes from the
-operator's template; the Ingress contributes only strictly-validated,
-suffix-restricted hostnames and two DNS booleans. Because gpm is off-cluster,
+derived host (upstream, certificate, middleware, access lists) comes from an
+operator-authored chain — the default `template`, or one of the named
+`profiles` an Ingress may **select by name** with `gpm.rake.pro/profile`. The
+Ingress contributes only strictly-validated, suffix-restricted hostnames, two DNS
+booleans, and that one name. Profiles exist because a real fleet is
+heterogeneous (public-and-rate-limited, SSO-and-VPN, login-middleware) and a
+single template can only adopt the group that happens to match it; the annotation
+carries a *name* and never a chain, so a cluster tenant chooses among
+configurations the operator sanctioned but can never invent one, and an undefined
+profile name skips the Ingress rather than silently downgrading it to the
+default. Every profile validates exactly as the template does, at settings-write
+time. Because gpm is off-cluster,
 in-cluster Service DNS is unusable, so the upstream is the ingress controller's
 address and the data plane's preserved `Host` header is what routes the request
 to the right workload. A whole reconcile lands as **one commit**
@@ -283,7 +292,9 @@ own address are rewritten to the public scheme/host.
   shipped RBAC grants `list` on `ingresses` and nothing else — and
   an `Ingress` without `gpm.rake.pro/managed: "true"` is invisible. There is no
   namespace-sweep mode, and no field of an Ingress can supply an upstream, a
-  certificate, a middleware or an access list.
+  certificate, a middleware or an access list — only the *name* of an
+  operator-authored discovery profile, which is why there is no annotation that
+  names those objects directly.
 
 ## Dependencies
 

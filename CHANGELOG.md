@@ -9,6 +9,46 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Added
 
+- **Ingress discovery: operator-defined named profiles, selected per Ingress.**
+  `settings.ingressDiscovery.profiles` is a map of named chains, each with the
+  same shape and the same validation as `template`; an `Ingress` selects one with
+  `gpm.rake.pro/profile: "<name>"`. Discovery previously derived every host from
+  the single `template`, so it could only adopt the uniform tail of a fleet -
+  publishing anything else would silently **drop** its `sso`/`rate-limit`/login
+  middleware or **impose** an access list on a host that is public on purpose,
+  both security-relevant regressions that leave the host serving under a chain
+  nobody chose. `template` is unchanged and now acts as the default profile, so
+  existing configs and existing annotated Ingresses behave identically (covered
+  by a regression test).
+
+  **The annotation carries a name and nothing else, and that is the security
+  constraint.** An Ingress author is untrusted - in a shared cluster a tenant may
+  be able to create or edit an `Ingress`, and gpm sits at the edge in front of
+  everything - so there is deliberately **no** annotation that lets a manifest
+  name a middleware, an access list, a certificate or an upstream. Such an
+  annotation would be a self-service privilege grant (`access-lists: ""` on your
+  own namespace's Ingress removes `home-vpn` from a hostname at the edge). Every
+  profile is authored by the operator in the config repo; a manifest chooses
+  among sanctioned chains and can never invent one, nor end up weaker than
+  something the operator explicitly allowed. An **undefined** profile name
+  **skips** the Ingress - never a silent fall back to the default, never a
+  partial chain - and the skip protects any existing derived host for that
+  Ingress from deletion, so a typo cannot take a service offline. Matching is
+  exact (no prefix match, no case folding); a profile is applied verbatim rather
+  than merged with the default, so the default's access list cannot leak onto a
+  deliberately-public profile. Every profile validates at settings-**write** time
+  (`certificateRef` required, `upstream` XOR `upstreamGroupRef`, name-checked
+  middleware/access-list refs), so an invalid one is rejected where an operator
+  sees it rather than surfacing later as a skipped host.
+  `GET /ingress-discovery/status` now reports the resolved `profile` per host
+  (the literal `template` for the default block) as the audit trail for what
+  chain a given Ingress actually got, and the settings UI grows a profile editor
+  plus the resolved profile in its status panel. Threat model and resolution
+  rules in
+  [docs/design/ingress-discovery.md §5a](docs/design/ingress-discovery.md);
+  schema and a worked example in
+  [docs/configuration.md](docs/configuration.md#discovery-profiles).
+
 - **Ingress discovery templates can name an upstream group.**
   `settings.ingressDiscovery.template.upstreamGroupRef` is an alternative to a
   single `upstream` address, mutually exclusive with it exactly as on a proxy
