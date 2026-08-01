@@ -289,9 +289,19 @@ an access list, a certificate or an upstream, because such an annotation is a
 self-service privilege grant — `access-lists: ""` on your own namespace's Ingress
 would remove `home-vpn` from a hostname at the edge. Every profile is written by
 you, here, in the config repo; a manifest chooses among them and can never invent
-one, and can never produce a host weaker than something you explicitly
-sanctioned. Full threat model in
-[design/ingress-discovery.md §5a](design/ingress-discovery.md).
+one, so a derived host is always one of a set you authored and can audit.
+
+**The residual risk, stated plainly: every profile is selectable by every
+annotating Ingress — define only profiles you are willing for any cluster tenant
+to choose.** Selection is not restricted per namespace, per Ingress or per
+tenant. A tenant who can annotate an Ingress in their own namespace can pick the
+*most permissive* profile you defined, so a profile with no access list (like
+`public-ratelimited` in the example below) is effectively an open door any tenant
+may walk their own hostname through. That is a real capability — bounded by a set
+you control, not unbounded, but not nothing. If it is too coarse for your cluster,
+the escalation path is an operator-side selector table (deferred, see
+[design/ingress-discovery.md §5a](design/ingress-discovery.md), which also holds
+the full threat model).
 
 **Resolution rules:**
 
@@ -304,15 +314,37 @@ sanctioned. Full threat model in
 
 An undefined profile is **never** downgraded to the default and never adopted
 with a partial chain — falling back is exactly the silent regression profiles
-exist to prevent. The skip also **protects** any existing derived host for that
-Ingress from deletion, so a typo in an annotation cannot take a service offline.
-Matching is exact: no prefix match, no case folding, no nearest-neighbour guess.
+exist to prevent. Matching is exact: no prefix match, no case folding, no
+nearest-neighbour guess.
+
+**An unresolvable profile fails closed on an existing host.** If the Ingress
+already has a derived host, that host is not left alone: it is updated with
+`disabled: true`. Nothing is deleted, nothing is rewritten, and re-adding the
+profile re-enables it on the very next reconcile. This is what makes **revocation**
+work. Leaving it untouched would mean a tenant could pin a chain you have just
+tightened, renamed or retired — by pointing the annotation at a name that does
+not exist — and the host would go on serving the revoked chain indefinitely.
+Retiring a profile (or clearing the profile rows in the UI) disables the hosts
+derived from it for the same reason.
+
+Every *other* derive failure — a malformed hostname, an unusable derived name —
+still **freezes** the existing host instead: your policy has not changed there,
+the host on disk is the last good rendering of it, and failing closed would let
+any tenant take their own service offline with a one-character manifest edit.
 A profile is applied **verbatim**, never merged with the template, so the
 default's access list can never leak onto a profile that is public on purpose.
 
 Every profile validates at **settings-write time**, not at reconcile time — an
 invalid one is rejected by `PUT /api/settings` where you see it, rather than
-surfacing later as a skipped host.
+surfacing later as a skipped host. That includes **referential** validation: the
+`certificateRef`, `upstreamGroupRef`, `middlewares`, `accessLists` and
+`tls.clientAuth.caRef` of the template and of every profile are cross-checked
+against the objects that actually exist. A dangling name there is not a
+localised problem later — it is stamped onto every derived host, and the store
+validates a reconcile as one batch, so the rejection would drop every *other*
+tenant's create, update and delete too, on every poll, until it was fixed.
+A disabled `ingressDiscovery` block is not cross-checked, so a half-filled draft
+never blocks an unrelated settings write.
 
 `GET /api/ingress-discovery/status` reports the resolved `profile` per host (the
 literal `template` for the default block), so you can audit what chain a given
@@ -429,7 +461,9 @@ is bounded to two minutes end to end, so a hung endpoint fails the run rather
 than holding the reconciler for the page limit times the per-request timeout. An
 annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
 **and** protects its existing host from deletion, so one bad manifest edit cannot
-take a host offline. An *empty successful* list is a different thing entirely: it
+take a host offline — the one exception being an unresolvable *profile*, which
+disables the existing host rather than freezing it (see "Resolution rules"). An
+*empty successful* list is a different thing entirely: it
 is a legitimate delete-all, applied and logged per host at WARN.
 
 **Writes land as one commit per reconcile** — every create, update and delete from
