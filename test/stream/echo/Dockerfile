@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Tiny static TCP/UDP echo server for the stream-host test harness.
-FROM golang:1.26-alpine AS build
+FROM golang:1.27rc2-alpine AS build
 ENV CGO_ENABLED=0 GOOS=linux
 WORKDIR /src
 COPY go.mod main.go ./
