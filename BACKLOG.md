@@ -127,6 +127,18 @@ All findings from that review are remediated in the same change (see CHANGELOG
   token header when Authentik is itself proxied through gpm, breaking every admin
   login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
 
+## Public release (deferred - owner wants this, not yet ready)
+
+- [ ] **Take the repo public** once it has had a polish pass and a dedicated
+  security-surface review. Publishing the source of the live edge proxy is a
+  deliberate exposure decision: the full pre-publication pipeline applies
+  (all-history secret/infra audit, author-identity normalization, tag/release
+  handling, LICENSE choice) plus items specific to this repo - a fresh look at
+  the auth/guard code paths with "attacker can read the source" assumptions,
+  a decision on how the docs position NPM/NPMplus as references (clean-room
+  note stays), and confirmation that no deployment-specific defaults leak
+  operator detail. Do not flip until the security review is signed off.
+
 ## Live-validation follow-ups
 
 These features are built and unit-tested; they still want an end-to-end check on
