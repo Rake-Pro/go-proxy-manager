@@ -44,6 +44,17 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Changed
 
+- **The host editor's middleware / access-list pickers show attached entries
+  first and grew from ~7 to ~18 visible rows.** Both check-lists rendered in
+  collection (file) order inside a 220px scroll box, so an attached entry
+  sorting past the cutoff — `sso` sorts *after* `sso-lan`, `-` < `.` in file
+  names — was clipped out of view behind an overlay scrollbar and the host
+  looked unprotected in the UI while the data plane was enforcing the chain
+  all along. Checked entries now render at the top in the host's stored chain
+  order (which the DOM-order save path then preserves on re-save), and the
+  list cap is 560px. Display-only; no host was ever actually missing its
+  middleware.
+
 - **The per-host "LAN direct" / "Public CNAME" toggles stay usable when their DNS
   backend is not configured.** They were greyed out via `gateControl`; they now
   render an inline note instead ("Pi-hole DNS sync is not configured yet - this

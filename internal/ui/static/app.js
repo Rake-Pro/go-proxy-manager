@@ -697,6 +697,13 @@ async function hostEditor(c, name) {
 
   const selMw = arr(h.middlewares);
   const selAl = arr(h.accessLists);
+  // Attached entries render first, in the host's stored (chain) order, so the
+  // active chain is visible without scrolling; the save path reads checkboxes
+  // in DOM order, so this also preserves that order on re-save.
+  const mwSorted = selMw.map((n) => middlewares.find((m) => m.name === n)).filter(Boolean)
+    .concat(middlewares.filter((m) => selMw.indexOf(m.name) === -1));
+  const alSorted = selAl.map((n) => accessLists.find((a) => a.name === n)).filter(Boolean)
+    .concat(accessLists.filter((a) => selAl.indexOf(a.name) === -1));
 
   const statusChip = h.disabled
     ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
@@ -861,7 +868,7 @@ async function hostEditor(c, name) {
           <p class="section-label">Middleware chain</p>
           <p class="muted" style="font-size:11.5px;margin:0 0 10px">Applied in order. Reflected in the request flow above.</p>
           <div class="check-list" id="f-mw">
-            ${middlewares.length ? middlewares.map((m) => `
+            ${mwSorted.length ? mwSorted.map((m) => `
               <label class="check-item"><input type="checkbox" value="${esc(m.name)}"${selMw.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>
             `).join('') : '<div class="check-empty">No middleware defined yet.</div>'}
           </div>
@@ -870,7 +877,7 @@ async function hostEditor(c, name) {
         <div class="card form-section">
           <p class="section-label">Access lists</p>
           <div class="check-list" id="f-al">
-            ${accessLists.length ? accessLists.map((a) => `
+            ${alSorted.length ? alSorted.map((a) => `
               <label class="check-item"><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}<span class="ci-ty">access-list</span></label>
             `).join('') : '<div class="check-empty">No access lists defined yet.</div>'}
           </div>
