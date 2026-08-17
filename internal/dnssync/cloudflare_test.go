@@ -209,21 +209,21 @@ func cloudflareSyncerWith(t *testing.T, srv *httptest.Server, hosts []model.Prox
 
 	return New(func(context.Context) (model.Config, model.Settings, error) {
 		return model.Config{
-				ProxyHosts: hosts,
-				DNSProviders: []model.DNSProvider{{
-					ObjectMeta: model.ObjectMeta{Name: "cf"},
-					Provider:   "cloudflare",
-					Config:     map[string]model.Secret{"apiToken": "${ENV:GPM_CF_TOKEN}"},
-				}},
-			}, model.Settings{
-				DNSSync: model.DNSSyncSettings{Cloudflare: model.CloudflareDNSSync{
-					Enabled:        true,
-					DNSProviderRef: "cf",
-					ZoneName:       "example.com",
-					ApexTarget:     "edge.example.com",
-					Proxied:        proxied,
-				}},
-			}, nil
+			ProxyHosts: hosts,
+			DNSProviders: []model.DNSProvider{{
+				ObjectMeta: model.ObjectMeta{Name: "cf"},
+				Provider:   "cloudflare",
+				Config:     map[string]model.Secret{"apiToken": "${ENV:GPM_CF_TOKEN}"},
+			}},
+		}, model.Settings{
+			DNSSync: model.DNSSyncSettings{Cloudflare: model.CloudflareDNSSync{
+				Enabled:        true,
+				DNSProviderRef: "cf",
+				ZoneName:       "example.com",
+				ApexTarget:     "edge.example.com",
+				Proxied:        proxied,
+			}},
+		}, nil
 	}, ledger)
 }
 
