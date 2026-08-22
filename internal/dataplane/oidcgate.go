@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -263,15 +264,32 @@ func RevokeAllSSOSessions() error {
 	return writeFileAtomic(filepath.Join(*d, ssoNotBeforeFile), []byte(strconv.FormatInt(now, 10)), 0o600)
 }
 
-// signToken returns payload as base64url(payload).base64url(HMAC-SHA256(payload)).
-func signToken(payload []byte) string {
+// Domain-separation labels mixed into the MAC input. One process-wide HMAC key
+// signs three unrelated cookie types (the SSO session, the short-lived login
+// state, and the upstream-group affinity cookie); without a per-type label their
+// MACs live in one namespace, so a payload accepted by one verifier is a valid
+// signature for any other whose parser happens to accept the same bytes. Mixing
+// the label in binds every MAC to exactly one cookie type. The "-v1" suffix
+// leaves room to rotate a single type's namespace later.
+const (
+	macLabelSSOSession = "gpm-sso-v1|"
+	macLabelSSOState   = "gpm-sso-state-v1|"
+	macLabelSticky     = "gpm-sticky-v1|"
+)
+
+// signToken returns payload as base64url(payload).base64url(HMAC-SHA256(label ||
+// payload)). label names the cookie type (see the macLabel* constants) so a MAC
+// minted for one type never verifies as another.
+func signToken(label string, payload []byte) string {
 	mac := hmac.New(sha256.New, ssoSigningKey())
+	mac.Write([]byte(label))
 	mac.Write(payload)
 	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// verifyToken checks the HMAC and returns the payload bytes, or ok=false.
-func verifyToken(tok string) ([]byte, bool) {
+// verifyToken checks the HMAC for label and returns the payload bytes, or
+// ok=false. A token signed under a different label fails here.
+func verifyToken(label, tok string) ([]byte, bool) {
 	i := strings.IndexByte(tok, '.')
 	if i < 0 {
 		return nil, false
@@ -285,6 +303,7 @@ func verifyToken(tok string) ([]byte, bool) {
 		return nil, false
 	}
 	mac := hmac.New(sha256.New, ssoSigningKey())
+	mac.Write([]byte(label))
 	mac.Write(payload)
 	if !hmac.Equal(sig, mac.Sum(nil)) {
 		return nil, false
@@ -321,14 +340,14 @@ type oidcLoginState struct {
 	Exp      int64  `json:"exp"`
 }
 
-func setSignedCookie(w http.ResponseWriter, name string, v any, ttl time.Duration) {
+func setSignedCookie(w http.ResponseWriter, name, label string, v any, ttl time.Duration) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
-		Value:    signToken(b),
+		Value:    signToken(label, b),
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true, // the data plane terminates TLS; SSO is HTTPS-only
@@ -344,16 +363,38 @@ func clearSignedCookie(w http.ResponseWriter, name string) {
 	})
 }
 
-func readSignedCookie(r *http.Request, name string, v any) bool {
+func readSignedCookie(r *http.Request, name, label string, v any) bool {
 	c, err := r.Cookie(name)
 	if err != nil {
 		return false
 	}
-	payload, ok := verifyToken(c.Value)
+	payload, ok := verifyToken(label, c.Value)
 	if !ok {
 		return false
 	}
 	return json.Unmarshal(payload, v) == nil
+}
+
+// maxOIDCClients hard-caps the per-gate discovery cache. The cache is already
+// bounded by the host's configured domain count (an unknown Host is refused
+// before it is consulted), so this only ever fires for a host configured with an
+// implausible number of domains - it exists so the map can never be grown by
+// request traffic, whatever the config says.
+const maxOIDCClients = 64
+
+// errOIDCHostNotConfigured is returned by client() for a request Host that is
+// not one of the gated host's configured domains. The gate answers 404 rather
+// than starting a login for a name it does not serve.
+var errOIDCHostNotConfigured = errors.New("request host is not a configured domain of this host")
+
+// oidcClientEntry is one cache slot. ready is closed when discovery for this key
+// has finished; concurrent callers wait on it instead of repeating the discovery
+// (singleflight, without the extra dependency) and, crucially, without holding
+// the gate's mutex across the network round trip.
+type oidcClientEntry struct {
+	ready  chan struct{}
+	client *oidc.Client
+	err    error
 }
 
 // dataOIDC gates a proxied host as an OIDC relying party.
@@ -362,15 +403,21 @@ type dataOIDC struct {
 	roleMapping *model.RoleMapping
 	required    []string
 	hostName    string
+	// domains is the hostKey-normalized set of domains this host serves. The
+	// per-request-Host discovery cache is keyed and ADMITTED by it: a Host header
+	// that is not in this set never reaches the cache, so neither the map nor the
+	// IdP discovery it triggers can be driven by attacker-chosen names.
+	domains map[string]struct{}
 
 	mu      sync.Mutex
-	clients map[string]*oidc.Client // discovery result cached per request host
+	clients map[string]*oidcClientEntry // discovery result cached per configured domain
 }
 
 // compileDataOIDC builds the gate from an OIDC IdP. The client secret is resolved
 // now (env/file), but OIDC discovery is deferred to the first request so a build
-// never blocks on the network.
-func compileDataOIDC(idp model.IdentityProvider, required []string, hostName string) (*dataOIDC, error) {
+// never blocks on the network. domains are the gated host's configured domains;
+// a request whose Host is not among them is refused without any discovery.
+func compileDataOIDC(idp model.IdentityProvider, required []string, hostName string, domains []string) (*dataOIDC, error) {
 	secret, err := idp.OIDC.ClientSecret.Resolve()
 	if err != nil {
 		return nil, err
@@ -379,6 +426,12 @@ func compileDataOIDC(idp model.IdentityProvider, required []string, hostName str
 	groups := "groups"
 	if idp.RoleMapping != nil && idp.RoleMapping.GroupsClaim != "" {
 		groups = idp.RoleMapping.GroupsClaim
+	}
+	dom := make(map[string]struct{}, len(domains))
+	for _, d := range domains {
+		if k := hostKey(d); k != "" {
+			dom[k] = struct{}{}
+		}
 	}
 	return &dataOIDC{
 		cfgTmpl: oidc.Config{
@@ -393,26 +446,68 @@ func compileDataOIDC(idp model.IdentityProvider, required []string, hostName str
 		roleMapping: idp.RoleMapping,
 		required:    required,
 		hostName:    hostName,
-		clients:     map[string]*oidc.Client{},
+		domains:     dom,
+		clients:     map[string]*oidcClientEntry{},
 	}, nil
 }
 
 // client returns the discovered OIDC client for a request host, building (and
 // caching) it with that host's redirect URI on first use.
+//
+// Three properties matter here, all of them security properties rather than
+// performance ones:
+//
+//   - host is validated against the host's CONFIGURED domains first. A Host
+//     header gpm does not serve is refused (errOIDCHostNotConfigured) before the
+//     cache is touched, so an attacker cannot mint cache keys - nor make gpm
+//     perform an IdP discovery - by varying the Host header.
+//   - discovery runs WITHOUT the gate's mutex held. It is a live network call to
+//     the IdP; holding d.mu across it stalls every other request on this gate
+//     (and every other domain of it) behind one slow or hanging IdP.
+//   - concurrent callers for the same key share one discovery via the entry's
+//     ready channel, so a burst of first requests does not fan out into a burst
+//     of discovery requests at the IdP.
+//
+// A failed discovery is evicted so the next request retries rather than caching
+// the failure for the process lifetime.
 func (d *dataOIDC) client(ctx context.Context, host string) (*oidc.Client, error) {
+	key := hostKey(host)
+	if _, ok := d.domains[key]; !ok {
+		return nil, errOIDCHostNotConfigured
+	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if c, ok := d.clients[host]; ok {
-		return c, nil
+	e, cached := d.clients[key]
+	if !cached {
+		if len(d.clients) >= maxOIDCClients {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("oidc client cache is full (%d entries)", maxOIDCClients)
+		}
+		e = &oidcClientEntry{ready: make(chan struct{})}
+		d.clients[key] = e
 	}
-	cfg := d.cfgTmpl
-	cfg.RedirectURL = "https://" + host + oidcCallbackPath
-	c, err := oidc.New(ctx, cfg)
-	if err != nil {
-		return nil, err
+	d.mu.Unlock()
+
+	if !cached {
+		cfg := d.cfgTmpl
+		cfg.RedirectURL = "https://" + key + oidcCallbackPath
+		e.client, e.err = oidc.New(ctx, cfg)
+		close(e.ready)
+		if e.err != nil {
+			d.mu.Lock()
+			if d.clients[key] == e {
+				delete(d.clients, key)
+			}
+			d.mu.Unlock()
+		}
+		return e.client, e.err
 	}
-	d.clients[host] = c
-	return c, nil
+
+	select {
+	case <-e.ready:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return e.client, e.err
 }
 
 // authorized applies the role policy. With neither a role mapping nor required
@@ -427,12 +522,23 @@ func (d *dataOIDC) authorized(groups []string) bool {
 
 func (d *dataOIDC) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Refuse a Host this gate does not serve before anything else runs: no
+		// cache lookup, no discovery, no cookie parsing, no callback handling.
+		// The router already dispatches by configured domain, so this only ever
+		// fires for a request that reached the gate some other way - and it is
+		// what makes the per-Host client cache bounded by the config.
+		if _, ok := d.domains[hostKey(r.Host)]; !ok {
+			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).
+				Msg("oidc: request host is not a configured domain of this host")
+			http.Error(w, "no such host", http.StatusNotFound)
+			return
+		}
 		if r.URL.Path == oidcCallbackPath {
 			d.handleCallback(w, r)
 			return
 		}
 		var sess oidcSession
-		if readSignedCookie(r, oidcSessionCookie, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
+		if readSignedCookie(r, oidcSessionCookie, macLabelSSOSession, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
 			sess.Iat >= ssoRevokedAt() {
 			if !d.authorized(sess.Groups) {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -449,6 +555,11 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	client, err := d.client(r.Context(), r.Host)
 	if err != nil {
+		if errors.Is(err, errOIDCHostNotConfigured) {
+			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).Msg("oidc: refusing login for an unconfigured request host")
+			http.Error(w, "no such host", http.StatusNotFound)
+			return
+		}
 		log.Warn().Str("host", d.hostName).Err(err).Msg("oidc discovery failed")
 		http.Error(w, "authentication unavailable", http.StatusBadGateway)
 		return
@@ -460,7 +571,7 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	nonce, _ := oidc.NewNonce()
 	verifier := oidc.GenerateVerifier()
-	setSignedCookie(w, oidcStateCookie, oidcLoginState{
+	setSignedCookie(w, oidcStateCookie, macLabelSSOState, oidcLoginState{
 		State: state, Nonce: nonce, Verifier: verifier,
 		Return: sanitizeSSOReturn(r.URL.RequestURI()),
 		Exp:    time.Now().Add(oidcStateTTL).Unix(),
@@ -476,7 +587,7 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	code, state := q.Get("code"), q.Get("state")
 	var st oidcLoginState
-	ok := readSignedCookie(r, oidcStateCookie, &st)
+	ok := readSignedCookie(r, oidcStateCookie, macLabelSSOState, &st)
 	clearSignedCookie(w, oidcStateCookie)
 	if !ok || st.Exp < time.Now().Unix() || state == "" ||
 		subtle.ConstantTimeCompare([]byte(st.State), []byte(state)) != 1 {
@@ -485,6 +596,10 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	client, err := d.client(r.Context(), r.Host)
 	if err != nil {
+		if errors.Is(err, errOIDCHostNotConfigured) {
+			http.Error(w, "no such host", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "authentication unavailable", http.StatusBadGateway)
 		return
 	}
@@ -498,7 +613,7 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	setSignedCookie(w, oidcSessionCookie, oidcSession{
+	setSignedCookie(w, oidcSessionCookie, macLabelSSOSession, oidcSession{
 		Sub: claims.Subject, Email: claims.Email, Name: claims.Name,
 		Groups: claims.Groups, Host: d.hostName,
 		Exp: time.Now().Add(oidcSessionTTL).Unix(),

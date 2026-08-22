@@ -16,12 +16,16 @@ import (
 // keeps the issued artifacts on disk for the data plane to load.
 type Manager struct {
 	certDir             string
-	resolver            *net.Resolver
+	resolver            txtLookuper
 	renewBefore         time.Duration
 	propagationTimeout  time.Duration
 	propagationInterval time.Duration
 	newSolver           func(model.DNSProvider) (DNSSolver, error)
 	onChange            func()
+
+	// http01 holds the key authorizations of in-flight HTTP-01 orders; the data
+	// plane's plaintext listener serves them (see HTTP01Store).
+	http01 *HTTP01Store
 
 	mu sync.Mutex // serialises issuance (one order at a time)
 }
@@ -44,14 +48,16 @@ type Options struct {
 func NewManager(o Options) *Manager {
 	m := &Manager{
 		certDir:             o.CertDir,
-		resolver:            o.Resolver,
 		renewBefore:         o.RenewBefore,
 		propagationTimeout:  o.PropagationTimeout,
 		propagationInterval: o.PropagationInterval,
 		newSolver:           o.NewSolver,
 		onChange:            o.OnChange,
+		http01:              NewHTTP01Store(),
 	}
-	if m.resolver == nil {
+	if o.Resolver != nil {
+		m.resolver = o.Resolver
+	} else {
 		m.resolver = publicResolver()
 	}
 	if m.renewBefore == 0 {
@@ -68,6 +74,10 @@ func NewManager(o Options) *Manager {
 	}
 	return m
 }
+
+// HTTP01Challenges exposes the in-flight HTTP-01 tokens so the data plane can
+// answer /.well-known/acme-challenge/<token> on the plaintext listener.
+func (m *Manager) HTTP01Challenges() *HTTP01Store { return m.http01 }
 
 // EnsureAll issues or renews every ACME certificate that needs it. A failure on
 // one certificate is logged and does not block the others. Returns whether any
@@ -90,22 +100,33 @@ func (m *Manager) EnsureAll(ctx context.Context, cfg model.Config) (bool, error)
 		if !m.needsRenewal(cert) {
 			continue
 		}
-		provider, ok := providers[cert.ACME.DNSProvider]
-		if !ok {
-			errs = append(errs, fmt.Errorf("certificate %q: dns provider %q not found", cert.Name, cert.ACME.DNSProvider))
-			continue
+		// http-01 needs no provider at all; dns-01 (the default whenever a
+		// provider is referenced) resolves and builds its solver here.
+		var solver DNSSolver
+		if cert.ACME.EffectiveChallenge() == model.ChallengeDNS01 {
+			provider, ok := providers[cert.ACME.DNSProvider]
+			if !ok {
+				errs = append(errs, fmt.Errorf("certificate %q: dns provider %q not found", cert.Name, cert.ACME.DNSProvider))
+				continue
+			}
+			s, err := m.newSolver(provider)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("certificate %q: build solver: %w", cert.Name, err))
+				continue
+			}
+			solver = s
 		}
-		solver, err := m.newSolver(provider)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("certificate %q: build solver: %w", cert.Name, err))
-			continue
-		}
-		client, err := newClient(ctx, m.certDir, cert.ACME.DirectoryURL, cert.ACME.Email)
+		eab, err := externalAccountBinding(cert.ACME.EAB)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
 			continue
 		}
-		log.Info().Str("cert", cert.Name).Msg("issuing/renewing certificate")
+		client, err := newClient(ctx, m.certDir, cert.ACME.DirectoryURL, cert.ACME.Email, eab)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
+			continue
+		}
+		log.Info().Str("cert", cert.Name).Str("challenge", cert.ACME.EffectiveChallenge()).Msg("issuing/renewing certificate")
 		if err := m.issue(ctx, client, cert, solver); err != nil {
 			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
 			continue
@@ -161,15 +182,22 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration, loadConfig fu
 	}
 }
 
-// defaultNewSolver maps a DNSProvider config to a concrete solver.
+// defaultNewSolver maps a DNSProvider config to a concrete solver. Every shipped
+// provider authenticates with a single token under config.apiToken.
 func defaultNewSolver(p model.DNSProvider) (DNSSolver, error) {
+	token, err := p.Config["apiToken"].Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("%s apiToken: %w", p.Provider, err)
+	}
 	switch p.Provider {
 	case "cloudflare":
-		token, err := p.Config["apiToken"].Resolve()
-		if err != nil {
-			return nil, fmt.Errorf("cloudflare apiToken: %w", err)
-		}
 		return NewCloudflareSolver(token)
+	case "digitalocean":
+		return NewDigitalOceanSolver(token)
+	case "hetzner":
+		return NewHetznerSolver(token)
+	case "desec":
+		return NewDesecSolver(token)
 	default:
 		return nil, fmt.Errorf("unsupported dns provider %q", p.Provider)
 	}

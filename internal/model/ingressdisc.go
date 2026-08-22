@@ -10,9 +10,17 @@ import (
 	"time"
 )
 
-// Kubernetes Ingress annotations gpm reads. Opt-in is EXACTLY
-// AnnotationManaged == "true"; an Ingress carrying anything else (or nothing)
-// is invisible to discovery. There is no opt-out mode and no namespace sweep.
+// Kubernetes Ingress annotations gpm reads under the DEFAULT annotation
+// prefix. Opt-in is EXACTLY AnnotationManaged == "true"; an Ingress carrying
+// anything else (or nothing) is invisible to discovery. There is no opt-out
+// mode and no namespace sweep.
+//
+// These constants are the DEFAULT prefix's keys only, kept for backward
+// compatibility (every deployment that has never set
+// ingressDiscovery.annotationPrefix keeps working unchanged). Code that needs
+// to honour a possibly-customised prefix must use the IngressDiscoverySettings
+// methods below (AnnotationManaged(), ManagedByLabel(), etc.) instead of these
+// constants.
 const (
 	// AnnotationManaged opts an Ingress into gpm discovery.
 	AnnotationManaged = "gpm.rake.pro/managed"
@@ -28,6 +36,18 @@ const (
 	// the default. See docs/design/ingress-discovery.md §5a.
 	AnnotationProfile = "gpm.rake.pro/profile"
 )
+
+// DefaultAnnotationPrefix is the annotation/label prefix used when
+// ingressDiscovery.annotationPrefix is unset, so every existing deployment's
+// keys are unchanged unless an operator opts into a different prefix.
+const DefaultAnnotationPrefix = "gpm.rake.pro"
+
+// annotationPrefixRe matches a DNS-subdomain-shaped annotation/label key
+// prefix: dot-separated lowercase alphanumeric labels (hyphens allowed inside
+// a label), no leading or trailing dot, and - since it never includes the "/"
+// gpm appends itself - no slash. This is the same shape Kubernetes requires
+// for the prefix portion of a qualified annotation/label key.
+var annotationPrefixRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
 // DefaultProfileName is what a host derived from the default `template` reports
 // as its profile in the reconcile status. It is a reserved profile name so the
@@ -261,6 +281,122 @@ type IngressDiscoverySettings struct {
 	// consulted at all when no ProfileRules entry matches. Empty means
 	// ProfileSelectionAnnotationOrRules. See the ProfileSelection* constants.
 	ProfileSelection string `json:"profileSelection,omitempty" yaml:"profileSelection,omitempty"`
+
+	// AnnotationPrefix replaces "gpm.rake.pro" as the prefix for every
+	// discovery annotation gpm reads (.../managed, .../lan-direct,
+	// .../public-cname, .../profile) and for the managed-by/disabled-by labels
+	// gpm writes on the proxy hosts it derives. Empty means
+	// DefaultAnnotationPrefix, so an existing deployment that never sets this is
+	// completely unaffected. Use the methods below (AnnotationManaged(),
+	// ManagedByLabel(), etc.) rather than the package-level Annotation*/
+	// ManagedByLabel/DisabledByLabel constants, which are the DEFAULT prefix
+	// only.
+	//
+	// Ownership recognition is keyed on the CURRENT prefix only: changing this
+	// value does not retroactively relabel hosts discovery already wrote, so
+	// they stop being recognised as discovery-managed until relabelled. See
+	// AnnotationPrefixMigrate and "Changing the annotation prefix" in
+	// docs/configuration.md.
+	AnnotationPrefix string `json:"annotationPrefix,omitempty" yaml:"annotationPrefix,omitempty"`
+
+	// AnnotationPrefixMigrate, when true, allows a settings write that changes
+	// AnnotationPrefix even though existing proxy hosts still carry a
+	// managed-by label under a DIFFERENT prefix (a write that would otherwise
+	// be refused - see ValidateRefs). It does not relabel anything itself: it
+	// only lifts the refusal. The relabel happens in the NEXT reconcile, as an
+	// ordinary update in that run's single commit (see internal/k8s/discovery.go).
+	AnnotationPrefixMigrate bool `json:"annotationPrefixMigrate,omitempty" yaml:"annotationPrefixMigrate,omitempty"`
+}
+
+// Prefix returns the configured annotation/label prefix, or
+// DefaultAnnotationPrefix when AnnotationPrefix is unset.
+func (d IngressDiscoverySettings) Prefix() string {
+	if d.AnnotationPrefix == "" {
+		return DefaultAnnotationPrefix
+	}
+	return d.AnnotationPrefix
+}
+
+// AnnotationManaged is the CURRENT-prefix key that opts an Ingress into gpm
+// discovery. See the package-level AnnotationManaged constant for the exact
+// semantics; only the key's prefix is configurable.
+func (d IngressDiscoverySettings) AnnotationManaged() string { return d.Prefix() + "/managed" }
+
+// AnnotationLanDirect is the CURRENT-prefix key that sets dns.lanDirect on a
+// derived proxy host.
+func (d IngressDiscoverySettings) AnnotationLanDirect() string { return d.Prefix() + "/lan-direct" }
+
+// AnnotationPublicCname is the CURRENT-prefix key that sets dns.publicCname on
+// a derived proxy host.
+func (d IngressDiscoverySettings) AnnotationPublicCname() string {
+	return d.Prefix() + "/public-cname"
+}
+
+// AnnotationProfile is the CURRENT-prefix key an Ingress uses to name a
+// discovery profile.
+func (d IngressDiscoverySettings) AnnotationProfile() string { return d.Prefix() + "/profile" }
+
+// ManagedByLabel is the CURRENT-prefix label key discovery stamps (with value
+// ManagedByIngressDiscovery) onto every proxy host it owns. A host is
+// recognised as discovery-managed ONLY under this, the CURRENT prefix - see
+// AnnotationPrefixMigrate for what changing the prefix requires.
+func (d IngressDiscoverySettings) ManagedByLabel() string { return d.Prefix() + "/managed-by" }
+
+// DisabledByLabel is the CURRENT-prefix label key discovery stamps (with value
+// DisabledByIngressDiscovery) onto a managed host it fail-closed disabled
+// itself, so the next clean derive knows it may re-enable it.
+func (d IngressDiscoverySettings) DisabledByLabel() string { return d.Prefix() + "/disabled-by" }
+
+// HasStaleManagedByLabel reports whether labels carries a managed-by label
+// (value ManagedByIngressDiscovery) under a prefix OTHER than the one d is
+// currently configured with - i.e. this object was labelled by discovery
+// before the prefix was last changed. Used both to refuse a prefix change that
+// would silently orphan hosts (ValidateRefs) and, when
+// AnnotationPrefixMigrate is set, to keep recognising those hosts as
+// discovery-owned so the next reconcile relabels them.
+func (d IngressDiscoverySettings) HasStaleManagedByLabel(labels map[string]string) bool {
+	return hasStaleDiscoveryLabel(labels, d.ManagedByLabel(), "/managed-by")
+}
+
+// HasStaleDisabledByLabel is HasStaleManagedByLabel's counterpart for the
+// disabled-by label.
+func (d IngressDiscoverySettings) HasStaleDisabledByLabel(labels map[string]string) bool {
+	return hasStaleDiscoveryLabel(labels, d.DisabledByLabel(), "/disabled-by")
+}
+
+// hasStaleDiscoveryLabel reports whether labels carries a key, other than
+// currentKey, ending in suffix ("/managed-by" or "/disabled-by") whose value
+// is one discovery itself writes (ManagedByIngressDiscovery and
+// DisabledByIngressDiscovery are both "ingress-discovery").
+func hasStaleDiscoveryLabel(labels map[string]string, currentKey, suffix string) bool {
+	for k, v := range labels {
+		if k == currentKey || v != ManagedByIngressDiscovery {
+			continue
+		}
+		if strings.HasSuffix(k, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// StripStaleDiscoveryLabels deletes, in place, any managed-by/disabled-by
+// label belonging to a PREVIOUS annotation prefix from labels. Only meaningful
+// during an AnnotationPrefixMigrate relabel; harmless (a no-op) otherwise,
+// since there is nothing stale to find.
+func (d IngressDiscoverySettings) StripStaleDiscoveryLabels(labels map[string]string) {
+	managedKey, disabledKey := d.ManagedByLabel(), d.DisabledByLabel()
+	for k, v := range labels {
+		if v != ManagedByIngressDiscovery {
+			continue
+		}
+		if k == managedKey || k == disabledKey {
+			continue
+		}
+		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") {
+			delete(labels, k)
+		}
+	}
 }
 
 // IngressProfileRule is one operator-authored routing rule: an Ingress whose
@@ -408,6 +544,11 @@ func (d IngressDiscoverySettings) Validate() error {
 	if d.Namespace != "" && !dnsLabelRe.MatchString(d.Namespace) {
 		return fmt.Errorf("settings: ingressDiscovery.namespace %q is not a valid Kubernetes namespace", d.Namespace)
 	}
+	if d.AnnotationPrefix != "" {
+		if len(d.AnnotationPrefix) > 253 || !annotationPrefixRe.MatchString(d.AnnotationPrefix) {
+			return fmt.Errorf("settings: ingressDiscovery.annotationPrefix %q is not a valid annotation prefix (lowercase alphanumerics, '-' and '.', no leading/trailing dot, no slash, at most 253 characters)", d.AnnotationPrefix)
+		}
+	}
 	if strings.ContainsAny(d.LabelSelector, "\r\n") {
 		return fmt.Errorf("settings: ingressDiscovery.labelSelector must not contain newlines")
 	}
@@ -534,6 +675,9 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 	if !d.Enabled {
 		return nil
 	}
+	if err := d.checkAnnotationPrefixMigration(cfg); err != nil {
+		return err
+	}
 	certs := map[string]bool{}
 	for _, o := range cfg.Certificates {
 		certs[o.Name] = true
@@ -577,6 +721,37 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 		check(fmt.Sprintf("profiles[%q]", name), d.Profiles[name])
 	}
 	return errors.Join(errs...)
+}
+
+// checkAnnotationPrefixMigration refuses a settings write that would silently
+// orphan every proxy host discovery already manages: ownership is recognised
+// ONLY under the CURRENT prefix (see ManagedByLabel), so saving a changed
+// prefix while old-labelled hosts still exist would make the very next
+// reconcile treat them as unmanaged - an operator-authored host with the same
+// name, never touched - and, once their Ingress stops deriving to a name
+// discovery still owns, potentially never clean up either. AnnotationPrefix
+// starting empty (the default) counts too: this refuses the FIRST prefix
+// change exactly like every later one.
+//
+// AnnotationPrefixMigrate:true opts out of the refusal; the relabel itself
+// happens in the next reconcile (see internal/k8s/discovery.go), as an
+// ordinary update in that run's one commit, never as a side effect of this
+// settings save.
+func (d IngressDiscoverySettings) checkAnnotationPrefixMigration(cfg Config) error {
+	if d.AnnotationPrefixMigrate {
+		return nil
+	}
+	stale := 0
+	for _, h := range cfg.ProxyHosts {
+		if d.HasStaleManagedByLabel(h.Labels) {
+			stale++
+		}
+	}
+	if stale == 0 {
+		return nil
+	}
+	return fmt.Errorf("settings: ingressDiscovery.annotationPrefix %q would orphan %d proxy host(s) still labelled managed-by under a different prefix; "+
+		"re-label them first, or set ingressDiscovery.annotationPrefixMigrate: true to relabel them automatically in the next reconcile", d.Prefix(), stale)
 }
 
 // validate checks one derived-host shape. path is the settings location used in

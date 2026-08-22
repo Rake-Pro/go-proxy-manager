@@ -240,12 +240,27 @@ left mutated but uncommitted would be read as live config by the next load and
 swept into the next unrelated commit.
 
 **ACME manager** (`internal/acme`). A background loop (12h interval) issues and
-renews `Certificate` objects of type `acme` via DNS-01: register/reuse an account
-key per directory URL, create the order, write the `_acme-challenge` TXT record
-through the DNS provider, wait for propagation against a public resolver, accept
-the challenge, finalize the CSR, and write `fullchain.pem` + `privkey.pem`
-atomically. Renewal triggers when a cert is unissued, its domain set changed, or
-it is within 30 days of expiry. On any change it signals the data plane to reload.
+renews `Certificate` objects of type `acme`: register/reuse an account key per
+directory URL (per external account when EAB is configured), create the order,
+solve every authorization, finalize the CSR, and write `fullchain.pem` +
+`privkey.pem` atomically. Renewal triggers when a cert is unissued, its domain
+set changed, or it is within 30 days of expiry. On any change it signals the data
+plane to reload.
+
+Two challenge types are solved. **DNS-01** writes the `_acme-challenge` TXT
+record through the referenced DNS provider (Cloudflare, DigitalOcean, Hetzner,
+deSEC - each a plain REST client behind one `DNSSolver` interface) and waits for
+propagation against a public resolver before accepting; it is the only way to
+prove a wildcard. **HTTP-01** needs no provider: the manager parks the key
+authorization in an in-memory token store (`HTTP01Store`, entries expiring with
+the order) which the data plane reads through the one-method
+`dataplane.ACMEChallengeStore` interface - the two packages stay decoupled, the
+manager owns the map, the listener only reads it. The plaintext `:80` handler
+answers `/.well-known/acme-challenge/<token>` for an in-flight token before host
+routing, the force-SSL redirect, and auth run, so a name that has no host yet (or
+that redirects everything to https) can still be validated; an unknown token
+falls through to normal routing so a proxied upstream's own ACME client keeps
+working. Only the HA leader runs the manager, so only it holds tokens.
 
 **HA role gate** (`internal/ha`, phase 1 of [design/ha.md](design/ha.md)). A
 two-node pair designates its single writer statically: `GPM_HA_ROLE=leader`

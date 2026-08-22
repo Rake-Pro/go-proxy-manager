@@ -16,7 +16,7 @@ LDFLAGS := -s -w \
 
 export CGO_ENABLED := 0
 
-.PHONY: build run test vet tidy docker clean
+.PHONY: build run test vet lint vuln tidy docker clean
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -30,6 +30,12 @@ test:
 
 vet:
 	go vet ./...
+
+lint:
+	go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
 tidy:
 	go mod tidy

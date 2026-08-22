@@ -467,7 +467,7 @@ func TestStickyCookieAffinity(t *testing.T) {
 	// a misbehaving client replays it past Max-Age.
 	expiredPayload := strings.Join([]string{stickyPayloadPrefix, "g", g.ups[0].label,
 		strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)}, "|")
-	expired := &http.Cookie{Name: "gpm-sticky-g", Value: signToken([]byte(expiredPayload))}
+	expired := &http.Cookie{Name: "gpm-sticky-g", Value: signToken(macLabelSticky, []byte(expiredPayload))}
 	if _, resp := do(expired); len(resp.Cookies()) != 1 {
 		t.Fatal("expired cookie must trigger a fresh assignment cookie")
 	}
@@ -475,7 +475,7 @@ func TestStickyCookieAffinity(t *testing.T) {
 	// A cookie for another group's name/payload is ignored.
 	foreignPayload := strings.Join([]string{stickyPayloadPrefix, "other", g.ups[0].label,
 		strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}, "|")
-	foreign := &http.Cookie{Name: "gpm-sticky-g", Value: signToken([]byte(foreignPayload))}
+	foreign := &http.Cookie{Name: "gpm-sticky-g", Value: signToken(macLabelSticky, []byte(foreignPayload))}
 	if _, resp := do(foreign); len(resp.Cookies()) != 1 {
 		t.Fatal("foreign-group cookie must trigger a fresh assignment cookie")
 	}

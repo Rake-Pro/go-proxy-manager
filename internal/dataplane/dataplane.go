@@ -25,6 +25,37 @@ var secureCipherSuites = []uint16{
 	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 }
 
+// Data-plane listener timeouts. They are vars, not consts, only so tests can
+// shrink them; nothing outside this package (or its tests) writes them.
+//
+//   - readHeaderTimeout bounds the request line + headers (slowloris).
+//   - readTimeout bounds reading a whole request. The stdlib clears this
+//     deadline once a request body has been consumed, so it cannot truncate a
+//     streamed RESPONSE; the proxy additionally clears it outright for the two
+//     request shapes that legitimately outlive it - protocol upgrades and
+//     body-bearing requests being streamed to an upstream (see longLivedProxy).
+//   - idleTimeout reaps keep-alive connections between requests. Without it an
+//     idle connection is held for readTimeout (and, before it was set, forever),
+//     so a client could pin file descriptors by opening connections and never
+//     sending a second request.
+var (
+	readHeaderTimeout = 15 * time.Second
+	readTimeout       = 60 * time.Second
+	idleTimeout       = 90 * time.Second
+)
+
+// newListenerServer builds one data-plane http.Server with the shared timeout
+// policy applied. Both listeners go through it so neither can drift.
+func newListenerServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
 // Server runs the reverse-proxy data plane. The compiled router is held in an
 // atomic pointer so config reloads swap the whole routing table (and cert set)
 // live, with no listener restart and no in-flight request disruption.
@@ -57,6 +88,11 @@ type Server struct {
 
 	httpsSrv *http.Server
 	httpSrv  *http.Server
+
+	// acmeChallenge serves in-flight ACME HTTP-01 tokens on the plaintext
+	// listener. Wired once at startup (SetACMEChallengeStore); atomic so a late
+	// or replaced wiring races nothing.
+	acmeChallenge atomic.Pointer[ACMEChallengeStore]
 }
 
 // Config holds the data plane's bind addresses, cert directory, and the optional
@@ -156,28 +192,20 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("data plane: Reload must be called before Start")
 	}
 
-	s.httpSrv = &http.Server{
-		Addr:              s.httpAddr,
-		Handler:           s.observe(http.HandlerFunc(s.dispatchHTTP)),
-		ReadHeaderTimeout: 15 * time.Second,
-	}
-	s.httpsSrv = &http.Server{
-		Addr:              s.httpsAddr,
-		Handler:           s.observe(http.HandlerFunc(s.dispatchHTTPS)),
-		ReadHeaderTimeout: 15 * time.Second,
-		// GetCertificate reads the live router so cert changes apply on reload.
-		// GetConfigForClient lets a host pin a higher minimum TLS version than the
-		// 1.2 floor: it returns that host's config (by SNI) or nil for the default.
-		TLSConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			CipherSuites: secureCipherSuites,
-			NextProtos:   []string{"h2", "http/1.1"},
-			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				return s.current().certs.GetCertificate(hello)
-			},
-			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-				return s.current().tlsConfigForSNI(hello.ServerName), nil
-			},
+	s.httpSrv = newListenerServer(s.httpAddr, s.observe(http.HandlerFunc(s.dispatchHTTP)))
+	s.httpsSrv = newListenerServer(s.httpsAddr, s.observe(http.HandlerFunc(s.dispatchHTTPS)))
+	// GetCertificate reads the live router so cert changes apply on reload.
+	// GetConfigForClient lets a host pin a higher minimum TLS version than the
+	// 1.2 floor: it returns that host's config (by SNI) or nil for the default.
+	s.httpsSrv.TLSConfig = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		CipherSuites: secureCipherSuites,
+		NextProtos:   []string{"h2", "http/1.1"},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return s.current().certs.GetCertificate(hello)
+		},
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			return s.current().tlsConfigForSNI(hello.ServerName), nil
 		},
 	}
 
@@ -214,7 +242,28 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// SetACMEChallengeStore wires the ACME manager's in-flight HTTP-01 tokens into
+// the plaintext listener. Passing nil detaches it.
+func (s *Server) SetACMEChallengeStore(store ACMEChallengeStore) {
+	if store == nil {
+		s.acmeChallenge.Store(nil)
+		return
+	}
+	s.acmeChallenge.Store(&store)
+}
+
+func (s *Server) acmeChallengeStore() ACMEChallengeStore {
+	if p := s.acmeChallenge.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 func (s *Server) dispatchHTTP(w http.ResponseWriter, r *http.Request) {
+	// ACME HTTP-01 first: before host routing, force-SSL redirect, and auth.
+	if serveACMEChallenge(s.acmeChallengeStore(), w, r) {
+		return
+	}
 	s.current().serveHTTP(w, r)
 }
 

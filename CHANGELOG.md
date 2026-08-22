@@ -1,11 +1,94 @@
 # Changelog
 
 All notable changes to go-proxy-manager are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project is
-pre-1.0 and has no tagged releases yet; everything to date lives under
-*Unreleased*.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- **ACME HTTP-01 challenge support**: `certificate.acme.challenge: http-01`
+  issues without any DNS credential; the data plane's plaintext `:80` listener
+  serves `/.well-known/acme-challenge/<token>` ahead of host routing, the
+  force-SSL redirect and auth. `dns-01` stays the default for certificates that
+  reference a DNS provider and remains required for wildcards. Unknown tokens
+  fall through to normal routing so an upstream's own ACME client keeps working.
+- **ACME External Account Binding** (`acme.eab.kid` + `acme.eab.hmacKey`) for
+  CAs that require it (ZeroSSL, Google Public CA examples in docs); EAB
+  accounts get their own account key per key id.
+- **Three more DNS-01 providers** on their plain REST APIs, no new
+  dependencies: `digitalocean`, `hetzner`, `desec`.
+- **`ingressDiscovery.annotationPrefix`** makes the Kubernetes Ingress
+  discovery annotation/label prefix configurable (default `gpm.rake.pro`,
+  unchanged for existing deployments). Changing it while hosts are labelled
+  under the old prefix is refused at settings-write time unless
+  `ingressDiscovery.annotationPrefixMigrate: true`, which relabels them in the
+  next reconcile's single commit.
+- **OpenAPI 3.1 spec** at `docs/api/openapi.yaml` (102 operations), served at
+  `GET /api/openapi.yaml`, with a route-coverage test.
+- Admin UI: per-location middleware and access-list pickers in the host
+  editor; certificate editor gains a challenge selector (dns-01 greyed until a
+  DNS provider exists) and EAB fields; DNS provider editor offers all four
+  providers.
+- Docs: bare-metal/systemd deployment, backup/restore, upgrade/rollback,
+  image signature verification, and a "Users, roles and audit" stance section.
+
+### Changed
+
+- Startup logs a warning naming `GPM_LOCAL_ADMIN_USER` /
+  `GPM_LOCAL_ADMIN_PASSWORD_HASH` and `settings.adminAuth.providers` when
+  neither is configured (the admin panel was previously unreachable with no
+  diagnostic).
+- CI: every third-party GitHub Action is pinned to a full commit SHA;
+  `staticcheck` and `govulncheck` are required jobs (`make lint`, `make vuln`);
+  the Trivy gate now fails on HIGH as well as CRITICAL.
+- FEATURES.md rewritten as a status board; CHANGELOG restructured into
+  per-version sections; `docs/deployment.md` documents `GPM_GEOIP_DB` and the
+  absence of a `/metrics` endpoint.
+
+### Fixed
+
+- Admin UI: saving a proxy host with `locations` no longer drops each
+  location's `middlewares` / `accessLists` when the host was authored outside
+  the UI; the save merges over the loaded location by path, mirroring the
+  `tls.clientAuth` merge.
+- Certificate type "Custom (upload)" relabelled "Custom (file on server)" with
+  the cert-store-relative path convention (there is no upload endpoint).
+- Dead `ghcr.io/rake-pro/go-proxy-manager:main` image references and a dead
+  runbook link in `deploy/compose.parallel.yaml`.
+
+### Security
+
+- Released images are signed keylessly with cosign via GitHub Actions OIDC.
+- Data-plane OIDC gate: a request whose `Host` is not a configured domain of
+  the gated host is refused (404) instead of minting and caching a per-Host
+  relying-party client with live IdP discovery. Discovery runs outside the
+  gate's mutex with single-flight per domain; the client cache is bounded.
+- HA follower: the config pull has a 60s timeout, the network fetch runs
+  without the config write lock (only the fast-forward takes it), and
+  `GIT_TERMINAL_PROMPT=0` is in force.
+- Data-plane listeners set `ReadTimeout` (60s) and `IdleTimeout` (90s); upgrades
+  and body-bearing proxied requests clear their deadlines, so websockets,
+  streams and large uploads are never truncated.
+- Data-plane basic auth: failed attempts are throttled per client IP (5 / 15
+  min, bounded map that fails closed when saturated) and concurrent bcrypt
+  verifications are bounded process-wide. A locked-out client receives the
+  same 401 as a wrong password.
+- Reverse proxy re-asserts gpm's own identity headers on the outbound request;
+  a client `Connection: X-Forwarded-User` previously had the header removed by
+  the hop-by-hop purge.
+- Guard middleware: a guard matching on `queryEquals` rejects (400) a request
+  whose raw query contains `;` rather than evaluating a query gpm and the
+  upstream may parse differently.
+- Cookie MACs are domain-separated (SSO session, SSO login-state, sticky
+  cookie). **Existing SSO sessions and sticky assignments are invalidated once
+  on upgrade.**
+- `Principal.SessionID` is no longer serialised by `GET /api/me` (landed in
+  1.0.16, recorded here for visibility).
+- Test coverage for the admin login flow: `internal/server` 44% -> 91%,
+  `internal/auth` 64% -> 93%.
+
+## [1.0.16] - 2026-08-22
 
 ### Added
 
@@ -59,9 +142,28 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 - `Principal.SessionID` is no longer serialised by `GET /api/me`.
 
+## [1.0.15] - 2026-08-21
+
 ### Changed
 
 - Go toolchain 1.27rc2 -> 1.27.0
+
+## [1.0.13] - 2026-08-16
+
+### Changed
+
+- **The host editor's middleware / access-list pickers show attached entries
+  first and grew from ~7 to ~18 visible rows.** Both check-lists rendered in
+  collection (file) order inside a 220px scroll box, so an attached entry
+  sorting past the cutoff — `sso` sorts *after* `sso-lan`, `-` < `.` in file
+  names — was clipped out of view behind an overlay scrollbar and the host
+  looked unprotected in the UI while the data plane was enforcing the chain
+  all along. Checked entries now render at the top in the host's stored chain
+  order (which the DOM-order save path then preserves on re-save), and the
+  list cap is 560px. Display-only; no host was ever actually missing its
+  middleware.
+
+## [1.0.10] - 2026-08-01
 
 ### Added
 
@@ -98,18 +200,60 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   the rebuild-instead-of-merge regression (which has already stripped
   `clientAuth`/`hsts`/`minTLSVersion` once) fails CI.
 
-### Changed
+## [1.0.9] - 2026-07-31
 
-- **The host editor's middleware / access-list pickers show attached entries
-  first and grew from ~7 to ~18 visible rows.** Both check-lists rendered in
-  collection (file) order inside a 220px scroll box, so an attached entry
-  sorting past the cutoff — `sso` sorts *after* `sso-lan`, `-` < `.` in file
-  names — was clipped out of view behind an overlay scrollbar and the host
-  looked unprotected in the UI while the data plane was enforcing the chain
-  all along. Checked entries now render at the top in the host's stored chain
-  order (which the DOM-order save path then preserves on re-save), and the
-  list cap is 560px. Display-only; no host was ever actually missing its
-  middleware.
+### Added
+
+- **`GET /api/dns-sync/plan` — dry run before you enable.** Reads both backends and
+  the ownership ledger and reports exactly what a reconcile would create, adopt,
+  retarget, delete and skip, plus how many records it would leave alone, without
+  issuing a single write. Scope `dns-sync:read`; `409 Conflict` while a reconcile
+  is in flight, for the same reason the manual reconcile refuses to queue. Wired
+  into the settings UI as **Preview changes**, next to *Reconcile now*. The
+  2026-08-01 incident was unpreviewable — the only way to learn what the first
+  reconcile would do was to run it, and by then the records were gone.
+- **Ingress discovery: operator-defined named profiles, selected per Ingress.**
+  `settings.ingressDiscovery.profiles` is a map of named chains, each with the
+  same shape and the same validation as `template`; an `Ingress` selects one with
+  `gpm.rake.pro/profile: "<name>"`. Discovery previously derived every host from
+  the single `template`, so it could only adopt the uniform tail of a fleet -
+  publishing anything else would silently **drop** its `sso`/`rate-limit`/login
+  middleware or **impose** an access list on a host that is public on purpose,
+  both security-relevant regressions that leave the host serving under a chain
+  nobody chose. `template` is unchanged and now acts as the default profile, so
+  existing configs and existing annotated Ingresses behave identically (covered
+  by a regression test).
+
+  **The annotation carries a name and nothing else, and that is the security
+  constraint.** An Ingress author is untrusted - in a shared cluster a tenant may
+  be able to create or edit an `Ingress`, and gpm sits at the edge in front of
+  everything - so there is deliberately **no** annotation that lets a manifest
+  name a middleware, an access list, a certificate or an upstream. Such an
+  annotation would be a self-service privilege grant (`access-lists: ""` on your
+  own namespace's Ingress removes `home-vpn` from a hostname at the edge). Every
+  profile is authored by the operator in the config repo; a manifest chooses
+  among sanctioned chains and can never invent one, nor end up weaker than
+  something the operator explicitly allowed. An **undefined** profile name
+  **skips** the Ingress - never a silent fall back to the default, never a
+  partial chain - and if that Ingress already has a derived host, the host is
+  **disabled** rather than left alone, so a retired or tightened profile cannot
+  be pinned (see Security below). Matching is
+  exact (no prefix match, no case folding); a profile is applied verbatim rather
+  than merged with the default, so the default's access list cannot leak onto a
+  deliberately-public profile. Every profile validates at settings-**write** time
+  (`certificateRef` required, `upstream` XOR `upstreamGroupRef`, name-checked
+  middleware/access-list refs), so an invalid one is rejected where an operator
+  sees it rather than surfacing later as a skipped host.
+  `GET /ingress-discovery/status` now reports the resolved `profile` per host
+  (the literal `template` for the default block) as the audit trail for what
+  chain a given Ingress actually got, and the settings UI grows a profile editor
+  plus the resolved profile in its status panel. Threat model and resolution
+  rules in
+  [docs/design/ingress-discovery.md §5a](docs/design/ingress-discovery.md);
+  schema and a worked example in
+  [docs/configuration.md](docs/configuration.md#discovery-profiles).
+
+### Changed
 
 - **The per-host "LAN direct" / "Public CNAME" toggles stay usable when their DNS
   backend is not configured.** They were greyed out via `gateControl`; they now
@@ -119,6 +263,20 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   is wired - not an error to refuse, and the capability probe is cached per page
   load, so a stale "not configured" could otherwise outlive the fact and block a
   valid edit. Every other capability-gated control still greys out.
+- **`GET /api/dns-sync/status` reports adoption.** Each backend now carries
+  `adopted`, `retargeted`, `skipped` and `untouched` alongside `created` and
+  `deleted`. `managed` changes meaning from "records whose target matched the
+  apex" to "records gpm owns" (the ledger entry count after the run). `untouched`
+  is the number to check after a first enable: it should equal everything you
+  maintain by hand on that backend.
+- **Changing `apexTarget` no longer orphans records.** Previously ownership *was*
+  target equality, so moving the apex made every record gpm had created
+  unrecognisable to it — never updated, never deleted, and never recreated either
+  because the name now conflicted. With the ledger, a record gpm created and
+  nobody has touched since is still identifiably gpm's, so it is retargeted on the
+  next reconcile. The manual-cleanup warning in `docs/configuration.md` and
+  `docs/deployment.md` is retired.
+
 ### Fixed
 
 - **A record gpm ADOPTED is never deleted — it is released.** Adoption used to be
@@ -140,7 +298,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   **adopted**, the only reading that cannot destroy a record on upgrade. The
   trade-off is stated in `docs/configuration.md`: gpm will not clean up an adopted
   record for you.
-
 - **An `apexTarget` change no longer deletes the records gpm only ADOPTED.** A
   retarget is a delete followed by a create, and the retarget branch did not look
   at the claim's provenance: after the edge host moved, a record an operator had
@@ -158,14 +315,12 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   else; the single place a claim may become "created" is a record that has gone
   and is genuinely re-created by gpm. To move an adopted name to a new apex,
   delete or re-point the record by hand (`docs/configuration.md`).
-
 - **Pi-hole sessions leaked whenever a run was cut short.** `logout` ran on the
   caller's context, so an HTTP client disconnecting mid-reconcile cancelled the
   logout along with the run (measurably: one login, zero logouts). Pi-hole has a
   small fixed session pool, so a leak per aborted run eventually locks the
   operator out of their own admin UI. Logout now runs on a detached context with a
   5s deadline.
-
 - **A failed retarget no longer destroys the record.** Neither backend can update
   a CNAME in place, so a retarget is delete-then-create; a create that failed left
   the name unresolved until some later reconcile happened to heal it, while the
@@ -173,19 +328,16 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   said nothing had happened. The original record is now restored (Cloudflare
   included, orange-cloud flag and all), the run fails loudly, and the counter is
   incremented as soon as the *delete* lands.
-
 - **A Pi-hole API shape change is an error, not a silent ledger wipe.** A renamed
   or missing `config.dns.cnameRecords` field decoded to a nil slice, which a
   full-state reconciler reads as "the resolver holds nothing" — status OK, zero
   counters, ledger emptied and committed. The field is now required to be present
   and a list; anything else fails the run with the ledger intact.
-
 - **Cloudflare pagination no longer truncates when `result_info` is absent.** A
   full 100-record page with no (or a zeroed) `result_info` stopped the walk at
   page 1, hiding the rest of the zone: no false deletes, but orphaned ledger
   entries and repeated creates of records that already exist. Termination is now
   driven by a short page; `result_info` is advisory.
-
 - **A reconcile can no longer clobber a concurrent revert of the ownership
   ledger.** The reconcile's read-modify-write spans minutes of backend I/O, and
   `Revert` rewrites `dns-ledger.yaml` with the rest of the tree; a reconcile that
@@ -194,23 +346,19 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   `SaveDNSLedger` now takes the repo revision the ledger was read at and refuses a
   stale write (`ErrLedgerStale`); the reconciler re-reads and rewrites *without*
   the withdrawn claims rather than resurrecting them.
-
 - **A revert can still restore an ownership claim reality has moved past** (gpm
   created a record, deleted it, an operator recreated it by hand, the config is
   reverted to before the deletion). This is documented prominently beside the
   existing revert note in `docs/configuration.md`, and every deletion is now
   logged at **warn** with the ledger revision that authorised it, so a record
   removed on the strength of a stale claim is identifiable after the fact.
-
 - **Ledger duplicate-domain validation is case-insensitive**, matching the
   normalised form the reconciler indexes by. `Foo.lan` and `foo.lan` could both
   validate, leaving one claim silently shadowing the other.
-
 - **The ledger commit survives a cancelled request.** The reconciler's ledger save
   passed the (possibly request-scoped) context to `git.CommitAll`, so a cancelled
   reconcile could leave the file written but uncommitted, to be swept into an
   unrelated commit later. It now writes on a detached context.
-
 - **DNS sync deleted 19 records it did not create. It can no longer delete
   anything it did not create.** On 2026-08-01 an operator enabled
   `settings.dnsSync.pihole` for the first time. Their Pi-hole already held 19
@@ -256,84 +404,26 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   Regression coverage names the incident directly: pre-existing records pointing
   at `apexTarget`, an empty desired set and an empty ledger must produce **zero**
   deletions, on both backends.
-
-### Added
-
-- **`GET /api/dns-sync/plan` — dry run before you enable.** Reads both backends and
-  the ownership ledger and reports exactly what a reconcile would create, adopt,
-  retarget, delete and skip, plus how many records it would leave alone, without
-  issuing a single write. Scope `dns-sync:read`; `409 Conflict` while a reconcile
-  is in flight, for the same reason the manual reconcile refuses to queue. Wired
-  into the settings UI as **Preview changes**, next to *Reconcile now*. The
-  2026-08-01 incident was unpreviewable — the only way to learn what the first
-  reconcile would do was to run it, and by then the records were gone.
-
-### Changed
-
-- **`GET /api/dns-sync/status` reports adoption.** Each backend now carries
-  `adopted`, `retargeted`, `skipped` and `untouched` alongside `created` and
-  `deleted`. `managed` changes meaning from "records whose target matched the
-  apex" to "records gpm owns" (the ledger entry count after the run). `untouched`
-  is the number to check after a first enable: it should equal everything you
-  maintain by hand on that backend.
-- **Changing `apexTarget` no longer orphans records.** Previously ownership *was*
-  target equality, so moving the apex made every record gpm had created
-  unrecognisable to it — never updated, never deleted, and never recreated either
-  because the name now conflicted. With the ledger, a record gpm created and
-  nobody has touched since is still identifiably gpm's, so it is retargeted on the
-  next reconcile. The manual-cleanup warning in `docs/configuration.md` and
-  `docs/deployment.md` is retired.
-
-### Added
-
-- **Ingress discovery: operator-defined named profiles, selected per Ingress.**
-  `settings.ingressDiscovery.profiles` is a map of named chains, each with the
-  same shape and the same validation as `template`; an `Ingress` selects one with
-  `gpm.rake.pro/profile: "<name>"`. Discovery previously derived every host from
-  the single `template`, so it could only adopt the uniform tail of a fleet -
-  publishing anything else would silently **drop** its `sso`/`rate-limit`/login
-  middleware or **impose** an access list on a host that is public on purpose,
-  both security-relevant regressions that leave the host serving under a chain
-  nobody chose. `template` is unchanged and now acts as the default profile, so
-  existing configs and existing annotated Ingresses behave identically (covered
-  by a regression test).
-
-  **The annotation carries a name and nothing else, and that is the security
-  constraint.** An Ingress author is untrusted - in a shared cluster a tenant may
-  be able to create or edit an `Ingress`, and gpm sits at the edge in front of
-  everything - so there is deliberately **no** annotation that lets a manifest
-  name a middleware, an access list, a certificate or an upstream. Such an
-  annotation would be a self-service privilege grant (`access-lists: ""` on your
-  own namespace's Ingress removes `home-vpn` from a hostname at the edge). Every
-  profile is authored by the operator in the config repo; a manifest chooses
-  among sanctioned chains and can never invent one, nor end up weaker than
-  something the operator explicitly allowed. An **undefined** profile name
-  **skips** the Ingress - never a silent fall back to the default, never a
-  partial chain - and if that Ingress already has a derived host, the host is
-  **disabled** rather than left alone, so a retired or tightened profile cannot
-  be pinned (see Security below). Matching is
-  exact (no prefix match, no case folding); a profile is applied verbatim rather
-  than merged with the default, so the default's access list cannot leak onto a
-  deliberately-public profile. Every profile validates at settings-**write** time
-  (`certificateRef` required, `upstream` XOR `upstreamGroupRef`, name-checked
-  middleware/access-list refs), so an invalid one is rejected where an operator
-  sees it rather than surfacing later as a skipped host.
-  `GET /ingress-discovery/status` now reports the resolved `profile` per host
-  (the literal `template` for the default block) as the audit trail for what
-  chain a given Ingress actually got, and the settings UI grows a profile editor
-  plus the resolved profile in its status panel. Threat model and resolution
-  rules in
-  [docs/design/ingress-discovery.md §5a](docs/design/ingress-discovery.md);
-  schema and a worked example in
-  [docs/configuration.md](docs/configuration.md#discovery-profiles).
-
-- **Ingress discovery templates can name an upstream group.**
-  `settings.ingressDiscovery.template.upstreamGroupRef` is an alternative to a
-  single `upstream` address, mutually exclusive with it exactly as on a proxy
-  host. A cluster ingress controller normally runs on every node, so pinning
-  discovery to one address made every discovered service single-node while the
-  operator's hand-written hosts kept failing over - a silent availability
-  downgrade for anything discovery adopted.
+- **One dangling reference in `ingressDiscovery` could wedge the entire
+  reconcile, forever.** `Settings.Validate` checks only the *shape* of the names
+  a template or profile carries, so a `certificateRef` / `upstreamGroupRef` /
+  middleware / access list / `clientAuth.caRef` naming an object that does not
+  exist passed `SaveSettings` - and then failed at `merged.Validate()` in
+  `ApplyBatch`, which rejects the **whole batch**. Every other tenant's create,
+  update and delete was therefore dropped on every poll, indefinitely, surfacing
+  only as an opaque batch-validation error in the reconcile status.
+  `SaveSettings` now cross-checks the template and every profile against the
+  loaded config (`IngressDiscoverySettings.ValidateRefs`), so the error lands on
+  the operator's own write with the offending name in it. A **disabled**
+  discovery block is not cross-checked, so a half-filled draft still never blocks
+  an unrelated settings write.
+- **The residual risk of profiles is now documented where operators read it.**
+  `docs/configuration.md` and the settings UI both claimed a manifest "can never
+  produce a host weaker than something you explicitly sanctioned" while the
+  worked example shipped a `public-ratelimited` profile with no access list. Both
+  now say the operative rule plainly: every profile is selectable by every
+  annotating Ingress, so define only profiles you are willing for any cluster
+  tenant to choose.
 
 ### Security
 
@@ -352,7 +442,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   derived name) still freezes the existing host: the operator's policy has not
   changed there, and failing closed would let any tenant take their own service
   offline with a one-character manifest edit.
-
 - **A settings save no longer strips mTLS from discovery profiles or the
   template.** The settings form rebuilt `tls` from exactly the three fields it
   renders (`certificateRef`, `forceSSL`, `http2`), and a settings write is a full
@@ -363,7 +452,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   onto every derived host. The handler now merges over the loaded object. The
   template block had this bug since it shipped; profiles inherited it. A guard
   test in `internal/ui` fails if the merge is ever rebuilt away.
-
 - **The data plane fails closed on an unresolvable middleware or access-list
   name.** `buildChain` skipped any name it could not resolve, so a typo in a
   host's `accessLists` turned a restricted host into an open one, with
@@ -371,7 +459,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   An unresolvable reference now replaces that host's chain with a `503` and logs
   at `error`. Scoped to the one host on purpose: a config that cannot pass
   validation anyway must not take unrelated hosts down as a side effect.
-
 - **Derived hosts no longer share one `*ClientAuth` with the settings object.**
   `TLSSettings` is a value but its `ClientAuth` is a pointer, so every host
   derived from a template aliased the same mTLS struct (middlewares, access lists
@@ -379,29 +466,21 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   path, but a mutation of one host's mTLS requirement could have reached every
   other host's. Now deep-copied.
 
+## [1.0.8] - 2026-07-31
+
+### Added
+
+- **Ingress discovery templates can name an upstream group.**
+  `settings.ingressDiscovery.template.upstreamGroupRef` is an alternative to a
+  single `upstream` address, mutually exclusive with it exactly as on a proxy
+  host. A cluster ingress controller normally runs on every node, so pinning
+  discovery to one address made every discovered service single-node while the
+  operator's hand-written hosts kept failing over - a silent availability
+  downgrade for anything discovery adopted.
+
+## [1.0.7] - 2026-07-31
+
 ### Fixed
-
-- **One dangling reference in `ingressDiscovery` could wedge the entire
-  reconcile, forever.** `Settings.Validate` checks only the *shape* of the names
-  a template or profile carries, so a `certificateRef` / `upstreamGroupRef` /
-  middleware / access list / `clientAuth.caRef` naming an object that does not
-  exist passed `SaveSettings` - and then failed at `merged.Validate()` in
-  `ApplyBatch`, which rejects the **whole batch**. Every other tenant's create,
-  update and delete was therefore dropped on every poll, indefinitely, surfacing
-  only as an opaque batch-validation error in the reconcile status.
-  `SaveSettings` now cross-checks the template and every profile against the
-  loaded config (`IngressDiscoverySettings.ValidateRefs`), so the error lands on
-  the operator's own write with the offending name in it. A **disabled**
-  discovery block is not cross-checked, so a half-filled draft still never blocks
-  an unrelated settings write.
-
-- **The residual risk of profiles is now documented where operators read it.**
-  `docs/configuration.md` and the settings UI both claimed a manifest "can never
-  produce a host weaker than something you explicitly sanctioned" while the
-  worked example shipped a `public-ratelimited` profile with no access list. Both
-  now say the operative rule plainly: every profile is selectable by every
-  annotating Ingress, so define only profiles you are willing for any cluster
-  tenant to choose.
 
 - **The API-token form could not grant `ingress-discovery`.** The SPA rendered
   its scope checkboxes from a hand-maintained copy of `model.ScopePlurals`,
@@ -411,6 +490,8 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   and the form renders from it, with the local list demoted to a
   fetch-failure fallback. Covered by a test asserting the served list matches
   `model.ScopePlurals` exactly.
+
+## [1.0.5] - 2026-07-31
 
 ### Added
 
@@ -455,7 +536,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   check `Delete` performs) before touching the working tree. It is what makes
   "one commit per reconcile" possible for Ingress discovery; an empty batch is a
   no-op that commits nothing.
-
 - **Scoped API tokens.** A new `APIToken` config object
   (`config/api-tokens/<name>.yaml`) gives scripts and CI a bearer credential
   instead of an admin session cookie. The secret (`gpm_` + 32 random bytes,
@@ -505,149 +585,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   "API Tokens" nav entry and page when no token source is wired, instead of
   accepting input that could not work (`internal/api`, `internal/ui`).
 
-- **`rewrite` middleware: exact-match request-path replacement.** A new
-  middleware type (`type: rewrite`) with a `replacePath` map that swaps an
-  incoming request path for a target before proxying, when the path matches a key
-  **exactly** (no regex/prefix matching, sidestepping the path-confusion/ReDoS
-  classes). The rewrite is internal and upstream-facing: it preserves the method
-  and body (never an HTTP redirect) and runs **innermost** in the chain (closest
-  to the upstream, after headers), so auth/guard/access-list all still evaluate
-  the ORIGINAL client path. Motivating case: repair a client that mangles an
-  upstream path - e.g. a mobile OIDC app that strips the trailing slash off
-  Authentik's `/application/o/token`, which Django answers `405`; a
-  `/application/o/token → /application/o/token/` rewrite at the edge fixes it.
-  Both key and value must be absolute paths and a key may not map to itself
-  (`internal/dataplane/rewrite.go`, model `RewriteMiddleware`).
-- **Web UI: middleware editor supports `rewrite`.** The middleware-type
-  dropdown now offers `rewrite` with a `replacePath` key/value row editor
-  (parity with the `headers` editor), so an existing `rewrite` middleware can
-  be opened and saved without being coerced into another type
-  (`internal/ui/static/app.js`).
-- **HA design doc** ([docs/design/ha.md](docs/design/ha.md)): a settled
-  multi-instance story for gpm itself. Recommends a phase-1 active/standby
-  two-node homelab pair - static leader owns ACME renewal and admin writes, the
-  follower pulls config via git `pull --ff-only` and reads replicated
-  certs/secrets, a keepalived VRRP VIP steers traffic (client IP preserved), the
-  `sso_not_before` watermark gains a refresh loop so revocation propagates
-  without a restart, and TCP/UDP streams are failover-with-reconnect. Per-instance
-  state (admin sessions, access-log ring, rate-limit buckets, login-lockout maps)
-  is documented as lossy. No new dependency; no data-plane hot-path change.
-- **Per-object revert.** A scoped revert restores only one object's file to its
-  state at a past commit, committing just that change and leaving every other
-  object untouched. New `Store.RevertObject(kind, name, hash)` uses
-  `git checkout <hash> -- <rel>` (path always after `--`); the rel path is derived
-  from the trusted object-kind directory mapping (never client-supplied), the hash
-  is validated, and the whole config is re-validated with a rollback to HEAD on
-  failure exactly like the whole-tree revert. New endpoint
-  `POST /api/{kind}/{name}/revert` (body `{"hash":"<commit>"}`), same
-  auth/CSRF/reload/webhook wiring as the whole-config revert. The History view now
-  offers "revert this object" per single-object commit, and the existing
-  whole-tree action is relabeled "revert entire config" to make its scope
-  unmistakable. This closes the gap where reverting one object from its History
-  view silently deleted every object created after that commit (operator incident
-  2026-07-16: a proxy-host revert wiped three newer Certificate objects).
-- **Upstream groups: health-checked failover across multiple backends.** New
-  first-class `UpstreamGroup` object (`config/upstream-groups/`): an ordered
-  list of upstreams (first = primary, rest = backups) with a per-group health
-  check (TCP connect by default, or HTTP GET via `healthCheck.path`; tunable
-  `intervalSeconds`/`timeoutSeconds`/`rise`/`fall`). A ProxyHost selects it via
-  `upstreamGroupRef` (mutually exclusive with `upstream`; locations inherit the
-  group unless they set their own single `upstream`). The data plane tries
-  candidates healthy-first in config order and retries a request on the next
-  upstream **only on connect-phase failures** (dial/TLS — the request was never
-  sent, so retrying is safe for non-idempotent methods; an HTTP response,
-  including a 5xx, is never replayed). Live-traffic connect failures feed the
-  same fall counter as the active probe, an immediate probe round runs at
-  (re)load, and a group with every upstream down fails open (attempts in
-  preference order). Request bodies up to 1 MiB are buffered for replay; larger
-  bodies stream with a single attempt at the preferred upstream. Group health
-  state and probers survive config reloads that don't change the group, and a
-  rejected config never disturbs the running probers. Live status at
-  `GET /api/upstream-health`; full CRUD at `/api/upstream-groups/`; UI gains an
-  "Upstream Groups" section (typed editor with per-upstream up/down chips) and
-  a group selector on the proxy-host editor. Referential integrity enforced:
-  unknown or disabled group references are rejected at write time.
-- **Load-distribution policies and weights on upstream groups.** `policy` on
-  `UpstreamGroup` selects how traffic spreads across the healthy upstreams:
-  `failover` (default — strict list order, unchanged behavior), `round-robin`
-  (smooth weighted round-robin, nginx's algorithm), `least-connections`
-  (fewest in-flight requests relative to weight, tracked per upstream until
-  each response body closes), and `ip-hash` (rendezvous hashing on the client
-  IP for sticky sessions — when an upstream dies only its own clients move).
-  Per-upstream `weight` (1–256, default 1) sets the relative share for the
-  weighted policies and is ignored by `failover`/`ip-hash`. Unhealthy
-  upstreams are demoted to the end of the try-order under every policy
-  (fail-open preserved), and the connect-error-only retry rule is unchanged.
-  `GET /api/upstream-health` now also reports each upstream's `weight` and
-  in-flight `active` count. UI: policy select and per-upstream weight column
-  on the group editor.
-- **Cookie-based sticky sessions with a server-enforced TTL on upstream
-  groups.** `stickiness: {ttl: "12h", cookie: "..."}` on `UpstreamGroup` pins
-  each client to its assigned upstream via an HMAC-signed cookie (default name
-  `gpm-sticky-<group>`; `HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` when the
-  client arrived over HTTPS). The TTL (Go duration, plus a `d` day suffix,
-  e.g. `3d`) rides inside the signed value, so replaying a cookie past its
-  `Max-Age` still re-assigns — expiry is authoritative server-side and the
-  window is fixed from assignment, not sliding. Signed with the existing
-  data-plane SSO key (`GPM_SSO_SIGNING_KEY` / persisted `sso_signing.key`), so
-  clients cannot forge a pin to a chosen backend; tampered, expired,
-  foreign-group, or dead-upstream pins all fall back to the policy and get a
-  fresh assignment cookie, and an honored pin adds no Set-Cookie noise.
-  Composes with every policy (the policy picks initial/replacement
-  assignments). UI: sticky TTL + cookie-name fields on the group editor.
-- **Per-location upstream group references.** `upstreamGroupRef` on a
-  `Location` (mutually exclusive with the location's `upstream`) points one
-  path at its own group; with neither set the location inherits the host
-  backend as before. Validated like the host-level reference (unknown or
-  disabled groups rejected). UI: a group select per location row on the
-  proxy-host editor.
-
-- **Configurable rate-limit window on `RateLimitMiddleware`.** Rate limits can
-  now be expressed as `requests` + `window` (a Go duration string, e.g. `10s`,
-  `1m`, `1h`) for limits that don't reduce cleanly to a per-second rate (e.g.
-  "100 requests per 1m", "5 per 1h"). The legacy `requestsPerSecond` field is
-  kept as shorthand for `requests`/`window: 1s` and remains fully supported;
-  exactly one of the two forms may be set, validated at config load. Burst
-  still defaults to `ceil(requests)` and can still be overridden explicitly.
-  Data-plane refill rate and `Retry-After` math both derive from the
-  configured window rather than assuming seconds. UI editor (middleware
-  rate-limit form) updated to a `Requests` + `Per` (window) pair; existing
-  `requestsPerSecond`-only configs still load and behave identically, and
-  editing one through the UI migrates it to the new form on save.
-- **`allowFrom` exemption on `RateLimitMiddleware`.** Rate-limit middlewares now
-  accept an `allowFrom` list of client CIDRs/IPs (same shape and validation as
-  `AuthMiddleware.AllowFrom` / `GuardMiddleware.AllowFrom`); a matching client
-  bypasses the limiter entirely (no token consumed, no 429), resolved via the
-  same XFF-aware client-IP logic as the rest of the chain. Non-matching and
-  unresolvable-IP clients are limited exactly as before. Config, data-plane
-  enforcement, UI editor, and tests all updated.
-- **Optional `blockFor` block period on `RateLimitMiddleware`.** Once a client
-  exceeds the limit, further requests from it are rejected for a configured
-  duration (a Go duration string, e.g. `"30s"`, `"5m"`) regardless of token
-  refill, so a briefly-paused client cannot immediately sail back through. The
-  block is fixed, not sliding - repeat requests during the block do not extend
-  it, and once it expires ordinary token-bucket rules resume (no instant
-  re-burst beyond `burst`). Optional and off by default (empty `blockFor` is
-  today's refill-only behavior); validated via `time.ParseDuration` (must be
-  > 0) alongside either rate form. UI editor adds a "Block for" select
-  (none/10s/30s/1m/5m/15m/1h, with round-trip preservation for a
-  hand-authored value like `2m`) next to the rate-limit form.
-- **Opt-in `net/http/pprof` on the admin server.** New `-pprof` flag / `GPM_PPROF`
-  env var (default off, same pattern as `-debug-headers`) mounts `net/http/pprof`
-  under `/debug/pprof/` on the admin listener only, behind the same admin-role +
-  same-origin CSRF gate as the REST API (`RequireRole(RoleAdmin, ...)` +
-  `sameOriginGuard`). Registered explicitly on the admin mux, never via the
-  side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
-  `http.DefaultServeMux`. Never touches the data-plane router.
-- **Domain-group filter chips on the Proxy Hosts list.** Each host's domains are
-  grouped into a "zone" (a wildcard's remainder, or the last two labels of a
-  regular domain — `sensor.iot.example.com` and `*.iot.example.com` both group
-  under `iot.example.com`). When a list has 2+ zones, a chip row renders below the
-  search box (label "zone (count)", sorted by count then name); clicking a chip
-  excludes/includes that zone, composing with the existing text filter. Excluded
-  zones persist in `localStorage` (`gpm.hosts.zonesOff`) across navigation and
-  reloads.
-
 ### Changed
 
 - **One Ingress reconcile's cluster list is bounded to two minutes.** The only
@@ -671,21 +608,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 - **`ProxyHost.dns` is now omitted from JSON when unset.** `encoding/json`
   ignores `omitempty` on a struct value, so every proxy-host response carried a
   noise `"dns":{}`; the field is a pointer now (`internal/model`).
-
-- **Data-plane reverse proxy tuned for large/streamed upstream responses.** The
-  shared upstream transport now sets `DisableCompression: true` (the proxy must
-  not transparently gunzip upstream bodies — CPU cost, and it strips
-  Content-Length, forcing the flush-per-write chunked path), and the main
-  `httputil.ReverseProxy` now uses a fixed 512KiB `sync.Pool`-backed `BufferPool`
-  (a larger copy buffer cuts the per-write flush count for chunked upstream
-  responses, which stdlib flushes after every write). The outpost auth
-  subrequest client (`internal/dataplane/authrequest.go`) now uses a dedicated,
-  tuned `http.Transport` (no proxy env, 5s dial/TLS timeouts, 64 idle conns per
-  host) instead of the default transport's 2-conn-per-host cap.
-- **Browser tab title dropped the " admin" suffix.** The static fallback title
-  and the dynamic `document.title` (set from `settings.appName` once loaded)
-  now both read just "Go Proxy Manager" (or the configured app name), matching
-  the sidebar wordmark.
 
 ### Fixed
 
@@ -718,12 +640,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   boundary, so gpm now validates it itself and skips the Ingress (returning no name,
   so an ambiguous one cannot protect a host from deletion) (`internal/k8s`,
   `internal/model`).
-- **Duplicate `Strict-Transport-Security` on the proxied admin path.** The admin
-  server emitted its own HSTS header in addition to the one the data plane (the
-  actual TLS edge) emits for the admin host, so a request to the admin panel
-  through gpm carried two identical HSTS headers. HSTS is now set only by the data
-  plane; the admin server no longer sets it (over its direct plain-HTTP port HSTS
-  was ignored anyway, and via the proxy the edge owns it).
 
 ### Security
 
@@ -825,6 +741,18 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   name that exists with a different target — the behaviour the Cloudflare backend
   already had (`internal/dnssync`).
 
+## [1.0.4] - 2026-07-20
+
+### Added
+
+- **Web UI: middleware editor supports `rewrite`.** The middleware-type
+  dropdown now offers `rewrite` with a `replacePath` key/value row editor
+  (parity with the `headers` editor), so an existing `rewrite` middleware can
+  be opened and saved without being coerced into another type
+  (`internal/ui/static/app.js`).
+
+### Security
+
 - **Aikido SAST suppression documented at the git exec site.** The
   command-injection finding on `internal/store/gitrepo.go` is a false
   positive - git runs as a fixed argv (no shell) with internal literal
@@ -839,171 +767,152 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   style attributes, and Google Fonts (`style-src` fonts.googleapis.com,
   `font-src` fonts.gstatic.com). Admin listener only — proxied data-plane
   traffic is untouched (`internal/server`).
-- **Webhook delivery is SSRF-bounded** (issue #1, low/defense-in-depth).
-  Lifecycle-webhook targets are admin-configured URLs, which made delivery an
-  SSRF primitive from gpm's network position. Redirects are no longer followed
-  (a 3xx counts as a failed delivery instead of bouncing gpm to a URL the admin
-  never configured), and link-local destinations (`169.254.0.0/16`, `fe80::/10`
-  — cloud metadata services) are refused at connect time on the resolved
-  address, so a rebinding resolver cannot dodge the check. Private/LAN targets
-  remain allowed (the normal self-hosted case); URL scheme/shape was already
-  validated at config-write time.
-- **Data-plane SSO sessions gained global revocation** (issue #1,
-  low/defense-in-depth). Sessions stay stateless (1h absolute TTL), but
-  `POST /api/sso/revoke` (admin-gated, CSRF-protected; also a button under
-  Settings) moves a persisted revocation watermark to "now": any session issued
-  before it — including legacy cookies minted before this change — fails the
-  gate and the user re-authenticates at the IdP. The watermark is stored next
-  to the SSO signing key so revocation survives restarts. Session cookies now
-  carry an `iat` claim to support the check.
-- **`GPM_COOKIE_SECURE=0` production guard** (issue #1, low/defense-in-depth).
-  gpm now logs a prominent startup warning when Secure cookies are disabled
-  while `settings.externalBaseURL` is `https://` — the signature of a
-  TLS-fronted deployment mis-set for local testing. A warning rather than a
-  hard failure, because a LAN-only plain-HTTP admin listener alongside the
-  public URL is a known deliberate topology.
-- **Data-plane SSO cookies use the `__Host-` prefix.** `gpm_sso` / `gpm_sso_state`
-  are now `__Host-gpm_sso` / `__Host-gpm_sso_state`, so the browser enforces their
-  Secure + host-locked (no `Domain`) + `Path=/` scope and a sibling subdomain cannot
-  plant a same-named shadow cookie. (Forged values already failed the HMAC; this
-  closes the shadowing vector.) Active sessions re-authenticate once (GPM-I2).
 
-- **Settings validation rejects an admin-lockout configuration.** A settings write
-  with neither local login nor any SSO provider — no way into the admin panel — is
-  now refused at validation instead of committing and locking the operator out
-  (previously recoverable only by redeploy) (GPM-I4).
-
-- **A host referencing a disabled ClientCA is rejected at validation.** Previously
-  referential validation only checked the CA name existed; a disabled CA then
-  produced a nil pool and a hard TLS-config error that failed the whole router
-  reload. The disabled reference is now a clear load-time error (GPM-I3).
-
-- **Access lists are evaluated ahead of authentication.** The middleware chain now
-  runs `rate-limit → access-list → auth → guard → headers → upstream` (previously
-  the access-list sat inside auth). An IP the access-list would deny is now dropped
-  before any auth work runs, so a non-allowed client hitting an OIDC/forward-auth
-  host no longer drives a forward-auth subrequest to the IdP or receives an OIDC
-  redirect/401 that discloses the auth flow. IP/geo access policy is enforced as an
-  edge control, before identity, as intended (GPM-L1).
-
-- **Client-IP resolution for IP-based controls is now per-host, not a global
-  union.** `X-Forwarded-For` is honoured (for access-list, rate-limit, geo, and
-  auth-request `allowFrom`) only for proxies the target host actually trusts — the
-  `trustedProxies` of the forward-auth IdPs that host references — mirroring the
-  host-scoped identity-header trust. Previously the trusted-proxy set was the union
-  across every IdP, so a proxy trusted by one host could have its `XFF` honoured
-  when resolving another host's client IP. A host with no forward-auth IdP in front
-  now keys IP controls off the connection peer (GPM-L4).
-
-- **Data-plane SSO sessions use a 1-hour absolute TTL (was 12h).** The `gpm_sso`
-  cookie is no longer valid for 12h with no revocation path; it now expires 1h after
-  login and is not extended by activity. On expiry the gate re-runs the OIDC flow
-  (silent while the IdP session is valid) and re-checks group membership, bounding
-  the offboarding window for a deprivileged or disabled user to ~1h without
-  server-side session state (GPM-L3).
-
-- **Login/OIDC-begin rate gate fails closed under a distinct-key flood.** When the
-  gate's per-IP map is saturated with live entries, a new key could previously go
-  unrecorded and thus never reach its limit (a brute-force bypass). The read path
-  now treats an untracked key as at-limit while the map is saturated, so a flood
-  degrades login into a lockout rather than an unthrottled guess (GPM-L2).
-
-- **`Restore` enforces the no-literal-secrets guard.** An uploaded backup archive is
-  now checked for literal (non-placeholder) secrets after load, matching `Save`/
-  `SaveSettings`; a violation rolls the working tree back and commits nothing, so a
-  crafted archive cannot land a plaintext secret on disk or in git history. The
-  rollback itself was hardened: `RestoreTree` now also removes untracked files
-  (`git clean -fd`), closing a gap where a refused restore's newly-written files
-  survived on disk and would be picked up by the next config load (GPM-L6).
-
-- **`${ENV:...}` cannot resolve gpm's own reserved secrets, and can be prefix-gated.**
-  `GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH` are never resolvable via
-  an `${ENV:...}` placeholder, so an admin-authored value cannot exfiltrate the SSO
-  signing key or admin password hash (e.g. via a webhook secret). Operators can
-  further restrict resolution to an allowlist of name prefixes with
-  `GPM_SECRET_ENV_PREFIXES`, mirroring `${FILE:...}` confinement (GPM-L7).
-
-- **Rate-limiter bucket eviction is now O(1) (LRU) instead of an O(n) map scan.**
-  At the 16 384-bucket cap, a rotating-source-IP flood forced a full-map scan under
-  the limiter mutex per new key, serializing rate-limit checks for the host (a DoS
-  amplifier). Buckets are held in an LRU list and the least-recently-used one is
-  evicted in constant time; memory stays bounded as before (GPM-L5).
-
-- **Access lists reject `\` and `;` in the request path.** Path matching for
-  path-scoped locations and guard triggers is exact after `path.Clean`, which does
-  not treat a backslash or a `;` matrix parameter as path structure. A request like
-  `/admin;x` or `/admin\..\x` therefore failed to match a location/guard keyed on
-  `/admin` yet could be re-collapsed onto `/admin` by a backend that strips
-  `;`-parameters (Servlet containers) or treats `\` as a separator (IIS/Windows),
-  slipping past that path's auth. The data plane now rejects any request whose
-  canonical path still contains `\` or `;` with `400 Bad Request`, keeping the
-  matched path and the forwarded path byte-identical.
-
-- **Data-plane SSO session cookies are bound to their issuing host.** The `gpm_sso`
-  cookie is HMAC-signed with a process-wide key, so a valid session minted for one
-  OIDC-gated host verified on every other. With two hosts fronted by different IdPs
-  that share a group name, a cookie copied from host A would be re-evaluated against
-  host B's role mapping using A's groups (cross-IdP privilege confusion). The signed
-  payload now carries the issuing host and a gate rejects any cookie whose host is
-  not its own (a mismatched cookie triggers a fresh login).
-
-- **Geo whitelist (`countryAllow`) fails closed on unknown IPs by default.**
-  Previously `onUnknown` defaulted to `allow` in all modes, so an IP the GeoIP
-  database could not place in a country - unallocated space, stale-DB gaps, some
-  cloud/VPN ranges - was admitted even by a `countryAllow: [US]` whitelist,
-  defeating it. When `onUnknown` is unset, whitelist mode now defaults to `deny`;
-  deny-list mode keeps `allow` (it only narrows). An explicit `onUnknown` still
-  wins.
-
-- **`defaultAction: deny` on a rule-less access list now denies.** An access list
-  with no IP, basic-auth, or geo rules but an explicit `defaultAction: deny` (a
-  deliberate "lock this host down") was treated as an empty, unrestricted list and
-  silently allowed all traffic. Such a list now denies; an unset or `allow` default
-  remains open, as before.
-
-- **Session database created 0600 in a 0700 directory.** The SQLite session
-  store (`session.db`) was previously created with default OS permissions (typically
-  0644 dir / 0644 file), making session IDs and CSRF tokens world-readable. The
-  parent directory is now created 0700 and the file is pre-created 0600 (and
-  `chmod`'d on open to tighten pre-existing deployments).
-
-- **`GET /version` no longer exposes the config-repo HEAD commit.** The response
-  previously included a `configCommit` field containing the current HEAD SHA of the
-  git-backed config repository, leaking internal state to any authenticated caller.
-  The field has been removed; the response now contains only the binary version info.
-
-- **`roleMapping.defaultRole: "admin"` now requires explicit opt-in.** Setting
-  `defaultRole` to `"admin"` without also setting `roleMapping.allowDefaultAdmin:
-  true` is rejected at validation time. Without group gating, `defaultRole: "admin"`
-  grants full admin to every user the IdP authenticates; the new required field stops
-  that from happening silently by config typo. Unknown `defaultRole` values are also
-  rejected (previously silently treated as deny).
-
-- **Per-IP rate limit on OIDC admin login starts.** A client IP may initiate at
-  most 30 OIDC login flows within any 10-minute window. Attempts beyond the cap
-  receive a 502 immediately, before any redirect to the IdP. This prevents a single
-  client from exhausting the global pending-login budget and blocking OIDC logins for
-  all users. Legitimate flows behind shared NAT are unaffected by the generous cap.
-
-- **Data-plane SSO signing key is now persisted across restarts.** When
-  `GPM_SSO_SIGNING_KEY` is not set, gpm previously generated a random ephemeral key
-  per process, invalidating all per-host OIDC sessions on every restart. The key is
-  now generated once and written to `<cert-dir>/sso_signing.key` (0600) on first
-  use, so sessions survive restarts. If the file is found corrupt on startup it is
-  renamed to `sso_signing.key.corrupt` and a fresh key is generated and persisted.
-  `GPM_SSO_SIGNING_KEY` still takes precedence when set.
-
-- **Forward-auth identity strip no longer breaks a proxied Authentik.** The
-  baseline identity-header denylist stripped the entire `X-Authentik-*` request
-  family from untrusted peers, which also removed Authentik's own CSRF token header
-  (`X-authentik-CSRF`, read from the `authentik_csrf` cookie and sent on every
-  flow-executor API POST). When Authentik itself is proxied through gpm, every
-  admin login failed with "CSRF Failed: CSRF token missing". `X-Authentik-Csrf` is
-  now exempt from the strip — it is a CSRF token validated against a cookie, not an
-  identity assertion, so forwarding it is no escalation risk.
+## [1.0.1] - 2026-07-19
 
 ### Added
 
+- **`rewrite` middleware: exact-match request-path replacement.** A new
+  middleware type (`type: rewrite`) with a `replacePath` map that swaps an
+  incoming request path for a target before proxying, when the path matches a key
+  **exactly** (no regex/prefix matching, sidestepping the path-confusion/ReDoS
+  classes). The rewrite is internal and upstream-facing: it preserves the method
+  and body (never an HTTP redirect) and runs **innermost** in the chain (closest
+  to the upstream, after headers), so auth/guard/access-list all still evaluate
+  the ORIGINAL client path. Motivating case: repair a client that mangles an
+  upstream path - e.g. a mobile OIDC app that strips the trailing slash off
+  Authentik's `/application/o/token`, which Django answers `405`; a
+  `/application/o/token → /application/o/token/` rewrite at the edge fixes it.
+  Both key and value must be absolute paths and a key may not map to itself
+  (`internal/dataplane/rewrite.go`, model `RewriteMiddleware`).
+
+## [1.0.0] - 2026-07-18
+
+### Added
+
+- **HA design doc** ([docs/design/ha.md](docs/design/ha.md)): a settled
+  multi-instance story for gpm itself. Recommends a phase-1 active/standby
+  two-node homelab pair - static leader owns ACME renewal and admin writes, the
+  follower pulls config via git `pull --ff-only` and reads replicated
+  certs/secrets, a keepalived VRRP VIP steers traffic (client IP preserved), the
+  `sso_not_before` watermark gains a refresh loop so revocation propagates
+  without a restart, and TCP/UDP streams are failover-with-reconnect. Per-instance
+  state (admin sessions, access-log ring, rate-limit buckets, login-lockout maps)
+  is documented as lossy. No new dependency; no data-plane hot-path change.
+- **Per-object revert.** A scoped revert restores only one object's file to its
+  state at a past commit, committing just that change and leaving every other
+  object untouched. New `Store.RevertObject(kind, name, hash)` uses
+  `git checkout <hash> -- <rel>` (path always after `--`); the rel path is derived
+  from the trusted object-kind directory mapping (never client-supplied), the hash
+  is validated, and the whole config is re-validated with a rollback to HEAD on
+  failure exactly like the whole-tree revert. New endpoint
+  `POST /api/{kind}/{name}/revert` (body `{"hash":"<commit>"}`), same
+  auth/CSRF/reload/webhook wiring as the whole-config revert. The History view now
+  offers "revert this object" per single-object commit, and the existing
+  whole-tree action is relabeled "revert entire config" to make its scope
+  unmistakable. This closes the gap where reverting one object from its History
+  view silently deleted every object created after that commit (operator incident
+  2026-07-16: a proxy-host revert wiped three newer Certificate objects).
+- **Upstream groups: health-checked failover across multiple backends.** New
+  first-class `UpstreamGroup` object (`config/upstream-groups/`): an ordered
+  list of upstreams (first = primary, rest = backups) with a per-group health
+  check (TCP connect by default, or HTTP GET via `healthCheck.path`; tunable
+  `intervalSeconds`/`timeoutSeconds`/`rise`/`fall`). A ProxyHost selects it via
+  `upstreamGroupRef` (mutually exclusive with `upstream`; locations inherit the
+  group unless they set their own single `upstream`). The data plane tries
+  candidates healthy-first in config order and retries a request on the next
+  upstream **only on connect-phase failures** (dial/TLS — the request was never
+  sent, so retrying is safe for non-idempotent methods; an HTTP response,
+  including a 5xx, is never replayed). Live-traffic connect failures feed the
+  same fall counter as the active probe, an immediate probe round runs at
+  (re)load, and a group with every upstream down fails open (attempts in
+  preference order). Request bodies up to 1 MiB are buffered for replay; larger
+  bodies stream with a single attempt at the preferred upstream. Group health
+  state and probers survive config reloads that don't change the group, and a
+  rejected config never disturbs the running probers. Live status at
+  `GET /api/upstream-health`; full CRUD at `/api/upstream-groups/`; UI gains an
+  "Upstream Groups" section (typed editor with per-upstream up/down chips) and
+  a group selector on the proxy-host editor. Referential integrity enforced:
+  unknown or disabled group references are rejected at write time.
+- **Load-distribution policies and weights on upstream groups.** `policy` on
+  `UpstreamGroup` selects how traffic spreads across the healthy upstreams:
+  `failover` (default — strict list order, unchanged behavior), `round-robin`
+  (smooth weighted round-robin, nginx's algorithm), `least-connections`
+  (fewest in-flight requests relative to weight, tracked per upstream until
+  each response body closes), and `ip-hash` (rendezvous hashing on the client
+  IP for sticky sessions — when an upstream dies only its own clients move).
+  Per-upstream `weight` (1–256, default 1) sets the relative share for the
+  weighted policies and is ignored by `failover`/`ip-hash`. Unhealthy
+  upstreams are demoted to the end of the try-order under every policy
+  (fail-open preserved), and the connect-error-only retry rule is unchanged.
+  `GET /api/upstream-health` now also reports each upstream's `weight` and
+  in-flight `active` count. UI: policy select and per-upstream weight column
+  on the group editor.
+- **Cookie-based sticky sessions with a server-enforced TTL on upstream
+  groups.** `stickiness: {ttl: "12h", cookie: "..."}` on `UpstreamGroup` pins
+  each client to its assigned upstream via an HMAC-signed cookie (default name
+  `gpm-sticky-<group>`; `HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` when the
+  client arrived over HTTPS). The TTL (Go duration, plus a `d` day suffix,
+  e.g. `3d`) rides inside the signed value, so replaying a cookie past its
+  `Max-Age` still re-assigns — expiry is authoritative server-side and the
+  window is fixed from assignment, not sliding. Signed with the existing
+  data-plane SSO key (`GPM_SSO_SIGNING_KEY` / persisted `sso_signing.key`), so
+  clients cannot forge a pin to a chosen backend; tampered, expired,
+  foreign-group, or dead-upstream pins all fall back to the policy and get a
+  fresh assignment cookie, and an honored pin adds no Set-Cookie noise.
+  Composes with every policy (the policy picks initial/replacement
+  assignments). UI: sticky TTL + cookie-name fields on the group editor.
+- **Per-location upstream group references.** `upstreamGroupRef` on a
+  `Location` (mutually exclusive with the location's `upstream`) points one
+  path at its own group; with neither set the location inherits the host
+  backend as before. Validated like the host-level reference (unknown or
+  disabled groups rejected). UI: a group select per location row on the
+  proxy-host editor.
+- **Configurable rate-limit window on `RateLimitMiddleware`.** Rate limits can
+  now be expressed as `requests` + `window` (a Go duration string, e.g. `10s`,
+  `1m`, `1h`) for limits that don't reduce cleanly to a per-second rate (e.g.
+  "100 requests per 1m", "5 per 1h"). The legacy `requestsPerSecond` field is
+  kept as shorthand for `requests`/`window: 1s` and remains fully supported;
+  exactly one of the two forms may be set, validated at config load. Burst
+  still defaults to `ceil(requests)` and can still be overridden explicitly.
+  Data-plane refill rate and `Retry-After` math both derive from the
+  configured window rather than assuming seconds. UI editor (middleware
+  rate-limit form) updated to a `Requests` + `Per` (window) pair; existing
+  `requestsPerSecond`-only configs still load and behave identically, and
+  editing one through the UI migrates it to the new form on save.
+- **`allowFrom` exemption on `RateLimitMiddleware`.** Rate-limit middlewares now
+  accept an `allowFrom` list of client CIDRs/IPs (same shape and validation as
+  `AuthMiddleware.AllowFrom` / `GuardMiddleware.AllowFrom`); a matching client
+  bypasses the limiter entirely (no token consumed, no 429), resolved via the
+  same XFF-aware client-IP logic as the rest of the chain. Non-matching and
+  unresolvable-IP clients are limited exactly as before. Config, data-plane
+  enforcement, UI editor, and tests all updated.
+- **Optional `blockFor` block period on `RateLimitMiddleware`.** Once a client
+  exceeds the limit, further requests from it are rejected for a configured
+  duration (a Go duration string, e.g. `"30s"`, `"5m"`) regardless of token
+  refill, so a briefly-paused client cannot immediately sail back through. The
+  block is fixed, not sliding - repeat requests during the block do not extend
+  it, and once it expires ordinary token-bucket rules resume (no instant
+  re-burst beyond `burst`). Optional and off by default (empty `blockFor` is
+  today's refill-only behavior); validated via `time.ParseDuration` (must be
+  > 0) alongside either rate form. UI editor adds a "Block for" select
+  (none/10s/30s/1m/5m/15m/1h, with round-trip preservation for a
+  hand-authored value like `2m`) next to the rate-limit form.
+- **Opt-in `net/http/pprof` on the admin server.** New `-pprof` flag / `GPM_PPROF`
+  env var (default off, same pattern as `-debug-headers`) mounts `net/http/pprof`
+  under `/debug/pprof/` on the admin listener only, behind the same admin-role +
+  same-origin CSRF gate as the REST API (`RequireRole(RoleAdmin, ...)` +
+  `sameOriginGuard`). Registered explicitly on the admin mux, never via the
+  side-effecting `_ "net/http/pprof"` import, so nothing is ever exposed on
+  `http.DefaultServeMux`. Never touches the data-plane router.
+- **Domain-group filter chips on the Proxy Hosts list.** Each host's domains are
+  grouped into a "zone" (a wildcard's remainder, or the last two labels of a
+  regular domain — `sensor.iot.example.com` and `*.iot.example.com` both group
+  under `iot.example.com`). When a list has 2+ zones, a chip row renders below the
+  search box (label "zone (count)", sorted by count then name); clicking a chip
+  excludes/includes that zone, composing with the existing text filter. Excluded
+  zones persist in `localStorage` (`gpm.hosts.zonesOff`) across navigation and
+  reloads.
 - **mTLS (phase 1): per-host client-certificate auth** (`tls.clientAuth`): a
   proxy/redirect/dead host can require or accept a client certificate verified
   against a new `ClientCA` trust-anchor object (`caPEM`, inline or
@@ -1055,8 +964,6 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   config change. Delivery is asynchronous and best-effort under a 10s timeout, so a
   slow or unreachable endpoint never blocks or fails a config write. An optional
   per-target secret (placeholder-resolved) is sent as `X-GPM-Webhook-Secret`.
-
-
 - **Data plane**: native-Go reverse proxy with SNI-based TLS termination (exact +
   wildcard certificate selection), HTTP/2, WebSocket upgrades, and force-SSL
   (HTTP→HTTPS 308 redirects).
@@ -1125,6 +1032,20 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Changed
 
+- **Data-plane reverse proxy tuned for large/streamed upstream responses.** The
+  shared upstream transport now sets `DisableCompression: true` (the proxy must
+  not transparently gunzip upstream bodies — CPU cost, and it strips
+  Content-Length, forcing the flush-per-write chunked path), and the main
+  `httputil.ReverseProxy` now uses a fixed 512KiB `sync.Pool`-backed `BufferPool`
+  (a larger copy buffer cuts the per-write flush count for chunked upstream
+  responses, which stdlib flushes after every write). The outpost auth
+  subrequest client (`internal/dataplane/authrequest.go`) now uses a dedicated,
+  tuned `http.Transport` (no proxy env, 5s dial/TLS timeouts, 64 idle conns per
+  host) instead of the default transport's 2-conn-per-host cap.
+- **Browser tab title dropped the " admin" suffix.** The static fallback title
+  and the dynamic `document.title` (set from `settings.appName` once loaded)
+  now both read just "Go Proxy Manager" (or the configured app name), matching
+  the sidebar wordmark.
 - **Lifecycle webhooks now fire only after a config change is applied to the
   running data plane, not merely committed to git** - a write that commits
   but fails to apply (e.g. a geo rule saved the instant its GeoIP database
@@ -1150,6 +1071,12 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Fixed
 
+- **Duplicate `Strict-Transport-Security` on the proxied admin path.** The admin
+  server emitted its own HSTS header in addition to the one the data plane (the
+  actual TLS edge) emits for the admin host, so a request to the admin panel
+  through gpm carried two identical HSTS headers. HSTS is now set only by the data
+  plane; the admin server no longer sets it (over its direct plain-HTTP port HSTS
+  was ignored anyway, and via the proxy the edge owns it).
 - Logout now lands on the login page under SSO-only instead of silently
   re-authenticating against a live IdP session.
 - Rewrite upstream `Location` redirects that point back at the upstream's own
@@ -1162,6 +1089,149 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ### Security
 
+- **Webhook delivery is SSRF-bounded** (issue #1, low/defense-in-depth).
+  Lifecycle-webhook targets are admin-configured URLs, which made delivery an
+  SSRF primitive from gpm's network position. Redirects are no longer followed
+  (a 3xx counts as a failed delivery instead of bouncing gpm to a URL the admin
+  never configured), and link-local destinations (`169.254.0.0/16`, `fe80::/10`
+  — cloud metadata services) are refused at connect time on the resolved
+  address, so a rebinding resolver cannot dodge the check. Private/LAN targets
+  remain allowed (the normal self-hosted case); URL scheme/shape was already
+  validated at config-write time.
+- **Data-plane SSO sessions gained global revocation** (issue #1,
+  low/defense-in-depth). Sessions stay stateless (1h absolute TTL), but
+  `POST /api/sso/revoke` (admin-gated, CSRF-protected; also a button under
+  Settings) moves a persisted revocation watermark to "now": any session issued
+  before it — including legacy cookies minted before this change — fails the
+  gate and the user re-authenticates at the IdP. The watermark is stored next
+  to the SSO signing key so revocation survives restarts. Session cookies now
+  carry an `iat` claim to support the check.
+- **`GPM_COOKIE_SECURE=0` production guard** (issue #1, low/defense-in-depth).
+  gpm now logs a prominent startup warning when Secure cookies are disabled
+  while `settings.externalBaseURL` is `https://` — the signature of a
+  TLS-fronted deployment mis-set for local testing. A warning rather than a
+  hard failure, because a LAN-only plain-HTTP admin listener alongside the
+  public URL is a known deliberate topology.
+- **Data-plane SSO cookies use the `__Host-` prefix.** `gpm_sso` / `gpm_sso_state`
+  are now `__Host-gpm_sso` / `__Host-gpm_sso_state`, so the browser enforces their
+  Secure + host-locked (no `Domain`) + `Path=/` scope and a sibling subdomain cannot
+  plant a same-named shadow cookie. (Forged values already failed the HMAC; this
+  closes the shadowing vector.) Active sessions re-authenticate once (GPM-I2).
+- **Settings validation rejects an admin-lockout configuration.** A settings write
+  with neither local login nor any SSO provider — no way into the admin panel — is
+  now refused at validation instead of committing and locking the operator out
+  (previously recoverable only by redeploy) (GPM-I4).
+- **A host referencing a disabled ClientCA is rejected at validation.** Previously
+  referential validation only checked the CA name existed; a disabled CA then
+  produced a nil pool and a hard TLS-config error that failed the whole router
+  reload. The disabled reference is now a clear load-time error (GPM-I3).
+- **Access lists are evaluated ahead of authentication.** The middleware chain now
+  runs `rate-limit → access-list → auth → guard → headers → upstream` (previously
+  the access-list sat inside auth). An IP the access-list would deny is now dropped
+  before any auth work runs, so a non-allowed client hitting an OIDC/forward-auth
+  host no longer drives a forward-auth subrequest to the IdP or receives an OIDC
+  redirect/401 that discloses the auth flow. IP/geo access policy is enforced as an
+  edge control, before identity, as intended (GPM-L1).
+- **Client-IP resolution for IP-based controls is now per-host, not a global
+  union.** `X-Forwarded-For` is honoured (for access-list, rate-limit, geo, and
+  auth-request `allowFrom`) only for proxies the target host actually trusts — the
+  `trustedProxies` of the forward-auth IdPs that host references — mirroring the
+  host-scoped identity-header trust. Previously the trusted-proxy set was the union
+  across every IdP, so a proxy trusted by one host could have its `XFF` honoured
+  when resolving another host's client IP. A host with no forward-auth IdP in front
+  now keys IP controls off the connection peer (GPM-L4).
+- **Data-plane SSO sessions use a 1-hour absolute TTL (was 12h).** The `gpm_sso`
+  cookie is no longer valid for 12h with no revocation path; it now expires 1h after
+  login and is not extended by activity. On expiry the gate re-runs the OIDC flow
+  (silent while the IdP session is valid) and re-checks group membership, bounding
+  the offboarding window for a deprivileged or disabled user to ~1h without
+  server-side session state (GPM-L3).
+- **Login/OIDC-begin rate gate fails closed under a distinct-key flood.** When the
+  gate's per-IP map is saturated with live entries, a new key could previously go
+  unrecorded and thus never reach its limit (a brute-force bypass). The read path
+  now treats an untracked key as at-limit while the map is saturated, so a flood
+  degrades login into a lockout rather than an unthrottled guess (GPM-L2).
+- **`Restore` enforces the no-literal-secrets guard.** An uploaded backup archive is
+  now checked for literal (non-placeholder) secrets after load, matching `Save`/
+  `SaveSettings`; a violation rolls the working tree back and commits nothing, so a
+  crafted archive cannot land a plaintext secret on disk or in git history. The
+  rollback itself was hardened: `RestoreTree` now also removes untracked files
+  (`git clean -fd`), closing a gap where a refused restore's newly-written files
+  survived on disk and would be picked up by the next config load (GPM-L6).
+- **`${ENV:...}` cannot resolve gpm's own reserved secrets, and can be prefix-gated.**
+  `GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH` are never resolvable via
+  an `${ENV:...}` placeholder, so an admin-authored value cannot exfiltrate the SSO
+  signing key or admin password hash (e.g. via a webhook secret). Operators can
+  further restrict resolution to an allowlist of name prefixes with
+  `GPM_SECRET_ENV_PREFIXES`, mirroring `${FILE:...}` confinement (GPM-L7).
+- **Rate-limiter bucket eviction is now O(1) (LRU) instead of an O(n) map scan.**
+  At the 16 384-bucket cap, a rotating-source-IP flood forced a full-map scan under
+  the limiter mutex per new key, serializing rate-limit checks for the host (a DoS
+  amplifier). Buckets are held in an LRU list and the least-recently-used one is
+  evicted in constant time; memory stays bounded as before (GPM-L5).
+- **Access lists reject `\` and `;` in the request path.** Path matching for
+  path-scoped locations and guard triggers is exact after `path.Clean`, which does
+  not treat a backslash or a `;` matrix parameter as path structure. A request like
+  `/admin;x` or `/admin\..\x` therefore failed to match a location/guard keyed on
+  `/admin` yet could be re-collapsed onto `/admin` by a backend that strips
+  `;`-parameters (Servlet containers) or treats `\` as a separator (IIS/Windows),
+  slipping past that path's auth. The data plane now rejects any request whose
+  canonical path still contains `\` or `;` with `400 Bad Request`, keeping the
+  matched path and the forwarded path byte-identical.
+- **Data-plane SSO session cookies are bound to their issuing host.** The `gpm_sso`
+  cookie is HMAC-signed with a process-wide key, so a valid session minted for one
+  OIDC-gated host verified on every other. With two hosts fronted by different IdPs
+  that share a group name, a cookie copied from host A would be re-evaluated against
+  host B's role mapping using A's groups (cross-IdP privilege confusion). The signed
+  payload now carries the issuing host and a gate rejects any cookie whose host is
+  not its own (a mismatched cookie triggers a fresh login).
+- **Geo whitelist (`countryAllow`) fails closed on unknown IPs by default.**
+  Previously `onUnknown` defaulted to `allow` in all modes, so an IP the GeoIP
+  database could not place in a country - unallocated space, stale-DB gaps, some
+  cloud/VPN ranges - was admitted even by a `countryAllow: [US]` whitelist,
+  defeating it. When `onUnknown` is unset, whitelist mode now defaults to `deny`;
+  deny-list mode keeps `allow` (it only narrows). An explicit `onUnknown` still
+  wins.
+- **`defaultAction: deny` on a rule-less access list now denies.** An access list
+  with no IP, basic-auth, or geo rules but an explicit `defaultAction: deny` (a
+  deliberate "lock this host down") was treated as an empty, unrestricted list and
+  silently allowed all traffic. Such a list now denies; an unset or `allow` default
+  remains open, as before.
+- **Session database created 0600 in a 0700 directory.** The SQLite session
+  store (`session.db`) was previously created with default OS permissions (typically
+  0644 dir / 0644 file), making session IDs and CSRF tokens world-readable. The
+  parent directory is now created 0700 and the file is pre-created 0600 (and
+  `chmod`'d on open to tighten pre-existing deployments).
+- **`GET /version` no longer exposes the config-repo HEAD commit.** The response
+  previously included a `configCommit` field containing the current HEAD SHA of the
+  git-backed config repository, leaking internal state to any authenticated caller.
+  The field has been removed; the response now contains only the binary version info.
+- **`roleMapping.defaultRole: "admin"` now requires explicit opt-in.** Setting
+  `defaultRole` to `"admin"` without also setting `roleMapping.allowDefaultAdmin:
+  true` is rejected at validation time. Without group gating, `defaultRole: "admin"`
+  grants full admin to every user the IdP authenticates; the new required field stops
+  that from happening silently by config typo. Unknown `defaultRole` values are also
+  rejected (previously silently treated as deny).
+- **Per-IP rate limit on OIDC admin login starts.** A client IP may initiate at
+  most 30 OIDC login flows within any 10-minute window. Attempts beyond the cap
+  receive a 502 immediately, before any redirect to the IdP. This prevents a single
+  client from exhausting the global pending-login budget and blocking OIDC logins for
+  all users. Legitimate flows behind shared NAT are unaffected by the generous cap.
+- **Data-plane SSO signing key is now persisted across restarts.** When
+  `GPM_SSO_SIGNING_KEY` is not set, gpm previously generated a random ephemeral key
+  per process, invalidating all per-host OIDC sessions on every restart. The key is
+  now generated once and written to `<cert-dir>/sso_signing.key` (0600) on first
+  use, so sessions survive restarts. If the file is found corrupt on startup it is
+  renamed to `sso_signing.key.corrupt` and a fresh key is generated and persisted.
+  `GPM_SSO_SIGNING_KEY` still takes precedence when set.
+- **Forward-auth identity strip no longer breaks a proxied Authentik.** The
+  baseline identity-header denylist stripped the entire `X-Authentik-*` request
+  family from untrusted peers, which also removed Authentik's own CSRF token header
+  (`X-authentik-CSRF`, read from the `authentik_csrf` cookie and sent on every
+  flow-executor API POST). When Authentik itself is proxied through gpm, every
+  admin login failed with "CSRF Failed: CSRF token missing". `X-Authentik-Csrf` is
+  now exempt from the strip — it is a CSRF token validated against a cookie, not an
+  identity assertion, so forwarding it is no escalation risk.
 - Remediated an internal security review (8 high / 3 medium / 11 low): identity
   headers stripped from untrusted peers; CSRF double-submit token + same-origin
   guard on the admin API; literal-secret commit guard; API secret redaction;
@@ -1194,4 +1264,15 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
   - **Local-login throttling**: per-client-IP lockout after repeated failures,
     bounded pending-login/throttle maps, and sliding session expiry.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/commits/main
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.16...HEAD
+[1.0.16]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.15...v1.0.16
+[1.0.15]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.13...v1.0.15
+[1.0.13]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...v1.0.13
+[1.0.10]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.9...v1.0.10
+[1.0.9]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.8...v1.0.9
+[1.0.8]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.5...v1.0.7
+[1.0.5]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.1...v1.0.4
+[1.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/Rake-Pro/go-proxy-manager/releases/tag/v1.0.0

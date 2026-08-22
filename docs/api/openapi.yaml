@@ -1,0 +1,4088 @@
+# Generated reference - see docs/api/README.md for how this is produced,
+# validated (go test ./internal/server) and served (GET /api/openapi.yaml).
+# Do not hand-edit paths/schemas without also updating internal/api/api.go's
+# routes or internal/model's structs to match.
+openapi: 3.1.0
+info:
+  title: go-proxy-manager admin API
+  version: 0.1.0
+  summary: 'REST API for the go-proxy-manager control plane: config CRUD, settings, backup/restore, DNS
+    sync, Ingress discovery, and admin auth.'
+  description: 'Covers the admin control-plane surface only (port 8081 by default), not the public data
+    plane that serves proxied traffic. Every non-2xx response uses the uniform `{"error": "..."}` shape
+    (see #/components/schemas/Error), except the plain-text/HTML auth endpoints noted individually below.
+
+
+    Authentication: an admin session cookie (`sessionCookie`) or a scoped API bearer token (`bearerAuth`)
+    - either satisfies every operation below unless noted. A session''s access is governed by its role
+    (`user` for GET /api/me only; `admin` for everything under /api/); a token''s access is additionally
+    governed by its granted scopes, shown per-operation as `x-scope` (`admin` satisfies every scope check;
+    a concrete `<plural>:write` implies `<plural>:read`; `*:read`/`*:write` must be granted literally
+    - a resource-scoped grant does not satisfy a wildcard requirement). Mutating session requests additionally
+    require the `X-CSRF-Token` header (double-submit against the value GET /api/me returns); bearer requests
+    never need it.
+
+
+    HA: on an instance running GPM_HA_ROLE=follower, every write (any POST/PUT/DELETE under /api/) answers
+    503 rather than being applied; reads are unaffected. See docs/ha.md.'
+  license:
+    name: See repository LICENSE
+servers:
+- url: http://localhost:8081
+  description: Admin control plane (default). Bind to loopback or front with your own ingress - do not
+    expose to the internet.
+tags:
+- name: Auth
+  description: Login/logout and the current principal.
+- name: Meta
+  description: Health, version, capabilities, whole-config reads, logs, this spec.
+- name: Settings
+  description: The singleton application settings object.
+- name: Backup & restore
+  description: Whole-config export/import as a portable archive.
+- name: DNS sync
+  description: Pi-hole / Cloudflare CNAME reconciliation for opted-in hosts.
+- name: Ingress discovery
+  description: Kubernetes Ingress -> managed proxy host reconciliation.
+- name: API tokens
+  description: Scoped bearer credentials for automation.
+- name: Profiling (opt-in)
+  description: net/http/pprof, only mounted with GPM_PPROF=1.
+- name: Proxy hosts
+- name: Redirect hosts
+- name: Stream hosts
+- name: Dead hosts
+- name: Certificates
+- name: Client CAs
+- name: DNS providers
+- name: Identity providers
+- name: Upstream groups
+- name: Access lists
+- name: Middlewares
+security:
+- sessionCookie: []
+- bearerAuth: []
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: gpm_session
+      description: Admin browser session, issued by /auth/login (OIDC) or /auth/local (bcrypt). Cookie
+        is HttpOnly, SameSite=Lax, and named __Host-gpm_session when GPM_COOKIE_SECURE=1 (default). A
+        session principal has whatever access its role (admin/user) grants and is unaffected by API-token
+        scopes. Mutating requests also need the X-CSRF-Token header.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: gpm_<random>
+      description: A scoped API token (config kind api-tokens), created via PUT /api/api-tokens/{name}.
+        Every token principal is admin-role by construction; real authorization is per-route scope checking
+        (see each operation's x-scope). No CSRF header is used or required.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+      required:
+      - error
+      description: Uniform error shape returned by every endpoint on a non-2xx response.
+    Secret:
+      type: string
+      description: 'A secret-valued field. On write, must be a ${ENV:NAME} or ${FILE:/path} placeholder
+        (a literal value is accepted for local dev but never committed as-is - see docs/configuration.md#secrets).
+        On read: a placeholder returns verbatim, an empty secret returns "", and a literal non-empty value
+        is always redacted to "***".'
+    ObjectMeta:
+      type: object
+      properties:
+        name: &id001
+          type: string
+          description: Identity and YAML filename. Lowercase alphanumeric plus -_. , must start/end alphanumeric.
+        displayName: &id002
+          type: string
+          description: Optional human label.
+        labels: &id003
+          type: object
+          properties: {}
+          description: Arbitrary key/value metadata. `gpm.rake.pro/managed-by` is reserved for automated
+            reconcilers.
+          additionalProperties:
+            type: string
+        tags: &id004
+          type: array
+          items:
+            type: string
+          description: Free-form grouping/filter labels.
+        disabled: &id005
+          type: boolean
+          description: Keep the object in config but exclude it from the running data plane. Default false.
+        createdAt: &id006
+          type: string
+          description: Set by the store on first write. Read-only.
+          format: date-time
+        updatedAt: &id007
+          type: string
+          description: Set by the store on every write. Read-only.
+          format: date-time
+    Upstream:
+      type: object
+      properties:
+        scheme:
+          type: string
+          description: http or https.
+          enum:
+          - http
+          - https
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      required:
+      - scheme
+      - host
+      - port
+    HSTS:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        maxAge:
+          type: integer
+          description: Seconds.
+        includeSubdomains:
+          type: boolean
+        preload:
+          type: boolean
+    ClientCertHeaders:
+      type: object
+      properties:
+        subjectHeader:
+          type: string
+          description: Overrides the header carrying the certificate subject (RFC 2253). Empty selects
+            X-Client-Cert-Subject.
+        san:
+          type: boolean
+          description: Send X-Client-Cert-SAN.
+        serial:
+          type: boolean
+          description: Send X-Client-Cert-Serial (lower-case hex).
+        fingerprint:
+          type: boolean
+          description: Send X-Client-Cert-Fingerprint (SHA-256, lower-case hex).
+    ClientAuth:
+      type: object
+      properties:
+        caRef:
+          type: string
+          description: Name of the ClientCA trust anchor.
+        mode:
+          type: string
+          description: require (reject unverified) or optional (verify if presented). Default require.
+          enum:
+          - require
+          - optional
+        identityHeaders:
+          $ref: '#/components/schemas/ClientCertHeaders'
+      required:
+      - caRef
+    TLSSettings:
+      type: object
+      properties:
+        certificateRef:
+          type: string
+          description: Name of a Certificate object.
+        forceSSL:
+          type: boolean
+          description: Redirect http to https.
+        http2:
+          type: boolean
+        hsts:
+          $ref: '#/components/schemas/HSTS'
+        minTLSVersion:
+          type: string
+          description: 1.2 (default) or 1.3.
+          enum:
+          - ''
+          - '1.2'
+          - '1.3'
+        clientAuth:
+          $ref: '#/components/schemas/ClientAuth'
+      description: 'Requires forceSSL: true when clientAuth is set (mTLS must never be servable in the
+        clear).'
+    HostTimeouts:
+      type: object
+      properties:
+        connectSeconds:
+          type: integer
+          description: 0-3600. 0 uses the shared transport default.
+          minimum: 0
+          maximum: 3600
+        readSeconds:
+          type: integer
+          description: 0-3600. Time-to-first-byte only, not a streaming-body cap.
+          minimum: 0
+          maximum: 3600
+    Location:
+      type: object
+      properties:
+        path:
+          type: string
+        upstream:
+          $ref: '#/components/schemas/Upstream'
+        upstreamGroupRef:
+          type: string
+          description: Mutually exclusive with upstream.
+        middlewares:
+          type: array
+          items:
+            type: string
+        accessLists:
+          type: array
+          items:
+            type: string
+      required:
+      - path
+    DNSSyncPolicy:
+      type: object
+      properties:
+        lanDirect:
+          type: boolean
+          description: Publish a local (Pi-hole) CNAME.
+        publicCname:
+          type: boolean
+          description: Publish a public (Cloudflare) CNAME.
+    ProxyHost:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        domains:
+          type: array
+          items:
+            type: string
+          description: At least one required.
+        upstream:
+          $ref: '#/components/schemas/Upstream'
+        upstreamGroupRef:
+          type: string
+          description: Name of an UpstreamGroup. Exactly one of upstream/upstreamGroupRef is set.
+        websocketsUpgrade:
+          type: boolean
+        robotsNoIndex:
+          type: boolean
+          description: 'Emit X-Robots-Tag: noindex, nofollow.'
+        timeouts:
+          $ref: '#/components/schemas/HostTimeouts'
+        tls:
+          $ref: '#/components/schemas/TLSSettings'
+        dns:
+          $ref: '#/components/schemas/DNSSyncPolicy'
+        middlewares:
+          type: array
+          items:
+            type: string
+          description: Host-wide, applied before any location-scoped ones.
+        accessLists:
+          type: array
+          items:
+            type: string
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Location'
+      required:
+      - name
+      - domains
+      description: Terminates TLS for one or more domains and reverse-proxies to an upstream.
+    RedirectHost:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        domains:
+          type: array
+          items:
+            type: string
+          description: At least one required.
+        targetScheme:
+          type: string
+          description: http | https | auto.
+          enum:
+          - ''
+          - http
+          - https
+          - auto
+        targetDomain:
+          type: string
+        statusCode:
+          type: integer
+          description: 301|302|307|308. Default 301.
+          enum:
+          - 0
+          - 301
+          - 302
+          - 307
+          - 308
+        preservePath:
+          type: boolean
+        tls:
+          $ref: '#/components/schemas/TLSSettings'
+      required:
+      - name
+      - domains
+      - targetDomain
+      description: Issues HTTP redirects for its domains.
+    StreamHost:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        listenPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          description: tcp | udp | both.
+          enum:
+          - tcp
+          - udp
+          - both
+        forwardHost:
+          type: string
+        forwardPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      required:
+      - name
+      - listenPort
+      - protocol
+      - forwardHost
+      - forwardPort
+      description: Forwards raw TCP/UDP from a listen port to a backend.
+    DeadHost:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        domains:
+          type: array
+          items:
+            type: string
+          description: At least one required.
+        statusCode:
+          type: integer
+          description: Default 404.
+        tls:
+          $ref: '#/components/schemas/TLSSettings'
+      required:
+      - name
+      - domains
+      description: Serves a 404 (or custom status) for claimed domains, absorbing unmatched vhosts.
+    ACMESpec:
+      type: object
+      properties:
+        email:
+          type: string
+        directoryURL:
+          type: string
+          description: Default Let's Encrypt production.
+        keyType:
+          type: string
+          description: ecdsa (default) | rsa.
+          enum:
+          - ''
+          - ecdsa
+          - rsa
+        challenge:
+          type: string
+          description: dns-01 is the only supported challenge.
+          enum:
+          - ''
+          - dns-01
+        dnsProvider:
+          type: string
+          description: Name of a DNSProvider object.
+      required:
+      - email
+      - dnsProvider
+    CustomCertSpec:
+      type: object
+      properties:
+        certFile:
+          type: string
+          description: PEM chain, relative to the cert store.
+        keyFile:
+          type: string
+          description: PEM private key, relative to the cert store.
+      required:
+      - certFile
+      - keyFile
+    Certificate:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        type:
+          type: string
+          description: custom | acme.
+          enum:
+          - custom
+          - acme
+        domains:
+          type: array
+          items:
+            type: string
+          description: At least one required.
+        acme:
+          $ref: '#/components/schemas/ACMESpec'
+        custom:
+          $ref: '#/components/schemas/CustomCertSpec'
+      required:
+      - name
+      - type
+      - domains
+      description: Desired state for a TLS certificate. Issuance/renewal status is runtime state, not
+        part of this object.
+    DNSProvider:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        provider:
+          type: string
+          description: cloudflare (only provider shipped today).
+        config:
+          type: object
+          properties: {}
+          description: 'Provider-specific credential map, e.g. {"apiToken": "${FILE:/run/secrets/cf_token}"}.'
+          additionalProperties:
+            $ref: '#/components/schemas/Secret'
+      required:
+      - name
+      - provider
+      description: Reusable credentials for an ACME DNS-01 provider.
+    ClientCA:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        caPEM:
+          type: string
+          description: PEM-encoded CA certificate bundle. Public; may be inline or a placeholder.
+        crlFile:
+          type: string
+          description: Optional CRL path, relative to the cert store. Mutually exclusive with crlPEM.
+            Re-read on reload and mtime watch.
+        crlPEM:
+          type: string
+          description: Optional inline PEM-encoded CRL. Mutually exclusive with crlFile.
+        crlPolicy:
+          type: string
+          description: fail-closed (default, reject on an unusable CRL) | fail-open.
+          enum:
+          - ''
+          - fail-closed
+          - fail-open
+      required:
+      - name
+      - caPEM
+      description: Trust anchor for mTLS client-certificate verification.
+    OIDCSpec:
+      type: object
+      properties:
+        issuerURL:
+          type: string
+        clientID:
+          type: string
+        clientSecret:
+          $ref: '#/components/schemas/Secret'
+        scopes:
+          type: array
+          items:
+            type: string
+          description: Default [openid, profile, email, groups].
+        usePKCE:
+          type: boolean
+          description: Default true.
+        requireVerifiedEmail:
+          type: boolean
+        trustIdPMFA:
+          type: boolean
+          description: Delegate MFA to the IdP via acr/amr instead of a second local prompt.
+      required:
+      - issuerURL
+      - clientID
+    ForwardAuthSpec:
+      type: object
+      properties:
+        trustedProxies:
+          type: array
+          items:
+            type: string
+          description: CIDRs allowed to assert identity headers. Required, non-empty.
+        userHeader:
+          type: string
+          description: e.g. X-authentik-username.
+        emailHeader:
+          type: string
+        nameHeader:
+          type: string
+        groupsHeader:
+          type: string
+        groupsDelimiter:
+          type: string
+          description: Default ",".
+        amrHeader:
+          type: string
+          description: Authentication-methods header, drives MFA delegation. Empty asserts no MFA.
+      required:
+      - trustedProxies
+      - userHeader
+    AuthRequestSpec:
+      type: object
+      properties:
+        outpostURL:
+          type: string
+          description: Base URL of the auth server, e.g. http://auth-outpost:9000.
+        pathPrefix:
+          type: string
+          description: Default /outpost.goauthentik.io.
+        authPath:
+          type: string
+          description: Default pathPrefix + /auth/nginx.
+        copyHeaders:
+          type: array
+          items:
+            type: string
+          description: Response headers copied from the auth subrequest onto the upstream request. Default
+            the Authentik X-authentik-* set.
+      required:
+      - outpostURL
+    RoleMapping:
+      type: object
+      properties:
+        groupsClaim:
+          type: string
+          description: Default "groups".
+        adminGroups:
+          type: array
+          items:
+            type: string
+        userGroups:
+          type: array
+          items:
+            type: string
+        defaultRole:
+          type: string
+          description: Applied when no group matches. "" (deny) | user | admin.
+          enum:
+          - ''
+          - user
+          - admin
+        allowDefaultAdmin:
+          type: boolean
+          description: 'Required true to set defaultRole: admin (otherwise every authenticated user would
+            get admin).'
+    IdentityProvider:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        type:
+          type: string
+          description: oidc | forward-auth | auth-request.
+          enum:
+          - oidc
+          - forward-auth
+          - auth-request
+        oidc:
+          $ref: '#/components/schemas/OIDCSpec'
+        forwardAuth:
+          $ref: '#/components/schemas/ForwardAuthSpec'
+        authRequest:
+          $ref: '#/components/schemas/AuthRequestSpec'
+        roleMapping:
+          $ref: '#/components/schemas/RoleMapping'
+      required:
+      - name
+      - type
+      description: An auth source. Can drive admin-panel login and/or gate proxy hosts via an auth middleware.
+    Stickiness:
+      type: object
+      properties:
+        cookie:
+          type: string
+          description: Default gpm-sticky-<group>.
+        ttl:
+          type: string
+          description: Go duration ("30m", "12h"), or a whole-day "3d" suffix. Required, > 0.
+      required:
+      - ttl
+    HealthCheck:
+      type: object
+      properties:
+        path:
+          type: string
+          description: HTTP GET path; empty keeps a plain TCP-connect probe.
+        intervalSeconds:
+          type: integer
+          description: Default 5.
+        timeoutSeconds:
+          type: integer
+          description: Default 3.
+        rise:
+          type: integer
+          description: Consecutive successes to mark healthy again. Default 2.
+        fall:
+          type: integer
+          description: Consecutive failures to mark unhealthy. Default 2.
+    GroupUpstream:
+      type: object
+      properties:
+        scheme:
+          type: string
+          enum:
+          - http
+          - https
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        weight:
+          type: integer
+          description: Relative share for round-robin/least-connections, 1-256. 0 defaults to 1. Ignored
+            by failover/ip-hash.
+      required:
+      - scheme
+      - host
+      - port
+    UpstreamGroup:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        upstreams:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupUpstream'
+          description: At least one required.
+        policy:
+          type: string
+          description: failover (default) | round-robin | least-connections | ip-hash.
+          enum:
+          - ''
+          - failover
+          - round-robin
+          - least-connections
+          - ip-hash
+        stickiness:
+          $ref: '#/components/schemas/Stickiness'
+        healthCheck:
+          $ref: '#/components/schemas/HealthCheck'
+      required:
+      - name
+      - upstreams
+      description: An ordered set of interchangeable backends a proxy host can forward to instead of a
+        single upstream.
+    BasicAuthUser:
+      type: object
+      properties:
+        username:
+          type: string
+        passwordHash:
+          type: string
+          description: bcrypt hash.
+      required:
+      - username
+      - passwordHash
+    IPRule:
+      type: object
+      properties:
+        action:
+          type: string
+          enum:
+          - allow
+          - deny
+        cidr:
+          type: string
+          description: e.g. 10.0.0.0/8 or 1.2.3.4/32.
+      required:
+      - action
+      - cidr
+    AccessListGeo:
+      type: object
+      properties:
+        countryAllow:
+          type: array
+          items:
+            type: string
+          description: ISO-3166-1 alpha-2 whitelist. Takes priority over countryDeny.
+        countryDeny:
+          type: array
+          items:
+            type: string
+          description: ISO-3166-1 alpha-2 denylist. Only consulted when countryAllow is empty.
+        onUnknown:
+          type: string
+          description: allow | deny, for an IP with no country in the database.
+          enum:
+          - ''
+          - allow
+          - deny
+      description: Requires an operator-supplied GeoIP database (GPM_GEOIP_DB); none is bundled.
+    AccessList:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        satisfyAny:
+          type: boolean
+          description: OR- vs AND-evaluation across auth/IP/geo checks.
+        basicAuth:
+          type: array
+          items:
+            $ref: '#/components/schemas/BasicAuthUser'
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/IPRule'
+          description: Ordered, evaluated top-down.
+        defaultAction:
+          type: string
+          description: Applied when no IP rule matches. Default deny.
+          enum:
+          - ''
+          - allow
+          - deny
+        geo:
+          $ref: '#/components/schemas/AccessListGeo'
+      required:
+      - name
+      description: HTTP basic auth, ordered IP allow/deny rules, and optional GeoIP country rules.
+    AuthMiddleware:
+      type: object
+      properties:
+        identityProvider:
+          type: string
+          description: Required except in client-cert mode.
+        mode:
+          type: string
+          description: oidc | forward-auth | auth-request | client-cert. Defaults from the IdP type.
+          enum:
+          - ''
+          - oidc
+          - forward-auth
+          - auth-request
+          - client-cert
+        requiredRoles:
+          type: array
+          items:
+            type: string
+        allowFrom:
+          type: array
+          items:
+            type: string
+          description: CIDRs that bypass authentication entirely (auth-request mode).
+        clientCertRoles:
+          type: object
+          properties: {}
+          description: Certificate subject (or bare CN) -> role, for client-cert mode.
+          additionalProperties:
+            type: string
+    HeadersMiddleware:
+      type: object
+      properties:
+        setRequest:
+          type: object
+          properties: {}
+          additionalProperties:
+            type: string
+        setResponse:
+          type: object
+          properties: {}
+          additionalProperties:
+            type: string
+        removeRequest:
+          type: array
+          items:
+            type: string
+        removeResponse:
+          type: array
+          items:
+            type: string
+    GuardTrigger:
+      type: object
+      properties:
+        paths:
+          type: array
+          items:
+            type: string
+        methods:
+          type: array
+          items:
+            type: string
+        queryEquals:
+          type: object
+          properties: {}
+          additionalProperties:
+            type: string
+    GuardMiddleware:
+      type: object
+      properties:
+        triggers:
+          type: array
+          items:
+            $ref: '#/components/schemas/GuardTrigger'
+          description: At least one required. Fires when ANY trigger matches.
+        allowFrom:
+          type: array
+          items:
+            type: string
+          description: CIDRs exempt from the deny.
+        denyStatus:
+          type: integer
+          description: 4xx/5xx. Default 403.
+      required:
+      - triggers
+    RateLimitMiddleware:
+      type: object
+      properties:
+        requestsPerSecond:
+          type: number
+          description: Legacy shorthand. Mutually exclusive with requests+window.
+        requests:
+          type: number
+          description: Paired with window, e.g. requests:100, window:"1m".
+        window:
+          type: string
+          description: Go duration string.
+        burst:
+          type: integer
+          description: Default ceil(requests).
+        allowFrom:
+          type: array
+          items:
+            type: string
+          description: CIDRs that bypass rate limiting entirely.
+        blockFor:
+          type: string
+          description: Go duration; once exceeded, further requests are rejected for this long regardless
+            of refill.
+      description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
+        be set.
+    RewriteMiddleware:
+      type: object
+      properties:
+        replacePath:
+          type: object
+          properties: {}
+          description: Exact request path -> replacement path. No regex.
+          additionalProperties:
+            type: string
+      required:
+      - replacePath
+    Middleware:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        type:
+          type: string
+          description: auth | headers | guard | rate-limit | rewrite.
+          enum:
+          - auth
+          - headers
+          - guard
+          - rate-limit
+          - rewrite
+        auth:
+          $ref: '#/components/schemas/AuthMiddleware'
+        headers:
+          $ref: '#/components/schemas/HeadersMiddleware'
+        guard:
+          $ref: '#/components/schemas/GuardMiddleware'
+        rateLimit:
+          $ref: '#/components/schemas/RateLimitMiddleware'
+        rewrite:
+          $ref: '#/components/schemas/RewriteMiddleware'
+      required:
+      - name
+      - type
+      description: A reusable, named processing step referenced by hosts/locations. Exactly one of auth/headers/guard/rateLimit/rewrite
+        is set, matching type.
+    APIToken:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        scopes: &id008
+          type: array
+          items:
+            type: string
+          description: e.g. "proxy-hosts:read", "*:read", "admin". At least one required.
+        expiresAt: &id009
+          type: string
+          description: 'Unset: never expires.'
+          format: date-time
+        lastUsed: &id010
+          type: string
+          description: In-memory last-use timestamp, decorated onto GET responses. Resets on restart.
+            Never persisted.
+          format: date-time
+      required:
+      - name
+      - scopes
+      description: A non-interactive bearer credential for the REST API. TokenHash is server-owned and
+        never returned.
+    APITokenCreateResponse:
+      type: object
+      properties:
+        name: *id001
+        displayName: *id002
+        labels: *id003
+        tags: *id004
+        disabled: *id005
+        createdAt: *id006
+        updatedAt: *id007
+        scopes: *id008
+        expiresAt: *id009
+        lastUsed: *id010
+        token:
+          type: string
+          description: The plaintext secret ("gpm_..."). Shown exactly once, on create or ?rotate=1.
+        tokenNote:
+          type: string
+          description: Human-readable reminder that the token cannot be retrieved again.
+      required:
+      - name
+      - scopes
+      description: Response to PUT /api-tokens/{name} the first time a token is created, or with ?rotate=1.
+    AdminAuthSettings:
+      type: object
+      properties:
+        providers:
+          type: array
+          items:
+            type: string
+          description: IdentityProvider names allowed to log into the admin panel.
+        localLoginEnabled:
+          type: boolean
+          description: Default true (anti-lockout).
+        ssoOnly:
+          type: boolean
+          description: Disables local login. Requires at least one providers entry.
+    WebhookConfig:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          description: Absolute http(s) endpoint.
+        secret:
+          $ref: '#/components/schemas/Secret'
+        disabled:
+          type: boolean
+      required:
+      - name
+      - url
+      description: Outbound lifecycle notification POSTed after every successful config change.
+    PiholeDNSSync:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        url:
+          type: string
+          description: Pi-hole base URL, no /api suffix.
+        appPassword:
+          $ref: '#/components/schemas/Secret'
+        apexTarget:
+          type: string
+          description: CNAME target every managed record points at.
+    CloudflareDNSSync:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        dnsProviderRef:
+          type: string
+          description: Name of a DNSProvider whose config.apiToken is reused.
+        zoneName:
+          type: string
+        apexTarget:
+          type: string
+        proxied:
+          type: boolean
+          description: Cloudflare orange-cloud flag. Default false.
+    DNSSyncSettings:
+      type: object
+      properties:
+        pihole:
+          $ref: '#/components/schemas/PiholeDNSSync'
+        cloudflare:
+          $ref: '#/components/schemas/CloudflareDNSSync'
+      description: Both backends independently enabled; both disabled (default) is inert.
+    IngressHostTemplate:
+      type: object
+      properties:
+        upstream:
+          $ref: '#/components/schemas/Upstream'
+        upstreamGroupRef:
+          type: string
+          description: Mutually exclusive with upstream.
+        tls:
+          $ref: '#/components/schemas/TLSSettings'
+        websocketsUpgrade:
+          type: boolean
+        robotsNoIndex:
+          type: boolean
+        timeouts:
+          $ref: '#/components/schemas/HostTimeouts'
+        middlewares:
+          type: array
+          items:
+            type: string
+        accessLists:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        defaultDNS:
+          $ref: '#/components/schemas/DNSSyncPolicy'
+        allowedDomainSuffixes:
+          type: array
+          items:
+            type: string
+          description: Narrows the global list for hosts derived from this template/profile. Must be a
+            subset.
+      description: The shape every proxy host derived from discovery takes. certificateRef is required.
+    IngressProfileRule:
+      type: object
+      properties:
+        namespace:
+          type: string
+          description: Empty matches any namespace.
+        matchLabels:
+          type: object
+          properties: {}
+          additionalProperties:
+            type: string
+        profile:
+          type: string
+          description: '"template" or a profiles key. Required.'
+      required:
+      - profile
+    IngressDiscoverySettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        apiURL:
+          type: string
+          description: Absolute https URL. Empty uses the in-cluster endpoint.
+        tokenFile:
+          type: string
+          description: Absolute path. Empty uses the projected in-cluster path.
+        caFile:
+          type: string
+          description: Absolute path. Empty uses the projected in-cluster CA.
+        namespace:
+          type: string
+          description: Empty lists cluster-wide (still annotation-gated).
+        labelSelector:
+          type: string
+        pollInterval:
+          type: string
+          description: Go duration. Default 1m, minimum 15s.
+        allowedDomainSuffixes:
+          type: array
+          items:
+            type: string
+          description: Required when enabled.
+        template:
+          $ref: '#/components/schemas/IngressHostTemplate'
+        profiles:
+          type: object
+          properties: {}
+          description: Named chains an Ingress may select by annotation. "template" is reserved.
+          additionalProperties:
+            $ref: '#/components/schemas/IngressHostTemplate'
+        profileRules:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngressProfileRule'
+          description: Operator-side profile routing by namespace/labels, evaluated in order.
+        profileSelection:
+          type: string
+          description: annotation-or-rules (default) | rules-only.
+          enum:
+          - ''
+          - annotation-or-rules
+          - rules-only
+      description: Disabled (default) is inert. Discovers annotated Kubernetes Ingress objects into managed
+        proxy hosts.
+    Settings:
+      type: object
+      properties:
+        schemaVersion:
+          type: integer
+        appName:
+          type: string
+          description: Default "Go Proxy Manager".
+        externalBaseURL:
+          type: string
+          description: Canonical public URL of the admin panel. Must be absolute.
+        adminAuth:
+          $ref: '#/components/schemas/AdminAuthSettings'
+        webhooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookConfig'
+        dnsSync:
+          $ref: '#/components/schemas/DNSSyncSettings'
+        ingressDiscovery:
+          $ref: '#/components/schemas/IngressDiscoverySettings'
+      description: Singleton application configuration (config/settings.yaml).
+    Config:
+      type: object
+      properties:
+        schemaVersion:
+          type: integer
+        proxyHosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProxyHost'
+        redirectHosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/RedirectHost'
+        streamHosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/StreamHost'
+        deadHosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeadHost'
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Certificate'
+        clientCAs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientCA'
+        dnsProviders:
+          type: array
+          items:
+            $ref: '#/components/schemas/DNSProvider'
+        identityProviders:
+          type: array
+          items:
+            $ref: '#/components/schemas/IdentityProvider'
+        upstreamGroups:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpstreamGroup'
+        accessLists:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessList'
+        middlewares:
+          type: array
+          items:
+            $ref: '#/components/schemas/Middleware'
+        apiTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/APIToken'
+      description: The full assembled config graph, as returned by GET /config.
+    Commit:
+      type: object
+      properties:
+        hash:
+          type: string
+        author:
+          type: string
+        email:
+          type: string
+        message:
+          type: string
+        when:
+          type: string
+          format: date-time
+      description: One git commit in the config repo's history.
+    CommitRef:
+      type: object
+      properties:
+        hash:
+          type: string
+          description: A commit hash from GET /history or GET /{plural}/{name}/history.
+      required:
+      - hash
+      description: Request body for POST /revert and POST /{plural}/{name}/revert.
+    CommitResponse:
+      type: object
+      properties:
+        commit:
+          type: string
+          description: The new commit hash created by this write (the revert/restore is itself a new commit).
+      required:
+      - commit
+    VersionInfo:
+      type: object
+      properties:
+        version:
+          type: string
+        commit:
+          type: string
+        date:
+          type: string
+        go:
+          type: string
+          description: Go toolchain version used to build.
+        os:
+          type: string
+        arch:
+          type: string
+      description: Build identity, from -ldflags at build time.
+    Principal:
+      type: object
+      properties:
+        Subject:
+          type: string
+          description: Stable IdP/local subject identifier. No json tag on this Go field, so the key is
+            capitalized as shown.
+        Email:
+          type: string
+        Name:
+          type: string
+        Role:
+          type: string
+          description: admin | user.
+          enum:
+          - admin
+          - user
+        IdP:
+          type: string
+          description: Name of the IdentityProvider that authenticated this session; empty for local login.
+        csrfToken:
+          type: string
+          description: Required back as the X-CSRF-Token header on mutating session requests. Empty for
+            a token principal.
+        isToken:
+          type: boolean
+          description: True when authenticated by an API token rather than a session cookie.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: The token's granted scopes. Empty for a session principal (governed by role alone).
+      description: The authenticated caller, as returned by GET /api/me.
+    Capabilities:
+      type: object
+      properties:
+        geoip:
+          type: object
+          properties:
+            dbLoaded:
+              type: boolean
+        apiTokens:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+        dnsSync:
+          type: object
+          properties:
+            piholeEnabled:
+              type: boolean
+            cloudflareEnabled:
+              type: boolean
+        ingressDiscovery:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+        ha:
+          type: object
+          properties:
+            role:
+              type: string
+              enum:
+              - leader
+              - follower
+            readOnly:
+              type: boolean
+        scopeSubjects:
+          type: array
+          items:
+            type: string
+          description: The authoritative list of scope subjects (resource plurals + settings/dns-sync/ingress-discovery),
+            for building a token-scope form.
+      description: 'Read-only runtime feature-availability probe. Not scope-gated: any authenticated caller
+        may ask.'
+    DNSSyncStatus:
+      type: object
+      properties:
+        lastRun:
+          type: string
+          format: date-time
+        pihole:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            ok:
+              type: boolean
+            desired:
+              type: integer
+            managed:
+              type: integer
+            created:
+              type: integer
+            adopted:
+              type: integer
+            retargeted:
+              type: integer
+            deleted:
+              type: integer
+            skipped:
+              type: integer
+            untouched:
+              type: integer
+            error:
+              type: string
+        cloudflare:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            ok:
+              type: boolean
+            desired:
+              type: integer
+            managed:
+              type: integer
+            created:
+              type: integer
+            adopted:
+              type: integer
+            retargeted:
+              type: integer
+            deleted:
+              type: integer
+            skipped:
+              type: integer
+            untouched:
+              type: integer
+            error:
+              type: string
+      description: Last-reconcile result, per backend. Shape mirrored from internal/dnssync; see docs/configuration.md#dnssyncsettings
+        for field meanings.
+      additionalProperties: true
+    DNSSyncPlan:
+      type: object
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        pihole:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            ok:
+              type: boolean
+            create:
+              type: array
+              items:
+                type: string
+            adopt:
+              type: array
+              items:
+                type: string
+            retarget:
+              type: array
+              items:
+                type: string
+            delete:
+              type: array
+              items:
+                type: string
+            skip:
+              type: array
+              items:
+                type: string
+            untouched:
+              type: integer
+            error:
+              type: string
+        cloudflare:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            ok:
+              type: boolean
+            create:
+              type: array
+              items:
+                type: string
+            adopt:
+              type: array
+              items:
+                type: string
+            retarget:
+              type: array
+              items:
+                type: string
+            delete:
+              type: array
+              items:
+                type: string
+            skip:
+              type: array
+              items:
+                type: string
+            untouched:
+              type: integer
+            error:
+              type: string
+      description: Dry-run preview of what a reconcile would do. Never writes anything.
+      additionalProperties: true
+    IngressDiscoveryStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        lastRun:
+          type: string
+          format: date-time
+        lastSuccess:
+          type: string
+          description: 'Watch this, not lastRun, for staleness: a failed run freezes the managed set instead
+            of changing it.'
+          format: date-time
+        discovered:
+          type: integer
+        managed:
+          type: integer
+        created:
+          type: integer
+        updated:
+          type: integer
+        deleted:
+          type: integer
+        skipped:
+          type: integer
+        error:
+          type: string
+        hosts:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              namespace:
+                type: string
+              profile:
+                type: string
+              action:
+                type: string
+                enum:
+                - created
+                - updated
+                - unchanged
+                - deleted
+                - skipped
+              reason:
+                type: string
+                description: Present when action is skipped.
+      description: Last-reconcile result. Shape mirrored from internal/k8s; see docs/deployment.md#kubernetes-ingress-discovery.
+      additionalProperties: true
+    IngressDiscoveryPlan:
+      type: object
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+      description: Dry-run preview mirroring the reconcile decisions, without writing anything.
+      additionalProperties: true
+    UpstreamHealth:
+      type: object
+      properties: {}
+      description: Map of UpstreamGroup name -> per-upstream live health, e.g. {"edge-nodes":[{"upstream":"http://192.0.2.11:80","healthy":true,"weight":1,"active":3}]}.
+      additionalProperties:
+        type: object
+        properties:
+          upstream:
+            type: string
+            description: scheme://host:port
+          healthy:
+            type: boolean
+          weight:
+            type: integer
+          active:
+            type: integer
+            description: In-flight request count.
+    Logs:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: False, with an empty entries array, when no access-log viewer is wired.
+        entries:
+          type: array
+          items:
+            type: object
+            properties: {}
+            additionalProperties: true
+          description: Newest first. Shape depends on internal/dataplane's access-log entry.
+      description: Recent data-plane access-log entries for the in-UI log viewer.
+    ReconcileAck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - reconciled
+      description: Fallback ack when no status payload is wired.
+    RevokeAck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - revoked
+  responses:
+    BadRequest:
+      description: Malformed request body, invalid object, or a validation error (e.g. a dangling reference,
+        a literal secret, an invalid name).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: No valid session cookie or bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated, but the caller's role or API-token scope does not permit this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No object of this kind with this name exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Delete refused because another object still references this one, or a reconcile is
+        already in flight.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FollowerReadOnly:
+      description: This instance is an HA follower (GPM_HA_ROLE=follower) and refuses every write; make
+        the change on the leader.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotImplemented:
+      description: The backing feature is not wired on this instance (e.g. no DNSSync/IngressDiscovery/SSO-revocation
+        dependency was configured).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: The store or an underlying dependency failed, or a write committed but could not be
+        applied to the running configuration.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoContent:
+      description: Deleted.
+  parameters:
+    NamePath:
+      name: name
+      in: path
+      required: true
+      description: Object name (the identity/filename).
+      schema:
+        type: string
+    CSRFTokenHeader:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required on this mutating request when authenticated by session cookie (the value from
+        GET /api/me's csrfToken). Not required, and ignored, for bearer-token authentication - a token
+        carries no ambient browser authority to defend against.
+      schema:
+        type: string
+paths:
+  /api/access-lists:
+    get:
+      summary: List access lists
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AccessList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
+  /api/access-lists/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one AccessList
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
+    put:
+      summary: Create or update an AccessList
+      tags:
+      - Access lists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessList'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:write
+    delete:
+      summary: Delete an AccessList
+      tags:
+      - Access lists
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:write
+  /api/access-lists/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one AccessList
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
+  /api/access-lists/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one AccessList to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Access lists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:write
+  /api/api-tokens:
+    get:
+      summary: List api tokens
+      tags:
+      - API tokens
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/APIToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/api-tokens/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one APIToken
+      tags:
+      - API tokens
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+    put:
+      summary: Create or update an APIToken
+      description: Creates or updates the named token. A new token (or an existing one re-PUT with ?rotate=1)
+        mints a fresh secret server-side, returned exactly once as `token`/`tokenNote`. An ordinary edit
+        (scopes, expiry, disabled) with no ?rotate carries the existing digest forward unchanged. TokenHash
+        is never accepted from the client.
+      tags:
+      - API tokens
+      parameters:
+      - name: rotate
+        in: query
+        required: false
+        description: 'api-tokens only: 1 mints a replacement secret, invalidating the old one immediately.'
+        schema:
+          type: string
+          enum:
+          - '1'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APIToken'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APITokenCreateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+    delete:
+      summary: Delete an APIToken
+      tags:
+      - API tokens
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/api-tokens/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one APIToken
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - API tokens
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/api-tokens/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one APIToken to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - API tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/backup:
+    get:
+      summary: Download a portable config backup archive
+      description: 'Gzip-compressed tar of every config object YAML plus settings.yaml (excludes .git
+        history, certs, and session.db). Admin scope, not *:read: unlike the JSON reads, the raw YAML
+        carries api-tokens'' stored digests, which are offline-crackable.'
+      tags:
+      - Backup & restore
+      responses:
+        '200':
+          description: gpm-config-backup.tar.gz
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/capabilities:
+    get:
+      summary: Runtime feature-availability probe
+      description: 'Not scope-gated: any authenticated caller (session or token, any scope) may ask what
+        this instance can do.'
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/certificates:
+    get:
+      summary: List certificates
+      tags:
+      - Certificates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Certificate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:read
+  /api/certificates/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one Certificate
+      tags:
+      - Certificates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Certificate'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:read
+    put:
+      summary: Create or update a Certificate
+      tags:
+      - Certificates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Certificate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Certificate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:write
+    delete:
+      summary: Delete a Certificate
+      tags:
+      - Certificates
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:write
+  /api/certificates/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one Certificate
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Certificates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:read
+  /api/certificates/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one Certificate to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Certificates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:write
+  /api/client-cas:
+    get:
+      summary: List client cas
+      tags:
+      - Client CAs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ClientCA'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:read
+  /api/client-cas/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one ClientCA
+      tags:
+      - Client CAs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientCA'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:read
+    put:
+      summary: Create or update a ClientCA
+      tags:
+      - Client CAs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientCA'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientCA'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+    delete:
+      summary: Delete a ClientCA
+      tags:
+      - Client CAs
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+  /api/client-cas/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one ClientCA
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Client CAs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:read
+  /api/client-cas/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one ClientCA to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Client CAs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+  /api/config:
+    get:
+      summary: Dump the whole assembled config
+      description: 'Needs the wildcard read scope: no single resource scope is enough.'
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Config'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
+  /api/dead-hosts:
+    get:
+      summary: List dead hosts
+      tags:
+      - Dead hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeadHost'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:read
+  /api/dead-hosts/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one DeadHost
+      tags:
+      - Dead hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadHost'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:read
+    put:
+      summary: Create or update a DeadHost
+      tags:
+      - Dead hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeadHost'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:write
+    delete:
+      summary: Delete a DeadHost
+      tags:
+      - Dead hosts
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:write
+  /api/dead-hosts/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one DeadHost
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Dead hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:read
+  /api/dead-hosts/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one DeadHost to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Dead hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dead-hosts:write
+  /api/dns-providers:
+    get:
+      summary: List dns providers
+      tags:
+      - DNS providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DNSProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:read
+  /api/dns-providers/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one DNSProvider
+      tags:
+      - DNS providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSProvider'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:read
+    put:
+      summary: Create or update a DNSProvider
+      tags:
+      - DNS providers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSProvider'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:write
+    delete:
+      summary: Delete a DNSProvider
+      tags:
+      - DNS providers
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:write
+  /api/dns-providers/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one DNSProvider
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - DNS providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:read
+  /api/dns-providers/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one DNSProvider to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - DNS providers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:write
+  /api/dns-sync/plan:
+    get:
+      summary: Preview a DNS sync reconcile
+      description: 'Read-only dry run: reports what a reconcile would create/adopt/retarget/delete, without
+        changing anything.'
+      tags:
+      - DNS sync
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSSyncPlan'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The backend call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-sync:read
+  /api/dns-sync/reconcile:
+    post:
+      summary: Run a DNS sync reconcile now
+      description: 'Synchronous. Never queues: a run already in flight answers 409 instead of blocking.'
+      tags:
+      - DNS sync
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSSyncStatus'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The backend (Pi-hole/Cloudflare) call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-sync:write
+  /api/dns-sync/status:
+    get:
+      summary: Last DNS sync reconcile result
+      tags:
+      - DNS sync
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSSyncStatus'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-sync:read
+  /api/history:
+    get:
+      summary: Whole-config commit history
+      description: Up to the 100 most recent commits across the entire config repo.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
+  /api/identity-providers:
+    get:
+      summary: List identity providers
+      tags:
+      - Identity providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IdentityProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:read
+  /api/identity-providers/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one IdentityProvider
+      tags:
+      - Identity providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityProvider'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:read
+    put:
+      summary: Create or update an IdentityProvider
+      tags:
+      - Identity providers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityProvider'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:write
+    delete:
+      summary: Delete an IdentityProvider
+      tags:
+      - Identity providers
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:write
+  /api/identity-providers/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one IdentityProvider
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Identity providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:read
+  /api/identity-providers/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one IdentityProvider to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Identity providers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:write
+  /api/ingress-discovery/plan:
+    get:
+      summary: Preview an Ingress discovery reconcile
+      description: Read-only dry run, without changing anything.
+      tags:
+      - Ingress discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngressDiscoveryPlan'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The Kubernetes API call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: ingress-discovery:read
+  /api/ingress-discovery/reconcile:
+    post:
+      summary: Run an Ingress discovery reconcile now
+      description: 'Synchronous. Never queues: a run already in flight answers 409 instead of blocking.'
+      tags:
+      - Ingress discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngressDiscoveryStatus'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The Kubernetes API call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: ingress-discovery:write
+  /api/ingress-discovery/status:
+    get:
+      summary: Last Ingress discovery reconcile result
+      tags:
+      - Ingress discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngressDiscoveryStatus'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: ingress-discovery:read
+  /api/logs:
+    get:
+      summary: Recent data-plane access-log entries
+      description: Newest first, for the in-UI log viewer. Empty/disabled when no access-log viewer is
+        wired.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Logs'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
+  /api/me:
+    get:
+      summary: Current authenticated principal
+      description: Proves the session/role gate and hands the SPA its CSRF token. Works for a session
+        OR a bearer token.
+      tags:
+      - Auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/middlewares:
+    get:
+      summary: List middlewares
+      tags:
+      - Middlewares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Middleware'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:read
+  /api/middlewares/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one Middleware
+      tags:
+      - Middlewares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Middleware'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:read
+    put:
+      summary: Create or update a Middleware
+      tags:
+      - Middlewares
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Middleware'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Middleware'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:write
+    delete:
+      summary: Delete a Middleware
+      tags:
+      - Middlewares
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:write
+  /api/middlewares/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one Middleware
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Middlewares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:read
+  /api/middlewares/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one Middleware to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Middlewares
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:write
+  /api/openapi.yaml:
+    get:
+      summary: This OpenAPI 3.1 specification
+      description: Same auth as GET /api/me (any authenticated session or token; no particular role or
+        scope beyond authentication).
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/proxy-hosts:
+    get:
+      summary: List proxy hosts
+      tags:
+      - Proxy hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProxyHost'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:read
+  /api/proxy-hosts/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one ProxyHost
+      tags:
+      - Proxy hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyHost'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:read
+    put:
+      summary: Create or update a ProxyHost
+      tags:
+      - Proxy hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyHost'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:write
+    delete:
+      summary: Delete a ProxyHost
+      tags:
+      - Proxy hosts
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:write
+  /api/proxy-hosts/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one ProxyHost
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Proxy hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:read
+  /api/proxy-hosts/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one ProxyHost to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Proxy hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:write
+  /api/redirect-hosts:
+    get:
+      summary: List redirect hosts
+      tags:
+      - Redirect hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RedirectHost'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:read
+  /api/redirect-hosts/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one RedirectHost
+      tags:
+      - Redirect hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedirectHost'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:read
+    put:
+      summary: Create or update a RedirectHost
+      tags:
+      - Redirect hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedirectHost'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedirectHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:write
+    delete:
+      summary: Delete a RedirectHost
+      tags:
+      - Redirect hosts
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:write
+  /api/redirect-hosts/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one RedirectHost
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Redirect hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:read
+  /api/redirect-hosts/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one RedirectHost to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Redirect hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:write
+  /api/restore:
+    post:
+      summary: Restore the whole config from a backup archive
+      description: Replaces the current config, validates the result, and commits it as one revision.
+        If the archive yields an invalid config (including a literal, uncommittable secret) the working
+        tree is rolled back to HEAD and nothing is committed. Max 8MB gzipped body.
+      tags:
+      - Backup & restore
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema:
+              type: string
+              format: binary
+  /api/revert:
+    post:
+      summary: Revert the whole config to a past commit
+      description: Recorded as a new commit, so the revert is itself revertible. Rewrites every object,
+        so it needs admin scope for a token principal.
+      tags:
+      - Meta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/settings:
+    get:
+      summary: Get the singleton application settings
+      tags:
+      - Settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:read
+    put:
+      summary: Replace the application settings
+      description: 'Admin scope, not settings:write: a settings write can point webhooks/dnsSync at an
+        attacker-controlled URL with a ${ENV:...} placeholder, and can rewrite adminAuth.'
+      tags:
+      - Settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Settings'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/sso/revoke:
+    post:
+      summary: Revoke every outstanding data-plane SSO session
+      description: Users re-authenticate at the IdP on their next request.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeAck'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /api/stream-hosts:
+    get:
+      summary: List stream hosts
+      tags:
+      - Stream hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StreamHost'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:read
+  /api/stream-hosts/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one StreamHost
+      tags:
+      - Stream hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamHost'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:read
+    put:
+      summary: Create or update a StreamHost
+      tags:
+      - Stream hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamHost'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:write
+    delete:
+      summary: Delete a StreamHost
+      tags:
+      - Stream hosts
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:write
+  /api/stream-hosts/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one StreamHost
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Stream hosts
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:read
+  /api/stream-hosts/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one StreamHost to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Stream hosts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:write
+  /api/upstream-groups:
+    get:
+      summary: List upstream groups
+      tags:
+      - Upstream groups
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UpstreamGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:read
+  /api/upstream-groups/{name}:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Get one UpstreamGroup
+      tags:
+      - Upstream groups
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamGroup'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:read
+    put:
+      summary: Create or update an UpstreamGroup
+      tags:
+      - Upstream groups
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpstreamGroup'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:write
+    delete:
+      summary: Delete an UpstreamGroup
+      tags:
+      - Upstream groups
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:write
+  /api/upstream-groups/{name}/history:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: Commit history for one UpstreamGroup
+      description: Up to the 50 most recent commits touching this object's file.
+      tags:
+      - Upstream groups
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commit'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:read
+  /api/upstream-groups/{name}/revert:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Revert one UpstreamGroup to a past commit
+      description: Restores only this object's file to its state at the given commit; every other object
+        is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
+        an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+      tags:
+      - Upstream groups
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitRef'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:write
+  /api/upstream-health:
+    get:
+      summary: Live per-upstream-group health
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamHealth'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
+  /auth/callback:
+    get:
+      summary: OIDC authorization-code callback
+      description: Verifies state against the login cookie, exchanges the code, establishes the session,
+        and redirects to the original return path.
+      tags:
+      - Auth
+      parameters:
+      - name: state
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: code
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: error
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Set by the IdP on a failed/denied authorization.
+      responses:
+        '302':
+          description: Redirect to the original return path, with the session cookie set.
+        '400':
+          description: Missing state/code, or the state does not match the login cookie.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: The IdP reported an error, or the code exchange / identity checks failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security: []
+  /auth/local:
+    post:
+      summary: Local username/password login
+      description: 'Same-origin only (CSRF belt: no session exists yet for a token-based defense). Rate-limited
+        per client IP.'
+      tags:
+      - Auth
+      responses:
+        '302':
+          description: Redirect to the return path, with the session cookie set.
+        '403':
+          description: Cross-origin request blocked (failed the same-origin guard).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many recent failed attempts from this client IP.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Bad credentials, or local login is disabled/not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                return:
+                  type: string
+                  description: Same-site path to redirect to on success.
+  /auth/login:
+    get:
+      summary: Start (or choose) an admin login flow
+      description: With ?idp=<name>, redirects straight to that IdentityProvider's OIDC flow. With none,
+        renders an HTML chooser (SSO providers + local login form), unless exactly one SSO provider is
+        configured and local login is off, in which case it redirects immediately (?select=1 forces the
+        chooser, used by logout).
+      tags:
+      - Auth
+      parameters:
+      - name: idp
+        in: query
+        required: false
+        schema:
+          type: string
+        description: IdentityProvider name to start an OIDC redirect immediately.
+      - name: return
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Same-site path to return to after login. Anything else (open-redirect shapes) is
+          discarded in favour of "/".
+      - name: select
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Any non-empty value forces the chooser page even with a single SSO provider.
+      responses:
+        '200':
+          description: HTML login chooser.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to the IdP's authorization endpoint.
+        '502':
+          description: The IdP could not be reached to start the flow.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security: []
+  /auth/logout:
+    post:
+      summary: End the current admin session
+      description: Same-origin only. Redirects to the login chooser (?select=1) rather than bouncing straight
+        back into a still-live IdP session.
+      tags:
+      - Auth
+      responses:
+        '302':
+          description: Redirect to /auth/login?select=1, with the session cookie cleared.
+        '403':
+          description: Cross-origin request blocked (failed the same-origin guard).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /debug/pprof/:
+    get:
+      summary: pprof index
+      description: Only mounted when the instance is started with GPM_PPROF=1 (-pprof); a 404 here means
+        profiling is off, not that this route doesn't exist. Gated by admin role, the same-origin guard,
+        AND (unlike every other admin route) an explicit `admin` API-token scope check - a resource-scoped
+        token gets 403, because a heap dump or /debug/pprof/cmdline carries resolved backend credentials
+        in cleartext. `go tool pprof <url>` direct remote-attach does not work (no cookie, and its /debug/pprof/symbol
+        POST fails CSRF); download the profile with curl -b and run pprof against the local file.
+      tags:
+      - Profiling (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /debug/pprof/cmdline:
+    get:
+      summary: Process command line
+      description: Only mounted when the instance is started with GPM_PPROF=1 (-pprof); a 404 here means
+        profiling is off, not that this route doesn't exist. Gated by admin role, the same-origin guard,
+        AND (unlike every other admin route) an explicit `admin` API-token scope check - a resource-scoped
+        token gets 403, because a heap dump or /debug/pprof/cmdline carries resolved backend credentials
+        in cleartext. `go tool pprof <url>` direct remote-attach does not work (no cookie, and its /debug/pprof/symbol
+        POST fails CSRF); download the profile with curl -b and run pprof against the local file.
+      tags:
+      - Profiling (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /debug/pprof/profile:
+    get:
+      summary: CPU profile (?seconds=N)
+      description: Only mounted when the instance is started with GPM_PPROF=1 (-pprof); a 404 here means
+        profiling is off, not that this route doesn't exist. Gated by admin role, the same-origin guard,
+        AND (unlike every other admin route) an explicit `admin` API-token scope check - a resource-scoped
+        token gets 403, because a heap dump or /debug/pprof/cmdline carries resolved backend credentials
+        in cleartext. `go tool pprof <url>` direct remote-attach does not work (no cookie, and its /debug/pprof/symbol
+        POST fails CSRF); download the profile with curl -b and run pprof against the local file.
+      tags:
+      - Profiling (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /debug/pprof/symbol:
+    get:
+      summary: Symbol lookup (used by go tool pprof)
+      description: Only mounted when the instance is started with GPM_PPROF=1 (-pprof); a 404 here means
+        profiling is off, not that this route doesn't exist. Gated by admin role, the same-origin guard,
+        AND (unlike every other admin route) an explicit `admin` API-token scope check - a resource-scoped
+        token gets 403, because a heap dump or /debug/pprof/cmdline carries resolved backend credentials
+        in cleartext. `go tool pprof <url>` direct remote-attach does not work (no cookie, and its /debug/pprof/symbol
+        POST fails CSRF); download the profile with curl -b and run pprof against the local file.
+      tags:
+      - Profiling (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /debug/pprof/trace:
+    get:
+      summary: Execution trace (?seconds=N)
+      description: Only mounted when the instance is started with GPM_PPROF=1 (-pprof); a 404 here means
+        profiling is off, not that this route doesn't exist. Gated by admin role, the same-origin guard,
+        AND (unlike every other admin route) an explicit `admin` API-token scope check - a resource-scoped
+        token gets 403, because a heap dump or /debug/pprof/cmdline carries resolved backend credentials
+        in cleartext. `go tool pprof <url>` direct remote-attach does not work (no cookie, and its /debug/pprof/symbol
+        POST fails CSRF); download the profile with curl -b and run pprof against the local file.
+      tags:
+      - Profiling (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+  /healthz:
+    get:
+      summary: Liveness probe
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+      security: []
+  /version:
+    get:
+      summary: Build identity
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionInfo'
+      security: []

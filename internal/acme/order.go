@@ -17,12 +17,19 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
-// issue runs a full DNS-01 order for cert's domains and persists the result.
+// issue runs a full order (dns-01 or http-01) for cert's domains and persists
+// the result. For dns-01 solver provisions the TXT records; for http-01 the
+// key authorizations are parked in the manager's token store, which the data
+// plane's plaintext listener serves.
 func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Certificate, solver DNSSolver) error {
 	if kt := cert.ACME.KeyType; kt != "" && kt != "ecdsa" {
 		return fmt.Errorf("certificate %q: key type %q not supported (P0c issues ecdsa P-256)", cert.Name, kt)
 	}
 	domains := cert.Domains
+	chalType := cert.ACME.EffectiveChallenge()
+	if chalType == model.ChallengeDNS01 && solver == nil {
+		return fmt.Errorf("certificate %q: dns-01 needs a dns provider solver", cert.Name)
+	}
 
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
 	if err != nil {
@@ -34,8 +41,9 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		authzURL string
 	}
 	var (
-		records []challengeRecord
-		todo    []pending
+		records    []challengeRecord
+		httpTokens []string
+		todo       []pending
 	)
 	for _, authzURL := range order.AuthzURLs {
 		authz, err := client.GetAuthorization(ctx, authzURL)
@@ -45,30 +53,45 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		if authz.Status == acme.StatusValid {
 			continue // already authorized
 		}
-		chal := findChallenge(authz, "dns-01")
+		chal := findChallenge(authz, chalType)
 		if chal == nil {
-			return fmt.Errorf("no dns-01 challenge offered for %q", authz.Identifier.Value)
+			return fmt.Errorf("no %s challenge offered for %q", chalType, authz.Identifier.Value)
 		}
-		val, err := client.DNS01ChallengeRecord(chal.Token)
-		if err != nil {
-			return fmt.Errorf("compute dns-01 record: %w", err)
+		if chalType == model.ChallengeHTTP01 {
+			keyAuth, err := client.HTTP01ChallengeResponse(chal.Token)
+			if err != nil {
+				m.http01.Delete(httpTokens...)
+				return fmt.Errorf("compute http-01 response: %w", err)
+			}
+			m.http01.Put(chal.Token, keyAuth, http01TokenTTL)
+			httpTokens = append(httpTokens, chal.Token)
+		} else {
+			val, err := client.DNS01ChallengeRecord(chal.Token)
+			if err != nil {
+				return fmt.Errorf("compute dns-01 record: %w", err)
+			}
+			records = append(records, challengeRecord{name: dnsName(authz.Identifier.Value), value: val})
 		}
-		records = append(records, challengeRecord{name: dnsName(authz.Identifier.Value), value: val})
 		todo = append(todo, pending{chal: chal, authzURL: authzURL})
 	}
 
-	// Provision every TXT record first (apex + wildcard may share a name), then
-	// clean them all up once the order resolves.
-	for _, r := range records {
-		if err := solver.Present(ctx, r.name, r.value); err != nil {
-			m.cleanup(ctx, solver, records)
-			return fmt.Errorf("present TXT %s: %w", r.name, err)
+	if chalType == model.ChallengeHTTP01 {
+		// The tokens are only servable while this order is in flight.
+		defer m.http01.Delete(httpTokens...)
+	} else {
+		// Provision every TXT record first (apex + wildcard may share a name), then
+		// clean them all up once the order resolves.
+		for _, r := range records {
+			if err := solver.Present(ctx, r.name, r.value); err != nil {
+				m.cleanup(ctx, solver, records)
+				return fmt.Errorf("present TXT %s: %w", r.name, err)
+			}
 		}
-	}
-	defer m.cleanup(ctx, solver, records)
+		defer m.cleanup(ctx, solver, records)
 
-	if err := waitPropagation(ctx, records, m.resolver, m.propagationTimeout, m.propagationInterval); err != nil {
-		return err
+		if err := waitPropagation(ctx, records, m.resolver, m.propagationTimeout, m.propagationInterval); err != nil {
+			return err
+		}
 	}
 
 	for _, p := range todo {

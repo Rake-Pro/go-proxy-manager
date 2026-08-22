@@ -289,7 +289,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authMiddlewareHandler(mw, reg, host.Name, clientIP, h)
+		h = authMiddlewareHandler(mw, reg, host.Name, host.Domains, clientIP, h)
 	}
 
 	// Access lists (host-level), wrapped outside auth so an IP the list would

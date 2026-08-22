@@ -229,8 +229,9 @@ func normalizeLocationPrefix(p string) string {
 // from the live health state (reconciled before the router build, so a missing
 // group here is a hard build error rather than a silently dead host).
 func hostProxy(h model.ProxyHost, reg *registry) (http.Handler, string, error) {
+	ident := assertedIdentityHeaders(h, reg)
 	if h.UpstreamGroupRef == "" {
-		return newReverseProxy(h.Upstream, h.Name, h.Timeouts), upstreamLabel(h.Upstream), nil
+		return newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident), upstreamLabel(h.Upstream), nil
 	}
 	var gh *groupHealth
 	if reg.health != nil {
@@ -239,7 +240,41 @@ func hostProxy(h model.ProxyHost, reg *registry) (http.Handler, string, error) {
 	if gh == nil {
 		return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
 	}
-	return newGroupReverseProxy(gh, h.Name, h.Timeouts), groupLabel(h.UpstreamGroupRef), nil
+	return newGroupReverseProxy(gh, h.Name, h.Timeouts, ident), groupLabel(h.UpstreamGroupRef), nil
+}
+
+// assertedIdentityHeaders is the canonical set of header names gpm may set on a
+// request to this host on its own authority: the baseline denylist (which is
+// exactly the set of names gpm strips from untrusted clients and then re-asserts
+// from a verified identity), the host's provider-configured headers, and its
+// client-certificate subject header. It is handed to the reverse proxy so those
+// names can be restored after the stdlib's Connection-header purge (see
+// reassertIdentity); it is NOT an authorization input.
+func assertedIdentityHeaders(h model.ProxyHost, reg *registry) []string {
+	extra, _ := hostIdentityTrust(h, reg)
+	names := make([]string, 0, len(baselineIdentityHeaders)+len(extra)+1)
+	seen := make(map[string]struct{}, cap(names))
+	add := func(n string) {
+		k := textproto.CanonicalMIMEHeaderKey(n)
+		if k == "" {
+			return
+		}
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		names = append(names, k)
+	}
+	for _, n := range baselineIdentityHeaders {
+		add(n)
+	}
+	for _, n := range extra {
+		add(n)
+	}
+	if ci := compileCertIdentity(h.TLS); ci != nil {
+		add(ci.subject)
+	}
+	return names
 }
 
 // buildLocations compiles a host's path-scoped locations into routes ordered

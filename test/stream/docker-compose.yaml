@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   gpm:
-    image: ghcr.io/rake-pro/go-proxy-manager:main
+    image: ghcr.io/rake-pro/go-proxy-manager:latest
     pull_policy: always
     # TEST ONLY: run as root so the bind-mounted ./config is writable (the prod
     # image runs as the non-root 'gpm' user). Do NOT copy this into production.

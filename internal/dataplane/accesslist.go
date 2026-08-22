@@ -5,8 +5,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -157,9 +160,111 @@ func (c accessList) ipAllowed(ip net.IP, geoLookup func(net.IP) (string, bool), 
 // password by response time.
 var dummyBcryptHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
+const (
+	// maxBasicAuthFails / basicAuthLockout / maxBasicAuthKeys mirror the admin
+	// plane's local-login throttle (internal/auth, rateGate): a client IP that
+	// fails this many times inside the window is locked out for the rest of it.
+	maxBasicAuthFails = 5
+	basicAuthLockout  = 15 * time.Minute
+	maxBasicAuthKeys  = 4096
+
+	// maxBcryptConcurrent bounds how many bcrypt comparisons run at once across
+	// the whole data plane. bcrypt is deliberately expensive (~50-100ms of CPU at
+	// the cost factors in use); without a bound, one unauthenticated client can
+	// convert a request flood directly into full CPU saturation and take down
+	// every other host this process serves. Requests above the bound queue rather
+	// than fail, so a legitimate burst is slowed, never rejected.
+	maxBcryptConcurrent = 16
+)
+
+// bcryptSem bounds concurrent bcrypt work (see maxBcryptConcurrent). It is
+// process-wide on purpose: the resource being protected is this process's CPU,
+// not any one access list.
+var bcryptSem = make(chan struct{}, maxBcryptConcurrent)
+
+// authGate is a per-key rolling-window failure throttle, mirroring the admin
+// plane's rateGate (internal/auth/authenticator.go) for the data plane's basic
+// auth. Keys are client IPs; the map is capped (maxKeys) and fails CLOSED when
+// saturated, so a flood of distinct keys becomes a lockout rather than an
+// unthrottled brute-force path.
+type authGate struct {
+	mu      sync.Mutex
+	entries map[string]*authGateEntry
+	window  time.Duration
+	limit   int
+	maxKeys int
+}
+
+type authGateEntry struct {
+	fails   int
+	resetAt time.Time
+}
+
+func newAuthGate(window time.Duration, limit, maxKeys int) *authGate {
+	return &authGate{entries: map[string]*authGateEntry{}, window: window, limit: limit, maxKeys: maxKeys}
+}
+
+// atLimit reports whether key is currently locked out, evicting its entry if the
+// window has passed. An untracked key while the map is full counts as at-limit
+// (fail closed under saturation).
+func (g *authGate) atLimit(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.entries[key]
+	if e == nil {
+		return len(g.entries) >= g.maxKeys
+	}
+	if time.Now().After(e.resetAt) {
+		delete(g.entries, key)
+		return false
+	}
+	return e.fails >= g.limit
+}
+
+// record counts one failure against key over a fresh window, opportunistically
+// evicting expired entries so the map cannot grow without bound.
+func (g *authGate) record(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	e := g.entries[key]
+	if e == nil || now.After(e.resetAt) {
+		if e == nil && len(g.entries) >= g.maxKeys {
+			for k, ev := range g.entries {
+				if now.After(ev.resetAt) {
+					delete(g.entries, k)
+				}
+			}
+			if len(g.entries) >= g.maxKeys {
+				return // atLimit treats an untracked key as locked while saturated
+			}
+		}
+		e = &authGateEntry{}
+		g.entries[key] = e
+	}
+	e.fails++
+	e.resetAt = now.Add(g.window)
+}
+
+// clear forgets key's failures, e.g. after a successful authentication.
+func (g *authGate) clear(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.entries, key)
+}
+
+// authOK verifies the request's basic-auth credentials. The bcrypt compare runs
+// under bcryptSem so concurrent verifications stay bounded; r's context cancels
+// the wait, so a client that goes away does not keep a slot queued.
 func (c accessList) authOK(r *http.Request) bool {
 	user, pass, ok := r.BasicAuth()
 	if !ok {
+		return false
+	}
+	select {
+	case bcryptSem <- struct{}{}:
+		defer func() { <-bcryptSem }()
+	case <-r.Context().Done():
 		return false
 	}
 	hash, known := c.users[user]
@@ -179,6 +284,11 @@ func (c accessList) authOK(r *http.Request) bool {
 // accessList.ipAllowed). The gate fails closed: a misconfigured or unmatched
 // request is denied, never allowed by default.
 func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, next http.Handler) http.Handler {
+	// One gate per compiled list. A config reload rebuilds the chain and so
+	// resets the counters, which is acceptable: a reload is operator-driven (an
+	// admin write or a certificate renewal) and cannot be provoked by the client
+	// being throttled.
+	gate := newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A list with no IP, auth, or geo dimension has nothing to match on.
 		// Honor an explicit defaultAction: deny (a deliberate "deny all") rather
@@ -196,7 +306,33 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		if c.hasIP || c.hasGeo {
 			ipOK = c.ipAllowed(ipOf(r), geoLookup, geoLoaded)
 		}
-		authOK := !c.hasAuth || c.authOK(r)
+
+		// Basic auth: throttle per client IP before spending a bcrypt compare.
+		// A locked-out client is answered exactly like a wrong password (401 +
+		// challenge, never 429), so the response cannot be used as an oracle for
+		// whether a username or a password is close to right - or for whether the
+		// lockout is in force at all.
+		authOK := !c.hasAuth
+		if c.hasAuth {
+			key := authGateKey(ipOf, r)
+			switch {
+			case gate.atLimit(key):
+				log.Warn().Str("accessList", c.name).Str("client", key).
+					Msg("data plane basic auth: client is locked out after repeated failures")
+			default:
+				authOK = c.authOK(r)
+				if _, _, presented := r.BasicAuth(); presented {
+					// Only a real attempt counts. Browsers routinely send one
+					// credential-less request per fresh page load; counting those
+					// would lock out normal users.
+					if authOK {
+						gate.clear(key)
+					} else {
+						gate.record(key)
+					}
+				}
+			}
+		}
 
 		var pass bool
 		if c.satisfyAny && (c.hasIP || c.hasGeo) && c.hasAuth {
@@ -216,6 +352,23 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		}
 		http.Error(w, "Forbidden", http.StatusForbidden)
 	})
+}
+
+// authGateKey is the basic-auth throttle key for a request: the access list's
+// own client-IP resolver, falling back to the connection peer. An IP that cannot
+// be parsed at all collapses to one shared key rather than to no key, so such
+// requests are still throttled (together) instead of escaping the gate.
+func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
+	var ip net.IP
+	if ipOf != nil {
+		ip = ipOf(r)
+	} else {
+		ip = peerIP(r)
+	}
+	if ip == nil {
+		return "unknown"
+	}
+	return ip.String()
 }
 
 // peerIP is the IP of the immediate connection peer (RemoteAddr). It is never

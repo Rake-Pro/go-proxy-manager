@@ -972,7 +972,9 @@ async function hostEditor(c, name) {
       <select class="field mono loc-scheme" style="flex:0 0 90px"><option value="">(host default)</option><option value="http"${lu.scheme === 'http' ? ' selected' : ''}>http</option><option value="https"${lu.scheme === 'https' ? ' selected' : ''}>https</option></select>
       <input class="field mono loc-host" style="flex:1 1 110px" value="${esc(lu.host || '')}" placeholder="host (optional)" aria-label="Upstream host" />
       <input class="field mono loc-port" type="number" style="flex:0 0 80px" value="${esc(lu.port != null ? lu.port : '')}" placeholder="port" aria-label="Upstream port" />
-      <button class="icon-btn loc-del" type="button" aria-label="Remove location">${ICON.x}</button>`;
+      <button class="icon-btn loc-del" type="button" aria-label="Remove location">${ICON.x}</button>
+      <select multiple class="field mono loc-mw" style="flex:1 1 140px;height:56px" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+      <select multiple class="field mono loc-al" style="flex:1 1 140px;height:56px" aria-label="Location access lists" title="Access lists for this path only (blank = host lists apply)">${accessLists.map((a) => `<option value="${esc(a.name)}"${arr(loc.accessLists).indexOf(a.name) !== -1 ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>`;
     div.querySelector('.loc-del').addEventListener('click', () => div.remove());
     // A selected group replaces (and greys out) the row's single-upstream fields.
     const gsel = div.querySelector('.loc-group');
@@ -1098,6 +1100,11 @@ async function hostEditor(c, name) {
     const mws = curMw(); if (mws.length) obj.middlewares = mws;
     const als = curAl(); if (als.length) obj.accessLists = als;
 
+    // Matched by path against the loaded host, so the merge below can carry
+    // forward any Location field this form does not render.
+    const origLocs = {};
+    arr(h.locations).forEach((ol) => { if (ol && ol.path) origLocs[ol.path] = ol; });
+
     const locs = [];
     $$('#f-locs .loc-row').forEach((row) => {
       const path = row.querySelector('.loc-path').value.trim();
@@ -1112,7 +1119,16 @@ async function hostEditor(c, name) {
         const ls = row.querySelector('.loc-scheme').value;
         if (lh && !isNaN(lp)) loc.upstream = { scheme: ls || 'http', host: lh, port: lp };
       }
-      locs.push(loc);
+      loc.middlewares = Array.from(row.querySelector('.loc-mw').selectedOptions).map((o) => o.value);
+      loc.accessLists = Array.from(row.querySelector('.loc-al').selectedOptions).map((o) => o.value);
+      // INVARIANT (same as tls.clientAuth above): merge over the original
+      // location instead of sending only what this form renders, or any
+      // Location field this editor doesn't expose (present or future) would be
+      // silently dropped on every save. upstream/upstreamGroupRef are mutually
+      // exclusive, so the side loc didn't set must not survive from orig.
+      const orig = Object.assign({}, origLocs[path]);
+      if (loc.upstreamGroupRef) delete orig.upstream; else if (loc.upstream) delete orig.upstreamGroupRef;
+      locs.push(Object.assign(orig, loc));
     });
     if (locs.length) obj.locations = locs;
 
@@ -1142,6 +1158,15 @@ async function hostEditor(c, name) {
   }
 }
 
+// Effective ACME challenge for a certificate: the explicit value, else dns-01
+// when a DNS provider is referenced (back-compat) and http-01 otherwise. Mirrors
+// ACMESpec.EffectiveChallenge in the model.
+function certChallenge(ct) {
+  const a = (ct && ct.acme) || {};
+  if (a.challenge) return a.challenge;
+  return a.dnsProvider ? 'dns-01' : 'http-01';
+}
+
 // ---------- CERTIFICATES LIST ----------
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
@@ -1156,7 +1181,7 @@ async function listCerts(c) {
     const kv = ct.type === 'acme'
       ? `<span class="k">Type</span><span class="v">ACME</span>
          <span class="k">Account</span><span class="v">${esc((ct.acme && ct.acme.email) || '')}</span>
-         <span class="k">Challenge</span><span class="v">${esc((ct.acme && ct.acme.challenge) || 'dns-01')} via ${esc((ct.acme && ct.acme.dnsProvider) || '?')}</span>`
+         <span class="k">Challenge</span><span class="v">${esc(certChallenge(ct))}${(ct.acme && ct.acme.dnsProvider) ? ' via ' + esc(ct.acme.dnsProvider) : ''}</span>`
       : `<span class="k">Type</span><span class="v">Custom</span>
          <span class="k">Cert file</span><span class="v">${esc((ct.custom && ct.custom.certFile) || '')}</span>
          <span class="k">Key file</span><span class="v">${esc((ct.custom && ct.custom.keyFile) || '')}</span>`;
@@ -1196,6 +1221,8 @@ async function certEditor(c, name) {
   const acme = ct.acme || {};
   const custom = ct.custom || {};
   const type = ct.type || 'acme';
+  // Default a brand-new cert to dns-01 only when a provider exists to solve it.
+  const challenge = isNew ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
 
   c.innerHTML = `
     <div class="row-between view-head">
@@ -1218,7 +1245,7 @@ async function certEditor(c, name) {
           <label>Type</label>
           <select class="field" id="ct-type">
             <option value="acme"${type === 'acme' ? ' selected' : ''}>ACME (Let's Encrypt)</option>
-            <option value="custom"${type === 'custom' ? ' selected' : ''}>Custom (upload)</option>
+            <option value="custom"${type === 'custom' ? ' selected' : ''}>Custom (file on server)</option>
           </select>
         </div>
         <div class="field-group">
@@ -1235,9 +1262,15 @@ async function certEditor(c, name) {
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
           <div class="inline-fields">
             <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" value="${esc(acme.keyType || '')}" placeholder="EC256" /></div>
-            <div class="field-group"><label>Challenge</label><input class="field mono" id="ct-challenge" value="dns-01" disabled /></div>
+            <div class="field-group"><label>Challenge</label>
+              <select class="field mono" id="ct-challenge">
+                <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>http-01 (port 80)</option>
+                <option value="dns-01"${challenge === 'dns-01' ? ' selected' : ''}${(dnsProviders.length || challenge === 'dns-01') ? '' : ' disabled'}>dns-01 (DNS provider)${dnsProviders.length ? '' : ' - no provider'}</option>
+              </select>
+              <div class="hint">${dnsProviders.length ? 'http-01 is validated on port 80; dns-01 is the only way to get a wildcard.' : 'dns-01 needs a DNS provider - add one under DNS Providers.'}</div>
+            </div>
           </div>
-          <div class="field-group">
+          <div class="field-group" id="ct-dns-group" style="${challenge === 'dns-01' ? '' : 'display:none'}">
             <label>DNS provider</label>
             <select class="field mono" id="ct-dns">
               <option value="">select provider...</option>
@@ -1245,11 +1278,21 @@ async function certEditor(c, name) {
             </select>
             ${dnsProviders.length ? '' : '<div class="hint">No DNS providers configured yet. Add one under DNS Providers.</div>'}
           </div>
+          <div class="field-group">
+            <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds">Required by ZeroSSL and Google Public CA</div></div>${switchHtml('ct-eab', !!(acme.eab && acme.eab.kid), 'External account binding')}</div>
+          </div>
+          <div id="ct-eab-fields" style="${(acme.eab && acme.eab.kid) ? '' : 'display:none'}">
+            <div class="field-group"><label>EAB key ID</label><input class="field mono" id="ct-eab-kid" value="${esc((acme.eab && acme.eab.kid) || '')}" placeholder="kid from the CA" /></div>
+            <div class="field-group"><label>EAB HMAC key</label><input class="field mono" id="ct-eab-hmac" value="${esc((acme.eab && acme.eab.hmacKey) || '')}" placeholder="\${ENV:ACME_EAB_HMAC}" />
+              <div class="hint">base64url, as issued by the CA. Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder so no secret is committed.</div>
+            </div>
+          </div>
         </div>
         <div id="custom-fields" style="${type === 'custom' ? '' : 'display:none'}">
           <p class="section-label">Custom certificate</p>
-          <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" value="${esc(custom.certFile || '')}" placeholder="/path/fullchain.pem" /></div>
-          <div class="field-group"><label>Key file</label><input class="field mono" id="ct-keyfile" value="${esc(custom.keyFile || '')}" placeholder="/path/privkey.pem" /></div>
+          <div class="hint" style="margin-bottom:8px">Paths are relative to the cert store on the gpm host (<span class="mono">-cert-dir</span>, default <span class="mono">/data/certs</span>) - there is no upload here, the files must already exist there.</div>
+          <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" value="${esc(custom.certFile || '')}" placeholder="fullchain.pem" /></div>
+          <div class="field-group"><label>Key file</label><input class="field mono" id="ct-keyfile" value="${esc(custom.keyFile || '')}" placeholder="privkey.pem" /></div>
         </div>
       </div>
     </div>
@@ -1269,6 +1312,13 @@ async function certEditor(c, name) {
     $('#acme-fields').style.display = t === 'acme' ? '' : 'none';
     $('#custom-fields').style.display = t === 'custom' ? '' : 'none';
   });
+  // The DNS provider only applies to dns-01; http-01 is solved on port 80.
+  $('#ct-challenge').addEventListener('change', () => {
+    $('#ct-dns-group').style.display = $('#ct-challenge').value === 'dns-01' ? '' : 'none';
+  });
+  $('#ct-eab').addEventListener('switchchange', () => {
+    $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+  });
 
   $('#ct-save').addEventListener('click', async () => {
     const nm = isNew ? $('#ct-name').value.trim() : ct.name;
@@ -1278,10 +1328,23 @@ async function certEditor(c, name) {
     const t = $('#ct-type').value;
     const obj = { name: nm, type: t, domains };
     if (t === 'acme') {
-      const a = { email: $('#ct-email').value.trim(), challenge: 'dns-01', dnsProvider: $('#ct-dns').value };
+      const ch = $('#ct-challenge').value;
+      const a = { email: $('#ct-email').value.trim(), challenge: ch };
       const dir = $('#ct-dir').value.trim(); if (dir) a.directoryURL = dir;
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
-      if (!a.dnsProvider) { toast('DNS provider required', 'Select a DNS provider for dns-01.', 'err'); return; }
+      if (ch === 'dns-01') {
+        a.dnsProvider = $('#ct-dns').value;
+        if (!a.dnsProvider) { toast('DNS provider required', 'Select a DNS provider for dns-01.', 'err'); return; }
+      } else if (domains.some((d) => d.startsWith('*.'))) {
+        toast('Wildcard needs dns-01', 'A wildcard domain can only be validated over dns-01.', 'err'); return;
+      }
+      if (isOn('ct-eab')) {
+        const kid = $('#ct-eab-kid').value.trim();
+        const hmac = $('#ct-eab-hmac').value.trim();
+        if (!kid || !hmac) { toast('EAB incomplete', 'Enter both the EAB key ID and HMAC key.', 'err'); return; }
+        if (hmac === '***') { toast('Secret masked', 'The EAB HMAC key reads *** - replace it with a real value or a ${ENV:...} placeholder.', 'err'); return; }
+        a.eab = { kid, hmacKey: hmac };
+      }
       obj.acme = a;
     } else {
       obj.custom = { certFile: $('#ct-certfile').value.trim(), keyFile: $('#ct-keyfile').value.trim() };
@@ -1636,6 +1699,15 @@ async function deadEditor(c, name) {
   });
 }
 
+// DNS-01 providers with a built-in solver (mirrors model.KnownDNSProviders).
+// Every one of them authenticates with a single config key: apiToken.
+const DNS_PROVIDERS = [
+  { id: 'cloudflare', label: 'Cloudflare', hint: 'config.apiToken: an API token with Zone:DNS:Edit + Zone:Read on the zone.' },
+  { id: 'digitalocean', label: 'DigitalOcean', hint: 'config.apiToken: a personal access token with write scope on domains.' },
+  { id: 'hetzner', label: 'Hetzner DNS', hint: 'config.apiToken: a Hetzner DNS API token (sent as Auth-API-Token).' },
+  { id: 'desec', label: 'deSEC', hint: 'config.apiToken: a deSEC API token (sent as Authorization: Token).' },
+];
+
 // ---------- DNS PROVIDER EDITOR ----------
 async function dnsEditor(c, name) {
   const meta = SECTION_META.dns; const isNew = !name;
@@ -1644,9 +1716,10 @@ async function dnsEditor(c, name) {
     ${nameCard(o, isNew)}
     <div class="card form-section"><p class="section-label">Provider</p>
       <div class="field-group"><label>Provider</label>
-        <input class="field mono" id="ed-provider" list="dns-provider-list" value="${esc(o.provider || 'cloudflare')}" placeholder="cloudflare" />
-        <datalist id="dns-provider-list"><option value="cloudflare"></option></datalist>
-        <div class="hint">P0 ships cloudflare.</div>
+        <select class="field mono" id="ed-provider">
+          ${DNS_PROVIDERS.map((p) => `<option value="${esc(p.id)}"${(o.provider || 'cloudflare') === p.id ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
+        </select>
+        <div class="hint" id="ed-provider-hint"></div>
       </div>
     </div>
     <div class="card form-section"><p class="section-label">Credentials</p>
@@ -1655,14 +1728,21 @@ async function dnsEditor(c, name) {
       <div class="hint" style="margin-top:8px">Use a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so no secret is committed. A masked secret reads <span class="mono">***</span>.</div>
     </div>
   </div></div>` + saveBar('dns', isNew, meta.addLabel);
-  const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:CF_API_TOKEN}', true);
+  const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:DNS_API_TOKEN}', true);
   $('#ed-addcfg').addEventListener('click', () => cfgCtl.addRow('', ''));
+  const showProviderHint = () => {
+    const p = DNS_PROVIDERS.find((x) => x.id === $('#ed-provider').value);
+    $('#ed-provider-hint').textContent = p ? p.hint : '';
+  };
+  showProviderHint();
+  $('#ed-provider').addEventListener('change', showProviderHint);
   wireEditor('dns', 'dns-providers', meta, isNew, name || o.name, () => {
     const prov = $('#ed-provider').value.trim();
-    if (!prov) { toast('Provider required', 'Enter a provider.', 'err'); return null; }
+    if (!prov) { toast('Provider required', 'Select a provider.', 'err'); return null; }
     if (cfgCtl.masked()) { toast('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', 'err'); return null; }
     const body = { provider: prov };
     const cfg = cfgCtl.get(); if (Object.keys(cfg).length) body.config = cfg;
+    if (!cfg.apiToken) { toast('API token required', 'Every DNS provider needs a config.apiToken credential.', 'err'); return null; }
     return body;
   });
 }
@@ -2628,6 +2708,8 @@ async function viewSettings(c) {
       <p class="section-label">Kubernetes Ingress discovery</p>
       <p class="muted" style="font-size:11.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">gpm.rake.pro/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">gpm.rake.pro/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template or a named profile below, so a cluster manifest can never supply an upstream, a certificate or a middleware - only the <em>name</em> of a chain you wrote here. Derived hosts feed the DNS sync above.</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Ingress discovery</div><div class="ds">Reconcile annotated cluster Ingresses into managed proxy hosts</div></div>${switchHtml('set-id-on', !!idc.enabled, 'Ingress discovery')}</div>
+      <div class="field-group" style="margin-top:8px"><label>Annotation/label prefix</label><input class="field mono" id="set-id-annprefix" value="${esc(idc.annotationPrefix || '')}" placeholder="gpm.rake.pro" /><div class="hint">Prefix for every annotation above (<span class="mono">.../managed</span>, <span class="mono">.../profile</span>, etc.) and the <span class="mono">managed-by</span>/<span class="mono">disabled-by</span> labels gpm writes on derived hosts. Leave blank for the default. Changing it does not relabel existing hosts by itself - see "Migrate" below.</div></div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Migrate existing hosts to the new prefix</div><div class="ds">Relabels hosts still under the old prefix in the next reconcile, in one commit</div></div>${switchHtml('set-id-annprefix-migrate', !!idc.annotationPrefixMigrate, 'Migrate existing hosts to the new prefix')}</div>
       <div class="grid-2" style="margin-top:8px">
         <div>
           <div class="field-group"><label>API server URL</label><input class="field mono" id="set-id-url" value="${esc(idc.apiURL || '')}" placeholder="https://k8s.example.lan:6443" /><div class="hint">Leave empty to use the in-cluster endpoint. Must be https.</div></div>
@@ -2798,6 +2880,18 @@ async function viewSettings(c) {
       el.textContent = e && e.status === 501 ? 'DNS sync is not wired in this deployment.' : 'Preview unavailable: ' + (e.message || e);
     }
   }
+
+  // The migrate switch only matters once the prefix field actually differs
+  // from what is currently saved, so it stays greyed out (and off) otherwise -
+  // toggling it on without changing the prefix would be a no-op refusal-bypass
+  // for nothing.
+  const idPrefixStored = idc.annotationPrefix || '';
+  function refreshAnnPrefixMigrateGate() {
+    const changed = $('#set-id-annprefix').value.trim() !== idPrefixStored;
+    gateControl($('#set-id-annprefix-migrate'), changed, 'Only needed when the prefix above differs from the currently saved one.');
+  }
+  $('#set-id-annprefix').addEventListener('input', refreshAnnPrefixMigrateGate);
+  refreshAnnPrefixMigrateGate();
 
   const idSuffixCtl = makeChipInput($('#set-id-suffixes'), arr(idc.allowedDomainSuffixes), 'add suffix...');
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
@@ -3067,6 +3161,7 @@ async function viewSettings(c) {
       apiURL: $('#set-id-url').value.trim(),
       tokenFile: $('#set-id-token').value.trim(),
       caFile: $('#set-id-ca').value.trim(),
+      annotationPrefix: $('#set-id-annprefix').value.trim(),
       namespace: $('#set-id-ns').value.trim(),
       labelSelector: $('#set-id-sel').value.trim(),
       pollInterval: $('#set-id-poll').value.trim(),
@@ -3103,6 +3198,7 @@ async function viewSettings(c) {
       },
     };
     if (isOn('set-id-on')) ingressDiscovery.enabled = true;
+    if (isOn('set-id-annprefix-migrate')) ingressDiscovery.annotationPrefixMigrate = true;
     if (isOn('set-id-dns-lan') || isOn('set-id-dns-pub')) {
       ingressDiscovery.template.defaultDNS = { lanDirect: isOn('set-id-dns-lan'), publicCname: isOn('set-id-dns-pub') };
     }

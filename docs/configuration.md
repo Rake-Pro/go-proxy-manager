@@ -35,7 +35,7 @@ references it).
 |-------|------|----------|-------|
 | `name` | string | yes | Identity and filename. Lowercase alphanumeric plus `-_.`, must start and end alphanumeric, 1–254 chars. |
 | `displayName` | string | no | Human label for the UI. |
-| `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` is reserved** — see below. |
+| `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` is reserved** — see below. (The exact key follows `ingressDiscovery.annotationPrefix`; `gpm.rake.pro` is the default and what every example below uses.) |
 | `tags` | []string | no | Flat, free-form labels for grouping/filtering. On the Proxy Hosts list they render as chips and are matched by the filter box. |
 | `disabled` | bool | no | Keep the object in config but exclude it from the running data plane. |
 
@@ -384,8 +384,10 @@ template field - see [below](#what-a-derived-host-cannot-express).
 | `profiles` | map[string]→ same shape as `template` (including its own `allowedDomainSuffixes`) | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
 | `profileRules` | []IngressProfileRule | Optional, ordered. Operator-side profile selection - see [below](#operator-side-profile-selection-profilerules). |
 | `profileSelection` | `"annotation-or-rules"` \| `"rules-only"` | Empty means `"annotation-or-rules"` (today's behaviour: try `profileRules` first, then the annotation). `"rules-only"` never reads `gpm.rake.pro/profile` at all. |
+| `annotationPrefix` | string | Replaces `gpm.rake.pro` as the prefix for every annotation below and for the `managed-by`/`disabled-by` labels gpm writes on derived hosts. Empty (the default) keeps every existing deployment's keys unchanged. Must be a DNS-subdomain-shaped prefix: lowercase alphanumerics, `-` and `.`, no leading/trailing dot, no slash, at most 253 characters. See [Changing the annotation prefix](#changing-the-annotation-prefix) below - **changing this does not relabel existing hosts by itself.** |
+| `annotationPrefixMigrate` | bool | Opt-in escape hatch for the refusal `annotationPrefix` triggers when existing hosts are still labelled under the old prefix - see below. Does not relabel anything itself; only lifts the refusal so the *next reconcile* can. |
 
-**Opt-in annotations** (on the `Ingress`, never on gpm's side):
+**Opt-in annotations** (on the `Ingress`, never on gpm's side; prefixed with `annotationPrefix`, default `gpm.rake.pro`):
 
 | Annotation | Value | Meaning |
 |------------|-------|---------|
@@ -393,6 +395,33 @@ template field - see [below](#what-a-derived-host-cannot-express).
 | `gpm.rake.pro/profile` | a `profiles` key | Select one of the operator-defined profiles. Absent (or empty) uses the default `template`. An **undefined** name skips the Ingress. |
 | `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Sets `dns.lanDirect` on the derived host, overriding the resolved profile's `defaultDNS`. |
 | `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Sets `dns.publicCname` on the derived host. |
+
+#### Changing the annotation prefix
+
+Ownership of a derived proxy host is recognised **only under the currently
+configured prefix**: the `managed-by` label discovery stamps on every host it
+owns is `<annotationPrefix>/managed-by: ingress-discovery`, and a host carrying
+that pair under some *other* prefix looks exactly like a hand-written host to a
+fresh reconcile - it is left alone (never deleted, never overwritten), but it
+also stops being treated as discovery-managed.
+
+Because of that, **a settings write that changes `annotationPrefix` is refused**
+if any existing proxy host is still labelled `managed-by` under the *old*
+prefix, naming how many hosts would be affected. To go ahead anyway, set
+`annotationPrefixMigrate: true` in the same (or a follow-up) write. That flag
+does not touch anything itself - it only lifts the refusal. The relabel happens
+in the **next reconcile**: every such host is picked up as an ordinary update
+(or, if its `Ingress` is meanwhile unresolvable, as the usual fail-closed
+disable) and rewritten with the new prefix's `managed-by`/`disabled-by` labels,
+in that reconcile's single commit, exactly like any other change discovery
+makes. Once that reconcile has run, `annotationPrefixMigrate` can be turned back
+off - it is not "sticky" state discovery depends on afterwards.
+
+Also update the `annotationPrefix` your cluster `Ingress` manifests use for
+their own annotations (`.../managed`, `.../profile`, `.../lan-direct`,
+`.../public-cname`) at the same time: an `Ingress` still carrying the old
+prefix's opt-in annotation becomes invisible to discovery the moment the
+setting changes, the same as if it had never opted in.
 
 #### Discovery profiles
 
@@ -998,9 +1027,57 @@ Semantics worth knowing:
 | `acme` | ACMESpec | when `type: acme` | |
 | `custom` | CustomCertSpec | when `type: custom` | |
 
-**ACMESpec**: `email` (required), `dnsProvider` (required — a DNSProvider name),
-`directoryURL` (optional, defaults to Let's Encrypt production), `keyType`
-(`ecdsa` default | `rsa`), `challenge` (only `dns-01` is supported).
+**ACMESpec**
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `email` | string | yes | ACME account contact. |
+| `challenge` | string | no | `dns-01` or `http-01`. Default: `dns-01` when `dnsProvider` is set (so configs written before this field existed keep their behaviour), `http-01` otherwise. |
+| `dnsProvider` | string | for `dns-01` | A [DNSProvider](#dnsprovider-configdns-providers) name. Rejected with `http-01`. |
+| `directoryURL` | string | no | Defaults to Let's Encrypt production. |
+| `keyType` | string | no | `ecdsa` (default) \| `rsa`. |
+| `eab` | EABSpec | no | External Account Binding, for CAs that require it. |
+
+**EABSpec**: `kid` (the key id the CA issued) and `hmacKey` (Secret; base64url
+as the CA issued it). Both are required together. An EAB key id widens the ACME
+account identity, so two external accounts on the same CA get separate account
+keys under `<cert-dir>/acme/accounts/`.
+
+Challenge selection:
+
+- **`http-01`** - validated on the data plane's plaintext `:80` listener. The
+  ACME manager parks the in-flight token in memory and the listener answers
+  `/.well-known/acme-challenge/<token>` **before** host routing, the force-SSL
+  redirect, and any auth, so a certificate can be issued for a host that does not
+  exist yet or that redirects everything to https. A challenge path whose token
+  is not in flight is routed normally, so an upstream running its own ACME client
+  keeps working. Port 80 must be reachable from the internet.
+- **`dns-01`** - the only challenge that can prove a wildcard. A wildcard domain
+  with `http-01` (explicit or defaulted) is a validation error.
+
+```yaml
+# ZeroSSL with External Account Binding, http-01
+name: zerossl
+type: acme
+domains: [app.example.com]
+acme:
+  email: admin@example.com
+  challenge: http-01
+  directoryURL: https://acme.zerossl.com/v2/DV90
+  eab:
+    kid: ${ENV:ZEROSSL_EAB_KID}
+    hmacKey: ${ENV:ZEROSSL_EAB_HMAC}
+```
+```yaml
+# Google Public CA (EAB required; kid + hmacKey come from `gcloud publicca`)
+acme:
+  email: admin@example.com
+  challenge: http-01
+  directoryURL: https://dv.acme-v02.api.pki.goog/directory
+  eab:
+    kid: ${ENV:GOOGLE_CA_EAB_KID}
+    hmacKey: ${FILE:/run/secrets/google_ca_eab_hmac}
+```
 
 **CustomCertSpec**: `certFile`, `keyFile` — paths **relative to the cert store**
 (absolute paths and `..` are rejected). These are file references, not inline PEM.
@@ -1014,6 +1091,15 @@ acme:
   email: admin@example.com
   dnsProvider: cloudflare
   keyType: ecdsa
+```
+```yaml
+# ACME single name over http-01 (no DNS provider needed)
+name: app
+type: acme
+domains: [app.example.com]
+acme:
+  email: admin@example.com
+  challenge: http-01
 ```
 ```yaml
 # Bring-your-own
@@ -1070,18 +1156,37 @@ crlPolicy: fail-closed     # default; fail-open accepts when the CRL is unusable
 
 ## DNSProvider (`config/dns-providers/`)
 
-Solves ACME `dns-01` challenges.
+Solves ACME `dns-01` challenges. Not needed for `http-01`.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `provider` | string | yes | `cloudflare`. |
-| `config` | map[string]Secret | yes | Provider-specific, secret-valued. |
+| `provider` | string | yes | `cloudflare` \| `digitalocean` \| `hetzner` \| `desec`. Anything else is rejected at write time. |
+| `config` | map[string]Secret | yes | Provider-specific, secret-valued. Every shipped provider needs `apiToken`. |
+
+Each solver talks to the provider's REST API directly (no SDK), finds the zone
+owning the challenge name by **longest-suffix match** over the account's zones
+(so a delegated `sub.example.com` wins over `example.com`), and adds rather than
+replaces the TXT value, so an apex + wildcard order that shares
+`_acme-challenge.example.com` validates.
+
+| `provider` | `config` keys | Credential |
+|------------|---------------|------------|
+| `cloudflare` | `apiToken` | API token with `Zone:DNS:Edit` + `Zone:Read` on the zone (`Authorization: Bearer`). |
+| `digitalocean` | `apiToken` | Personal access token with write scope on domains (`Authorization: Bearer`). |
+| `hetzner` | `apiToken` | Hetzner DNS API token, from the DNS console (`Auth-API-Token` header). |
+| `desec` | `apiToken` | deSEC API token (`Authorization: Token`). RRsets are read-modify-written; TTL is 3600, deSEC's minimum. |
 
 ```yaml
 name: cloudflare
 provider: cloudflare
 config:
   apiToken: ${FILE:/run/secrets/cf_token}   # scope: Zone:DNS:Edit + Zone:Read
+```
+```yaml
+name: hetzner
+provider: hetzner
+config:
+  apiToken: ${ENV:HETZNER_DNS_TOKEN}
 ```
 
 ---
@@ -1221,6 +1326,17 @@ own key (useful when rotating or sharing a key across instances).
 **GuardMiddleware**: `triggers` (≥1; each has `paths`, `methods`, `queryEquals`
 and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`
 (default 403).
+
+> **`queryEquals` and `;`.** A guard carrying any `queryEquals` trigger rejects a
+> request whose raw query string contains a `;`, with **400** (before the
+> allow/deny decision, so `allowFrom` does not exempt it). gpm parses the query
+> the modern way, where only `&` separates parameters, so `?a=1;direct=1` is one
+> parameter `a` with the value `1;direct=1` and a `direct: "1"` trigger would not
+> fire - but the raw query is forwarded to the upstream unchanged, and a backend
+> still honouring the legacy `;` separator would read `direct=1` and act on it.
+> Rather than evaluate a query it cannot read the same way the upstream will, the
+> guard fails closed. This mirrors the same rule for `;` in request paths. Guards
+> with no `queryEquals` trigger are unaffected, as is every other middleware.
 
 **RewriteMiddleware**: `replacePath` (a map of exact request paths to their
 replacements). When the incoming request path equals a key **exactly** (no
@@ -1440,6 +1556,69 @@ authentications are logged (token name on success; never any secret material).
 Last-use is tracked **in memory only** and surfaced as `lastUsed` on
 `GET /api/api-tokens`; the config store is git-backed, so persisting a timestamp
 per request would be a commit flood. It resets on restart.
+
+---
+
+## Users, roles and audit
+
+This is a deliberate stance, not a gap: gpm has **no local user table** and no
+per-user permission system. Two things authenticate to the admin panel:
+
+- **One local break-glass admin.** A single username/password pair
+  (`GPM_LOCAL_ADMIN_USER` + a bcrypt hash - see
+  [deployment.md](deployment.md#configuration-flags--environment)), always
+  role `admin`, always IdP `"local"`. There is exactly one of these; it is not
+  a config object, cannot be listed, and does not appear in git history. Its
+  purpose is recovery when SSO is unreachable, not day-to-day login - see
+  `adminAuth.ssoOnly` above.
+- **OIDC group-to-role mapping.** Every other admin-panel login is an
+  [IdentityProvider](#identityprovider-configidentity-providers) with a
+  `roleMapping`: the IdP's group claim resolves to exactly one of two local
+  roles, `admin` or `user` (`RoleNone` - no access - otherwise). There is no
+  third role and no per-object permission grant; a mapped `admin` can do
+  everything the local break-glass admin can, and `user` can only reach
+  `GET /api/me` (it exists to prove a session is authenticated, not to run a
+  reduced admin panel). **Individual identity is not gpm's to manage** - who
+  is in `adminGroups`/`userGroups` is a decision made and audited at the IdP,
+  the same way it already has to be for every other application behind SSO.
+
+**Not planned: multi-user local accounts, or per-user permissions finer than
+the two roles above.** Local accounts don't scale past the one break-glass
+credential they exist for - a second local user would need its own storage,
+its own rotation story, and its own audit trail, all of which OIDC already
+provides for free once an IdP is configured. If you need more than one named
+human with admin access, put an IdentityProvider in front of gpm; if you need
+per-person restriction to a subset of hosts or actions, that is out of scope
+for the same reason the two-role model is: gpm's authorization boundary is
+role (admin/user) plus, for automation, [API-token scope](#scopes) - not identity.
+
+**Delegation is API tokens, not accounts.** A script, CI pipeline, or
+integration that needs its own credential - distinct from "is logged in as
+the admin" - gets a scoped [APIToken](#apitoken-configapi-tokens), not a
+second local login. Tokens are named, individually revocable, expirable, and
+restricted to exactly the resources they touch (`proxy-hosts:write` and
+nothing else, for example), which is the delegation model NPM's shared local
+accounts don't have.
+
+**Audit is git history plus webhooks, not an audit-log table.** Every write
+through the API or UI - create, update, delete, settings, restore, revert -
+is one commit to the config repo (`config/`), carrying whatever
+[`Author`](architecture.md) the caller resolved to: the local admin's
+username, the SSO subject/email from the session, or the token's own
+`name` (its principal has no email, so the commit's email falls back to
+`gpm@localhost`) for a token-authenticated write. `git log`
+and `GET /api/history` / `GET /api/{plural}/{name}/history` are the audit
+trail - who changed what, when, and (via `git show`) exactly what the diff
+was, and it is tamper-evident by construction: rewriting it means rewriting
+git history, not flipping a row in a database. `webhooks` above add a
+real-time feed of the same events to an external system (SIEM, chat,
+ticketing) if you want change notifications outside `git log`.
+**What this does *not* cover:** authentication events themselves (successful
+and failed logins) are logged to gpm's structured process log
+(`GPM_LOG_LEVEL`/`GPM_LOG_CONSOLE`), not to git - a failed login attempt
+changes nothing in config, so there is no commit for it. Ship the process log
+to your log aggregator if you need a durable record of login attempts
+alongside the config-change history.
 
 ---
 

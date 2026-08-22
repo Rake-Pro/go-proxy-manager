@@ -2,7 +2,7 @@
 
 A reverse-proxy manager written in Go: a single static binary that terminates
 TLS for many domains, reverse-proxies them to your backends, issues and renews
-Let's Encrypt certificates over DNS-01, and gates access with IP access lists,
+Let's Encrypt certificates over DNS-01 or HTTP-01, and gates access with IP access lists,
 forward-auth, and OpenID Connect single sign-on. Configuration is declarative,
 git-backed YAML; there is a REST API and an embedded web UI.
 
@@ -42,7 +42,9 @@ builds it with a narrower, more focused design:
   unmatched vhosts)
 
 **Certificates**
-- Let's Encrypt (or any ACME CA) via **DNS-01**, Cloudflare provider built in
+- Let's Encrypt (or any ACME CA) via **DNS-01** (Cloudflare, DigitalOcean,
+  Hetzner, deSEC) or **HTTP-01** on the plaintext `:80` listener
+- External Account Binding for CAs that require it (ZeroSSL, Google Public CA)
 - Automatic renewal (30 days before expiry), ECDSA P-256
 - Bring-your-own custom certificates
 
@@ -95,7 +97,7 @@ See [FEATURES.md](FEATURES.md) for the full roadmap (P0–P3 tiers).
    Operator -- :8081 ----|  control plane: REST API + web UI  -->  git-backed config store|
                          |  auth: OIDC / local bcrypt          |   (per-object YAML)      |
                          |                                     \/                         |
-                         |  ACME manager -- DNS-01 --> Let's Encrypt    certs on disk      |
+                         |  ACME manager -- DNS-01/HTTP-01 --> ACME CA   certs on disk    |
                          +----------------------------------------------------------------+
 ```
 
@@ -154,6 +156,10 @@ upstream: {scheme: http, host: backend, port: 8080}
 tls: {certificateRef: wildcard, forceSSL: true}
 ```
 
+`tls` is optional - omit it entirely for a first run and the host is reachable
+over plain HTTP on `:80` with no certificate configured yet; add `tls` once
+you're ready to issue or attach one.
+
 The complete object reference (proxy/redirect/stream/dead hosts, certificates,
 DNS providers, identity providers, access lists, middlewares, settings) with
 validation rules and examples is in **[docs/configuration.md](docs/configuration.md)**.
@@ -196,7 +202,7 @@ cmd/gpm/            entrypoint, subcommands (daemon, hashpw, import)
 internal/model/     config object types + validation
 internal/store/     git-backed config store
 internal/dataplane/ TLS, routing, middleware chain, reverse proxy
-internal/acme/      ACME DNS-01 issuance + renewal
+internal/acme/      ACME issuance + renewal (DNS-01 solvers, HTTP-01 tokens)
 internal/dnssync/   Pi-hole / Cloudflare DNS record reconciler
 internal/auth/      sessions, OIDC, forward-auth, role mapping
 internal/oidc/      OIDC client (discovery, PKCE, token verification)

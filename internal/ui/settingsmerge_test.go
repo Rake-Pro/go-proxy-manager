@@ -77,3 +77,34 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 		}
 	}
 }
+
+// The same failure mode again, one level down: the proxy-host editor rebuilds
+// its `locations` array from the DOM, one loc-row per Location. A Location
+// carries middlewares/accessLists (and any field added later) that a rebuild
+// with only path/upstream/upstreamGroupRef would silently drop on every save
+// of a host whose locations were authored outside the UI (git/import). The
+// save handler must merge each rebuilt location over its original, matched by
+// path, the same way the tls block above is merged rather than rebuilt.
+func TestHostSaveMergesLocations(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(b)
+
+	for _, want := range []string{
+		// original locations indexed by path, for the merge below
+		"arr(h.locations).forEach((ol) => { if (ol && ol.path) origLocs[ol.path] = ol; });",
+		// merge over the original location instead of a bare rebuild
+		"const orig = Object.assign({}, origLocs[path]);",
+		"locs.push(Object.assign(orig, loc));",
+		// per-location middleware/access-list pickers, round-tripped like the
+		// host-level ones
+		"loc-mw",
+		"loc-al",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js no longer merges locations by path (%q not found); a host save now strips location fields the editor doesn't render", want)
+		}
+	}
+}

@@ -42,6 +42,17 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"empty token/ca are in-cluster", func(d *IngressDiscoverySettings) { d.TokenFile, d.CAFile = "", "" }, ""},
 		{"bad namespace", func(d *IngressDiscoverySettings) { d.Namespace = "Not A Namespace" }, "namespace"},
 		{"good namespace", func(d *IngressDiscoverySettings) { d.Namespace = "kube-system" }, ""},
+		{"empty annotationPrefix is the default", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "" }, ""},
+		{"custom annotationPrefix accepted", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "acme.corp.internal" }, ""},
+		{"single-label annotationPrefix accepted", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm" }, ""},
+		{"annotationPrefix with a slash rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm.rake.pro/x" }, "annotationPrefix"},
+		{"annotationPrefix with uppercase rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "GPM.rake.pro" }, "annotationPrefix"},
+		{"annotationPrefix with a leading dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = ".gpm.rake.pro" }, "annotationPrefix"},
+		{"annotationPrefix with a trailing dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm.rake.pro." }, "annotationPrefix"},
+		{"annotationPrefix with a double dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm..pro" }, "annotationPrefix"},
+		{"annotationPrefix with a space rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm rake pro" }, "annotationPrefix"},
+		{"annotationPrefix too long rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = strings.Repeat("a", 254) }, "annotationPrefix"},
+		{"annotationPrefix exactly 253 chars accepted", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = strings.Repeat("a", 253) }, ""},
 		{"label selector newline", func(d *IngressDiscoverySettings) { d.LabelSelector = "a=b\nc=d" }, "newlines"},
 		{"unparseable interval", func(d *IngressDiscoverySettings) { d.PollInterval = "soon" }, "pollInterval"},
 		{"interval too small", func(d *IngressDiscoverySettings) { d.PollInterval = "1s" }, "at least 15s"},
@@ -748,5 +759,185 @@ func TestIsDNSLabel(t *testing.T) {
 		if got := IsDNSLabel(tc.in); got != tc.want {
 			t.Errorf("IsDNSLabel(%q) = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Every Annotation*/ManagedByLabel/DisabledByLabel method must default to
+// EXACTLY the package-level constant it replaces, so an unconfigured
+// deployment's annotations and labels never change.
+func TestAnnotationPrefixMethodsDefault(t *testing.T) {
+	var d IngressDiscoverySettings
+	if got := d.Prefix(); got != DefaultAnnotationPrefix {
+		t.Fatalf("Prefix() = %q, want %q", got, DefaultAnnotationPrefix)
+	}
+	cases := []struct {
+		got, want string
+	}{
+		{d.AnnotationManaged(), AnnotationManaged},
+		{d.AnnotationLanDirect(), AnnotationLanDirect},
+		{d.AnnotationPublicCname(), AnnotationPublicCname},
+		{d.AnnotationProfile(), AnnotationProfile},
+		{d.ManagedByLabel(), ManagedByLabel},
+		{d.DisabledByLabel(), DisabledByLabel},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+// A custom prefix rewrites every key the same way, and nothing else.
+func TestAnnotationPrefixMethodsCustom(t *testing.T) {
+	d := IngressDiscoverySettings{AnnotationPrefix: "acme.corp.internal"}
+	cases := []struct {
+		got, want string
+	}{
+		{d.AnnotationManaged(), "acme.corp.internal/managed"},
+		{d.AnnotationLanDirect(), "acme.corp.internal/lan-direct"},
+		{d.AnnotationPublicCname(), "acme.corp.internal/public-cname"},
+		{d.AnnotationProfile(), "acme.corp.internal/profile"},
+		{d.ManagedByLabel(), "acme.corp.internal/managed-by"},
+		{d.DisabledByLabel(), "acme.corp.internal/disabled-by"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+func TestHasStaleManagedByLabel(t *testing.T) {
+	d := IngressDiscoverySettings{AnnotationPrefix: "acme.corp.internal"}
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{"no labels", nil, false},
+		{"current prefix only", map[string]string{"acme.corp.internal/managed-by": "ingress-discovery"}, false},
+		{"old default-prefix label", map[string]string{"gpm.rake.pro/managed-by": "ingress-discovery"}, true},
+		{"old label with a different value is not discovery's", map[string]string{"gpm.rake.pro/managed-by": "someone-else"}, false},
+		{"unrelated label ending in managed-by suffix but not gpm's value", map[string]string{"other/managed-by": "x"}, false},
+		{"operator-authored host has no managed-by at all", map[string]string{"team": "platform"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := d.HasStaleManagedByLabel(tc.labels); got != tc.want {
+				t.Errorf("HasStaleManagedByLabel(%v) = %v, want %v", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStripStaleDiscoveryLabels(t *testing.T) {
+	d := IngressDiscoverySettings{AnnotationPrefix: "acme.corp.internal"}
+	labels := map[string]string{
+		"gpm.rake.pro/managed-by":       "ingress-discovery",
+		"gpm.rake.pro/disabled-by":      "ingress-discovery",
+		"acme.corp.internal/managed-by": "ingress-discovery",
+		"team":                          "platform", // unrelated, must survive
+	}
+	d.StripStaleDiscoveryLabels(labels)
+	want := map[string]string{
+		"acme.corp.internal/managed-by": "ingress-discovery",
+		"team":                          "platform",
+	}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("StripStaleDiscoveryLabels: got %v, want %v", labels, want)
+	}
+}
+
+// The core safety property: saving a changed annotationPrefix while a proxy
+// host still carries managed-by under the OLD prefix must be refused, naming
+// the count, UNLESS annotationPrefixMigrate is set - and switching that flag on
+// changes nothing else about the write.
+func TestIngressDiscoveryValidateRefsAnnotationPrefixMigration(t *testing.T) {
+	d := validIngressDiscovery()
+	d.AnnotationPrefix = "acme.corp.internal"
+	staleHost := ProxyHost{
+		ObjectMeta: ObjectMeta{Name: "ing-app.default", Labels: map[string]string{
+			ManagedByLabel: ManagedByIngressDiscovery, // the OLD (default) prefix's key
+		}},
+		Domains:  []string{"app.example.com"},
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.5", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard"},
+	}
+	cfg := Config{ProxyHosts: []ProxyHost{staleHost}}
+
+	err := d.ValidateRefs(cfg)
+	if err == nil {
+		t.Fatal("ValidateRefs() = nil, want a refusal naming the orphaned host")
+	}
+	if !strings.Contains(err.Error(), "1 proxy host") {
+		t.Errorf("ValidateRefs() = %v, want the count of orphaned hosts", err)
+	}
+	if !strings.Contains(err.Error(), "annotationPrefixMigrate") {
+		t.Errorf("ValidateRefs() = %v, want it to name the escape hatch", err)
+	}
+
+	// A second stale host raises the count.
+	cfg.ProxyHosts = append(cfg.ProxyHosts, ProxyHost{
+		ObjectMeta: ObjectMeta{Name: "ing-other.default", Labels: map[string]string{
+			ManagedByLabel: ManagedByIngressDiscovery,
+		}},
+		Domains:  []string{"other.example.com"},
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.6", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard"},
+	})
+	err = d.ValidateRefs(cfg)
+	if err == nil || !strings.Contains(err.Error(), "2 proxy host") {
+		t.Fatalf("ValidateRefs() = %v, want a refusal naming 2 hosts", err)
+	}
+
+	// The certificate every one of these hosts' template references, so a
+	// config with no orphaned host at all passes ValidateRefs OUTRIGHT (not
+	// just past the annotationPrefix gate).
+	withCert := []Certificate{{ObjectMeta: ObjectMeta{Name: "wildcard"}}}
+
+	// Unrelated (non-discovery) hosts never count toward the refusal.
+	handWritten := Config{Certificates: withCert, ProxyHosts: []ProxyHost{{
+		ObjectMeta: ObjectMeta{Name: "hand-written"},
+		Domains:    []string{"hand.example.com"},
+		Upstream:   Upstream{Scheme: "http", Host: "10.0.0.7", Port: 80},
+		TLS:        TLSSettings{CertificateRef: "wildcard"},
+	}}}
+	if err := d.ValidateRefs(handWritten); err != nil {
+		t.Fatalf("ValidateRefs() = %v, want nil (no discovery-managed host to orphan)", err)
+	}
+
+	// A host already labelled under the CURRENT (new) prefix never counts.
+	current := Config{Certificates: withCert, ProxyHosts: []ProxyHost{{
+		ObjectMeta: ObjectMeta{Name: "already-migrated", Labels: map[string]string{
+			d.ManagedByLabel(): ManagedByIngressDiscovery,
+		}},
+		Domains:  []string{"cur.example.com"},
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.8", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard"},
+	}}}
+	if err := d.ValidateRefs(current); err != nil {
+		t.Fatalf("ValidateRefs() = %v, want nil (already under the current prefix)", err)
+	}
+
+	// The escape hatch: annotationPrefixMigrate:true lifts the refusal even
+	// though the same stale-labelled hosts are still present. The rest of
+	// ValidateRefs' checks still run (and here still pass, since every ref this
+	// config names resolves).
+	migrating := d
+	migrating.AnnotationPrefixMigrate = true
+	cfgWithCert := Config{
+		ProxyHosts:   cfg.ProxyHosts,
+		Certificates: []Certificate{{ObjectMeta: ObjectMeta{Name: "wildcard"}}},
+	}
+	if err := migrating.ValidateRefs(cfgWithCert); err != nil {
+		t.Fatalf("ValidateRefs() with annotationPrefixMigrate = %v, want nil", err)
+	}
+
+	// A disabled discovery block is never checked at all - same rule as every
+	// other ValidateRefs gate.
+	disabled := d
+	disabled.Enabled = false
+	if err := disabled.ValidateRefs(cfg); err != nil {
+		t.Fatalf("ValidateRefs() on a disabled block = %v, want nil", err)
 	}
 }

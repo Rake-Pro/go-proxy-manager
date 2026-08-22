@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,14 +22,31 @@ import (
 
 func TestSSOTokenRoundTrip(t *testing.T) {
 	payload := []byte(`{"sub":"admin"}`)
-	tok := signToken(payload)
-	got, ok := verifyToken(tok)
+	tok := signToken(macLabelSSOSession, payload)
+	got, ok := verifyToken(macLabelSSOSession, tok)
 	if !ok || string(got) != string(payload) {
 		t.Fatalf("round trip failed: ok=%v got=%q", ok, got)
 	}
 	// Tampering with the payload is rejected.
-	if _, ok := verifyToken("ZmFrZQ." + tok[len(tok)-10:]); ok {
+	if _, ok := verifyToken(macLabelSSOSession, "ZmFrZQ."+tok[len(tok)-10:]); ok {
 		t.Fatal("tampered token must not verify")
+	}
+}
+
+// TestTokenLabelsAreDomainSeparated proves the three cookie types no longer
+// share one MAC namespace: a token minted for one type must not verify as
+// another, even though all three are signed with the same process-wide key.
+func TestTokenLabelsAreDomainSeparated(t *testing.T) {
+	payload := []byte(`{"sub":"admin"}`)
+	labels := []string{macLabelSSOSession, macLabelSSOState, macLabelSticky}
+	for _, mint := range labels {
+		tok := signToken(mint, payload)
+		for _, check := range labels {
+			_, ok := verifyToken(check, tok)
+			if want := mint == check; ok != want {
+				t.Fatalf("token minted under %q verified under %q = %v, want %v", mint, check, ok, want)
+			}
+		}
 	}
 }
 
@@ -149,7 +168,7 @@ func TestDataOIDCEndToEnd(t *testing.T) {
 		ObjectMeta: model.ObjectMeta{Name: "idp"},
 		Type:       model.IdPTypeOIDC,
 		OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client"},
-	}, nil, "app")
+	}, nil, "app", []string{"app2.example.com", "app.example.com"})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -169,7 +188,7 @@ func TestDataOIDCEndToEnd(t *testing.T) {
 	if stateCookie == nil {
 		t.Fatal("begin must set a state cookie")
 	}
-	payload, ok := verifyToken(stateCookie.Value)
+	payload, ok := verifyToken(macLabelSSOState, stateCookie.Value)
 	if !ok {
 		t.Fatal("state cookie must be a valid signed token")
 	}
@@ -238,7 +257,7 @@ func TestDataOIDCSessionBoundToHost(t *testing.T) {
 			ObjectMeta: model.ObjectMeta{Name: "idp"},
 			Type:       model.IdPTypeOIDC,
 			OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client"},
-		}, nil, host)
+		}, nil, host, []string{host + ".example.com"})
 		if err != nil {
 			t.Fatalf("compile %s: %v", host, err)
 		}
@@ -249,7 +268,7 @@ func TestDataOIDCSessionBoundToHost(t *testing.T) {
 
 	// A valid session cookie bound to host "app".
 	payload, _ := json.Marshal(oidcSession{Sub: "u", Host: "app", Exp: time.Now().Add(time.Hour).Unix()})
-	appCookie := &http.Cookie{Name: oidcSessionCookie, Value: signToken(payload)}
+	appCookie := &http.Cookie{Name: oidcSessionCookie, Value: signToken(macLabelSSOSession, payload)}
 
 	// Its own host admits it.
 	recSame := httptest.NewRecorder()
@@ -279,7 +298,7 @@ func TestSSORevocationWatermark(t *testing.T) {
 		ObjectMeta: model.ObjectMeta{Name: "idp"},
 		Type:       model.IdPTypeOIDC,
 		OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client"},
-	}, nil, "app")
+	}, nil, "app", []string{"app2.example.com", "app.example.com"})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -295,7 +314,7 @@ func TestSSORevocationWatermark(t *testing.T) {
 			Exp: time.Now().Add(time.Hour).Unix(),
 			Iat: iat,
 		})
-		return &http.Cookie{Name: oidcSessionCookie, Value: signToken(payload)}
+		return &http.Cookie{Name: oidcSessionCookie, Value: signToken(macLabelSSOSession, payload)}
 	}
 	serve := func(c *http.Cookie) int {
 		rec := httptest.NewRecorder()
@@ -357,5 +376,196 @@ func TestSSORevocationPersists(t *testing.T) {
 	}
 	if got := ssoNotBefore.Load(); got != v {
 		t.Fatalf("in-memory watermark %d != persisted %d", got, v)
+	}
+}
+
+// gateIdP is a minimal OIDC discovery endpoint whose response can be stalled,
+// and which counts how many discoveries it served.
+type gateIdP struct {
+	url         string
+	discoveries atomic.Int64
+	stall       chan struct{} // non-nil = hold discovery until closed
+	mu          sync.Mutex
+}
+
+func newGateIdP(t *testing.T) *gateIdP {
+	t.Helper()
+	g := &gateIdP{}
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	g.url = srv.URL
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		g.discoveries.Add(1)
+		g.mu.Lock()
+		stall := g.stall
+		g.mu.Unlock()
+		if stall != nil {
+			select {
+			case <-stall:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuer":"` + srv.URL + `","authorization_endpoint":"` + srv.URL +
+			`/authorize","token_endpoint":"` + srv.URL + `/token","jwks_uri":"` + srv.URL +
+			`/jwks","id_token_signing_alg_values_supported":["RS256"],"response_types_supported":["code"],"subject_types_supported":["public"]}`))
+	})
+	return g
+}
+
+func (g *gateIdP) setStall(c chan struct{}) {
+	g.mu.Lock()
+	g.stall = c
+	g.mu.Unlock()
+}
+
+func newGate(t *testing.T, issuer, hostName string, domains []string) *dataOIDC {
+	t.Helper()
+	g, err := compileDataOIDC(model.IdentityProvider{
+		ObjectMeta: model.ObjectMeta{Name: "idp"},
+		Type:       model.IdPTypeOIDC,
+		OIDC:       &model.OIDCSpec{IssuerURL: issuer, ClientID: "gpm-client"},
+	}, nil, hostName, domains)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	return g
+}
+
+// The per-request-Host client cache must be keyed by a CONFIGURED domain. A Host
+// header the gate does not serve is refused outright: before the fix it minted a
+// fresh cache entry and performed a live IdP discovery, so an attacker-chosen
+// Host header both grew an unbounded map and drove outbound requests.
+func TestDataOIDCRejectsUnconfiguredRequestHost(t *testing.T) {
+	idp := newGateIdP(t)
+	g := newGate(t, idp.url, "app", []string{"app.example.com", "alias.example.com"})
+	h := g.handler(okHandler())
+
+	serve := func(host, target string) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", target, nil)
+		r.Host = host
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	for _, host := range []string{"evil.example.com", "app.example.com.evil.net", ""} {
+		if got := serve(host, "https://app.example.com/x"); got != http.StatusNotFound {
+			t.Fatalf("unconfigured Host %q: got %d, want 404", host, got)
+		}
+	}
+	// The callback is refused the same way.
+	if got := serve("evil.example.com", "https://app.example.com"+oidcCallbackPath+"?code=a&state=b"); got != http.StatusNotFound {
+		t.Fatalf("callback on an unconfigured Host: got %d, want 404", got)
+	}
+	if n := len(g.clients); n != 0 {
+		t.Fatalf("refused hosts left %d cache entries, want 0", n)
+	}
+	if n := idp.discoveries.Load(); n != 0 {
+		t.Fatalf("refused hosts triggered %d IdP discoveries, want 0", n)
+	}
+
+	// A configured domain is admitted, and case/port variants of it collapse onto
+	// one cache entry rather than one per spelling.
+	for _, host := range []string{"app.example.com", "APP.example.com", "app.example.com:443"} {
+		if got := serve(host, "https://app.example.com/x"); got != http.StatusFound {
+			t.Fatalf("configured Host %q: got %d, want 302", host, got)
+		}
+	}
+	if n := len(g.clients); n != 1 {
+		t.Fatalf("one domain in three spellings produced %d cache entries, want 1", n)
+	}
+	if n := idp.discoveries.Load(); n != 1 {
+		t.Fatalf("cached client re-discovered: %d discoveries, want 1", n)
+	}
+	// The cache can never exceed the configured domain count.
+	if got := serve("alias.example.com", "https://alias.example.com/x"); got != http.StatusFound {
+		t.Fatalf("second configured domain: got %d, want 302", got)
+	}
+	if n := len(g.clients); n > len(g.domains) {
+		t.Fatalf("cache holds %d entries for %d configured domains", n, len(g.domains))
+	}
+}
+
+// Discovery must happen OUTSIDE the gate's mutex, and concurrent first requests
+// for one host must share a single discovery. Before the fix a cache miss ran
+// the whole network round trip under d.mu, so one slow IdP stalled every request
+// on the gate - including ones whose client was already cached.
+func TestDataOIDCDiscoveryDoesNotBlockCachedHosts(t *testing.T) {
+	idp := newGateIdP(t)
+	g := newGate(t, idp.url, "app", []string{"warm.example.com", "cold.example.com"})
+	h := g.handler(okHandler())
+
+	serve := func(host string) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "https://"+host+"/x", nil)
+		r.Host = host
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	if got := serve("warm.example.com"); got != http.StatusFound {
+		t.Fatalf("warming the cache: got %d, want 302", got)
+	}
+
+	// Stall discovery, then start several concurrent first requests for the
+	// cold host.
+	stall := make(chan struct{})
+	idp.setStall(stall)
+	const concurrent = 8
+	var wg sync.WaitGroup
+	codes := make([]int, concurrent)
+	for i := range concurrent {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = serve("cold.example.com")
+		}()
+	}
+
+	// While they are all blocked on discovery, the warm host must still serve.
+	warmDone := make(chan int, 1)
+	go func() { warmDone <- serve("warm.example.com") }()
+	select {
+	case got := <-warmDone:
+		if got != http.StatusFound {
+			t.Errorf("cached host during a stalled discovery: got %d, want 302", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a cached host blocked behind another host's in-flight discovery: the mutex is held across it")
+	}
+
+	close(stall)
+	idp.setStall(nil)
+	wg.Wait()
+	for i, c := range codes {
+		if c != http.StatusFound {
+			t.Fatalf("concurrent request %d: got %d, want 302", i, c)
+		}
+	}
+	// One discovery for the warm host, one shared by all the cold ones.
+	if n := idp.discoveries.Load(); n != 2 {
+		t.Fatalf("%d discoveries for 2 hosts and %d concurrent requests, want 2 (single-flight)", n, concurrent)
+	}
+}
+
+// A failed discovery must not be cached: the next request retries instead of
+// serving 502 for the rest of the process's life.
+func TestDataOIDCFailedDiscoveryIsNotCached(t *testing.T) {
+	g := newGate(t, "http://127.0.0.1:1/not-a-real-idp", "app", []string{"app.example.com"})
+	h := g.handler(okHandler())
+	for i := range 2 {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "https://app.example.com/x", nil)
+		r.Host = "app.example.com"
+		h.ServeHTTP(rec, r)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("attempt %d: got %d, want 502", i, rec.Code)
+		}
+	}
+	if n := len(g.clients); n != 0 {
+		t.Fatalf("a failed discovery left %d cache entries, want 0", n)
 	}
 }

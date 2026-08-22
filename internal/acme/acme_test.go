@@ -103,14 +103,14 @@ func TestWaitPropagation(t *testing.T) {
 func TestAccountKeyPersistence(t *testing.T) {
 	dir := t.TempDir()
 	url := "https://acme.example/directory"
-	k1, err := loadOrCreateAccountKey(dir, url)
+	k1, err := loadOrCreateAccountKey(dir, url, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(accountKeyPath(dir, url)); err != nil {
+	if _, err := os.Stat(accountKeyPath(dir, url, "")); err != nil {
 		t.Fatalf("account key not persisted: %v", err)
 	}
-	k2, err := loadOrCreateAccountKey(dir, url)
+	k2, err := loadOrCreateAccountKey(dir, url, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,7 @@ forwarding** works end to end, using the same image you deploy.
 It runs:
 
 - **echo** — a tiny static TCP+UDP echo backend (echoes whatever it receives).
-- **gpm** — the `ghcr.io/rake-pro/go-proxy-manager:main` image with one
+- **gpm** — the `ghcr.io/rake-pro/go-proxy-manager:latest` image with one
   `StreamHost` (`config/stream-hosts/echo.yaml`) forwarding published port
   **15432** (TCP **and** UDP) to `echo:9000`.
 

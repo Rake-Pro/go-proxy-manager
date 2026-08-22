@@ -4,12 +4,28 @@ Target feature set and roadmap for `go-proxy-manager`, synthesized from **NPM**
 (baseline), **NPMplus** (hardened/expanded fork), and **lessons from running an
 OIDC-enabled reverse proxy in production**.
 
-> **Status:** this is the roadmap, not a status board. The **P0** tier (proxy/
-> redirect/stream/dead hosts, DNS-01 + custom certs, IP access lists, OIDC +
-> forward-auth + auth-request, the NPM importer, typed per-host middleware, REST
-> API + web UI, git-backed config) is **implemented** today; later tiers are
-> aspirational. For what actually ships and how to use it, see
-> [README.md](README.md) and [docs/](docs/).
+> **Status board** (current):
+> - **P0** - shipped: proxy/redirect/stream/dead hosts, DNS-01 + custom certs,
+>   IP access lists, OIDC + data-plane forward-auth + auth-request, the NPM
+>   importer, typed per-host middleware, REST API + web UI, git-backed config.
+>   Two P0 design goals were deliberately **reversed** after security review
+>   rather than shipped as originally scoped - trusted forward-auth *admin
+>   panel* login, and an in-band break-glass for SSO-only mode (see section 4
+>   items 1 and 3, and the P0 tier notes below).
+> - **P1** - shipped, except **HTTP-01 challenge support**, which is
+>   in progress (ACME client-side ordering/validation lands first; the
+>   data-plane HTTP listener does not yet serve
+>   `/.well-known/acme-challenge/`).
+> - **P2** - partially shipped: GeoIP geoblocking, mTLS client certs (phase 1
+>   verification **and** phase 2 CRL revocation + identity-passthrough
+>   headers), lifecycle webhooks, host tagging, reusable DNS credentials, and
+>   cosign image signing (build pipeline) are done. HTTP/3, proxy protocol,
+>   inbound IPv6, multi-ACME-server EAB, and the WAF/CrowdSec hook are not
+>   started.
+> - **P3** - aspirational; nothing in this tier is built.
+>
+> For what actually ships and how to use it, see [README.md](README.md) and
+> [docs/](docs/).
 
 **Legend (source):**
 `[NPM]` in upstream NPM · `[NPM+]` added by NPMplus · `[FORK]` added by an
@@ -112,6 +128,12 @@ worth building.
    forward-auth = double Authentik hops + an unavoidable "Login with Authentik"
    click. `[GOAL]` Accept a trusted forward-auth identity to establish the admin
    session directly: one authentication, no second click.
+   **Reversed:** shipped, then removed - see `internal/auth/authenticator.go`.
+   Minting an admin session from `X-*` identity headers on peer-IP/CIDR trust
+   alone is a spoofing risk if anything inside the trusted CIDR forwards client
+   headers, so trusted forward-auth login for the *admin panel* was dropped.
+   The data-plane forward-auth that gates proxied hosts is unaffected - it
+   never established an admin session and remains supported.
 2. **First-class OIDC/SSO** (not an unmerged PR) with **IdP group/claim -> role
    mapping**, so SSO users become admins by claim - replacing manual account
    linking and the "auto-provisioned = role user only" limit.
@@ -120,8 +142,17 @@ worth building.
    `[GOAL]` Enforce SSO-only while providing a *proper* break-glass:
    localhost-only admin / time-limited emergency token / CLI reset - never an open
    port. (NPMplus's `OIDC_DISABLE_PASSWORD` is the blunt version; do it safely.)
+   **Reversed:** SSO-only enforcement shipped; the break-glass half did not.
+   `internal/model/settings.go` (`AdminAuthSettings.SSOOnly`) states the call
+   explicitly: no in-band break-glass, deliberately - a network-position-trusted
+   local door is itself a spoofing risk. Recovery from an SSO outage is by
+   redeploying with local login re-enabled, not a built-in escape hatch.
 4. **MFA delegation.** Don't double-prompt (NPM TOTP + Authentik MFA). Trust IdP
    `acr/amr`; keep local TOTP only for local/break-glass accounts.
+   **Not implemented:** `OIDCSpec.TrustIdPMFA` exists as a config field but is
+   never read, and there is no local TOTP to delegate away from in the first
+   place. Moved to P3 below pending an actual local-MFA implementation to
+   delegate from.
 5. **Explicit external base URL.** Stop deriving origin from `X-Forwarded-*` (the
    redirect_uri port/scheme footgun that broke login in an earlier iteration).
    Configure the canonical public URL once.
@@ -165,9 +196,11 @@ earlier tiers or duplicating work (see "Architecture for extension").
   `*.example.com` wildcard, like the existing wildcard cert); custom certs.
 - **IP access lists** (LAN / VPN gating) - keep the current allow-list model.
 - **Authentik done right** (the reason this exists): native **OIDC admin login**
-  **+ trusted forward-auth header login** = one sign-in, no double prompt;
-  group->role mapping; MFA delegation; **safe SSO-only mode with a real
-  break-glass** (not an open `:81`).
+  with IdP group->role mapping; **SSO-only mode** (✓ shipped, `adminAuth.ssoOnly`)
+  with no in-band break-glass by design (section 4 #3 - reversed from the
+  original goal). Trusted forward-auth *admin panel* login and MFA delegation
+  were also reversed/deferred (section 4 #1, #4); trusted forward-auth still
+  gates data-plane hosts, just not the admin panel.
 - **Import the existing NPM/NPMplus config** (one-time, best-effort) to cut over
   (section 4 #11).
 - **First-class per-host config / middleware** escape hatch - never get blocked
@@ -229,6 +262,15 @@ earlier tiers or duplicating work (see "Architecture for extension").
   whole-config revert / pprof. The stored digest is never served, and reverting a
   token is refused so a rotation always means revocation. Closes the "scripting
   against the API means handing out an admin session" gap.
+- **HTTP-01 challenge** (**in progress**): `ACMESpec.Challenge` accepts
+  `http-01`, and the ACME client-side ordering/validation
+  (`internal/acme/order.go`, `HTTP01Store`) is wired; the data-plane HTTP
+  listener does not yet serve `/.well-known/acme-challenge/<token>`, so it
+  cannot complete an order end-to-end yet.
+- **High availability, phase 1** (✓ shipped: two-node active/standby - one
+  floating VIP via keepalived, one writer (`GPM_HA_ROLE=leader`), a read-only
+  follower that replicates config via `git pull --ff-only` and shares/rsyncs
+  the cert dir; no clustering dependency). See [docs/ha.md](docs/ha.md).
 
 ### P2 - hardening (NPMplus-class) + community gaps
 - HTTP/3 (QUIC), hardened TLS (1.3; optional 1.2 off).
@@ -236,10 +278,19 @@ earlier tiers or duplicating work (see "Architecture for extension").
   `countryAllow`/`countryDeny`/`onUnknown`, fail-closed at write and at live
   evaluation, `GPM_GEOIP_DB` with a 5-minute hot-reload watch, `GET
   /api/capabilities` gates the SPA controls), mTLS client certs (✓ shipped,
-  phase 1: per-host `tls.clientAuth` `require`/`optional` against a
-  `ClientCA` trust anchor, enforced per request via SNI==Host + verified
-  chain, `421` on mismatch; CRL/OCSP revocation and identity-passthrough
-  headers are phase 2, still open), proxy protocol.
+  phase 1 **and** phase 2: per-host `tls.clientAuth` `require`/`optional`
+  against a `ClientCA` trust anchor, enforced per request via SNI==Host +
+  verified chain, `421` on mismatch, plus CRL revocation
+  (`internal/dataplane/crl.go`, watched/hot-reloaded) and identity-passthrough
+  headers (`X-Client-Cert-{SAN,Serial,Fingerprint,Subject}`); OCSP was never
+  implemented and is not currently planned), proxy protocol.
+- **WAF/CrowdSec hook** (hook-only, not a bundled WAF): a named step in the
+  middleware chain (`internal/dataplane/chain.go` already reserves the slot
+  after `guard`/before `proxy`) that calls out to an operator-run bouncer/WAF
+  and acts on its verdict - not an embedded WAF or CrowdSec engine.
+- **cosign image signing** (build item, ✓ shipped): every release image is
+  signed keylessly via GitHub Actions OIDC (`.github/workflows/release.yml`);
+  `docs/deployment.md` documents `cosign verify`.
 - **Inbound IPv6** (NPM had it, disableable): bind the data plane on v6 and make
   it actually reachable end-to-end. Gotchas learned in the field: with Docker
   `userland-proxy:false` you can't DNAT v6 -> a v4-only container, so the gpm
@@ -260,11 +311,14 @@ earlier tiers or duplicating work (see "Architecture for extension").
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
   capped at TOTP + WebAuthn, not applicable with OIDC.
+- **MFA delegation** (moved from P0, section 4 #4: unimplemented). Trust IdP
+  `acr`/`amr` (`OIDCSpec.TrustIdPMFA` already exists as a config field but is
+  never read) to skip a redundant local prompt - blocked on local MFA
+  (TOTP/WebAuthn above) existing at all to delegate away from.
 
 ### Not planned at this time
 - Brotli/zstd compression (was P2)
 - OCSP stapling (was P2)
-- WAF/CrowdSec hook (was P2)
 - Email notifications (was P2)
 - SAML/LDAP login (was P2)
 - PHP / file server (was P3)
@@ -273,7 +327,6 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - ML-KEM (was P3)
 - MPTCP (was P3)
 - Anubis (was P3)
-- cosign image signing (build-side) (was P3)
 
 ### Architecture for extension (so later tiers aren't rework/duplication)
 - Model **hosts, certs, identity providers, access rules, middleware** as

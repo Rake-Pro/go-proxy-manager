@@ -9,7 +9,7 @@
 # Ports are chosen to avoid existing services on this host (e.g. another
 # service on 8080). Adjust the GPM_* env + ports below if any still collide.
 #
-# Quick start (see deploy/parallel-testing.md for the full runbook):
+# Quick start (see docs/migrating-from-npm.md for the full runbook):
 #   cp deploy/.env.example deploy/.env   # then set GPM_LOCAL_ADMIN_PASSWORD_HASH
 #   docker compose -f deploy/compose.parallel.yaml run --rm \
 #       -v /srv/npm-data-copy:/npm:ro gpm import --npm-data /npm --dry-run
@@ -23,7 +23,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     # Or pin the CI-built image instead of building locally:
-    # image: ghcr.io/rake-pro/go-proxy-manager:main
+    # image: ghcr.io/rake-pro/go-proxy-manager:latest
     container_name: gpm-test
     restart: unless-stopped
     environment:

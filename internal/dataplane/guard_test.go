@@ -65,3 +65,65 @@ func TestGuardFailsClosedOnNilIP(t *testing.T) {
 		t.Fatalf("a matched request with an unresolvable IP must be denied, got %d", rec.Code)
 	}
 }
+
+// A guard that matches on query parameters must refuse a raw query containing
+// ';'. Go's url.Values does not split on ';', so "?direct=1" written as
+// "?a=1;direct=1" does not fire the trigger - but RawQuery is forwarded to the
+// upstream unchanged, and a backend that still honours the legacy separator acts
+// on direct=1. Failing closed is what keeps gpm's view and the upstream's view
+// of the query from diverging.
+func TestGuardFailsClosedOnSemicolonQuery(t *testing.T) {
+	g := compileGuard(model.GuardMiddleware{
+		Triggers: []model.GuardTrigger{
+			{Paths: []string{"/login"}, QueryEquals: map[string]string{"direct": "1"}},
+		},
+		AllowFrom: []string{"192.0.2.0/24"},
+	})
+	h := guardHandler(g, peerIP, okHandler())
+
+	serve := func(target, remote string) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", target, nil)
+		req.RemoteAddr = remote
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	const external = "198.18.0.9:1"
+	cases := []struct {
+		name, target, remote string
+		want                 int
+	}{
+		{"semicolon smuggling the guarded parameter", "http://c/login?a=1;direct=1", external, http.StatusBadRequest},
+		{"semicolon anywhere in the query", "http://c/x?a=1;b=2", external, http.StatusBadRequest},
+		{"semicolon refused for allowed clients too", "http://c/login?a=1;direct=1", "192.0.2.5:1", http.StatusBadRequest},
+		{"plain guarded query still denied", "http://c/login?direct=1", external, http.StatusForbidden},
+		{"plain guarded query still allowed from the LAN", "http://c/login?direct=1", "192.0.2.5:1", http.StatusOK},
+		{"unrelated query untouched", "http://c/login?other=1", external, http.StatusOK},
+		{"no query untouched", "http://c/login", external, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serve(tc.target, tc.remote); got != tc.want {
+				t.Fatalf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// A guard with no query dimension has nothing to be confused by, so a ';' in the
+// query is none of its business and must not turn working requests into 400s.
+func TestGuardWithoutQueryTriggersIgnoresSemicolons(t *testing.T) {
+	g := compileGuard(model.GuardMiddleware{
+		Triggers:  []model.GuardTrigger{{Paths: []string{"/login"}, Methods: []string{"POST"}}},
+		AllowFrom: []string{"192.0.2.0/24"},
+	})
+	h := guardHandler(g, peerIP, okHandler())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://c/files?a=1;b=2", nil)
+	req.RemoteAddr = "198.18.0.9:1"
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}

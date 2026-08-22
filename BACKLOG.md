@@ -130,7 +130,12 @@ All findings from that review are remediated in the same change (see CHANGELOG
 ## Public release (deferred - owner wants this, not yet ready)
 
 - [ ] **Take the repo public** once it has had a polish pass and a dedicated
-  security-surface review. Publishing the source of the live edge proxy is a
+  security-surface review. *(2026-08-22: review done - report
+  gpm-pre-public-review-2026-08-22; batches 1+2 shipped same day: 4 Med + 2 Low
+  security fixes, location-chain data-loss fix, HTTP-01/EAB/3 DNS providers,
+  OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
+  annotation prefix, ops docs. Remaining at flip time: author-identity history
+  rewrite (real email on 43 commits), CLAUDE.md purge, final leakage pass.)* Publishing the source of the live edge proxy is a
   deliberate exposure decision: the full pre-publication pipeline applies
   (all-history secret/infra audit, author-identity normalization, tag/release
   handling, LICENSE choice) plus items specific to this repo - a fresh look at

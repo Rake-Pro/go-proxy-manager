@@ -12,21 +12,48 @@ import (
 // long a follower serves config the leader has already superseded.
 const DefaultFollowInterval = 20 * time.Second
 
+// PullTimeout bounds one fast-forward pull end to end. Without it a leader that
+// accepts the TCP connection and then stalls (a hung git-http backend, a
+// black-holed route, an SSH remote waiting on a prompt) leaves the pull running
+// for as long as the peer keeps the socket open - and, before the lock split
+// below, held the config write lock for exactly that long. The follower polls
+// every DefaultFollowInterval, so a pull that has not completed inside this
+// budget is simply retried on a later tick.
+const PullTimeout = 60 * time.Second
+
 // PullFFOnly fast-forwards the config repo from its configured remote and
 // reports whether HEAD moved. It never merges, rebases or resets: a diverged
 // history is returned as an error for an operator to resolve. With no remote
 // configured it is a no-op. Callers use the moved flag to reload only on a real
 // change.
+//
+// The network fetch runs WITHOUT the config write lock: it is the slow,
+// remote-controlled part, and holding the lock across it stalls every config
+// read and every admin write behind whatever the leader (or the network) decides
+// to do. Only the local half - the HEAD compare and the fast-forward that
+// rewrites the working tree - takes the lock, so a Load or a commit can never
+// observe a half-applied tree. The whole operation is bounded by PullTimeout.
 func (s *Store) PullFFOnly(ctx context.Context) (bool, error) {
-	// The write lock: the pull rewrites the working tree, so it must not overlap
-	// a Load or a commit.
+	ctx, cancel := context.WithTimeout(ctx, PullTimeout)
+	defer cancel()
+
+	hasRemote, err := s.git.FetchRemote(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !hasRemote {
+		return false, nil // no remote configured; nothing to pull
+	}
+
+	// The write lock: the fast-forward rewrites the working tree, so it must not
+	// overlap a Load or a commit.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	before, err := s.git.Head(ctx)
 	if err != nil {
 		return false, err
 	}
-	if err := s.git.PullFFOnly(ctx); err != nil {
+	if err := s.git.MergeFFOnly(ctx); err != nil {
 		return false, err
 	}
 	after, err := s.git.Head(ctx)
