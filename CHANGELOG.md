@@ -7,6 +7,10 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Changed
+
+- Go toolchain 1.27rc2 -> 1.27.0
+
 ### Added
 
 - **Discovery templates and profiles reach parity with a hand-written proxy
