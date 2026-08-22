@@ -5,17 +5,38 @@ go-proxy-manager ships as a single static binary and a multi-arch container imag
 under one data directory and exposes two HTTP surfaces: the public data plane and
 the admin control plane.
 
+## Verifying the image
+
+Every image pushed by the release workflow (including the `latest` tag, which
+shares the same manifest digest as the version tags built alongside it) is
+signed keylessly with [cosign](https://docs.sigstore.dev/cosign/) via GitHub
+Actions OIDC - no key material to manage or leak. Verify before you deploy:
+
+```
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/Rake-Pro/go-proxy-manager/\.github/workflows/release\.yml@refs/(heads/prod|tags/v.*)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/rake-pro/go-proxy-manager:latest
+```
+
+A successful verification prints the signature payload and confirms the image
+was built by the `release.yml` workflow in this repository from a `v*` tag -
+not from a fork, a different workflow, or a hand-pushed image.
+
 ## Listeners & ports
 
 | Port (default) | Surface | Expose to |
 |----------------|---------|-----------|
 | `:443` | Data plane HTTPS | Internet |
-| `:80` | Data plane HTTP (force-SSL redirects, plaintext hosts) | Internet |
+| `:80` | Data plane HTTP (force-SSL redirects, plaintext hosts, ACME HTTP-01 challenges) | Internet |
 | `:8081` | Admin API + web UI | **Not the internet** — your ingress, LAN, or an SSH tunnel |
 
 The admin plane is authenticated, but you should still keep it off the public
 internet. Bind it to loopback (`127.0.0.1:8081`) and reach it via a tunnel, or
 front it with your own authenticating ingress.
+
+There is no `/metrics` endpoint - the admin server exposes only `/healthz` and
+`/version`.
 
 ## Data directory
 
@@ -57,6 +78,7 @@ container deployments).
 | `-ha-role` | `GPM_HA_ROLE` | `leader` | HA role: `leader` runs ACME + Ingress discovery and accepts config writes; `follower` disables both and serves the admin API read-only (`503` on writes). See [ha.md](ha.md) |
 | `-ha-poll-interval` | `GPM_HA_POLL_INTERVAL` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved |
 | `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin role **and** `admin` scope gated) |
+| `-geoip-db` | `GPM_GEOIP_DB` | (none) | Path to an operator-supplied GeoLite2/GeoIP2 `.mmdb` file for AccessList geo rules; unset disables geo rules, no database is bundled |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
 preference:
@@ -102,7 +124,127 @@ volumes:
   gpm-data:
 ```
 
-## Automatic certificates (ACME DNS-01)
+## Bare metal / systemd
+
+No container runtime required - `gpm` is a single static, CGO-free binary.
+
+**Build:**
+
+```
+git clone https://github.com/Rake-Pro/go-proxy-manager
+cd go-proxy-manager
+make build              # -> bin/gpm, with VERSION/COMMIT/DATE stamped via ldflags
+```
+
+(`go build -trimpath -o /usr/local/bin/gpm ./cmd/gpm` works too, but skips the
+version stamping `make build` does - fine for a quick local test, not for
+something you'll run `gpm version` against later.) `git` must be on `PATH` at
+**runtime**, not just to build: the config store shells out to it for every
+commit, the same as the container image installs it explicitly.
+
+**User, data directory, and secrets:**
+
+```
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gpm
+sudo install -d -o gpm -g gpm -m 0750 /var/lib/gpm /var/lib/gpm/config /var/lib/gpm/certs
+sudo install -d -o root -g gpm -m 0750 /etc/gpm
+
+sudo install -m 0755 bin/gpm /usr/local/bin/gpm
+
+# Password hash: create the file 0600 FIRST, the same reasoning as the
+# Ingress-discovery token below - a plain redirect creates it world-readable
+# for the window between creation and chmod.
+sudo install -m 0600 -o gpm -g gpm /dev/null /etc/gpm/admin_hash
+/usr/local/bin/gpm hashpw 'your-password' | sudo tee /etc/gpm/admin_hash >/dev/null
+```
+
+**Environment file** (`/etc/gpm/gpm.env`, `0640 root:gpm` so only the service
+can read it):
+
+```
+GPM_CONFIG_DIR=/var/lib/gpm/config
+GPM_CERT_DIR=/var/lib/gpm/certs
+GPM_SESSION_DB=/var/lib/gpm/session.db
+GPM_LOCAL_ADMIN_USER=admin
+GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE=/etc/gpm/admin_hash
+GPM_LOG_LEVEL=info
+```
+
+Add any other flags from the [table above](#configuration-flags--environment)
+as `GPM_*` lines here - there is no separate bare-metal flag surface.
+
+**Unit file** (`/etc/systemd/system/gpm.service`):
+
+```
+[Unit]
+Description=go-proxy-manager
+Documentation=https://github.com/Rake-Pro/go-proxy-manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpm
+Group=gpm
+EnvironmentFile=/etc/gpm/gpm.env
+ExecStart=/usr/local/bin/gpm
+Restart=on-failure
+RestartSec=2s
+
+# Bind :80/:443 as the non-root gpm user, with no setuid binary and no root
+# process - the systemd equivalent of the container image's non-root USER.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Filesystem hardening. A container gets most of this from its own root
+# filesystem being throwaway; state it explicitly here instead.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gpm
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now gpm
+sudo systemctl status gpm
+curl -fsS http://127.0.0.1:8081/healthz && echo   # -> ok
+journalctl -u gpm -f                              # structured JSON logs; add GPM_LOG_CONSOLE=1 for human-readable
+```
+
+## Automatic certificates (ACME)
+
+Pick the challenge that fits the deployment:
+
+- **HTTP-01** (default when no DNS provider is referenced): no credentials at
+  all, but `:80` must be reachable from the internet and the name must already
+  resolve here. Single names only.
+- **DNS-01**: works from behind a firewall with no inbound port, and is the only
+  way to get a wildcard. Needs a DNSProvider credential
+  (`cloudflare`, `digitalocean`, `hetzner`, or `desec` - see
+  [configuration.md](configuration.md#dnsprovider-configdns-providers) for the
+  `config` keys each one takes).
+
+```yaml
+# config/certificates/app.yaml - HTTP-01, no provider needed
+name: app
+type: acme
+domains: [app.example.com]
+acme: {email: admin@example.com, challenge: http-01}
+```
+
+The HTTP-01 token is served by the data plane's own `:80` listener ahead of host
+routing and the force-SSL redirect, so no host or exception has to be configured
+for `/.well-known/acme-challenge/`. Anything in front of gpm (a router port
+forward, a cloud LB) must pass port 80 through unmodified. A CA that requires
+External Account Binding (ZeroSSL, Google Public CA) takes `acme.eab.kid` +
+`acme.eab.hmacKey` alongside its `directoryURL`.
+
+For DNS-01:
 
 1. Create a Cloudflare API token scoped to **Zone:DNS:Edit + Zone:Read** on the
    target zone, and mount it as a secret (`./secrets/cf_token`, `chmod 644`).
@@ -405,12 +547,147 @@ verification use, so a bare IP will fail the handshake.
 Scopes: `ingress-discovery:read` for status, `ingress-discovery:write` for
 reconcile.
 
+## Backup & restore
+
+`GET /api/backup` returns a gzip-compressed tar of the **declarative config
+only** - every object YAML under `config/<kind>/` plus `config/settings.yaml`.
+It does **not** include `.git` history (that's what `git clone`/`git bundle`
+the config repo is for, if you want commit history too), the `certs/`
+directory, or `session.db`. It needs the `admin` scope specifically, not
+`*:read` - unlike the JSON API, the raw YAML carries the `api-tokens`
+directory's stored digests, which are offline-crackable.
+
+Because backup is admin-scoped, there is no narrower "backup:read" token you
+can hand to a cron job - an automation credential that can back up the config
+can, by the same scope, do everything else `admin` can. Mint one deliberately
+for this and nothing else, and treat it with the same care as the break-glass
+password:
+
+```
+curl -s -X PUT https://<admin>/api/api-tokens/backup-cron \
+  -b "<admin session cookie>" -H "X-CSRF-Token: <token from /api/me>" \
+  -H 'Content-Type: application/json' \
+  -d '{"scopes":["admin"]}' | jq -r .token   # save this - shown once
+```
+
+**Cron:**
+
+```
+# /etc/cron.d/gpm-backup - runs as the gpm user
+0 3 * * * gpm  curl -fsS -H "Authorization: Bearer $(cat /etc/gpm/backup_token)" \
+  https://127.0.0.1:8081/api/backup \
+  -o /var/backups/gpm/gpm-config-$(date +\%Y-\%m-\%dT\%H\%M\%S).tar.gz \
+  && find /var/backups/gpm -name 'gpm-config-*.tar.gz' -mtime +30 -delete
+```
+
+(A `systemd` timer works the same way if you'd rather not use cron - a
+`Type=oneshot` service running the same `curl` line, triggered by an
+`OnCalendar=` timer unit.) `%` needs escaping as `\%` in a crontab; a plain
+shell script invoked by cron doesn't have that gotcha.
+
+**Restore** replaces the *entire* current config, validates the result, and
+commits it as one revision. If the archive doesn't validate (a dangling
+reference, a literal un-placeholdered secret, a corrupt/oversized upload) the
+working tree is rolled back to the pre-restore commit and **nothing is
+committed** - a bad restore attempt is a no-op, not a half-applied one:
+
+```
+curl -fsS -X POST https://<admin>/api/restore \
+  -H "Authorization: Bearer gpm_<admin-scoped-token>" \
+  -H 'Content-Type: application/gzip' \
+  --data-binary @gpm-config-2026-08-22T030000.tar.gz
+```
+
+Max upload size is 8MB gzipped. `X-Config-Commit` in the response header (and
+`.commit` in the JSON body) names the new commit, so a restore is itself
+revertible with `POST /api/revert` like any other change.
+
+**What a restore does *not* bring back**, and what to plan for separately:
+
+- **`certs/`** - a `custom`-type `Certificate` references cert/key files by
+  relative path in that directory; restoring config that names one does not
+  restore the files themselves. Back up `certs/` alongside the config archive
+  (a plain file copy - it isn't git-backed) if you use custom certificates.
+  `acme`-type certificates need nothing extra: DNS-01 credentials round-trip
+  in the restored `DNSProvider`/`Certificate` objects, and gpm re-issues on
+  next load if the on-disk artifact is missing.
+- **`session.db`** - restoring config never touches it; every admin session
+  active at restore time stays valid (or invalid) exactly as it was before.
+- **`api-tokens`** digests restore fine (they're plain config), but remember a
+  scoped revert of just `api-tokens` is refused for the reason in
+  [configuration.md](configuration.md#apitoken-configapi-tokens) - a whole-config
+  restore is the one path that *does* touch them, by design, since it's meant
+  to bring back an entire prior state including which tokens existed then.
+
+Verify a backup is actually restorable periodically, not just that the cron
+job exits `0` - a `GET`/`POST /api/restore` round trip against a disposable
+test instance is the only thing that proves the archive is usable, the same
+way an untested backup anywhere else is a hope, not a backup.
+
 ## High availability
 
 Two instances can run as an active/standby pair (keepalived VIP, one static
 leader, `git pull --ff-only` config replication, shared cert dir). The full
 recipe - keepalived config, cert-dir layout, `GPM_SSO_SIGNING_KEY` sharing,
 promotion, and what does not survive a failover - is in [ha.md](ha.md).
+
+## Upgrading and rolling back
+
+**Pin explicitly, and verify before you deploy.** Bump the image tag/digest
+(GitOps) or the binary version (bare metal) deliberately rather than tracking
+`latest` - see [Verifying the image](#verifying-the-image) above for the
+cosign check to run against whatever you're about to pin. There is no
+in-place "upgrade" operation: stop the old process/container, start the new
+one against the same `/data` (or `/var/lib/gpm`) volume, and confirm
+`GET /version` reports what you expect.
+
+**Config compatibility.** `Config`/`Settings` carry an explicit
+`schemaVersion` (currently `1`); a version bump would come with a documented,
+reversible migration in the store layer, not a silent format break - none has
+shipped yet. The two situations that matter *today*, both because an **older**
+binary's kind map silently ignores a directory/field it doesn't know about
+rather than erroring on it, so a downgrade can leave live objects invisible to
+it instead of cleanly rejected:
+
+- **Upstream groups** - roll the new binary out *before* the first host
+  references an `upstream-groups` entry. Full reasoning under
+  [Upstream-group health](#upstream-group-health-operations) above.
+- **API tokens** - roll the new binary out *before* creating the first
+  `api-tokens` object. Full reasoning under [API tokens](#api-tokens-automation)
+  above.
+
+The general rule those two both follow: roll a **newer** binary out before
+adopting any config it introduces; roll an **older** binary back only after
+confirming your config doesn't name a kind or field that predates it (an
+older loader ignoring a directory isn't a downgrade-safety net - the objects
+in it are simply invisible to that instance until you roll forward again).
+
+**`session.db` has no versioned migrations to worry about yet** - the schema
+is a single idempotent `CREATE TABLE IF NOT EXISTS` with no `ALTER TABLE`
+history (see `internal/session/session.go`), so every released binary to date
+reads and writes the identical schema and a downgrade is safe as far as
+sessions are concerned. If a future release does add a schema change, treat
+`session.db` as roll-forward only for that specific hop unless its changelog
+entry says otherwise - the safe fallback if you must roll back past it is
+deleting `session.db` (forces every admin to log in again; does not touch
+`config/` or `certs/`).
+
+**Rollback procedure**, once you've decided you need one:
+
+1. Stop the new version.
+2. If the upgrade you're undoing crossed one of the config-compatibility
+   points above, resolve that first (e.g. don't roll back past the release
+   that introduced your first `upstream-groups` reference while still using
+   it) - `POST /api/revert` or `POST /api/restore` from a
+   [pre-upgrade backup](#backup--restore) roll the *config* back
+   independently of the binary version, and you may need both together.
+3. Start the previous version against the same data directory.
+4. Confirm `GET /version`, `GET /healthz`, and that proxied traffic is still
+   routing - the same checks as a fresh deploy.
+
+Taking a [`GET /api/backup`](#backup--restore) immediately before an upgrade
+that changes anything nontrivial costs one `curl` and turns "roll back" into
+a config restore instead of a guess.
 
 ## Migrating from Nginx Proxy Manager
 

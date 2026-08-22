@@ -5,6 +5,14 @@ landed; it is kept as the rationale record for
 `internal/k8s`, `settings.ingressDiscovery`, and the
 `gpm.rake.pro/*` annotation contract.
 
+The `gpm.rake.pro` prefix used throughout this document is the **default**:
+`settings.ingressDiscovery.annotationPrefix` replaces it for both the opt-in
+annotations and the `managed-by`/`disabled-by` labels, so a deployment can avoid
+colliding with another `gpm.rake.pro`-prefixed tool in the same cluster.
+Ownership is recognised only under the *currently configured* prefix - see
+`docs/configuration.md`'s "Changing the annotation prefix" for what changing it
+requires (`annotationPrefixMigrate`). Every example below uses the default.
+
 Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) is
 shipped: a proxy host carrying a `dns` policy gets its domains published to the
 LAN resolver and/or the public zone. The manual step that remains is the one
@@ -24,7 +32,7 @@ Ingress loses its annotation).
 The deciding fact for almost every decision below is the deployment topology:
 
 ```
-   internet ─▶ [ edge-host ]  ── LAN ──▶ [ k8s cluster ]
+   internet ─▶ [ edge host ]  ── LAN ──▶ [ k8s cluster ]
                gpm (edge)             ingress controller (LB address)
                TLS termination        Services / Pods
 ```
@@ -280,7 +288,7 @@ discovery takes effect without a restart.
 |---|---|---|
 | `name` | derived: `ing-<name>.<namespace>` | see "Naming" below |
 | `displayName` | derived: `<namespace>/<name>` | so the host list says where it came from |
-| `labels["gpm.rake.pro/managed-by"]` | constant `ingress-discovery` | the ownership marker; nothing else is ever touched |
+| `labels["gpm.rake.pro/managed-by"]` | constant `ingress-discovery` | the ownership marker; nothing else is ever touched. Key prefix follows `annotationPrefix` |
 | `domains` | `spec.rules[].host` | lowercased, trailing dot stripped, de-duplicated, **sorted**, each one validated (below) |
 | `upstream` | **template** | the cluster ingress controller's address — *not* the Ingress backend |
 | `tls` | **template** | certificate ref, forceSSL, HTTP/2, HSTS, minTLSVersion, clientAuth |
@@ -666,13 +674,13 @@ takes a `load` func and an `apply` func and imports neither `store` nor `api`.
 | Requirement | Mechanism |
 |---|---|
 | gpm never writes to the cluster | shipped ClusterRole grants `list` on `ingresses` only (the reconciler never gets by name and never watches); no write verb exists to call |
-| Opt-in only | `gpm.rake.pro/managed: "true"` exactly; absent/any other value = invisible. No namespace sweep mode exists |
+| Opt-in only | `<annotationPrefix>/managed: "true"` exactly (`gpm.rake.pro` by default); absent/any other value = invisible. No namespace sweep mode exists |
 | No privilege inheritance from cluster manifests | every security-relevant field comes from an operator-written profile; the Ingress contributes hostnames (validated, suffix-restricted), two booleans, and the *name* of one profile — never a chain, a middleware, an access list, a certificate or an upstream (§5a) |
 | Untrusted profile selection | exact-match only against `settings.ingressDiscovery.profiles`; an undefined name **skips** the Ingress rather than falling back to the default (which would be a silent downgrade), and a profile is applied verbatim rather than merged with the default |
 | Untrusted strings | strict hostname validation + allowed-suffix gate + `model.ValidateName` on the derived name; upstream is never built from Ingress input |
 | Credential handling | bearer token read from a file, re-read on a TTL (projected SA tokens rotate), never logged, never returned by any endpoint, never committed to git |
 | Transport | TLS with the supplied CA bundle, redirects never followed, bounded response reads, bounded timeouts — the same hardening as `internal/dnssync` |
-| Ownership | writes and deletes restricted to objects carrying the managed-by label, re-verified under the store lock at write time (the plan predates the cluster list); collision on the derived NAME *or* on any DOMAIN with a host discovery does not own = skip + warn, backstopped by a duplicate-domain check in `Config.Validate` |
+| Ownership | writes and deletes restricted to objects carrying the managed-by label **under the currently configured `annotationPrefix`**, re-verified under the store lock at write time (the plan predates the cluster list); collision on the derived NAME *or* on any DOMAIN with a host discovery does not own = skip + warn, backstopped by a duplicate-domain check in `Config.Validate`. A settings write that changes `annotationPrefix` while hosts are still labelled under the old one is refused unless `annotationPrefixMigrate: true` is set |
 | API surface | `ingress-discovery:read` / `ingress-discovery:write` scopes; status carries no token, no CA, no cluster addresses beyond what settings already expose |
 
 The token file is a path, not a `Secret` placeholder, for two reasons: projected

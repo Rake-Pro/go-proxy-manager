@@ -424,18 +424,40 @@ type reconcilePlan struct {
 	results      []HostResult
 }
 
-// managedHost reports whether a proxy host is one discovery owns.
-func managedHost(h model.ProxyHost) bool {
-	return h.Labels[model.ManagedByLabel] == model.ManagedByIngressDiscovery
+// managedHost reports whether a proxy host is one discovery owns: it carries
+// managed-by under conf's CURRENT annotation prefix. When
+// conf.AnnotationPrefixMigrate is set, a host still carrying managed-by under
+// a DIFFERENT (older) prefix is ALSO recognised, so it is treated as owned for
+// this run rather than skipped as hand-written - which is what lets its normal
+// derive/update path (in planReconcile below) relabel it onto the current
+// prefix, since derive() always stamps a fresh Labels map under the current
+// prefix.
+func managedHost(h model.ProxyHost, conf model.IngressDiscoverySettings) bool {
+	if h.Labels[conf.ManagedByLabel()] == model.ManagedByIngressDiscovery {
+		return true
+	}
+	return conf.AnnotationPrefixMigrate && conf.HasStaleManagedByLabel(h.Labels)
 }
 
 // operatorDisabled reports whether a managed host's Disabled: true was set by
 // the OPERATOR rather than by discovery's own fail-closed revocation path (see
-// model.DisabledByLabel). Discovery must never re-enable a host it did not
-// disable itself - that would turn a hand-disable, the obvious move when an
-// app has to come offline now, into a no-op on the very next poll.
-func operatorDisabled(cur model.ProxyHost) bool {
-	return cur.Disabled && cur.Labels[model.DisabledByLabel] != model.DisabledByIngressDiscovery
+// IngressDiscoverySettings.DisabledByLabel). Discovery must never re-enable a
+// host it did not disable itself - that would turn a hand-disable, the obvious
+// move when an app has to come offline now, into a no-op on the very next
+// poll. During an AnnotationPrefixMigrate relabel, a disabled-by label under a
+// stale prefix is ALSO recognised as discovery's own, for the same reason
+// managedHost widens above.
+func operatorDisabled(cur model.ProxyHost, conf model.IngressDiscoverySettings) bool {
+	if !cur.Disabled {
+		return false
+	}
+	if cur.Labels[conf.DisabledByLabel()] == model.DisabledByIngressDiscovery {
+		return false
+	}
+	if conf.AnnotationPrefixMigrate && conf.HasStaleDisabledByLabel(cur.Labels) {
+		return false
+	}
+	return true
 }
 
 // cloneLabels copies a label map so a write through the copy can never mutate
@@ -458,7 +480,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 	managed := map[string]model.ProxyHost{} // only the ones discovery owns
 	for _, h := range cfg.ProxyHosts {
 		current[h.Name] = h
-		if managedHost(h) {
+		if managedHost(h, conf) {
 			managed[h.Name] = h
 		}
 	}
@@ -479,7 +501,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 	disable := map[string]model.ProxyHost{}
 
 	for _, ing := range ingresses {
-		if ing.Metadata.Annotations[model.AnnotationManaged] != "true" {
+		if ing.Metadata.Annotations[conf.AnnotationManaged()] != "true" {
 			continue // opt-in only: absent or any other value means invisible
 		}
 		p.discovered++
@@ -516,7 +538,15 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 				// before being written to, or this would mutate cur - and, through it,
 				// the config the caller still holds - out from under the read.
 				off.Labels = cloneLabels(cur.Labels)
-				off.Labels[model.DisabledByLabel] = model.DisabledByIngressDiscovery
+				// During an AnnotationPrefixMigrate relabel, cur may only carry a
+				// STALE prefix's labels (that is how it got into managed[] above); strip
+				// them so the host ends up with exactly the current prefix's pair,
+				// rather than old and new keys both lingering.
+				if conf.AnnotationPrefixMigrate {
+					conf.StripStaleDiscoveryLabels(off.Labels)
+				}
+				off.Labels[conf.ManagedByLabel()] = model.ManagedByIngressDiscovery
+				off.Labels[conf.DisabledByLabel()] = model.DisabledByIngressDiscovery
 				disable[name] = off
 				p.updated++
 				p.results = append(p.results, HostResult{Name: name, Ingress: ref, Domains: cur.Domains,
@@ -576,7 +606,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		// A managed host that this run rewrites or removes releases its domains;
 		// everything else - every operator-authored host, and every managed host
 		// being kept as-is - holds on to them.
-		if managedHost(h) {
+		if managedHost(h, conf) {
 			if _, rewritten := desired[h.Name]; rewritten || doomed[h.Name] {
 				continue
 			}
@@ -613,7 +643,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			continue
 		}
 		switch {
-		case exists && !managedHost(cur):
+		case exists && !managedHost(cur, conf):
 			// Somebody hand-wrote a host with this name. Overwriting it is exactly
 			// what the ownership rule forbids, so skip and say so - the same
 			// skip-and-warn the Pi-hole and Cloudflare backends do for a record they
@@ -638,7 +668,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			// exactly the signal that lifts it (want.Disabled is already false here,
 			// and want carries no disabled-by label, so it clears on its own).
 			reenable := false
-			if operatorDisabled(cur) {
+			if operatorDisabled(cur, conf) {
 				want.Disabled = true
 			} else if cur.Disabled {
 				reenable = true
@@ -651,7 +681,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			p.updated++
 			reason := ""
 			switch {
-			case operatorDisabled(cur):
+			case operatorDisabled(cur, conf):
 				reason = "operator-disabled host: other fields refreshed, disabled state preserved"
 			case reenable:
 				reason = "profile resolves again: re-enabling the host discovery had disabled"
@@ -784,7 +814,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 	// regression that nobody would see. The name is returned so the caller
 	// protects any existing host for this Ingress from deletion - a typo in an
 	// annotation must not take a host offline either.
-	tmpl, prof, ok := conf.ResolveProfileFor(ns, ing.Metadata.Labels, ing.Metadata.Annotations[model.AnnotationProfile])
+	tmpl, prof, ok := conf.ResolveProfileFor(ns, ing.Metadata.Labels, ing.Metadata.Annotations[conf.AnnotationProfile()])
 	if !ok {
 		// The rejected name is echoed back so the operator can see the typo, but it
 		// is cluster-supplied and an annotation value can be very large, so it is
@@ -869,7 +899,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		ObjectMeta: model.ObjectMeta{
 			Name:        name,
 			DisplayName: ns + "/" + nm,
-			Labels:      map[string]string{model.ManagedByLabel: model.ManagedByIngressDiscovery},
+			Labels:      map[string]string{conf.ManagedByLabel(): model.ManagedByIngressDiscovery},
 			Tags:        append([]string(nil), tmpl.Tags...),
 		},
 		Domains:           domains,
@@ -882,7 +912,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
 	}
-	if pol := dnsPolicy(ing, tmpl); pol != nil {
+	if pol := dnsPolicy(ing, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}
 	return name, host, prof, nil
@@ -891,7 +921,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 // dnsPolicy resolves the derived host's DNS policy: the resolved profile's
 // default, with each flag individually overridden by its annotation. A policy
 // that asks for nothing is nil, so an opted-out host carries no dns key at all.
-func dnsPolicy(ing Ingress, tmpl model.IngressHostTemplate) *model.DNSSyncPolicy {
+func dnsPolicy(ing Ingress, tmpl model.IngressHostTemplate, conf model.IngressDiscoverySettings) *model.DNSSyncPolicy {
 	pol := model.DNSSyncPolicy{}
 	if tmpl.DefaultDNS != nil {
 		pol = *tmpl.DefaultDNS
@@ -912,8 +942,8 @@ func dnsPolicy(ing Ingress, tmpl model.IngressHostTemplate) *model.DNSSyncPolicy
 				Msg(`ingress discovery: annotation value must be "true" or "false"; keeping the template default`)
 		}
 	}
-	apply(model.AnnotationLanDirect, &pol.LanDirect)
-	apply(model.AnnotationPublicCname, &pol.PublicCname)
+	apply(conf.AnnotationLanDirect(), &pol.LanDirect)
+	apply(conf.AnnotationPublicCname(), &pol.PublicCname)
 	if !pol.Enabled() {
 		return nil
 	}

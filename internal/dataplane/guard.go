@@ -14,6 +14,10 @@ type guard struct {
 	triggers   []guardTrigger
 	allowNets  []*net.IPNet
 	denyStatus int
+
+	// hasQueryEquals records that at least one trigger matches on query
+	// parameters, which makes the ';' ambiguity below relevant to this guard.
+	hasQueryEquals bool
 }
 
 type guardTrigger struct {
@@ -34,6 +38,9 @@ func compileGuard(g model.GuardMiddleware) guard {
 	}
 	for _, t := range g.Triggers {
 		gt := guardTrigger{queryEquals: t.QueryEquals}
+		if len(t.QueryEquals) > 0 {
+			c.hasQueryEquals = true
+		}
 		if len(t.Paths) > 0 {
 			gt.paths = map[string]struct{}{}
 			for _, p := range t.Paths {
@@ -78,6 +85,19 @@ func (t guardTrigger) matches(r *http.Request) bool {
 // client IP is denied (ipInNets(nil, ...) is false).
 func guardHandler(c guard, ipOf func(*http.Request) net.IP, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A ';' in the raw query is a matcher/backend divergence, the query-string
+		// twin of the path check in normalizeRequestPath. r.URL.Query() follows the
+		// modern rule and does NOT split on ';', so "?a=1;direct=1" parses as the
+		// single parameter a="1;direct=1" and a queryEquals trigger on direct=1
+		// does not fire - yet RawQuery is forwarded to the upstream byte for byte,
+		// and any backend still honouring the legacy ';' separator (PHP, older
+		// servlet containers, some frameworks) reads direct=1 and acts on it. The
+		// guard therefore refuses the request outright rather than evaluate a
+		// query it cannot interpret the same way the upstream will.
+		if c.hasQueryEquals && strings.Contains(r.URL.RawQuery, ";") {
+			http.Error(w, "bad request query", http.StatusBadRequest)
+			return
+		}
 		matched := false
 		for _, t := range c.triggers {
 			if t.matches(r) {

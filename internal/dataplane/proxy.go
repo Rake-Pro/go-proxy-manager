@@ -93,30 +93,57 @@ func (p *bufferPool) Put(b []byte) {
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
 // timeouts is nil for the shared, pooled transport, or a per-host override.
-func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts) *httputil.ReverseProxy {
+func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string) http.Handler {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 	}
-	return newProxyWith(target, transportFor(timeouts), hostName)
+	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders)
 }
 
 // newGroupReverseProxy builds the terminal handler for a host backed by an
 // upstream group. The Rewrite target is nominally the group's first upstream;
 // the groupTransport re-points each attempt at the healthiest candidate, so the
 // URL set here only seeds scheme/host for X-Forwarded computation.
-func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts) *httputil.ReverseProxy {
+func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName)
+	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders)
 }
 
-func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
+// reassertIdentity re-applies the identity headers gpm itself set on the inbound
+// request to the outbound one.
+//
+// httputil.ReverseProxy honours the client's "Connection" header by deleting
+// every header it names from the outbound request, and it does that BEFORE the
+// Rewrite hook runs. gpm's auth tiers (SSO gate, mTLS passthrough, forward-auth)
+// have already stripped the client's own copies and set authoritative values on
+// the inbound request by then - but a client that sends
+// "Connection: X-Forwarded-User" gets exactly that header dropped from the
+// request the upstream sees. An upstream that trusts gpm to assert identity then
+// sees an ANONYMOUS request on a gated route, which for a backend that falls back
+// to a default/guest identity is an authentication bypass, not a broken header.
+//
+// Restoring the values here, inside Rewrite, is what closes it: the deletion has
+// already happened, so the last writer wins. Only headers gpm is the asserter of
+// (names is the host's asserted set) and that are actually present inbound are
+// restored, so this can never resurrect a header the auth tier deliberately
+// stripped.
+func reassertIdentity(pr *httputil.ProxyRequest, names []string) {
+	for _, name := range names {
+		if v, ok := pr.In.Header[name]; ok && len(v) > 0 {
+			pr.Out.Header[name] = append([]string(nil), v...)
+		}
+	}
+}
+
+func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string) http.Handler {
+	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
 			pr.Out.Host = pr.In.Host // preserve the client's Host header
+			reassertIdentity(pr, identityHeaders)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Warn().Str("host", hostName).Str("path", r.URL.Path).Err(err).Msg("upstream error")
@@ -129,6 +156,54 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string)
 		Transport:  transport,
 		BufferPool: proxyBufPool,
 	}
+	return longLivedProxy(rp)
+}
+
+// longLivedProxy clears the listener's per-connection read/write deadlines for
+// the request shapes that legitimately outlive readTimeout, so the timeout added
+// for idle/slow clients can never truncate real traffic:
+//
+//   - a protocol upgrade (WebSocket and friends). The connection is hijacked and
+//     then lives for as long as both peers want it to; any deadline still set on
+//     the socket would kill it mid-session.
+//   - a request carrying a body. The body is streamed to the upstream at the
+//     upstream's pace, so a large or slow upload is bounded by the client and the
+//     backend, not by a proxy-side read deadline. (readTimeout still applies to
+//     bodies read by non-proxy handlers, and readHeaderTimeout still bounds every
+//     request's headers.)
+//
+// A bodiless, non-upgrade request keeps its deadline - and the stdlib clears that
+// one itself once the handler starts, so a long-streamed RESPONSE is unaffected
+// either way.
+func longLivedProxy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isUpgradeRequest(r) || r.ContentLength != 0 {
+			rc := http.NewResponseController(w)
+			// Both are best-effort: an http.ResponseWriter that does not support
+			// deadlines (an httptest recorder, HTTP/2) returns ErrNotSupported,
+			// which is not a reason to fail the request.
+			_ = rc.SetReadDeadline(time.Time{})
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isUpgradeRequest reports whether a request asks to switch protocols, per RFC
+// 7230: "Connection: Upgrade" (token match, the header may list several) plus a
+// non-empty Upgrade header.
+func isUpgradeRequest(r *http.Request) bool {
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // rewriteUpstreamRedirect fixes Location headers that point back at the upstream's

@@ -509,7 +509,7 @@ func (g *groupHealth) stickyUpstream(req *http.Request) *upstreamHealth {
 	if err != nil {
 		return nil
 	}
-	payload, ok := verifyToken(c.Value)
+	payload, ok := verifyToken(macLabelSticky, c.Value)
 	if !ok {
 		return nil
 	}
@@ -537,7 +537,7 @@ func (g *groupHealth) stickyCookieFor(u *upstreamHealth, req *http.Request) *htt
 	payload := strings.Join([]string{stickyPayloadPrefix, g.name, u.label, strconv.FormatInt(exp.Unix(), 10)}, "|")
 	return &http.Cookie{
 		Name:     g.stickyCookie,
-		Value:    signToken([]byte(payload)),
+		Value:    signToken(macLabelSticky, []byte(payload)),
 		Path:     "/",
 		MaxAge:   int(g.stickyTTL / time.Second),
 		HttpOnly: true,

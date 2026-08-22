@@ -1,10 +1,12 @@
 package dataplane
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"golang.org/x/crypto/bcrypt"
@@ -379,5 +381,169 @@ func TestAccessListGeoDBUnavailableFailsClosed(t *testing.T) {
 				t.Fatalf("geoLoaded=%s: DB unavailable must deny even for a known allow-listed country, got %d", tc.name, rec.Code)
 			}
 		})
+	}
+}
+
+// Data-plane basic auth must throttle per client IP: bcrypt is expensive by
+// design, so an unthrottled gate is both an online password-guessing oracle and
+// a CPU-exhaustion primitive. The lockout answers 401 with the usual challenge,
+// never 429, so the response never reveals that a lockout is in force.
+func TestAccessListBasicAuthLocksOutAfterRepeatedFailures(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	al := model.AccessList{
+		ObjectMeta: model.ObjectMeta{Name: "auth"},
+		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	}
+	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.9"), nil, nil, okHandler())
+
+	try := func(user, pass string, creds bool) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/", nil)
+		if creds {
+			r.SetBasicAuth(user, pass)
+		}
+		h.ServeHTTP(rec, r)
+		return rec
+	}
+
+	// A credential-less request is not an attempt: browsers send one per fresh
+	// page load and must never be able to lock a user out.
+	for range maxBasicAuthFails + 3 {
+		if rec := try("", "", false); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("no-credential request: got %d, want 401", rec.Code)
+		}
+	}
+	if rec := try("admin", "hunter2", true); rec.Code != http.StatusOK {
+		t.Fatalf("good credentials after credential-less requests: got %d, want 200", rec.Code)
+	}
+
+	// Real failures do count, and the gate closes at the limit.
+	for i := range maxBasicAuthFails {
+		if rec := try("admin", "wrong", true); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: got %d, want 401", i, rec.Code)
+		}
+	}
+	// Locked out: even the CORRECT password is refused, and with the same 401 +
+	// challenge a wrong password gets (no 429, no distinguishable body).
+	locked := try("admin", "hunter2", true)
+	if locked.Code != http.StatusUnauthorized {
+		t.Fatalf("locked-out client: got %d, want 401", locked.Code)
+	}
+	if locked.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("locked-out response must carry the same challenge as a normal failure")
+	}
+	wrong := try("admin", "also-wrong", true)
+	if wrong.Code != locked.Code || wrong.Body.String() != locked.Body.String() {
+		t.Fatalf("lockout is distinguishable from a wrong password: %d %q vs %d %q",
+			locked.Code, locked.Body.String(), wrong.Code, wrong.Body.String())
+	}
+
+	// A different client IP is unaffected: the throttle is per key, not global.
+	other := accessListHandler(compileAccessList(al), ipFrom("198.51.100.7"), nil, nil, okHandler())
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetBasicAuth("admin", "hunter2")
+	other.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unrelated client IP: got %d, want 200", rec.Code)
+	}
+}
+
+// A successful authentication clears the client's failure count, so an operator
+// who mistypes a few times is not locked out for the rest of the window.
+func TestAccessListBasicAuthSuccessClearsFailures(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	al := model.AccessList{
+		ObjectMeta: model.ObjectMeta{Name: "auth"},
+		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	}
+	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.10"), nil, nil, okHandler())
+	try := func(pass string) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/", nil)
+		r.SetBasicAuth("admin", pass)
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for range maxBasicAuthFails - 1 {
+		if got := try("wrong"); got != http.StatusUnauthorized {
+			t.Fatalf("failure: got %d, want 401", got)
+		}
+	}
+	if got := try("hunter2"); got != http.StatusOK {
+		t.Fatalf("good credentials below the limit: got %d, want 200", got)
+	}
+	// The counter was reset, so a full fresh run of failures is needed again.
+	for i := range maxBasicAuthFails {
+		if got := try("wrong"); got != http.StatusUnauthorized {
+			t.Fatalf("post-reset failure %d: got %d, want 401", i, got)
+		}
+	}
+	if got := try("hunter2"); got != http.StatusUnauthorized {
+		t.Fatalf("locked out after a fresh run of failures: got %d, want 401", got)
+	}
+}
+
+// The throttle map is bounded and fails CLOSED when saturated, so a flood of
+// distinct client IPs cannot grow it without bound nor buy an unthrottled
+// guessing path.
+func TestAuthGateFailsClosedWhenSaturated(t *testing.T) {
+	g := newAuthGate(time.Minute, 2, 4)
+	for i := range 4 {
+		g.record(net.IPv4(10, 0, 0, byte(i)).String())
+	}
+	if len(g.entries) != 4 {
+		t.Fatalf("gate holds %d entries, want its 4-key cap", len(g.entries))
+	}
+	g.record("10.0.0.99") // one key too many: not tracked...
+	if len(g.entries) != 4 {
+		t.Fatalf("gate grew past its cap to %d entries", len(g.entries))
+	}
+	if !g.atLimit("10.0.0.99") { // ...and therefore treated as locked out
+		t.Fatal("an untracked key must be treated as at-limit while the map is saturated")
+	}
+}
+
+// bcrypt verification is bounded process-wide, so a request flood against a
+// basic-auth host cannot saturate every core.
+func TestBcryptConcurrencyIsBounded(t *testing.T) {
+	if cap(bcryptSem) != maxBcryptConcurrent {
+		t.Fatalf("bcrypt semaphore capacity is %d, want %d", cap(bcryptSem), maxBcryptConcurrent)
+	}
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	c := compileAccessList(model.AccessList{
+		ObjectMeta: model.ObjectMeta{Name: "auth"},
+		BasicAuth:  []model.BasicAuthUser{{Username: "u", PasswordHash: string(hash)}},
+	})
+
+	// Fill the semaphore, then prove a verification cannot proceed past it and
+	// that a cancelled request gives up its wait rather than queueing forever.
+	for range maxBcryptConcurrent {
+		bcryptSem <- struct{}{}
+	}
+	defer func() {
+		for range maxBcryptConcurrent {
+			<-bcryptSem
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	r.SetBasicAuth("u", "pw")
+	done := make(chan bool, 1)
+	go func() { done <- c.authOK(r) }()
+	select {
+	case <-done:
+		t.Fatal("a bcrypt compare ran while the semaphore was full")
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a cancelled request must not authenticate")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled request kept waiting for a bcrypt slot")
 	}
 }

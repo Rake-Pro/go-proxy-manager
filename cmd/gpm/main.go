@@ -188,6 +188,14 @@ func main() {
 	})
 	authn.Configure(cfg, settings)
 
+	// With neither a local admin nor any OIDC provider configured, nothing can
+	// ever authenticate to the admin panel - and it fails silently (a login
+	// page with no way to log in) rather than with an error. Name both knobs so
+	// this is diagnosable from the startup log instead of a support thread.
+	if (*localUser == "" || localHash == "") && len(settings.AdminAuth.Providers) == 0 {
+		log.Warn().Msg("no admin authentication configured: set GPM_LOCAL_ADMIN_USER/GPM_LOCAL_ADMIN_PASSWORD_HASH for local login, or settings.adminAuth.providers for OIDC - the admin panel is unreachable until one is set")
+	}
+
 	// Scoped API tokens. The authenticator caches this closure's result and drops
 	// the cache from reload() below, so a token created, disabled or deleted
 	// through the API takes effect immediately WITHOUT an unauthenticated bearer
@@ -242,6 +250,9 @@ func main() {
 		log.Info().Msg("HA follower: ACME renewal loop disabled (the leader is the only issuer)")
 	} else {
 		acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: func() { _ = reload() }})
+		// HTTP-01 challenges are answered by the data plane's plaintext listener
+		// from the manager's in-flight token map.
+		dp.SetACMEChallengeStore(acmeMgr.HTTP01Challenges())
 		go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
 			c, _, err := st.Load(ctx)
 			return c, err

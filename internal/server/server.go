@@ -9,6 +9,7 @@ import (
 	"net/http/pprof"
 	"time"
 
+	openapidoc "github.com/Rake-Pro/go-proxy-manager/docs/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
@@ -45,6 +46,13 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 
 	// Current principal (user-level): proves the session/role gate.
 	mux.Handle("GET /api/me", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleMe)))
+
+	// The OpenAPI 3.1 spec for this whole admin API. Same auth as /api/me (any
+	// authenticated session or token, no particular role or scope beyond that) -
+	// it is documentation, not a capability, so it does not need admin. This
+	// specific pattern takes precedence over the "/api/" subtree below for this
+	// exact path, exactly like /api/me does.
+	mux.Handle("GET /api/openapi.yaml", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleOpenAPISpec)))
 
 	// REST CRUD API (admin-only). The more specific /api/me above takes
 	// precedence over this subtree for that exact path. RequireRole enforces the
@@ -155,6 +163,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, version.Get())
+}
+
+func (s *Server) handleOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(openapidoc.Spec)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -18,7 +18,10 @@ import (
 //     subsequent ones (see oidcgate.go).
 //   - client-cert: admit only requests whose TLS handshake verified a client
 //     certificate, optionally mapping its subject to a role (see clientCertGate).
-func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, clientIP func(*http.Request) net.IP, next http.Handler) http.Handler {
+//
+// domains are the gated host's configured domains; the OIDC gate validates the
+// request Host against them before caching a per-Host relying-party client.
+func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, domains []string, clientIP func(*http.Request) net.IP, next http.Handler) http.Handler {
 	// client-cert takes its identity from the TLS handshake, so it is handled
 	// before the identity-provider lookup - it is the one mode with no IdP.
 	if mw.Auth.Mode == model.AuthModeClientCert {
@@ -61,7 +64,7 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		if idp.OIDC == nil {
 			return failClosed(hostName, "oidc mode requires an oidc identity provider")
 		}
-		gate, err := compileDataOIDC(idp, mw.Auth.RequiredRoles, hostName)
+		gate, err := compileDataOIDC(idp, mw.Auth.RequiredRoles, hostName, domains)
 		if err != nil {
 			return failClosed(hostName, "oidc: "+err.Error())
 		}

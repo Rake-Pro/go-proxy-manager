@@ -578,7 +578,7 @@ func TestDNSPolicyFromAnnotations(t *testing.T) {
 			var ing Ingress
 			ing.Metadata.Namespace, ing.Metadata.Name = "ns", "app"
 			ing.Metadata.Annotations = tc.ann
-			got := dnsPolicy(ing, model.IngressHostTemplate{DefaultDNS: tc.def})
+			got := dnsPolicy(ing, model.IngressHostTemplate{DefaultDNS: tc.def}, model.IngressDiscoverySettings{})
 			if tc.wantNil {
 				if got != nil {
 					t.Fatalf("policy = %+v, want nil (a host that publishes nothing carries no dns key)", got)
@@ -2341,5 +2341,225 @@ func TestPlanRefusesWhileAReconcileIsRunning(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("first reconcile: %v", err)
+	}
+}
+
+// derive() must read every annotation - opt-in, profile, and the two DNS
+// booleans - and write the managed-by label, all under the settings-
+// configured prefix, and NOT under the default one, even when an Ingress
+// carries stray default-prefix annotations too (an operator migrating prefixes
+// gradually should never have the OLD prefix accidentally still work).
+func TestDeriveUsesCustomAnnotationPrefix(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		AnnotationPrefix:      "acme.corp.internal",
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "h", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+		},
+		Profiles: map[string]model.IngressHostTemplate{
+			"special": {
+				Upstream: model.Upstream{Scheme: "http", Host: "h2", Port: 81},
+				TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+			},
+		},
+	}
+	var ing Ingress
+	ing.Metadata.Namespace, ing.Metadata.Name = "ns", "app"
+	ing.Metadata.Annotations = map[string]string{
+		"acme.corp.internal/profile":      "special",
+		"acme.corp.internal/lan-direct":   "true",
+		"acme.corp.internal/public-cname": "true",
+		// Stray default-prefix annotations: must be ignored entirely under a
+		// custom prefix, not merged or treated as a fallback.
+		model.AnnotationProfile:     "does-not-exist",
+		model.AnnotationLanDirect:   "false",
+		model.AnnotationPublicCname: "false",
+	}
+	ing.Spec.Rules = []struct {
+		Host string `json:"host"`
+	}{{Host: "app.example.com"}}
+
+	name, host, prof, err := derive(ing, conf)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if name != "ing-app.ns" {
+		t.Fatalf("name = %q", name)
+	}
+	if prof != "special" {
+		t.Fatalf("profile = %q, want the custom-prefix annotation to have been read (special)", prof)
+	}
+	if host.Upstream != (model.Upstream{Scheme: "http", Host: "h2", Port: 81}) {
+		t.Fatalf("upstream = %+v, want the \"special\" profile's (the default-prefix annotation must be ignored)", host.Upstream)
+	}
+	wantLabels := map[string]string{"acme.corp.internal/managed-by": model.ManagedByIngressDiscovery}
+	if !mapsEqual(host.Labels, wantLabels) {
+		t.Fatalf("labels = %v, want %v (current-prefix managed-by only)", host.Labels, wantLabels)
+	}
+	if host.DNS == nil || !host.DNS.LanDirect || !host.DNS.PublicCname {
+		t.Fatalf("dns = %+v, want both flags on from the custom-prefix annotations", host.DNS)
+	}
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// Under a custom prefix, opt-in itself is read from the custom key: an Ingress
+// carrying only the DEFAULT-prefix "managed" annotation is invisible, exactly
+// like one carrying no annotation at all.
+func TestReconcileOptInIsReadUnderTheConfiguredPrefix(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			// Default-prefix opt-in only: invisible under a custom prefix.
+			ingressJSON("default", "old-style", map[string]string{model.AnnotationManaged: "true"}, "old.example.com"),
+			// Custom-prefix opt-in: this is the one discovery must see.
+			ingressJSON("default", "new-style", map[string]string{"acme.corp.internal/managed": "true"}, "new.example.com"),
+		}, "")
+	}
+	settings := baseSettings(f)
+	settings.AnnotationPrefix = "acme.corp.internal"
+	cfg := &model.Config{}
+	sVal := &model.Settings{IngressDiscovery: settings}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, sVal, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts=%d, want exactly the custom-prefix Ingress", len(rec.upserts))
+	}
+	if rec.upserts[0].Name != "ing-new-style.default" {
+		t.Fatalf("upserted host = %q, want the custom-prefix Ingress's", rec.upserts[0].Name)
+	}
+	if rec.upserts[0].Labels["acme.corp.internal/managed-by"] != model.ManagedByIngressDiscovery {
+		t.Fatalf("labels = %v, want the custom-prefix managed-by", rec.upserts[0].Labels)
+	}
+}
+
+// The safety property changing the prefix relies on: a proxy host discovery
+// wrote under the OLD prefix is NOT recognised as managed once the prefix is
+// changed (without annotationPrefixMigrate), so it is left exactly as it is -
+// neither deleted, nor silently adopted/overwritten. This is what makes the
+// settings-write refusal (model.IngressDiscoverySettings.ValidateRefs) a real
+// guarantee rather than a paper one: even if that check were bypassed, the
+// reconciler itself never touches a stale-labelled host.
+func TestOwnershipDoesNotCarryOverOnPrefixChangeWithoutMigrate(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) { writeList(w, nil, "") } // nothing derives any more
+	stale := managedHostFixture("ing-app.default", "app.example.com")                  // labelled under the DEFAULT prefix
+	settings := baseSettings(f)
+	settings.AnnotationPrefix = "acme.corp.internal" // changed, migrate NOT set
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{stale}}
+	sVal := &model.Settings{IngressDiscovery: settings}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, sVal, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("a stale-prefix host must be neither deleted nor rewritten once ownership is unrecognised (calls=%d)", rec.calls)
+	}
+	st := d.Status()
+	if st.Managed != 0 {
+		t.Fatalf("status.Managed = %d, want 0 (the stale host is not recognised as owned under the new prefix)", st.Managed)
+	}
+}
+
+// annotationPrefixMigrate:true is the opposite of the previous test: the same
+// stale-prefix host, with its Ingress still deriving cleanly under the NEW
+// prefix's opt-in annotation, is relabelled onto the new prefix as an ordinary
+// update - in the SAME single commit as everything else that reconcile writes,
+// with the old prefix's label gone from the result.
+func TestAnnotationPrefixMigrateRelabelsInOneCommit(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("default", "app", map[string]string{"acme.corp.internal/managed": "true"}, "app.example.com"),
+		}, "")
+	}
+	stale := managedHostFixture("ing-app.default", "app.example.com") // still under the OLD (default) prefix
+	settings := baseSettings(f)
+	settings.AnnotationPrefix = "acme.corp.internal"
+	settings.AnnotationPrefixMigrate = true
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{stale}}
+	sVal := &model.Settings{IngressDiscovery: settings}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, sVal, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("calls=%d, want exactly one commit for the whole relabel", rec.calls)
+	}
+	if len(rec.upserts) != 1 || len(rec.deletes) != 0 {
+		t.Fatalf("upserts=%d deletes=%d, want one relabelling update and no deletes", len(rec.upserts), len(rec.deletes))
+	}
+	got := rec.upserts[0]
+	if got.Name != "ing-app.default" {
+		t.Fatalf("relabelled host = %q", got.Name)
+	}
+	wantLabels := map[string]string{"acme.corp.internal/managed-by": model.ManagedByIngressDiscovery}
+	if !mapsEqual(got.Labels, wantLabels) {
+		t.Fatalf("labels after migrate = %v, want ONLY the new prefix's managed-by (old key must be gone)", got.Labels)
+	}
+	st := d.Status()
+	if len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUpdated {
+		t.Fatalf("status.Hosts = %+v, want a single Updated result", st.Hosts)
+	}
+}
+
+// The fail-closed disable path relabels too: a stale-prefix managed host whose
+// Ingress now names an undefined profile is disabled AND relabelled onto the
+// new prefix in the same write, with the old managed-by/disabled-by keys gone.
+func TestAnnotationPrefixMigrateRelabelsOnFailClosedDisable(t *testing.T) {
+	stale := managedHostFixture("ing-app.default", "app.example.com")
+	conf := model.IngressDiscoverySettings{
+		Enabled:                 true,
+		AnnotationPrefix:        "acme.corp.internal",
+		AnnotationPrefixMigrate: true,
+		AllowedDomainSuffixes:   []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+		},
+	}
+	var ing Ingress
+	ing.Metadata.Namespace, ing.Metadata.Name = "default", "app"
+	ing.Metadata.Annotations = map[string]string{
+		"acme.corp.internal/managed": "true",
+		"acme.corp.internal/profile": "does-not-exist",
+	}
+	ing.Spec.Rules = []struct {
+		Host string `json:"host"`
+	}{{Host: "app.example.com"}}
+
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale}}, conf, []Ingress{ing})
+	if len(p.upserts) != 1 {
+		t.Fatalf("upserts=%d, want exactly the disabled+relabelled host", len(p.upserts))
+	}
+	got := p.upserts[0]
+	if !got.Disabled {
+		t.Fatalf("host must be fail-closed disabled, got %+v", got)
+	}
+	wantLabels := map[string]string{
+		"acme.corp.internal/managed-by":  model.ManagedByIngressDiscovery,
+		"acme.corp.internal/disabled-by": model.DisabledByIngressDiscovery,
+	}
+	if !mapsEqual(got.Labels, wantLabels) {
+		t.Fatalf("labels = %v, want only the new prefix's pair", got.Labels)
 	}
 }

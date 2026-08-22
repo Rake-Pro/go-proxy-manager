@@ -334,3 +334,126 @@ func writeSelfSigned(t *testing.T, dir, domain string) {
 		t.Fatal(err)
 	}
 }
+
+// A client must not be able to delete the identity gpm asserted by naming it in
+// the Connection header. net/http/httputil strips every header the Connection
+// header lists BEFORE the Rewrite hook runs, so "Connection: X-Forwarded-User"
+// used to reach the upstream as an anonymous request on a gated route - an
+// authentication bypass against any backend that trusts gpm's identity header
+// and falls back to a guest identity when it is absent.
+func TestProxyReassertsIdentityStrippedByConnectionHeader(t *testing.T) {
+	var got http.Header
+	up, closeFn := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer closeFn()
+
+	h := newReverseProxy(up, "app", nil, []string{"X-Forwarded-User", "X-Forwarded-Groups", "X-Client-Cert-Subject"})
+
+	r := httptest.NewRequest("GET", "http://app.example.com/x", nil)
+	// What gpm's auth tier asserted...
+	r.Header.Set("X-Forwarded-User", "alice@example.com")
+	r.Header.Set("X-Forwarded-Groups", "admins")
+	// ...and the client's attempt to have it dropped on the way to the upstream.
+	r.Header.Set("Connection", "X-Forwarded-User, X-Forwarded-Groups")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	if got.Get("X-Forwarded-User") != "alice@example.com" {
+		t.Fatalf("upstream saw X-Forwarded-User %q, want the identity gpm asserted", got.Get("X-Forwarded-User"))
+	}
+	if got.Get("X-Forwarded-Groups") != "admins" {
+		t.Fatalf("upstream saw X-Forwarded-Groups %q, want \"admins\"", got.Get("X-Forwarded-Groups"))
+	}
+	// An asserted name gpm did NOT set stays unset: the restore only ever copies
+	// values that are actually on the inbound request.
+	if _, ok := got["X-Client-Cert-Subject"]; ok {
+		t.Fatalf("a header gpm never set was invented on the outbound request: %q", got.Get("X-Client-Cert-Subject"))
+	}
+	// Connection itself is still hop-by-hop and must not reach the upstream.
+	if v := got.Get("Connection"); v != "" {
+		t.Fatalf("Connection header forwarded upstream: %q", v)
+	}
+}
+
+// The restore must never resurrect a header the router stripped: on a host with
+// no identity provider, a client's forged X-Forwarded-User is stripped and must
+// stay gone, Connection trick or not.
+func TestProxyDoesNotResurrectStrippedClientIdentity(t *testing.T) {
+	var got http.Header
+	up, closeFn := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer closeFn()
+
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Domains:    []string{"app.example.com"},
+		Upstream:   up,
+	}}}
+	rt, err := buildRouter(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+
+	r := httptest.NewRequest("GET", "http://app.example.com/x", nil)
+	r.Host = "app.example.com"
+	r.RemoteAddr = "198.18.0.9:1234"
+	r.Header.Set("X-Forwarded-User", "evil@example.com")
+	r.Header.Set("Connection", "X-Forwarded-User")
+	rt.serveHTTP(httptest.NewRecorder(), r)
+
+	if v := got.Get("X-Forwarded-User"); v != "" {
+		t.Fatalf("a forged client identity reached the upstream: %q", v)
+	}
+}
+
+// The set of names the proxy is allowed to restore is exactly the set gpm may
+// assert: the baseline denylist, the host's provider headers, and its
+// client-certificate subject header.
+func TestAssertedIdentityHeaders(t *testing.T) {
+	cfg := model.Config{
+		IdentityProviders: []model.IdentityProvider{{
+			ObjectMeta:  model.ObjectMeta{Name: "fa"},
+			Type:        model.IdPTypeForwardAuth,
+			ForwardAuth: &model.ForwardAuthSpec{UserHeader: "X-Custom-User", TrustedProxies: []string{"10.0.0.0/8"}},
+		}},
+		Middlewares: []model.Middleware{{
+			ObjectMeta: model.ObjectMeta{Name: "sso"},
+			Type:       model.MWTypeAuth,
+			Auth:       &model.AuthMiddleware{Mode: model.AuthModeForwardAuth, IdentityProvider: "fa"},
+		}},
+	}
+	host := model.ProxyHost{
+		ObjectMeta:  model.ObjectMeta{Name: "app"},
+		Domains:     []string{"app.example.com"},
+		Middlewares: []string{"sso"},
+		TLS: model.TLSSettings{ClientAuth: &model.ClientAuth{
+			CARef:           "ca",
+			IdentityHeaders: &model.ClientCertHeaders{SubjectHeader: "X-My-Cert-Subject"},
+		}},
+	}
+	names := assertedIdentityHeaders(host, buildRegistry(cfg))
+	has := func(n string) bool {
+		for _, got := range names {
+			if got == n {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"X-Forwarded-User", "X-Forwarded-Email", "X-Forwarded-Groups", "X-Custom-User", "X-My-Cert-Subject"} {
+		if !has(want) {
+			t.Errorf("asserted set is missing %q: %v", want, names)
+		}
+	}
+	if has("X-Forwarded-For") {
+		t.Errorf("X-Forwarded-For must not be in the asserted set (SetXForwarded owns it): %v", names)
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			t.Errorf("asserted set contains %q twice: %v", n, names)
+		}
+		seen[n] = true
+	}
+}

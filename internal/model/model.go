@@ -17,8 +17,9 @@ import (
 	"time"
 )
 
-// SchemaVersion is the current on-disk schema version. Bumping it triggers a
-// (reversible, documented) migration in the store layer.
+// SchemaVersion is the on-disk schema version, currently pinned at 1. There is
+// no migration layer yet; every config object written so far is compatible
+// with version 1 as-is. Bumping it in the future requires adding one.
 const SchemaVersion = 1
 
 // Config is the fully-assembled in-memory snapshot of all config objects. The

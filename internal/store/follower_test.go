@@ -166,3 +166,126 @@ func TestFollowRemoteReloadsOnlyWhenHeadMoves(t *testing.T) {
 		t.Fatal("FollowRemote did not return after cancel")
 	}
 }
+
+// stubGit is a GitRepo whose FetchRemote is controllable, so a test can hold a
+// "network" fetch open and observe what the store can still do meanwhile.
+type stubGit struct {
+	GitRepo
+	fetchStarted chan struct{}
+	releaseFetch chan struct{}
+	fetchCtx     context.Context
+	merged       atomic.Bool
+}
+
+func (g *stubGit) FetchRemote(ctx context.Context) (bool, error) {
+	g.fetchCtx = ctx
+	close(g.fetchStarted)
+	select {
+	case <-g.releaseFetch:
+	case <-ctx.Done():
+		return true, ctx.Err()
+	}
+	return true, nil
+}
+
+func (g *stubGit) MergeFFOnly(context.Context) error {
+	g.merged.Store(true)
+	return nil
+}
+
+// The network fetch must run WITHOUT the config write lock, and the whole pull
+// must carry a deadline. Before the fix a hung remote held the store's write
+// lock for as long as the peer kept the socket open, blocking every config read
+// and every admin write behind it, with no timeout to end it.
+func TestPullFFOnlyDoesNotHoldTheStoreLockDuringFetch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	real := NewExecGit(dir)
+	s := New(dir, real)
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	g := &stubGit{GitRepo: real, fetchStarted: make(chan struct{}), releaseFetch: make(chan struct{})}
+	s.git = g
+
+	pullDone := make(chan error, 1)
+	go func() {
+		_, err := s.PullFFOnly(ctx)
+		pullDone <- err
+	}()
+
+	select {
+	case <-g.fetchStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FetchRemote was never called")
+	}
+
+	// The fetch is in flight. A config read must not be blocked by it.
+	loaded := make(chan error, 1)
+	go func() {
+		_, _, err := s.Load(ctx)
+		loaded <- err
+	}()
+	select {
+	case err := <-loaded:
+		if err != nil {
+			t.Fatalf("load during fetch: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a config read blocked on an in-flight network fetch: the write lock is still held across it")
+	}
+	if g.merged.Load() {
+		t.Fatal("the fast-forward ran before the fetch completed")
+	}
+
+	// The pull is bounded: the context handed to git carries a deadline no
+	// further out than PullTimeout.
+	dl, ok := g.fetchCtx.Deadline()
+	if !ok {
+		t.Fatal("the fetch context has no deadline; a hung remote would run forever")
+	}
+	if budget := time.Until(dl); budget > PullTimeout {
+		t.Fatalf("fetch deadline is %s out, want <= %s", budget, PullTimeout)
+	}
+
+	close(g.releaseFetch)
+	select {
+	case err := <-pullDone:
+		if err != nil {
+			t.Fatalf("pull: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PullFFOnly never returned")
+	}
+	if !g.merged.Load() {
+		t.Fatal("the fast-forward never ran after a successful fetch")
+	}
+}
+
+// A remote that never answers must not hang the pull forever: the deadline on
+// the pull context is what ends it.
+func TestPullFFOnlyTimesOutOnAHungRemote(t *testing.T) {
+	dir := t.TempDir()
+	real := NewExecGit(dir)
+	s := New(dir, real)
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	g := &stubGit{GitRepo: real, fetchStarted: make(chan struct{}), releaseFetch: make(chan struct{})}
+	s.git = g
+	// A caller-supplied deadline shorter than PullTimeout still wins, which is
+	// what makes this assertion fast; the point is that the fetch observes one.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := s.PullFFOnly(ctx); err == nil {
+		t.Fatal("a hung fetch returned no error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("the hung fetch took %s to give up", elapsed)
+	}
+	if g.merged.Load() {
+		t.Fatal("a failed fetch must not be followed by a fast-forward")
+	}
+}

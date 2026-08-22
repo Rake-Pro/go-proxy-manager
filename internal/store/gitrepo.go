@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -85,16 +86,28 @@ type GitRepo interface {
 	RestorePath(ctx context.Context, treeish, rel string) error
 	// IsClean reports whether the working tree has no uncommitted changes.
 	IsClean(ctx context.Context) (bool, error)
-	// PullFFOnly fast-forwards from the configured remote; it never merges or
-	// rebases. A diverged history is surfaced as an error for the caller to
+	// FetchRemote updates the remote-tracking refs from the configured remote.
+	// It is the NETWORK half of a follower pull and touches neither the index
+	// nor the working tree, so a caller can run it without holding a lock that
+	// would otherwise be held for the whole round trip. It reports whether a
+	// remote is configured at all (false = nothing to fetch, no error).
+	FetchRemote(ctx context.Context) (bool, error)
+	// MergeFFOnly fast-forwards the current branch onto its already-fetched
+	// upstream; it never merges or rebases. This is the LOCAL half of a follower
+	// pull. A diverged history is surfaced as an error for the caller to
 	// resolve, never auto-merged or discarded.
-	PullFFOnly(ctx context.Context) error
+	MergeFFOnly(ctx context.Context) error
 }
 
 // execGit shells out to the system git binary. Real git semantics, zero added
 // Go dependency; behind GitRepo so it stays swappable.
 type execGit struct {
-	dir       string
+	dir string
+
+	// fetchMu serializes FetchRemote, which its caller deliberately runs without
+	// the config-store lock (a network round trip must not block config reads).
+	// It also guards hasRemote, the one-shot "a remote is configured" cache.
+	fetchMu   sync.Mutex
 	hasRemote bool
 }
 
@@ -231,15 +244,27 @@ func (g *execGit) IsClean(ctx context.Context) (bool, error) {
 	return out == "", nil
 }
 
-func (g *execGit) PullFFOnly(ctx context.Context) error {
+func (g *execGit) FetchRemote(ctx context.Context) (bool, error) {
+	g.fetchMu.Lock()
+	defer g.fetchMu.Unlock()
 	if !g.hasRemote {
-		if out, _ := g.run(ctx, nil, "remote"); strings.TrimSpace(out) == "" {
-			return nil // no remote configured; nothing to pull
+		if out, _ := g.run(ctx, execEnv(), "remote"); strings.TrimSpace(out) == "" {
+			return false, nil // no remote configured; nothing to fetch
 		}
 		g.hasRemote = true
 	}
-	_, err := g.run(ctx, nil, "pull", "--ff-only", "-q")
-	if err != nil {
+	// execEnv() is what keeps GIT_TERMINAL_PROMPT=0 in force: without it a remote
+	// that asks for credentials blocks this git process on a terminal prompt that
+	// nothing will ever answer, and the caller's ctx deadline is the only thing
+	// left to stop it.
+	if _, err := g.run(ctx, execEnv(), "fetch", "-q"); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (g *execGit) MergeFFOnly(ctx context.Context) error {
+	if _, err := g.run(ctx, execEnv(), "merge", "--ff-only", "-q", "@{u}"); err != nil {
 		return fmt.Errorf("config repo diverged from remote (refusing to auto-merge or discard): %w", err)
 	}
 	return nil

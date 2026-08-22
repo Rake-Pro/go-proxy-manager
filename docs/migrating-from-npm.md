@@ -70,6 +70,13 @@ If it fails with "no NPM sqlite database found", the snapshot directory must
 directly contain `database.sqlite`. If it reports missing certificate files,
 the `letsencrypt/` copy wasn't done with `sudo` + `chmod -R a+rX` above.
 
+**Not imported: NPM's local user accounts, 2FA settings, or audit log** -
+go-proxy-manager has no local-user table to import them into (a single
+break-glass local admin plus OIDC group-to-role mapping instead; see
+[configuration.md](configuration.md#users-roles-and-audit)), so plan your
+post-cutover admin access (SSO groups, or the break-glass password) before
+Step 5 rather than assuming any NPM login carries over.
+
 ## Step 3 - Stand up gpm alongside NPM
 
 Bring gpm up on the non-conflicting ports from `deploy/compose.parallel.yaml`,
