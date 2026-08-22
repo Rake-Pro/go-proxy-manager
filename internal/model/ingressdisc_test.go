@@ -346,7 +346,7 @@ func TestResolveProfile(t *testing.T) {
 		{"yaml-ish", "{sso-internal}", "{sso-internal}", false},
 		{"template injection", "${sso-internal}", "${sso-internal}", false},
 		{"unicode lookalike", "ѕso-internal", "ѕso-internal", false}, // Cyrillic 'ѕ'
-		{"unicode zero width", "sso-​internal", "sso-​internal", false},
+		{"unicode zero width", "sso-\u200binternal", "sso-\u200binternal", false},
 		{"unicode normalisation is not applied", "sso-internaĺ", "sso-internaĺ", false},
 		{"very long", strings.Repeat("a", 8192), strings.Repeat("a", 8192), false},
 		{"long with a real name inside", strings.Repeat("a", 4096) + "sso-internal", strings.Repeat("a", 4096) + "sso-internal", false},

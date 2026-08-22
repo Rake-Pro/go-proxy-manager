@@ -64,9 +64,7 @@ func (s *doTestServer) handler() http.Handler {
 		switch {
 		case r.Method == http.MethodGet:
 			var out []doRecord
-			for _, rec := range s.records[domain] {
-				out = append(out, rec)
-			}
+			out = append(out, s.records[domain]...)
 			writeJSON(s.t, w, map[string]any{"domain_records": out})
 		case r.Method == http.MethodPost:
 			var body map[string]any

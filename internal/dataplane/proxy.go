@@ -79,14 +79,15 @@ type bufferPool struct {
 }
 
 func (p *bufferPool) Get() []byte {
-	if b, ok := p.pool.Get().([]byte); ok {
-		return b
+	if b, ok := p.pool.Get().(*[]byte); ok {
+		return *b
 	}
 	return make([]byte, proxyBufBytes)
 }
 
 func (p *bufferPool) Put(b []byte) {
-	p.pool.Put(b)
+	// Pointer, not slice header, so the Put does not allocate (staticcheck SA6002).
+	p.pool.Put(&b)
 }
 
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
