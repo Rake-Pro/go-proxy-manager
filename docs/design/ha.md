@@ -1,6 +1,10 @@
 # Design: High availability (gpm itself)
 
-Status: **proposal (not started).** Upstream groups already remove the
+Status: **phase 1 implemented.** The "Recommended phase 1" plan below ships:
+SSO watermark refresh loop, static `GPM_HA_ROLE` leader/follower gate, follower
+`git pull --ff-only` config poll, and the deployment recipe in
+[docs/ha.md](../ha.md). Phase 2 (automatic election, shared bare repo,
+active/active) remains a proposal. Upstream groups already remove the
 single-node dependency *behind* gpm (a host's backends fail over); the gpm
 instance itself is still a single point of failure. This document settles a
 supported multi-instance story before any code lands, per the BACKLOG item
@@ -36,8 +40,8 @@ adds zero clustering libraries.
 
 The git surface already anticipates this: `store.GitRepo` carries a
 `PullFFOnly(ctx)` method (fast-forwards from a configured remote, and
-**refuses** a diverged history rather than auto-merging or discarding). It has
-no non-test caller today - the follower poll loop below is its first user.
+**refuses** a diverged history rather than auto-merging or discarding). The
+follower poll loop below (`store.FollowRemote`) is its caller.
 
 ---
 

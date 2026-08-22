@@ -1,6 +1,6 @@
 # Design: HTTP/3, GeoIP geoblocking, mTLS client certs
 
-Status: **mixed.** mTLS (phase 1) and GeoIP geoblocking are **implemented**
+Status: **mixed.** mTLS (phases 1 and 2) and GeoIP geoblocking are **implemented**
 (see CHANGELOG.md / FEATURES.md); HTTP/3 remains a **proposal** (not
 started). Scope: three P2 edge features from [FEATURES.md](../../FEATURES.md).
 This document records the intended design, the schema/wiring, and —
@@ -26,7 +26,7 @@ data-plane handler) rather than reworking the core.
 
 ## 1. mTLS client-cert validation
 
-> **Status: IMPLEMENTED (phase 1).** Shipped as designed below, with one
+> **Status: IMPLEMENTED (phases 1 and 2).** Shipped as designed below, with one
 > enforcement detail firmed up during implementation: `tls.clientAuth`
 > requires `forceSSL: true` and a resolvable `caRef` at config-validation
 > time, and `require`/`optional` are enforced not just at the TLS handshake
@@ -35,9 +35,46 @@ data-plane handler) rather than reworking the core.
 > against a different host's config and then targets the mTLS host by `Host`
 > header) and, in `require` mode, the handshake must have produced a verified
 > client-certificate chain; either failure gets `421 Misdirected Request`. An
-> mTLS host is also redirected off the plaintext `:80` listener. Phase 2
-> (CRL/OCSP revocation, identity-passthrough header) is **not implemented** -
-> the open questions below still apply as written.
+> mTLS host is also redirected off the plaintext `:80` listener.
+>
+> **Phase 2 is now implemented too** - CRL revocation, identity passthrough and
+> the `client-cert` auth-middleware mode - with these deltas from the proposal:
+>
+> - **Revocation is CRL-only; OCSP was not built.** `ClientCA` gains `crlFile`
+>   (PEM or DER, confined **relative to the cert store** exactly like a custom
+>   certificate's files - not a `${FILE:...}` secret placeholder, which trims
+>   trailing bytes and would corrupt DER), `crlPEM` (inline, mutually exclusive)
+>   and `crlPolicy`. Enforcement hangs off `tls.Config.VerifyPeerCertificate` on
+>   the per-SNI config, as proposed; it additionally **validates the CRL's
+>   signature against the CA bundle** (an unsigned or foreign-signed list is
+>   refused, so dropping a file in the cert store cannot un-revoke anything) and
+>   honours `nextUpdate`.
+> - **A new fail-closed/fail-open policy field** the proposal did not name.
+>   `crlPolicy` defaults to `fail-closed`: a CRL that is missing, unparseable,
+>   foreign-signed or expired rejects **every** certificate for that CA. An
+>   unusable CRL is deliberately **not** a router-build error - that would take
+>   unrelated hosts down over one unreadable file - so, exactly like the GeoIP
+>   database, the gate lives at request/handshake time and recovers by itself.
+> - **CRL reload** happens on the existing config-reload path (the anchors are
+>   rebuilt per `buildRouter`) *and* on a 5-minute mtime watch mirroring the
+>   GeoIP `Resolver.Watch` pattern, started alongside the listeners.
+> - **Identity passthrough** landed as `tls.clientAuth.identityHeaders`:
+>   `subjectHeader` (default `X-Client-Cert-Subject`) plus opt-in `san` /
+>   `serial` / `fingerprint` booleans with fixed header names, rather than a
+>   free-form header map - fixed names are what lets the **baseline identity
+>   denylist** cover them unconditionally. All four are stripped from untrusted
+>   peers whether or not a host enables passthrough, a custom `subjectHeader`
+>   joins that host's own strip set, and gpm sets them after the strip only from
+>   a certificate with a verified chain.
+> - **The `client-cert` auth-middleware mode** gates on a verified certificate
+>   (401 without one) and maps subject -> role via `auth.clientCertRoles`; it is
+>   the one auth mode with no `identityProvider`. Chain composition is unchanged
+>   (middlewares nest, so two auth middlewares are AND, not OR): the "cert OR
+>   SSO" shape is expressed by running the host in `optional` mTLS mode with
+>   this middleware as its auth tier.
+>
+> Still open: **OCSP** (no stapling, no responder queries) and **mTLS over
+> HTTP/3**, which cannot be verified until h3 ships.
 
 **Goal.** Require (or optionally accept) a client certificate per host, verified
 against an operator-supplied CA, enforced at the TLS handshake. Community ask
@@ -101,16 +138,17 @@ parse to ≥1 cert at load; `mode` ∈ {require, optional}.
 
 ### Security / open questions
 
-- **Revocation:** stdlib `Verify` does not check CRL/OCSP. Phase-1 ignores
-  revocation (document it); phase-2 can add a `VerifyPeerCertificate` hook that
-  consults a CRL file. Note prominently — a "valid" client cert may be revoked.
+- **Revocation:** stdlib `Verify` does not check CRL/OCSP. Phase-1 ignored
+  revocation; **phase-2 shipped the `VerifyPeerCertificate` CRL hook** described
+  in the status note above. OCSP is still not implemented, and a ClientCA with no
+  CRL configured still accepts a revoked-but-unexpired certificate.
 - **HTTP/3 interaction:** quic-go honours the same `tls.Config` client-auth
   fields, but its `GetConfigForClient` timing differs; verify mTLS over h3
   separately if both ship.
 - Phasing: phase 1 = handshake `require`/`optional` (small, high value). Phase 2
-  = identity mapping + middleware mode.
+  = revocation + identity mapping + middleware mode. Both shipped.
 
-**Effort:** S (phase 1), +M (phase 2).
+**Effort:** S (phase 1), +M (phase 2). Both delivered.
 
 ---
 

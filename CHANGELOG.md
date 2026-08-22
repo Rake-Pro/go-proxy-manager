@@ -7,6 +7,58 @@ pre-1.0 and has no tagged releases yet; everything to date lives under
 
 ## [Unreleased]
 
+### Added
+
+- **High availability, phase 1** (active/standby pair, no new dependency):
+  `GPM_HA_ROLE=leader|follower` (default `leader`, unchanged single-node
+  behaviour) designates the single writer. A follower runs no ACME renewal and
+  no Ingress-discovery loop, refuses every admin/API config write with a `503`
+  naming the leader, and pulls the leader's config repo with
+  `git pull --ff-only` every `GPM_HA_POLL_INTERVAL` (default 20s), reloading
+  only when HEAD moved and never merging, rebasing or resetting a diverged
+  repo. `GET /api/capabilities` reports `ha.role` / `ha.readOnly` and the admin
+  UI greys out write controls on a follower. Every instance re-reads the
+  persisted SSO revocation watermark on a ticker and advances it
+  monotonically, so a revoke takes effect within one interval instead of at
+  the next restart. Deployment recipe in `docs/ha.md`.
+- **mTLS phase 2: client-certificate revocation.** `ClientCA` gains `crlFile`
+  (PEM or DER, confined relative to the cert store), `crlPEM` (inline) and
+  `crlPolicy` (`fail-closed` default | `fail-open`). Revoked serials are
+  rejected at the TLS handshake via `VerifyPeerCertificate`, the CRL signature
+  is validated against the CA bundle, and `nextUpdate` is honoured. CRLs
+  reload on the config-reload path and on a 5-minute mtime watch.
+- **mTLS phase 2: identity passthrough.** `tls.clientAuth.identityHeaders`
+  forwards the verified certificate's subject (`X-Client-Cert-Subject`, name
+  overridable) plus opt-in `san` / `serial` / `fingerprint` headers. All four
+  default names joined the baseline identity denylist, so they are stripped
+  from untrusted peers whether or not a host enables passthrough.
+- **mTLS phase 2: `client-cert` auth-middleware mode**, gating on a verified
+  client certificate with an optional `clientCertRoles` subject-to-role mapping
+  (no identity provider). "cert OR SSO" = `tls.clientAuth.mode: optional` plus
+  this middleware as the host's auth tier.
+- Admin UI: Client CAs section with the CRL fields, mTLS passthrough controls
+  in the host TLS editor, `client-cert` mode in the middleware auth editor.
+- `GET /api/ingress-discovery/plan` dry-run endpoint, mirroring
+  `GET /api/dns-sync/plan`; wired into the settings UI as *Preview changes*.
+- Operator-side Ingress-discovery profile selection
+  (`ingressDiscovery.profileRules`, `profileSelection: "rules-only"`),
+  evaluated before the `gpm.rake.pro/profile` annotation.
+- Per-profile `allowedDomainSuffixes` narrowing the global Ingress-discovery
+  suffix list, validated as a subset at settings-write time.
+
+### Fixed
+
+- A discovery-managed proxy host disabled by an operator is no longer
+  re-enabled by the next poll; discovery only clears a `disabled` state it set
+  itself (unresolvable-profile hold), tracked via the `gpm.rake.pro/disabled-by`
+  label.
+- Admin UI: saving a proxy host no longer drops a GitOps-authored
+  `tls.clientAuth` block.
+
+### Security
+
+- `Principal.SessionID` is no longer serialised by `GET /api/me`.
+
 ### Changed
 
 - Go toolchain 1.27rc2 -> 1.27.0

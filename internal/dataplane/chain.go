@@ -83,6 +83,15 @@ var baselineIdentityHeaders = []string{
 	"X-Forwarded-Preferred-Username",
 	"X-User", "X-Email", "X-Groups",
 	"X-Webauth-User", "X-Webauth-Email", "X-Webauth-Name", "X-Webauth-Groups",
+	// mTLS client-certificate passthrough (see TLSSettings.ClientAuth.
+	// IdentityHeaders). Listed unconditionally, exactly like the IdP headers
+	// above: a client must never be able to assert a certificate identity to a
+	// backend, whether or not the target host enables passthrough. A host that
+	// overrides the subject header name adds that name to its own strip set.
+	model.DefaultClientCertSubjectHeader,
+	model.ClientCertSANHeader,
+	model.ClientCertSerialHeader,
+	model.ClientCertFingerprintHeader,
 }
 
 // baselineIdentityPrefixes strip whole header families whose member names vary:

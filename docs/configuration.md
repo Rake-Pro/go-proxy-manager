@@ -47,25 +47,43 @@ references it).
 > way to adopt a discovered host permanently; adding it is never the way to give
 > one away.
 
-> **A managed host is not editable by hand - every edit is reverted on the next
-> poll, `disabled` included.** Discovery derives the whole object from the
+> **A managed host is not editable by hand - every edit besides `disabled` is
+> reverted on the next poll.** Discovery derives the whole object from the
 > template and the `Ingress` and writes it back whenever it differs from what is
-> stored, so `disabled: true`, an edited `displayName`, added `tags`, `timeouts`,
-> `locations` or `robotsNoIndex` all survive at most until the next reconcile
-> (default 60s) - and re-enabling the host republishes its DNS records with it.
-> **Disabling a managed host is therefore not an off-switch.** There are exactly
-> two supported ones:
+> stored, so an edited `displayName`, added `tags`, `timeouts`, `locations` or
+> `robotsNoIndex` all survive at most until the next reconcile (default 60s).
+>
+> **`disabled: true` is the exception - it is operator-owned state.** Discovery
+> honours an operator-set `disabled` and never clears it itself: hand-disabling a
+> managed host (in the UI or by editing
+> `config/proxy-hosts/<name>.yaml`) survives every subsequent poll, keeps the
+> object out of the running data plane, and withdraws its DNS records exactly
+> like disabling a hand-written host does. Editing the Ingress cannot undo this -
+> a cluster user has no way to re-enable a host you disabled. The one case where
+> a `disabled: true` a poll wrote itself IS cleared automatically is the
+> fail-closed hold below (an unresolvable profile): that disable is discovery's
+> own, and the very next reconcile that resolves the profile again lifts it. The
+> label `gpm.rake.pro/disabled-by: ingress-discovery` on the stored object is how
+> the two are told apart - never set or remove it by hand; it exists only for
+> discovery to recognise a hold it placed itself.
+>
+> With that, there is no longer only an "emergency" off-switch - disabling in the
+> UI now works - but the other two routes remain useful:
 >
 > - **Remove `gpm.rake.pro/managed` from the `Ingress`** (or delete the
 >   `Ingress`). Discovery stops deriving the host and deletes it on the next
->   successful reconcile. This is the clean route, but it needs cluster access.
+>   successful reconcile. This is the clean route for taking a service out of
+>   discovery for good, but it needs cluster access.
 > - **Remove the `gpm.rake.pro/managed-by` label from the proxy host.** The
 >   object becomes operator-authored, discovery refuses to touch it ever again,
->   and you can then disable or edit it freely. This is the **emergency**
->   route - it needs no cluster access, so it is the one to reach for when an app
->   has to come offline now - and it is **permanent**: the corresponding
->   `Ingress` is skipped with a warning from then on, and putting the host back
->   under discovery means deleting it and letting the next poll recreate it.
+>   and you can then edit it freely. This still needs no cluster access, and is
+>   still **permanent**: the corresponding `Ingress` is skipped with a warning
+>   from then on, and putting the host back under discovery means deleting it and
+>   letting the next poll recreate it.
+>
+> Preview what a reconcile would do to a specific host with `GET
+> /api/ingress-discovery/plan` (or **Preview changes** in the settings UI) before
+> disabling by hand, if in doubt.
 
 ## Domains are exclusive
 
@@ -358,11 +376,14 @@ rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
 | `template.accessLists` | []string | Applied to every derived host. |
 | `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No data-plane effect. |
 | `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
+| `template.allowedDomainSuffixes` | []string | Optional. **Narrows** the top-level `allowedDomainSuffixes` for hosts derived from the template. Must be a **subset** of the global list (checked at settings-write time); empty means no narrowing. |
 
 A derived host's `displayName` is always `<namespace>/<name>` (where the Ingress
 came from) and is not templatable. `locations` are **deliberately not** a
 template field - see [below](#what-a-derived-host-cannot-express).
-| `profiles` | map[string]→ same shape as `template` | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
+| `profiles` | map[string]→ same shape as `template` (including its own `allowedDomainSuffixes`) | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
+| `profileRules` | []IngressProfileRule | Optional, ordered. Operator-side profile selection - see [below](#operator-side-profile-selection-profilerules). |
+| `profileSelection` | `"annotation-or-rules"` \| `"rules-only"` | Empty means `"annotation-or-rules"` (today's behaviour: try `profileRules` first, then the annotation). `"rules-only"` never reads `gpm.rake.pro/profile` at all. |
 
 **Opt-in annotations** (on the `Ingress`, never on gpm's side):
 
@@ -455,7 +476,56 @@ never blocks an unrelated settings write.
 
 `GET /api/ingress-discovery/status` reports the resolved `profile` per host (the
 literal `template` for the default block), so you can audit what chain a given
-Ingress actually got.
+Ingress actually got. `GET /api/ingress-discovery/plan` (`ingress-discovery:read`,
+wired into the settings UI as **Preview changes**) reports the same per-host
+decisions a reconcile would take - `created`/`updated`/`deleted`/`skipped` counts
+and the per-host `hosts` list - without writing anything, mirroring
+`GET /api/dns-sync/plan`. Both answer `409 Conflict` while a reconcile is already
+in flight.
+
+#### Operator-side profile selection (`profileRules`)
+
+`gpm.rake.pro/profile` puts the tenant in charge of *choosing* among the profiles
+you defined (never inventing one), but every profile stays selectable by every
+annotating Ingress. `profileRules` is the escalation path when that is too
+coarse: an ordered list of `{namespace?, matchLabels?, profile}` rules, evaluated
+**before** the annotation. The **first matching rule wins** and its `profile` is
+used - exactly as if the Ingress had carried that name in `gpm.rake.pro/profile`
+- and the annotation is **not consulted** for that Ingress at all. A rule with no
+`namespace` matches any namespace; no `matchLabels` matches any labels; both set
+are AND'd together. `profile` names `template` (the default block) or a
+`profiles` key, and is cross-checked at `Settings.Validate` - a rule naming an
+undefined profile fails the settings write.
+
+When no rule matches, `profileSelection` decides what happens next:
+
+- `"annotation-or-rules"` (default, i.e. empty) - falls back to
+  `gpm.rake.pro/profile`, unchanged from the no-`profileRules` behaviour above.
+- `"rules-only"` - the annotation is **never read at all**. An Ingress that
+  matches no rule gets the default `template`, exactly as if it carried no
+  annotation, even if its own `gpm.rake.pro/profile` names a real profile. Use
+  this when the Ingress author should have no say in profile selection
+  whatsoever.
+
+`profileRules` is strictly stronger than the annotation - the Ingress author
+cannot see, match or influence a rule - at the cost of a settings commit per new
+namespace/label combination rather than per new service. Named profiles (and the
+template) remain the substrate either mode selects from; the vocabulary an
+Ingress or a rule can reach is always one the operator authored in
+`ingressDiscovery.template`/`.profiles`.
+
+#### Per-profile `allowedDomainSuffixes`
+
+The top-level `allowedDomainSuffixes` bounds every derived host by default. A
+profile (or the template) may set its **own** `allowedDomainSuffixes` to narrow
+that further for hosts it derives - e.g. a `public` profile restricted to
+`public.example.com` even though the global list also covers
+`internal.example.com`. It must be a **subset** of the global list (every entry
+equal to, or a dot-boundary sub-suffix of, some global entry); a profile that
+would *widen* the domains a tenant could publish fails `Settings.Validate` at the
+settings write, the same standard every other profile field is held to. Leaving
+it unset means the profile uses the global list unchanged - this is a narrowing
+knob only, never a second way to grant a wider set of names.
 
 #### What a derived host cannot express
 
@@ -675,9 +745,36 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 
 **TLSSettings**: `certificateRef` (a Certificate name), `forceSSL` (redirect
 HTTP→HTTPS), `http2`, `hsts` (`enabled`, `maxAge` — seconds, default one year when
-unset, `includeSubdomains`, `preload`), `minTLSVersion` (`"1.2"` default | `"1.3"`).
+unset, `includeSubdomains`, `preload`), `minTLSVersion` (`"1.2"` default | `"1.3"`),
+`clientAuth` (mTLS — below).
 When `hsts.enabled` is set, the data plane emits `Strict-Transport-Security` on
 HTTPS responses for the host (never over plain HTTP).
+
+**ClientAuth** (`tls.clientAuth`) opts the host into mTLS: client certificates
+are verified at the TLS handshake against a [ClientCA](#clientca-configclient-cas).
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `caRef` | string | yes | ClientCA name. Must exist and be enabled; the host also requires `forceSSL: true`. |
+| `mode` | string | no | `require` (default) rejects the handshake without a valid certificate; `optional` verifies a presented certificate but lets certless requests through (mTLS as a fallback beside SSO). |
+| `identityHeaders` | ClientCertHeaders | no | Forward the verified certificate's identity upstream. Unset = forward nothing. |
+
+**ClientCertHeaders** (`tls.clientAuth.identityHeaders`):
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `subjectHeader` | string | `X-Client-Cert-Subject` | Header carrying the certificate subject in RFC 2253 form (`CN=ops,O=Corp`). Must be a valid header name and may not be an `X-Forwarded-*` header. |
+| `san` | bool | false | Send `X-Client-Cert-SAN`: the subject alternative names (DNS, email, IP, URI), comma-separated. |
+| `serial` | bool | false | Send `X-Client-Cert-Serial`: the serial number in lower-case hex. |
+| `fingerprint` | bool | false | Send `X-Client-Cert-Fingerprint`: the SHA-256 digest of the DER certificate, lower-case hex. |
+
+These headers ride the existing identity-trust model: all four default names are
+in the **baseline identity denylist**, so they are stripped from every request
+whose peer is not a proxy the host trusts — whether or not the host enables
+passthrough — and a custom `subjectHeader` is added to that host's own strip set.
+gpm sets them *after* the strip, only from a certificate the handshake actually
+**verified**; in `optional` mode a certless request reaches the upstream with no
+identity headers at all.
 
 `minTLSVersion` is a **per-host** floor selected by SNI at handshake time. The
 edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
@@ -932,6 +1029,45 @@ yet is simply skipped until the manager issues it.
 
 ---
 
+## ClientCA (`config/client-cas/`)
+
+The trust anchor for per-host mTLS: the CA bundle presented client certificates
+are verified against (referenced by `tls.clientAuth.caRef`), plus its optional
+revocation list. It is kept distinct from [Certificate](#certificate-configcertificates)
+because it verifies peers rather than identifying this server, and it never
+carries a private key.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `caPEM` | string | yes | PEM CA bundle (one or more certificates). Public material, so it may be inline; a `${FILE:...}` / `${ENV:...}` placeholder also works. Must parse to at least one certificate at load. |
+| `crlFile` | string | no | Certificate revocation list, PEM or DER, **relative to the cert store** (absolute paths and `..` are rejected, like a custom certificate's files). Re-read on every config reload and within 5 minutes of the file's mtime changing. |
+| `crlPEM` | string | no | Inline PEM CRL, for a small list kept in git. Mutually exclusive with `crlFile`; changes only on a config reload. |
+| `crlPolicy` | string | no | `fail-closed` (default) or `fail-open` — what happens when a configured CRL is unusable. Only valid alongside `crlFile`/`crlPEM`. |
+
+With no CRL configured, certificates are verified against the CA only: a revoked
+but unexpired certificate still passes (the Go standard library's chain
+verification checks no revocation). With one configured, the data plane rejects
+any presented certificate whose serial is listed, after checking that the CRL is
+**signed by this CA** — so dropping a file into the cert store cannot un-revoke
+or mass-revoke anything.
+
+`crlPolicy` governs the failure modes: a CRL that is missing, unparseable,
+foreign-signed, or past its `nextUpdate`. `fail-closed` (the default) then
+rejects **every** client certificate verified against this CA — an operator who
+configured revocation asked for it to be enforced; `fail-open` accepts them and
+logs a warning, for a host where availability outranks revocation. Either way an
+unusable CRL never fails the config reload: unrelated hosts keep serving, exactly
+like the GeoIP database's live fail-closed evaluation.
+
+```yaml
+name: corp
+caPEM: ${FILE:/run/secrets/corp_client_ca.pem}
+crlFile: corp.crl          # <certDir>/corp.crl, PEM or DER
+crlPolicy: fail-closed     # default; fail-open accepts when the CRL is unusable
+```
+
+---
+
 ## DNSProvider (`config/dns-providers/`)
 
 Solves ACME `dns-01` challenges.
@@ -1047,11 +1183,26 @@ defaultAction: deny
 | `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
 | `rewrite` | RewriteMiddleware | Exact-match request-path replacement (upstream-facing). |
 
-**AuthMiddleware**: `identityProvider` (req), `mode` (`oidc`|`forward-auth`|
-`auth-request`, defaults from the IdP type), `requiredRoles` (forbidden in
-`auth-request` mode — the IdP application binding does authorization),
-`allowFrom` (CIDRs that bypass auth; `auth-request` mode only — e.g. let a LAN
-skip SSO).
+**AuthMiddleware**: `identityProvider` (required except in `client-cert` mode),
+`mode` (`oidc`|`forward-auth`|`auth-request`|`client-cert`, defaults from the IdP
+type), `requiredRoles` (forbidden in `auth-request` mode — the IdP application
+binding does authorization), `allowFrom` (CIDRs that bypass auth; `auth-request`
+mode only — e.g. let a LAN skip SSO), `clientCertRoles` (`client-cert` mode only).
+
+In `client-cert` mode the identity comes from the TLS handshake, so no
+`identityProvider` is named (setting one is an error). The gate admits a request
+only when the handshake **verified** a client certificate for this host — i.e.
+the host runs `tls.clientAuth` and the trust anchor (and its CRL, if configured)
+accepted the certificate; otherwise it replies `401`. `clientCertRoles` maps a
+certificate subject to a role: the key is the RFC 2253 subject (`CN=ops,O=Corp`)
+or its bare common name, the value is the role `requiredRoles` is checked
+against. With no mapping, any verified certificate passes; with a mapping, an
+unmapped subject or an insufficient role gets `403`. `requiredRoles` without a
+mapping is refused at validation (it could never match).
+
+Pair it with `tls.clientAuth.mode: optional` so certless clients still reach the
+chain and this middleware is what refuses them, leaving an SSO middleware free to
+cover other hosts or locations.
 
 In `oidc` mode gpm is itself the OIDC relying party for the host: an
 unauthenticated request is redirected to the IdP, the reserved callback path
@@ -1289,6 +1440,32 @@ authentications are logged (token name on success; never any secret material).
 Last-use is tracked **in memory only** and surfaced as `lastUsed` on
 `GET /api/api-tokens`; the config store is git-backed, so persisting a timestamp
 per request would be a commit flood. It resets on restart.
+
+---
+
+## High availability (`GPM_HA_ROLE`)
+
+Two instances can run as an active/standby pair with no clustering dependency.
+The role is environment-only - it is not a config object, because it describes
+*this process*, not the shared configuration.
+
+| Env | Default | Effect |
+|-----|---------|--------|
+| `GPM_HA_ROLE` | `leader` | `leader`: runs the ACME renewal loop and Kubernetes Ingress discovery, accepts admin/API writes. `follower`: both loops off, every write refused with `503`, reads unaffected. An unrecognised value is a startup error |
+| `GPM_HA_POLL_INTERVAL` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads if HEAD moved. Ignored on a leader |
+
+A follower's config arrives only by pulling the leader's repo, so it never
+commits and the two repos cannot diverge; a pull that is not a clean
+fast-forward is logged and refused, never merged or reset.
+
+`GET /api/capabilities` reports `"ha": {"role": "...", "readOnly": true|false}`,
+which is what the admin UI uses to grey out write controls on a follower.
+
+Both nodes must share `GPM_SSO_SIGNING_KEY` (identical value) and the ACME
+material under `<cert-dir>/acme`, and the SSO revocation watermark
+(`<cert-dir>/sso_not_before`) is re-read every 30s so a revoke propagates
+without a restart. Full recipe - keepalived VIP, shared cert dir, promotion,
+stream failover-with-reconnect - in [ha.md](ha.md).
 
 ---
 

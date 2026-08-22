@@ -65,7 +65,7 @@ All findings from that review are remediated in the same change (see CHANGELOG
 - [x] The SPA gates the API Tokens nav entry and page on
   `capabilities.apiTokens.enabled`. *(Low)*
 - [x] The API scope gate denies when no principal is on the request. *(Info)*
-- [ ] **`Principal.SessionID` is serialised by `GET /api/me`.** The struct has no
+- [x] **`Principal.SessionID` is serialised by `GET /api/me`.** (Done: `json:"-"`.) The struct has no
   `json:"-"` on `SessionID`, so the SPA's own session id is echoed back into the
   page. Pre-existing, out of scope for the token/DNS change that surfaced it, and
   low impact (the value is already in the caller's own cookie), but it should
@@ -148,9 +148,13 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   `1b6eeaf` image via the `test/stream/` harness (TCP + UDP echo round-tripped
   from an external client through a published 15432 → gpm forwarder → backend).
 - [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
+  (HELD 2026-08-22: only the 8 `auth-request` hosts without native OIDC would
+  benefit - claude, radarr, sonarr, jackett, prometheus, alertmanager, dev0910 -
+  revisit when the outpost becomes a nuisance; shared client, one callback URI
+  per host)
   (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
   walk a host through redirect → callback → session).
-- [ ] **Kubernetes Ingress discovery** against the real cluster: apply
+- [x] **Kubernetes Ingress discovery** against the real cluster (live since 2026-08-01; 23 managed hosts, reconcile no-op verified 2026-08-22): apply
   `deploy/k8s-ingress-discovery-rbac.yaml`, extract the token, enable discovery
   with the wildcard `certificateRef`, annotate one Ingress, and confirm the
   derived host appears, the DNS sync publishes its records, a second reconcile is
@@ -175,15 +179,6 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   validation (absolute paths, key != value), an `mwIcon` entry, and a summary
   chip in the middleware list. An existing `rewrite` middleware loaded from git
   now round-trips correctly instead of being coerced into another type on save.
-- [ ] **UI middleware editor: support the `rewrite` type.** The middleware-type
-  `<select>` in `internal/ui/static/app.js` (~line 1786) enumerates
-  `auth`/`headers`/`guard`/`rate-limit`; the new `rewrite` type is not yet
-  offerable, so a rewrite middleware can only be authored via git/API. Add a
-  `rewrite` option plus a `replacePath` key/value row editor (mirroring the
-  headers map editor) and an icon in `mwIcon`. Until then, per the homelab
-  ui-disable-unavailable rule, an existing `rewrite` middleware loaded from git
-  should render read-only / clearly flagged rather than silently mis-editing as
-  another type.
 - [x] **Drop the " admin" suffix from the browser tab title.** The tab should
   read just the app name (default "Go Proxy Manager"), not "Go Proxy Manager
   admin". Two spots: the static fallback `<title>` in
@@ -285,7 +280,7 @@ and the design record
     latency-critical. A full-state poll self-heals from a missed event by
     construction.
 
-- [ ] **Let an operator disable a discovery-managed host.** `derive()` never sets
+- [x] **Let an operator disable a discovery-managed host.** (Done 2026-08-22 via `gpm.rake.pro/disabled-by` provenance label; see CHANGELOG.) `derive()` never sets
   `Disabled` and `sameHost` compares it, so a managed host disabled by hand - the
   obvious move when an app has to come offline *now* - is upserted back to enabled
   on the next poll, DNS records and all. Today's only real off-switches are
@@ -385,9 +380,8 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   need its own rate-limit budget and a CT-disclosure note in the UI.
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
 - **Gateway API** (`Gateway`/`HTTPRoute`) as a second discovery source.
-- **A dry-run endpoint** (`GET /ingress-discovery/plan`) reporting the diff
-  without writing. Cheap to add on top of the existing plan/apply split.
-- **Operator-side profile selection** — mapping rules in settings
+- ~~**A dry-run endpoint** (`GET /ingress-discovery/plan`)~~ shipped 2026-08-22.
+- ~~**Operator-side profile selection**~~ shipped 2026-08-22 as `profileRules` / `profileSelection`. Original rationale: mapping rules in settings
   (`namespace`/label ⇒ profile) so the `Ingress` selects nothing at all. Strictly
   stronger than the annotation, and the answer to the one residual risk profiles
   carry: **every profile is selectable by every annotating Ingress**, so a tenant
@@ -397,18 +391,12 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   Cost: a settings commit per new service. Named
   profiles are the substrate it would sit on. See
   [design/ingress-discovery.md §5a](docs/design/ingress-discovery.md).
-- **Per-profile `allowedDomainSuffixes`**, so a permissive profile can be
-  restricted to a subset of the published namespace. The suffix list is currently
-  global to the whole discovery block.
-  without writing. Cheap to add on top of the existing plan/apply split — the DNS
-  sync's `GET /dns-sync/plan` is now the worked example to copy.
-- **Live validation** against the real cluster: the subsystem is unit-tested
-  hermetically (httptest fake API server) but has not yet run against
-  production RBAC and a real Ingress set.
+- ~~**Per-profile `allowedDomainSuffixes`**~~ shipped 2026-08-22 (subset of the global list, validated at settings-write).
+- ~~**Live validation** against the real cluster~~ done (live since 2026-08-01).
 
 ## High availability (gpm itself)
 
-- [ ] **HA support for gpm.** Upstream groups remove the single-node dependency
+- [x] **HA support for gpm** (phase 1 shipped 2026-08-22; phase 2 sketch remains a proposal). Upstream groups remove the single-node dependency
   *behind* gpm; the gpm instance itself is still a single point of failure. Design
   and ship a supported multi-instance story.
   - [x] **Design doc** resolving the open questions -
@@ -419,7 +407,7 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
     phase-2 sketch (lease-file election, shared bare repo, active/active) and
     explicit non-goals (no etcd/consul/raft, no multi-writer, no live stream-state
     replication).
-  - [ ] Implement phase 1 (see the doc's suggested sequencing: SSO watermark
+  - [x] Implement phase 1 (done 2026-08-22: `GPM_HA_ROLE`, `GPM_HA_POLL_INTERVAL`, `docs/ha.md`; see the doc's suggested sequencing: SSO watermark
     refresh loop -> leader/follower role gate -> follower config poll loop ->
     deploy doc).
 
@@ -442,12 +430,12 @@ MPTCP, Anubis, cosign signing).
   semantics, poll-vs-watch, and the Ingress → ProxyHost field mapping for an
   off-cluster gpm.
 - **High availability (gpm itself)** -
-  [docs/design/ha.md](docs/design/ha.md) (design complete, implementation not
-  started). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
+  [docs/design/ha.md](docs/design/ha.md) (phase 1 implemented 2026-08-22). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
   automatic election / active/active.
 - **HTTP/3** — [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
   from the same document are now ✓ shipped - see FEATURES.md and
-  CHANGELOG.md. Remaining mTLS follow-up: **phase 2** (CRL/OCSP revocation,
-  identity-passthrough header) - still open, see
+  CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
+  `client-cert` middleware mode) shipped 2026-08-22; OCSP deliberately not
+  implemented (CRL only), see
   [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) §1.

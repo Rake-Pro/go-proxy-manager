@@ -1628,6 +1628,134 @@ func TestReconcileDerivesTwoProfilesInOneRun(t *testing.T) {
 	}
 }
 
+// ProfileRules are strictly stronger than the annotation: a matching rule wins
+// even when the Ingress's own annotation asks for something else.
+func TestReconcileHonoursProfileRulesOverTheAnnotation(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			// The tenant asks for the wide-open public-ratelimited profile via the
+			// annotation; the rule on this namespace overrides it to sso-internal.
+			ingressJSON("media", "radarr", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "public-ratelimited",
+			}, "radarr.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	settings.IngressDiscovery.ProfileRules = []model.IngressProfileRule{
+		{Namespace: "media", Profile: "sso-internal"},
+	}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	got := rec.upserts[0]
+	if strings.Join(got.Middlewares, ",") != "sso,rate-limit" {
+		t.Fatalf("middlewares = %v, want the RULED profile's chain, not the annotation's", got.Middlewares)
+	}
+	if d.Status().Hosts[0].Profile != "sso-internal" {
+		t.Fatalf("status profile = %q, want sso-internal", d.Status().Hosts[0].Profile)
+	}
+}
+
+// A rule can match on labels instead of (or as well as) namespace.
+func TestReconcileProfileRuleMatchesOnLabels(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSONWithLabels("web", "internal-tool", map[string]string{"team": "core"}, map[string]string{
+				model.AnnotationManaged: "true",
+			}, "tool.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	settings.IngressDiscovery.ProfileRules = []model.IngressProfileRule{
+		{MatchLabels: map[string]string{"team": "core"}, Profile: "sso-internal"},
+	}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || strings.Join(rec.upserts[0].Middlewares, ",") != "sso,rate-limit" {
+		t.Fatalf("upserts = %+v, want the label-matched profile's chain", rec.upserts)
+	}
+}
+
+// "rules-only" mode must never consult the annotation: an Ingress that matches
+// no rule gets the default template, exactly as if it named no profile at all -
+// even when its own annotation names a real profile.
+func TestReconcileRulesOnlyIgnoresTheAnnotation(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("other", "app", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "app.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	settings.IngressDiscovery.ProfileSelection = model.ProfileSelectionRulesOnly
+	settings.IngressDiscovery.ProfileRules = []model.IngressProfileRule{
+		{Namespace: "media", Profile: "sso-internal"}, // does not match this Ingress's namespace
+	}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	got := rec.upserts[0]
+	if len(got.Middlewares) != 0 || len(got.AccessLists) != 0 {
+		t.Fatalf("host = %+v, want the plain default template - the annotation must never have been consulted", got)
+	}
+	if d.Status().Hosts[0].Profile != model.DefaultProfileName {
+		t.Fatalf("status profile = %q, want %q", d.Status().Hosts[0].Profile, model.DefaultProfileName)
+	}
+}
+
+// A profile's own allowedDomainSuffixes NARROWS the global list: a host it
+// derives is rejected for a hostname the global list alone would have allowed.
+func TestReconcilePerProfileAllowedDomainSuffixes(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "public-ratelimited",
+			}, "paste.example.com", "internal.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	prof := settings.IngressDiscovery.Profiles["public-ratelimited"]
+	prof.AllowedDomainSuffixes = []string{"paste.example.com"}
+	settings.IngressDiscovery.Profiles["public-ratelimited"] = prof
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	if strings.Join(rec.upserts[0].Domains, ",") != "paste.example.com" {
+		t.Fatalf("domains = %v, want only the one covered by the profile's narrower list", rec.upserts[0].Domains)
+	}
+}
+
 // The domain-shadowing gate is orthogonal to profiles: naming a profile must not
 // buy an Ingress a domain an operator-authored host already serves.
 func TestProfileDoesNotBypassDomainShadowing(t *testing.T) {
@@ -1783,6 +1911,9 @@ func TestReAddingTheProfileReEnablesTheHost(t *testing.T) {
 	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
 	disabled := managedHostFixture("ing-paste.web", "paste.example.com")
 	disabled.Disabled = true
+	// Marked as DISCOVERY's own disable (not an operator's): only that label is
+	// what makes a clean re-derive free to clear it.
+	disabled.Labels[model.DisabledByLabel] = model.DisabledByIngressDiscovery
 	cfg := &model.Config{ProxyHosts: []model.ProxyHost{disabled}}
 	rec := &recorder{}
 	d := newDiscoverer(f, cfg, settings, rec)
@@ -1796,8 +1927,111 @@ func TestReAddingTheProfileReEnablesTheHost(t *testing.T) {
 	if rec.upserts[0].Disabled {
 		t.Fatal("the host must be re-enabled once its profile resolves again")
 	}
+	if _, has := rec.upserts[0].Labels[model.DisabledByLabel]; has {
+		t.Fatal("a re-enabled host must not keep discovery's disabled-by label")
+	}
 	if strings.Join(rec.upserts[0].Middlewares, ",") != "sso,rate-limit" {
 		t.Fatalf("middlewares = %v, want the restored profile's chain", rec.upserts[0].Middlewares)
+	}
+}
+
+// An operator hand-disabling a managed host - the obvious move when an app has
+// to come offline NOW - must not be undone by the very next poll just because
+// the Ingress still derives cleanly. `disabled: true` with no
+// gpm.rake.pro/disabled-by label is operator-owned state.
+func TestOperatorDisabledHostIsNotReEnabled(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"}, "grafana.example.com"),
+		}, "")
+	}
+	existing := managedHostFixture("ing-grafana.monitoring", "grafana.example.com")
+	existing.DisplayName = "monitoring/grafana"
+	existing.Disabled = true // operator hand-disabled; no discovery label
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("an operator-disabled host with nothing else changed must write nothing, calls=%d", rec.calls)
+	}
+	st := d.Status()
+	if len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUnchanged {
+		t.Fatalf("hosts = %+v, want unchanged (still disabled)", st.Hosts)
+	}
+}
+
+// A cluster tenant must never be able to re-enable an operator-disabled host by
+// editing their Ingress: even a real change (new domain) is applied with
+// disabled preserved.
+func TestOperatorDisabledHostStaysDisabledAcrossOtherChanges(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"},
+				"grafana.example.com", "metrics.example.com"),
+		}, "")
+	}
+	existing := managedHostFixture("ing-grafana.monitoring", "grafana.example.com")
+	existing.Disabled = true
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want the domain change written", len(rec.upserts))
+	}
+	if !rec.upserts[0].Disabled {
+		t.Fatal("an operator-disabled host must stay disabled even when other fields change")
+	}
+	if strings.Join(rec.upserts[0].Domains, ",") != "grafana.example.com,metrics.example.com" {
+		t.Fatalf("domains = %v, want the new set applied", rec.upserts[0].Domains)
+	}
+	if d.Status().Hosts[0].Reason == "" {
+		t.Fatal("the status should explain that the disabled state was preserved")
+	}
+}
+
+// A host discovery disabled itself (unresolvable profile, label set) is exactly
+// the opposite: it is expected to clear on the very next clean derive, and the
+// disabling upsert must not corrupt the labels of the config it read from.
+func TestDiscoveryDisableSetsTheOwnershipLabelWithoutMutatingTheSourceHost(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "no-such-profile",
+			}, "paste.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	existing := managedHostFixture("ing-paste.web", "paste.example.com")
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || !rec.upserts[0].Disabled {
+		t.Fatalf("upserts = %+v, want one disabling upsert", rec.upserts)
+	}
+	if rec.upserts[0].Labels[model.DisabledByLabel] != model.DisabledByIngressDiscovery {
+		t.Fatalf("labels = %v, want the disabled-by label set to discovery's own value", rec.upserts[0].Labels)
+	}
+	// The upsert's Labels map must be a fresh copy, not an alias of cfg's: cfg is
+	// the caller's config, read under no lock, and must come back unmutated.
+	if _, has := cfg.ProxyHosts[0].Labels[model.DisabledByLabel]; has {
+		t.Fatal("the source config's host must not have been mutated in place")
 	}
 }
 
@@ -1958,5 +2192,154 @@ func TestDerivedHostsDoNotShareTheTimeoutsOrTagsBacking(t *testing.T) {
 	}
 	if b.Tags[0] != "cluster" || conf.Template.Tags[0] != "cluster" {
 		t.Fatalf("mutating one host's tags leaked: b=%v settings=%v", b.Tags, conf.Template.Tags)
+	}
+}
+
+// Plan must report EXACTLY the decisions Reconcile would take - create,
+// update, delete, skip, and every derived host's action/domains/profile -
+// without writing anything.
+func TestPlanMirrorsReconcileDecisionsAndWritesNothing(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			// Creates a new host.
+			ingressJSON("web", "new", map[string]string{model.AnnotationManaged: "true"}, "new.example.com"),
+			// Updates an existing one (new domain).
+			ingressJSON("web", "changed", map[string]string{model.AnnotationManaged: "true"},
+				"changed.example.com", "extra.example.com"),
+			// Unknown profile: skip, no existing host to disable.
+			ingressJSON("web", "bad-profile", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "no-such-profile",
+			}, "bad.example.com"),
+		}, "")
+	}
+	changed := managedHostFixture("ing-changed.web", "changed.example.com")
+	changed.DisplayName = "web/changed"
+	gone := managedHostFixture("ing-gone.web", "gone.example.com") // no Ingress derives this any more
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{changed, gone}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+
+	planRec := &recorder{}
+	planD := newDiscoverer(f, cfg, settings, planRec)
+	plan, err := planD.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if planRec.calls != 0 {
+		t.Fatalf("Plan must never call apply, calls=%d", planRec.calls)
+	}
+	if !plan.Enabled {
+		t.Fatal("plan.enabled = false, want true")
+	}
+	if plan.Created != 1 || plan.Updated != 1 || plan.Deleted != 1 || plan.Skipped != 1 {
+		t.Fatalf("plan = %+v, want +1 ~1 -1 skip1", plan)
+	}
+
+	reconcileRec := &recorder{}
+	reconcileD := newDiscoverer(f, cfg, settings, reconcileRec)
+	if err := reconcileD.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	status := reconcileD.Status()
+
+	if plan.Created != status.Created || plan.Updated != status.Updated ||
+		plan.Deleted != status.Deleted || plan.Skipped != status.Skipped ||
+		plan.Discovered != status.Discovered || plan.Managed != status.Managed {
+		t.Fatalf("plan counts %+v disagree with reconcile status %+v", plan, status)
+	}
+	if len(plan.Hosts) != len(status.Hosts) {
+		t.Fatalf("plan has %d hosts, reconcile status has %d", len(plan.Hosts), len(status.Hosts))
+	}
+	byName := map[string]HostResult{}
+	for _, h := range status.Hosts {
+		byName[h.Name] = h
+	}
+	for _, ph := range plan.Hosts {
+		h, ok := byName[ph.Name]
+		if !ok {
+			t.Fatalf("plan named host %q that reconcile's status does not have", ph.Name)
+		}
+		if h.Action != ph.Action || h.Profile != ph.Profile || strings.Join(h.Domains, ",") != strings.Join(ph.Domains, ",") {
+			t.Fatalf("host %q: plan=%+v reconcile=%+v", ph.Name, ph, h)
+		}
+	}
+}
+
+// A disabled discovery block must not be contacted for a preview either.
+func TestPlanDisabledIsInertAndContactsNothing(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	hit := false
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		writeList(w, nil, "")
+	}
+	s := baseSettings(f)
+	s.Enabled = false
+	settings := &model.Settings{IngressDiscovery: s}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	plan, err := d.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if hit {
+		t.Fatal("a disabled discovery must not contact the cluster for a preview")
+	}
+	if plan.Enabled {
+		t.Fatalf("plan = %+v, want enabled=false", plan)
+	}
+}
+
+// Invalid settings fail the preview exactly as they fail a real reconcile,
+// before any cluster contact.
+func TestPlanInvalidSettingsDoNotContactTheCluster(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	hit := false
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		writeList(w, nil, "")
+	}
+	s := baseSettings(f)
+	s.AllowedDomainSuffixes = nil
+	settings := &model.Settings{IngressDiscovery: s}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if _, err := d.Plan(context.Background()); err == nil {
+		t.Fatal("invalid settings must fail the plan")
+	}
+	if hit {
+		t.Fatal("invalid settings must stop before any cluster call")
+	}
+}
+
+// Like ReconcileNow, Plan refuses rather than queues behind a run already in
+// flight: a preview of a moving target is worth less than an honest 409.
+func TestPlanRefusesWhileAReconcileIsRunning(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	d := New(func(context.Context) (model.Config, model.Settings, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return model.Config{}, model.Settings{}, nil
+	}, nil, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- d.ReconcileNow(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first reconcile never started")
+	}
+	if _, err := d.Plan(context.Background()); !errors.Is(err, ErrReconcileInProgress) {
+		t.Fatalf("Plan while running = %v, want ErrReconcileInProgress", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first reconcile: %v", err)
 	}
 }

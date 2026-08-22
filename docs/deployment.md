@@ -54,6 +54,8 @@ container deployments).
 | `-slow-request-ms` | `GPM_SLOW_REQUEST_MS` | `0` (off) | Warn on requests slower than N ms |
 | `-debug-headers` | `GPM_DEBUG_HEADERS` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info — keep off in production) |
 | `-upstream-response-header-timeout` | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `0` (unbounded) | Cap time-to-first-byte from an upstream |
+| `-ha-role` | `GPM_HA_ROLE` | `leader` | HA role: `leader` runs ACME + Ingress discovery and accepts config writes; `follower` disables both and serves the admin API read-only (`503` on writes). See [ha.md](ha.md) |
+| `-ha-poll-interval` | `GPM_HA_POLL_INTERVAL` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved |
 | `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin role **and** `admin` scope gated) |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
@@ -402,6 +404,13 @@ verification use, so a bare IP will fail the handshake.
 
 Scopes: `ingress-discovery:read` for status, `ingress-discovery:write` for
 reconcile.
+
+## High availability
+
+Two instances can run as an active/standby pair (keepalived VIP, one static
+leader, `git pull --ff-only` config replication, shared cert dir). The full
+recipe - keepalived config, cert-dir layout, `GPM_SSO_SIGNING_KEY` sharing,
+promotion, and what does not survive a failover - is in [ha.md](ha.md).
 
 ## Migrating from Nginx Proxy Manager
 

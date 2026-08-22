@@ -37,6 +37,7 @@ const NAV = [
   { id: 'streams', label: 'Streams', icon: ICON.stream },
   { id: 'dead', label: 'Dead hosts', icon: ICON.skull },
   { id: 'certs', label: 'Certificates', icon: ICON.cert },
+  { id: 'clientcas', label: 'Client CAs', icon: ICON.clientUser },
   { id: 'identity', label: 'Identity', icon: ICON.user },
   { id: 'access', label: 'Access Lists', icon: ICON.shield },
   { id: 'middleware', label: 'Middleware', icon: ICON.layers },
@@ -50,7 +51,7 @@ const NAV = [
 
 const TITLES = {
   overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
-  dead: 'Dead hosts', certs: 'Certificates', identity: 'Identity', access: 'Access Lists',
+  dead: 'Dead hosts', certs: 'Certificates', clientcas: 'Client CAs', identity: 'Identity', access: 'Access Lists',
   middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
   tokens: 'API Tokens', logs: 'Access Logs', history: 'History', settings: 'Settings',
 };
@@ -58,7 +59,7 @@ const TITLES = {
 // plural API paths per section
 const PLURAL = {
   hosts: 'proxy-hosts', redirects: 'redirect-hosts', streams: 'stream-hosts',
-  dead: 'dead-hosts', certs: 'certificates', identity: 'identity-providers',
+  dead: 'dead-hosts', certs: 'certificates', clientcas: 'client-cas', identity: 'identity-providers',
   access: 'access-lists', middleware: 'middlewares', upstreams: 'upstream-groups',
   dns: 'dns-providers', tokens: 'api-tokens',
 };
@@ -321,6 +322,26 @@ function gateControl(el, available, reason) {
   if (!available) el.title = reason; else el.removeAttribute('title');
   el.querySelectorAll('input, select, button').forEach((child) => { child.disabled = !available; });
 }
+// ---------- HA read-only mode ----------
+// A follower instance (capabilities.ha.readOnly) refuses every config write with
+// a 503, so its write controls are greyed out up front instead of accepting a
+// change the API will reject. Runs after each view renders; the server enforces
+// this independently.
+const RO_WRITE_CONTROLS = [
+  '.btn.primary', '.btn.danger', '[data-revert]', '[data-revert-obj]',
+  '.tok-rotate', '#restoreBtn', '#set-save', '#set-sso-revoke', '#set-dns-run', '#set-id-run',
+].join(', ');
+function applyReadOnlyGating(container) {
+  if (!container || !hasCapability('ha.readOnly')) return;
+  const role = (state.capabilities && state.capabilities.ha && state.capabilities.ha.role) || 'follower';
+  const reason = `This instance runs as an HA ${role} and is read-only. Make config changes on the leader.`;
+  container.querySelectorAll(RO_WRITE_CONTROLS).forEach((el) => gateControl(el, false, reason));
+  const banner = document.createElement('div');
+  banner.className = 'ro-banner';
+  banner.innerHTML = `<b>Read-only (HA ${esc(role)}).</b> This instance does not accept config writes; make changes on the leader and they replicate here.`;
+  container.prepend(banner);
+}
+
 function loadingHtml(label) {
   return `<div class="loading"><span class="spinner"></span>${esc(label || 'Loading...')}</div>`;
 }
@@ -409,6 +430,7 @@ async function route() {
         else if (sub) await certEditor(c, sub);
         else await listCerts(c);
         break;
+      case 'clientcas': await genericSection(c, 'clientcas', sub); break;
       case 'identity': await genericSection(c, 'identity', sub); break;
       case 'access': await genericSection(c, 'access', sub); break;
       case 'middleware': await genericSection(c, 'middleware', sub); break;
@@ -424,6 +446,7 @@ async function route() {
       default: location.hash = '#/overview'; return;
     }
     c.classList.add('view');
+    applyReadOnlyGating(c);
   } catch (e) {
     if (e && e.message === 'Unauthorized') return;
     c.innerHTML = inlineError(e && e.message ? e.message : String(e));
@@ -694,6 +717,9 @@ async function hostEditor(c, name) {
   const up = h.upstream || {};
   const tls = h.tls || {};
   const hsts = tls.hsts || {};
+  // Client-certificate identity passthrough, when this host runs mTLS.
+  const certIDOn = !!(tls.clientAuth && tls.clientAuth.identityHeaders);
+  const certID = (tls.clientAuth && tls.clientAuth.identityHeaders) || {};
 
   const selMw = arr(h.middlewares);
   const selAl = arr(h.accessLists);
@@ -862,6 +888,21 @@ async function hostEditor(c, name) {
             <div class="toggle-line"><div class="tl-text"><div class="nm">Include subdomains</div></div>${switchHtml('f-hsts-sub', !!hsts.includeSubdomains, 'Include subdomains')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Preload</div></div>${switchHtml('f-hsts-preload', !!hsts.preload, 'Preload')}</div>
           </div>
+          ${tls.clientAuth ? `
+          <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+            <p class="section-label">Client certificates (mTLS)</p>
+            <div class="hint" style="margin-bottom:8px">Verified against client CA <span class="mono">${esc(tls.clientAuth.caRef || '')}</span>, mode <span class="mono">${esc(tls.clientAuth.mode || 'require')}</span>. Those two are edited in the config; this page preserves them.</div>
+            <div class="toggle-line"><div class="tl-text"><div class="nm">Identity passthrough</div><div class="ds">Send the verified certificate's subject upstream</div></div>${switchHtml('f-certid', certIDOn, 'Identity passthrough')}</div>
+            <div id="certid-fields" style="${certIDOn ? '' : 'display:none'}">
+              <div class="toggle-line"><div class="tl-text"><div class="nm">SAN</div><div class="ds"><span class="mono">X-Client-Cert-SAN</span></div></div>${switchHtml('f-certid-san', !!certID.san, 'SAN header')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Serial</div><div class="ds"><span class="mono">X-Client-Cert-Serial</span></div></div>${switchHtml('f-certid-serial', !!certID.serial, 'Serial header')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Fingerprint</div><div class="ds"><span class="mono">X-Client-Cert-Fingerprint</span></div></div>${switchHtml('f-certid-fp', !!certID.fingerprint, 'Fingerprint header')}</div>
+              <div class="field-group" style="margin-top:10px"><label>Subject header name</label>
+                <input class="field mono" id="f-certid-subject" value="${esc(certID.subjectHeader || '')}" placeholder="X-Client-Cert-Subject" />
+                <div class="hint">These headers are always stripped from untrusted peers; only gpm asserts them.</div>
+              </div>
+            </div>
+          </div>` : ''}
         </div>
 
         <div class="card form-section">
@@ -953,6 +994,13 @@ async function hostEditor(c, name) {
     $('#hsts-fields').style.display = isOn('f-hsts') ? '' : 'none';
   });
 
+  // Client-certificate identity passthrough show/hide (only rendered for an
+  // mTLS host).
+  const certIdSw = $('#f-certid');
+  if (certIdSw) certIdSw.addEventListener('switchchange', () => {
+    $('#certid-fields').style.display = isOn('f-certid') ? '' : 'none';
+  });
+
   // upstream group vs single upstream: a selected group replaces (and greys
   // out) the single-upstream fields.
   function curGroup() { const g = $('#f-upgroup'); return g ? g.value : ''; }
@@ -1029,6 +1077,21 @@ async function hostEditor(c, name) {
         includeSubdomains: isOn('f-hsts-sub'),
         preload: isOn('f-hsts-preload'),
       };
+    }
+    // clientAuth (caRef/mode) has no control here and is often GitOps-authored, so
+    // it is carried through verbatim; only its identity-passthrough block is edited.
+    if (tls.clientAuth) {
+      const ca = Object.assign({}, tls.clientAuth);
+      delete ca.identityHeaders;
+      if (isOn('f-certid')) {
+        const ih = {};
+        const sh = $('#f-certid-subject').value.trim(); if (sh) ih.subjectHeader = sh;
+        if (isOn('f-certid-san')) ih.san = true;
+        if (isOn('f-certid-serial')) ih.serial = true;
+        if (isOn('f-certid-fp')) ih.fingerprint = true;
+        ca.identityHeaders = ih;
+      }
+      tlsObj.clientAuth = ca;
     }
     if (Object.keys(tlsObj).length) obj.tls = tlsObj;
 
@@ -1245,6 +1308,12 @@ async function certEditor(c, name) {
 
 // ---------- GENERIC SECTIONS (list + JSON-editor form) ----------
 const SECTION_META = {
+  clientcas: {
+    title: 'Client CAs', sub: 'Trust anchors for per-host mTLS client-certificate verification.',
+    singular: 'client CA', addLabel: 'Add client CA',
+    summary: (o) => `<span class="k">Revocation</span><span class="v">${o.crlFile ? 'file: ' + esc(o.crlFile) : (o.crlPEM ? 'inline CRL' : 'none')}</span>` +
+      ((o.crlFile || o.crlPEM) ? `<span class="k">Policy</span><span class="v">${esc(o.crlPolicy || 'fail-closed')}</span>` : ''),
+  },
   identity: {
     title: 'Identity', sub: 'Single sign-on providers and admin authentication.',
     singular: 'identity provider', addLabel: 'Add identity provider',
@@ -1839,10 +1908,15 @@ async function middlewareEditor(c, name) {
         ${idps.map((p) => `<option value="${esc(p.name)}"${auth.identityProvider === p.name ? ' selected' : ''}>${esc(p.name)}${p.type ? ' (' + esc(p.type) + ')' : ''}</option>`).join('')}
       </select>${idps.length ? '' : '<div class="hint">No identity providers yet. Add one under Identity.</div>'}</div>
       <div class="field-group"><label>Mode</label><select class="field mono" id="mw-mode">
-        ${[['', '(from IdP type)'], ['oidc', 'oidc'], ['forward-auth', 'forward-auth'], ['auth-request', 'auth-request']].map(([v, l]) => `<option value="${v}"${(auth.mode || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
-      </select></div>
+        ${[['', '(from IdP type)'], ['oidc', 'oidc'], ['forward-auth', 'forward-auth'], ['auth-request', 'auth-request'], ['client-cert', 'client-cert (mTLS)']].map(([v, l]) => `<option value="${v}"${(auth.mode || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select><div class="hint">client-cert takes its identity from the TLS handshake, so it needs no identity provider - the host must run <span class="mono">tls.clientAuth</span>.</div></div>
       <div class="field-group"><label>Required roles</label><div class="chip-input" id="mw-roles"></div><div class="hint">Not supported in auth-request mode.</div></div>
       <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="mw-allow"></div><div class="hint">Client CIDRs that bypass auth entirely.</div></div>
+      <div class="field-group" id="mw-certroles-wrap" style="${auth.mode === 'client-cert' ? '' : 'display:none'}"><label>Certificate subject -> role</label>
+        <div id="mw-certroles"></div>
+        <button class="btn ghost sm" id="mw-certroles-add" type="button" style="margin-top:6px">${ICON.plus}Add</button>
+        <div class="hint">Key: the certificate subject (<span class="mono">CN=ops,O=Corp</span>) or its bare common name. Leave empty to admit any verified certificate.</div>
+      </div>
     </div>
 
     <div class="card form-section ed-sub" data-type="headers" style="${type === 'headers' ? '' : 'display:none'}"><p class="section-label">Headers</p>
@@ -1883,6 +1957,13 @@ async function middlewareEditor(c, name) {
   </div></div>` + saveBar('middleware', isNew, meta.addLabel);
 
   const rolesCtl = makeChipInput($('#mw-roles'), arr(auth.requiredRoles), 'add role...');
+  const certRolesCtl = makeKVRows($('#mw-certroles'), auth.clientCertRoles || {}, 'CN=ops,O=Corp', 'role', false);
+  $('#mw-certroles-add').addEventListener('click', () => certRolesCtl.addRow('', ''));
+  $('#mw-mode').addEventListener('change', () => {
+    $('#mw-certroles-wrap').style.display = $('#mw-mode').value === 'client-cert' ? '' : 'none';
+    $('#mw-idp').disabled = $('#mw-mode').value === 'client-cert';
+  });
+  $('#mw-idp').disabled = auth.mode === 'client-cert';
   const mwAllowCtl = makeChipInput($('#mw-allow'), arr(auth.allowFrom), 'add CIDR...');
   const setReqCtl = makeKVRows($('#hdr-setreq'), headers.setRequest || {}, 'Header', 'value', false);
   const setRespCtl = makeKVRows($('#hdr-setresp'), headers.setResponse || {}, 'Header', 'value', false);
@@ -1918,14 +1999,20 @@ async function middlewareEditor(c, name) {
   wireEditor('middleware', 'middlewares', meta, isNew, name || o.name, () => {
     const t = $('#ed-type').value; const body = { type: t };
     if (t === 'auth') {
-      const idp = $('#mw-idp').value;
-      if (!idp) { toast('Identity provider required', 'Select an identity provider.', 'err'); return null; }
       const mode = $('#mw-mode').value; const roles = rolesCtl.get(); const allow = mwAllowCtl.get();
+      const idp = mode === 'client-cert' ? '' : $('#mw-idp').value;
+      if (mode !== 'client-cert' && !idp) { toast('Identity provider required', 'Select an identity provider.', 'err'); return null; }
       if (mode === 'auth-request' && roles.length) { toast('Roles unsupported', 'Required roles are not supported in auth-request mode.', 'err'); return null; }
-      const spec = { identityProvider: idp };
+      const certRoles = mode === 'client-cert' ? certRolesCtl.get() : {};
+      if (mode === 'client-cert' && roles.length && !Object.keys(certRoles).length) {
+        toast('Mapping required', 'Required roles in client-cert mode need a subject -> role mapping.', 'err'); return null;
+      }
+      const spec = {};
+      if (idp) spec.identityProvider = idp;
       if (mode) spec.mode = mode;
       if (roles.length) spec.requiredRoles = roles;
       if (allow.length) spec.allowFrom = allow;
+      if (Object.keys(certRoles).length) spec.clientCertRoles = certRoles;
       body.auth = spec;
     } else if (t === 'headers') {
       const spec = {};
@@ -1972,6 +2059,59 @@ async function middlewareEditor(c, name) {
 }
 
 // section -> editor dispatch for the typed object editors
+// ---------- CLIENT CA EDITOR ----------
+// The trust anchor for per-host mTLS (tls.clientAuth.caRef), plus its optional
+// revocation list. The CA bundle is public, so it may be inline; the CRL may be
+// a cert-store-relative file (re-read on reload and on an mtime change) or an
+// inline PEM.
+async function clientCAEditor(c, name) {
+  const meta = SECTION_META.clientcas; const isNew = !name;
+  const o = isNew ? {} : ((await api('/api/client-cas/' + encodeURIComponent(name))).data || {});
+  const hasCRL = !!(o.crlFile || o.crlPEM);
+  c.innerHTML = editorHead('clientcas', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+    ${nameCard(o, isNew)}
+    <div class="card form-section"><p class="section-label">Trust anchor</p>
+      <div class="field-group"><label>CA certificate (PEM)</label>
+        <textarea class="field mono" id="ed-capem" rows="10" placeholder="-----BEGIN CERTIFICATE-----">${esc(o.caPEM || '')}</textarea>
+        <div class="hint">One or more PEM certificates, or a <span class="mono">\${FILE:/run/secrets/corp_ca.pem}</span> / <span class="mono">\${ENV:...}</span> placeholder resolved at load. Public material - no private key.</div>
+      </div>
+    </div>
+  </div><div class="stack">
+    <div class="card form-section"><p class="section-label">Revocation (CRL)</p>
+      <div class="field-group"><label>CRL file</label>
+        <input class="field mono" id="ed-crlfile" value="${esc(o.crlFile || '')}" placeholder="corp.crl" />
+        <div class="hint">PEM or DER, relative to the certificate store (no absolute or <span class="mono">..</span> paths). Re-read on every config reload and within 5 minutes of the file changing.</div>
+      </div>
+      <div class="field-group"><label>Inline CRL (PEM)</label>
+        <textarea class="field mono" id="ed-crlpem" rows="5" placeholder="-----BEGIN X509 CRL-----">${esc(o.crlPEM || '')}</textarea>
+        <div class="hint">Alternative to the file, for a small list kept in git. Set one or the other, not both.</div>
+      </div>
+      <div class="field-group"><label>When the CRL is unusable</label>
+        <select class="field mono" id="ed-crlpolicy">
+          <option value=""${(o.crlPolicy || 'fail-closed') === 'fail-closed' ? ' selected' : ''}>fail-closed (default) - reject every client certificate</option>
+          <option value="fail-open"${o.crlPolicy === 'fail-open' ? ' selected' : ''}>fail-open - accept and log</option>
+        </select>
+        <div class="hint">Applies when the CRL is missing, unparseable, not signed by this CA, or past its nextUpdate.</div>
+      </div>
+      ${hasCRL ? '' : '<div class="hint">No CRL configured: certificates are verified against the CA only, so a revoked-but-unexpired certificate still passes.</div>'}
+    </div>
+  </div></div>` + saveBar('clientcas', isNew, meta.addLabel);
+
+  wireEditor('clientcas', 'client-cas', meta, isNew, name || o.name, () => {
+    const caPEM = $('#ed-capem').value.trim();
+    if (!caPEM) { toast('CA required', 'Paste the CA certificate PEM or a ${FILE:...} placeholder.', 'err'); return null; }
+    const file = $('#ed-crlfile').value.trim();
+    const inline = $('#ed-crlpem').value.trim();
+    if (file && inline) { toast('One CRL source', 'Set the CRL file or the inline PEM, not both.', 'err'); return null; }
+    const body = { caPEM };
+    if (file) body.crlFile = file;
+    if (inline) body.crlPEM = inline;
+    const policy = $('#ed-crlpolicy').value;
+    if (policy && (file || inline)) body.crlPolicy = policy;
+    return body;
+  });
+}
+
 // ---------- UPSTREAM GROUP EDITOR ----------
 async function upstreamGroupEditor(c, name) {
   const meta = SECTION_META.upstreams; const isNew = !name;
@@ -2094,6 +2234,7 @@ async function upstreamGroupEditor(c, name) {
 
 const EDITORS = {
   redirects: redirectEditor, streams: streamEditor, dead: deadEditor, dns: dnsEditor,
+  clientcas: clientCAEditor,
   identity: idpEditor, access: accessEditor, middleware: middlewareEditor,
   upstreams: upstreamGroupEditor,
 };
@@ -2504,6 +2645,16 @@ async function viewSettings(c) {
           </div>
         </div>
       </div>
+      <p class="section-label" style="margin-top:14px">Profile selection</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules let YOU route an Ingress to a profile by namespace and/or label, with no say from the Ingress author at all - stronger than the annotation below. Evaluated in order; the first match wins. "Rules only" ignores <span class="mono">gpm.rake.pro/profile</span> entirely; the default tries these rules first and falls back to the annotation only when nothing matches.</p>
+      <div class="field-group" style="max-width:320px"><label>Mode</label>
+        <select class="field mono" id="set-id-profile-selection">
+          <option value=""${!idc.profileSelection || idc.profileSelection === 'annotation-or-rules' ? ' selected' : ''}>Annotation or rules (default)</option>
+          <option value="rules-only"${idc.profileSelection === 'rules-only' ? ' selected' : ''}>Rules only (ignore the annotation)</option>
+        </select>
+      </div>
+      <div id="set-id-rules"></div>
+      <button class="btn ghost sm" id="addIdRule" type="button" style="margin-top:6px">${ICON.plus}Add rule</button>
       <p class="section-label" style="margin-top:14px">Derived host template</p>
       <p class="muted" style="font-size:11.5px;margin:0 0 10px">gpm runs outside the cluster, so in-cluster Service DNS is not resolvable: the upstream is the <strong>ingress controller's</strong> address, and the controller routes by vhost using the Host header gpm forwards. Prefer <span class="mono">http</span> to its plain port; with <span class="mono">https</span> the upstream host is what SNI and certificate verification use.</p>
       <div class="grid-2">
@@ -2539,6 +2690,11 @@ async function viewSettings(c) {
             <div class="hint">Leave both blank for the shared pooled transport. Read caps time-to-first-byte only, so streaming upstreams stay safe.</div>
           </div>
           <div class="field-group"><label>Tags</label><div class="chip-input" id="set-id-tags"></div><div class="hint">Applied to every derived host, for grouping in the host list.</div></div>
+          <div class="field-group">
+            <label>Allowed domain suffixes override (optional)</label>
+            <div class="chip-input" id="set-id-suffixes-override"></div>
+            <div class="hint">Narrows the global list above for hosts derived from the template. Must be a subset. Leave empty to use the global list.</div>
+          </div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div><div class="ds">When the lan-direct annotation is absent</div></div>${switchHtml('set-id-dns-lan', !!idt.defaultDNS.lanDirect, 'Default LAN direct')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div><div class="ds">When the public-cname annotation is absent</div></div>${switchHtml('set-id-dns-pub', !!idt.defaultDNS.publicCname, 'Default public CNAME')}</div>
         </div>
@@ -2548,8 +2704,12 @@ async function viewSettings(c) {
       <div id="set-id-profiles"></div>
       <button class="btn ghost sm" id="addIdProfile" type="button" style="margin-top:6px">${ICON.plus}Add profile</button>
       <div id="set-id-status" class="hint" style="margin-top:12px"></div>
+      <div id="set-id-plan" class="hint" style="margin-top:6px"></div>
       <div id="set-id-hosts" style="margin-top:8px"></div>
-      <button class="btn ghost sm" id="set-id-run" type="button" style="margin-top:6px">Reconcile now</button>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn ghost sm" id="set-id-preview" type="button" title="Read the cluster and report what a reconcile would create, update, delete and skip. Nothing is written.">Preview changes</button>
+        <button class="btn ghost sm" id="set-id-run" type="button">Reconcile now</button>
+      </div>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Data-plane SSO sessions</p>
@@ -2643,6 +2803,7 @@ async function viewSettings(c) {
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
   const idTagCtl = makeChipInput($('#set-id-tags'), arr(idt.tags), 'add tag...');
+  const idTemplateSuffixCtl = makeChipInput($('#set-id-suffixes-override'), arr(idt.allowedDomainSuffixes), 'add suffix...');
 
   // Same MERGE invariant as the tls object in the save handler: `timeouts` is
   // rebuilt from the two inputs this form renders, over whatever was loaded, so a
@@ -2706,6 +2867,7 @@ async function viewSettings(c) {
             <div class="hint">Blank for the shared pooled transport.</div>
           </div>
           <div class="field-group"><label>Tags</label><div class="chip-input pf-tags"></div><div class="hint">Applied to every host that selects this profile.</div></div>
+          <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input pf-suffixes"></div><div class="hint">Narrows the global list for hosts using this profile. Must be a subset.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Websockets</div></div>${switchHtml('pf-ws-' + i, !!p.websocketsUpgrade, 'Websockets')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('pf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct')}</div>
@@ -2721,15 +2883,38 @@ async function viewSettings(c) {
     div._mw = makeChipInput(div.querySelector('.pf-mw'), arr(p.middlewares), 'add middleware...');
     div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
     div._tags = makeChipInput(div.querySelector('.pf-tags'), arr(p.tags), 'add tag...');
+    div._suffixes = makeChipInput(div.querySelector('.pf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
   Object.keys(idProfiles).sort().forEach((n) => profileRow(n, idProfiles[n]));
   $('#addIdProfile').addEventListener('click', () => profileRow('', {}));
+
+  // Profile rules: operator-side selection, strictly stronger than the
+  // annotation. Each row is namespace + comma-separated key=value labels +
+  // target profile (a profiles key, or "template" for the default block).
+  const ruleWrap = $('#set-id-rules');
+  function ruleRow(rule) {
+    rule = rule || {};
+    const div = document.createElement('div');
+    div.className = 'loc-row';
+    div.style.marginBottom = '8px';
+    const labelsStr = Object.entries(rule.matchLabels || {}).map(([k, v]) => k + '=' + v).join(',');
+    div.innerHTML = `
+      <input class="field mono rule-ns" style="flex:1 1 140px" value="${esc(rule.namespace || '')}" placeholder="namespace (any)" aria-label="Rule namespace" />
+      <input class="field mono rule-labels" style="flex:1 1 200px" value="${esc(labelsStr)}" placeholder="key=value,key2=value2 (any)" aria-label="Rule match labels" />
+      <input class="field mono rule-profile" style="flex:1 1 160px" value="${esc(rule.profile || '')}" placeholder="profile name or template" aria-label="Rule target profile" />
+      <button class="icon-btn rule-del" type="button" aria-label="Remove rule">${ICON.x}</button>`;
+    div.querySelector('.rule-del').addEventListener('click', () => div.remove());
+    ruleWrap.appendChild(div);
+  }
+  arr(idc.profileRules).forEach(ruleRow);
+  $('#addIdRule').addEventListener('click', () => ruleRow({}));
 
   // Ingress-discovery status. The panel and the manual reconcile are only
   // meaningful once discovery is enabled, so they are greyed out rather than
   // offered as controls that cannot work.
   const idAvailable = hasCapability('ingressDiscovery.enabled');
   gateControl($('#set-id-run'), idAvailable, 'Ingress discovery is turned off (enable it above and save).');
+  gateControl($('#set-id-preview'), idAvailable, 'Ingress discovery is turned off (enable it above and save).');
 
   async function renderIngressStatus() {
     const el = $('#set-id-status');
@@ -2764,6 +2949,38 @@ async function viewSettings(c) {
     }
   }
   renderIngressStatus();
+
+  // Dry run: the exact per-host decisions a reconcile would take, without
+  // writing anything - mirrors renderDNSPlan below.
+  async function renderIngressPlan() {
+    const el = $('#set-id-plan');
+    if (!el) return;
+    if (!idAvailable) { el.textContent = 'Ingress discovery is turned off.'; return; }
+    el.textContent = 'Reading the cluster...';
+    try {
+      const p = (await api('/api/ingress-discovery/plan')).data || {};
+      if (!p.enabled) { el.textContent = 'Ingress discovery is turned off.'; return; }
+      if (p.error) { el.textContent = 'FAILED - ' + p.error; return; }
+      const byAction = {};
+      arr(p.hosts).forEach((h) => { (byAction[h.action] = byAction[h.action] || []).push(h.name); });
+      const line = (label, names) => (names && names.length ? `${label} ${names.join(', ')}` : '');
+      const parts = [
+        line('create', byAction.created), line('update', byAction.updated),
+        line('DELETE', byAction.deleted), line('skip', byAction.skipped),
+      ].filter(Boolean);
+      el.textContent = 'Dry run, nothing was changed. ' + (parts.length ? parts.join('; ') : 'no changes') +
+        ` (${p.discovered || 0} annotated Ingresses, ${p.managed || 0} managed hosts after).`;
+    } catch (e) {
+      el.textContent = e && e.status === 501 ? 'Ingress discovery is not wired in this deployment.' :
+        (e && e.status === 409 ? 'A reconcile is already in progress; try again shortly.' : 'Preview unavailable: ' + (e.message || e));
+    }
+  }
+
+  $('#set-id-preview').addEventListener('click', async () => {
+    const btn = $('#set-id-preview'); btn.disabled = true;
+    await renderIngressPlan();
+    btn.disabled = false;
+  });
 
   $('#set-id-run').addEventListener('click', async () => {
     const btn = $('#set-id-run'); btn.disabled = true;
@@ -2882,6 +3099,7 @@ async function viewSettings(c) {
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
         tags: idTagCtl.get(),
+        allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
       },
     };
     if (isOn('set-id-on')) ingressDiscovery.enabled = true;
@@ -2921,6 +3139,7 @@ async function viewSettings(c) {
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
         tags: row._tags.get(),
+        allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
@@ -2932,6 +3151,30 @@ async function viewSettings(c) {
       return;
     }
     if (Object.keys(profiles).length) ingressDiscovery.profiles = profiles;
+
+    const profSel = $('#set-id-profile-selection').value;
+    if (profSel) ingressDiscovery.profileSelection = profSel;
+    const profileRules = [];
+    $$('#set-id-rules .loc-row').forEach((row) => {
+      const ns = row.querySelector('.rule-ns').value.trim();
+      const labelsRaw = row.querySelector('.rule-labels').value.trim();
+      const profile = row.querySelector('.rule-profile').value.trim();
+      if (!ns && !labelsRaw && !profile) return; // an untouched blank row is not a rule
+      const rule = {};
+      if (ns) rule.namespace = ns;
+      if (labelsRaw) {
+        const ml = Object.create(null);
+        labelsRaw.split(',').forEach((pair) => {
+          const idx = pair.indexOf('=');
+          if (idx <= 0) return;
+          ml[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+        });
+        if (Object.keys(ml).length) rule.matchLabels = ml;
+      }
+      if (profile) rule.profile = profile;
+      profileRules.push(rule);
+    });
+    if (profileRules.length) ingressDiscovery.profileRules = profileRules;
     body.ingressDiscovery = ingressDiscovery;
 
     const btn = $('#set-save'); btn.disabled = true;

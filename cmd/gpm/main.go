@@ -24,6 +24,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/geoip"
+	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -65,6 +66,8 @@ func main() {
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
+		haRole        = flag.String("ha-role", envOr("GPM_HA_ROLE", string(ha.RoleLeader)), "HA role: leader (runs ACME and Ingress discovery, accepts config writes) or follower (read-only, pulls the leader's config repo)")
+		haPollInt     = flag.Duration("ha-poll-interval", envDur("GPM_HA_POLL_INTERVAL", store.DefaultFollowInterval), "how often a follower fast-forwards the config repo from the leader remote")
 		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin role + admin scope gated)")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
@@ -81,6 +84,17 @@ func main() {
 
 	logging.Setup(*logLevel, *logConsole)
 	log.Info().Str("build", version.String()).Msg("starting go-proxy-manager")
+
+	// HA role (docs/design/ha.md phase 1). Exactly one instance is the writer:
+	// the leader runs the ACME and Ingress-discovery loops and accepts config
+	// writes; a follower does neither and pulls the leader's repo instead. An
+	// unparseable value is fatal rather than defaulting, so a typo cannot start a
+	// second ACME writer against the same account.
+	role, err := ha.ParseRole(*haRole)
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid HA role")
+	}
+	log.Info().Str("role", role.String()).Msg("HA role")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -118,6 +132,10 @@ func main() {
 	// Persist the data-plane SSO signing key under the cert dir when the operator
 	// has not pinned one via GPM_SSO_SIGNING_KEY, so SSO sessions survive restarts.
 	dataplane.SetSSOKeyDir(*certDir)
+	// Re-read the SSO revocation watermark periodically so a revoke issued on a
+	// peer (shared cert dir) - or edited out of band - is honored here without a
+	// restart, instead of only at the next process start.
+	go dataplane.WatchSSOWatermark(ctx, 0)
 	if *accessLog || *slowReqMS > 0 || *debugHeaders {
 		log.Info().
 			Bool("accessLog", *accessLog).
@@ -217,11 +235,25 @@ func main() {
 
 	// ACME manager: issues/renews DNS-01 certs and reloads on certificate change.
 	// The reload error is already logged; ACME has no caller to surface it to.
-	acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: func() { _ = reload() }})
-	go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
-		c, _, err := st.Load(ctx)
-		return c, err
-	})
+	// Single-writer ACME: only the leader renews. Two instances running this loop
+	// would race the same order (duplicate issuance, wasted rate limit, divergent
+	// keypairs); the follower serves the certs replicated into the shared cert dir.
+	if role.IsFollower() {
+		log.Info().Msg("HA follower: ACME renewal loop disabled (the leader is the only issuer)")
+	} else {
+		acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: func() { _ = reload() }})
+		go acmeMgr.Run(ctx, 0, func(ctx context.Context) (model.Config, error) {
+			c, _, err := st.Load(ctx)
+			return c, err
+		})
+	}
+
+	// Follower config replication: fast-forward the leader's repo on a poll and
+	// reload only when HEAD moved. The follower never commits, so the repo cannot
+	// diverge; a pull that is not a clean fast-forward is logged, never merged.
+	if role.IsFollower() {
+		go st.FollowRemote(ctx, *haPollInt, reload)
+	}
 
 	// Lifecycle webhooks: fire-and-forget notifications after each config change,
 	// reading the live targets from settings on every event.
@@ -286,12 +318,18 @@ func main() {
 	// the process is asked to stop has to be allowed to finish (or roll back)
 	// before main returns, or shutdown is exactly the window that leaves the config
 	// repo written but uncommitted.
+	// Leader-only: the reconciler commits to the config repo, and a follower that
+	// commits locally would diverge from the leader and break its ff-only pull.
 	var discWG sync.WaitGroup
-	discWG.Add(1)
-	go func() {
-		defer discWG.Done()
-		ingressDisc.Run(ctx)
-	}()
+	if !role.IsFollower() {
+		discWG.Add(1)
+		go func() {
+			defer discWG.Done()
+			ingressDisc.Run(ctx)
+		}()
+	} else {
+		log.Info().Msg("HA follower: Ingress discovery reconciler disabled (leader-only writer)")
+	}
 
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
@@ -336,7 +374,14 @@ func main() {
 
 		IngressDiscoveryReconcile: ingressDisc.ReconcileNow,
 		IngressDiscoveryStatus:    func() any { return ingressDisc.Status() },
-		IngressDiscoveryEnabled:   ingressDisc.Enabled,
+		IngressDiscoveryPlan: func(c context.Context) (any, error) {
+			return ingressDisc.Plan(c)
+		},
+		IngressDiscoveryEnabled: ingressDisc.Enabled,
+
+		// A follower serves the admin API read-only: writes are refused with a
+		// 503 naming the leader, and the SPA greys the controls out.
+		Role: role,
 	})
 
 	uiHandler, err := ui.Handler()

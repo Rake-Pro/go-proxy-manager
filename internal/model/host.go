@@ -1,6 +1,9 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Upstream is a single backend target a proxy forwards to.
 type Upstream struct {
@@ -57,6 +60,42 @@ type ClientAuth struct {
 	// presented certificate but lets certless requests proceed (so mTLS can be a
 	// fallback alongside SSO/forward-auth).
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
+	// IdentityHeaders opts this host into forwarding the VERIFIED client
+	// certificate's identity to the upstream as gpm-asserted request headers.
+	// nil (default) forwards nothing. These headers ride the existing identity
+	// model: they are in the baseline denylist, so a direct client can never
+	// assert them, and only gpm sets them - after the strip - from a certificate
+	// the handshake actually verified.
+	IdentityHeaders *ClientCertHeaders `json:"identityHeaders,omitempty" yaml:"identityHeaders,omitempty"`
+}
+
+// Default header names for client-certificate identity passthrough. They are
+// part of the data plane's baseline identity denylist, so no direct client can
+// forge them regardless of whether a host enables passthrough.
+const (
+	DefaultClientCertSubjectHeader = "X-Client-Cert-Subject"
+	ClientCertSANHeader            = "X-Client-Cert-SAN"
+	ClientCertSerialHeader         = "X-Client-Cert-Serial"
+	ClientCertFingerprintHeader    = "X-Client-Cert-Fingerprint"
+)
+
+// ClientCertHeaders selects which verified-client-certificate attributes are
+// forwarded upstream. The subject is always sent (under SubjectHeader); the
+// other three are opt-in and use fixed header names so the denylist covers them.
+type ClientCertHeaders struct {
+	// SubjectHeader overrides the header carrying the certificate subject (RFC
+	// 2253 form). Empty selects DefaultClientCertSubjectHeader. A custom name is
+	// added to this host's strip set, so it is still refused from an untrusted peer.
+	SubjectHeader string `json:"subjectHeader,omitempty" yaml:"subjectHeader,omitempty"`
+	// SAN sends the certificate's subject alternative names (DNS, email, IP,
+	// URI), comma-separated, as X-Client-Cert-SAN.
+	SAN bool `json:"san,omitempty" yaml:"san,omitempty"`
+	// Serial sends the certificate serial number in lower-case hex as
+	// X-Client-Cert-Serial.
+	Serial bool `json:"serial,omitempty" yaml:"serial,omitempty"`
+	// Fingerprint sends the SHA-256 fingerprint of the DER certificate in
+	// lower-case hex as X-Client-Cert-Fingerprint.
+	Fingerprint bool `json:"fingerprint,omitempty" yaml:"fingerprint,omitempty"`
 }
 
 func (t TLSSettings) validate() error {
@@ -79,8 +118,34 @@ func (t TLSSettings) validate() error {
 		default:
 			return fmt.Errorf(`tls.clientAuth.mode must be "require" or "optional", got %q`, t.ClientAuth.Mode)
 		}
+		if ih := t.ClientAuth.IdentityHeaders; ih != nil && ih.SubjectHeader != "" {
+			if !validHeaderName(ih.SubjectHeader) {
+				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader %q is not a valid header name", ih.SubjectHeader)
+			}
+			if strings.HasPrefix(strings.ToLower(ih.SubjectHeader), "x-forwarded-") {
+				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader must not be an X-Forwarded-* header (gpm sets those itself), got %q", ih.SubjectHeader)
+			}
+		}
 	}
 	return nil
+}
+
+// validHeaderName reports whether s is a non-empty RFC 7230 field-name token,
+// so a configured passthrough header can never inject CR/LF or a separator into
+// the upstream request.
+func validHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r > 0x7e || r <= 0x20 {
+			return false
+		}
+		if strings.ContainsRune(`"(),/:;<=>?@[\]{}`, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // HostTimeouts overrides the default upstream timeouts for a single proxy host.

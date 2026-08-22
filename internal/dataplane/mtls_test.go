@@ -74,13 +74,13 @@ func signedClientCert(t *testing.T, caCert *x509.Certificate, caKey crypto.Signe
 // mTLS host, exercising the real pool builder and mode mapping.
 func mtlsServerConfig(t *testing.T, caPEM, mode string) *tls.Config {
 	t.Helper()
-	pools, err := buildClientCAPools([]model.ClientCA{{ObjectMeta: model.ObjectMeta{Name: "corp"}, CAPEM: caPEM}})
+	pools, err := buildClientCAAnchors([]model.ClientCA{{ObjectMeta: model.ObjectMeta{Name: "corp"}, CAPEM: caPEM}}, "")
 	if err != nil {
-		t.Fatalf("buildClientCAPools: %v", err)
+		t.Fatalf("buildClientCAAnchors: %v", err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{testTLSCert(t)},
-		ClientCAs:    pools["corp"],
+		ClientCAs:    pools["corp"].pool,
 		ClientAuth:   clientAuthType(mode),
 	}
 }

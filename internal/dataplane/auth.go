@@ -16,7 +16,14 @@ import (
 //   - oidc: gpm acts as the OIDC relying party for the host - unauthenticated
 //     requests are redirected to the IdP and a signed SSO session cookie admits
 //     subsequent ones (see oidcgate.go).
+//   - client-cert: admit only requests whose TLS handshake verified a client
+//     certificate, optionally mapping its subject to a role (see clientCertGate).
 func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, clientIP func(*http.Request) net.IP, next http.Handler) http.Handler {
+	// client-cert takes its identity from the TLS handshake, so it is handled
+	// before the identity-provider lookup - it is the one mode with no IdP.
+	if mw.Auth.Mode == model.AuthModeClientCert {
+		return clientCertGate(*mw.Auth, next)
+	}
 	idpName := mw.Auth.IdentityProvider
 	idp, ok := reg.idps[idpName]
 	if !ok {
@@ -77,6 +84,41 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 		}
 		role := auth.MapRole(id.Groups, rm)
 		if !roleAllowed(role, required) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientCertGate admits a request only when the TLS handshake VERIFIED a client
+// certificate for this host, i.e. the mTLS trust anchor (and, when configured,
+// its CRL) accepted it. It is the auth-tier half of per-host mTLS: the host runs
+// tls.clientAuth in "optional" mode so certless clients still reach the chain,
+// and this gate is what actually refuses them - leaving an SSO middleware free
+// to cover a different host or location.
+//
+// With clientCertRoles set, the certificate subject (RFC 2253 form, or its bare
+// common name) must map to a role, and that role must satisfy requiredRoles; an
+// unmapped subject is refused. With no mapping, a verified certificate is enough.
+func clientCertGate(spec model.AuthMiddleware, next http.Handler) http.Handler {
+	roles := spec.ClientCertRoles
+	required := spec.RequiredRoles
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+			http.Error(w, "client certificate required", http.StatusUnauthorized)
+			return
+		}
+		if len(roles) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		subj := r.TLS.PeerCertificates[0].Subject
+		role, ok := roles[subj.String()]
+		if !ok {
+			role, ok = roles[subj.CommonName]
+		}
+		if !ok || !roleAllowed(auth.Role(role), required) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
