@@ -435,7 +435,7 @@ func New(d Deps) http.Handler {
 	// strictly read-only; see docs/design/ingress-discovery.md.
 	mux.HandleFunc("POST /ingress-discovery/reconcile", d.scoped("ingress-discovery:write", func(w http.ResponseWriter, r *http.Request) {
 		if d.IngressDiscoveryReconcile == nil {
-			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
 			return
 		}
 		if err := d.IngressDiscoveryReconcile(r.Context()); err != nil {
@@ -456,7 +456,7 @@ func New(d Deps) http.Handler {
 	}))
 	mux.HandleFunc("GET /ingress-discovery/status", d.scoped("ingress-discovery:read", func(w http.ResponseWriter, r *http.Request) {
 		if d.IngressDiscoveryStatus == nil {
-			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
 			return
 		}
 		writeJSON(w, http.StatusOK, d.IngressDiscoveryStatus())
@@ -466,7 +466,7 @@ func New(d Deps) http.Handler {
 	// it takes ingress-discovery:read.
 	mux.HandleFunc("GET /ingress-discovery/plan", d.scoped("ingress-discovery:read", func(w http.ResponseWriter, r *http.Request) {
 		if d.IngressDiscoveryPlan == nil {
-			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
 			return
 		}
 		plan, err := d.IngressDiscoveryPlan(r.Context())
