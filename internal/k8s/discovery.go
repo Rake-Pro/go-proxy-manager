@@ -225,6 +225,71 @@ func (d *Discoverer) ReconcileNow(ctx context.Context) error {
 	return d.reconcileLocked(ctx)
 }
 
+// Plan is the read-only preview served by GET /ingress-discovery/plan. It
+// mirrors dnssync.Plan (see internal/dnssync/dnssync.go): the same per-host
+// decisions Reconcile would take, computed by listing the cluster and running
+// planReconcile, without ever calling Applier.
+type Plan struct {
+	GeneratedAt time.Time    `json:"generatedAt"`
+	Enabled     bool         `json:"enabled"`
+	Error       string       `json:"error,omitempty"`
+	Discovered  int          `json:"discovered"`
+	Managed     int          `json:"managed"`
+	Created     int          `json:"created"`
+	Updated     int          `json:"updated"`
+	Deleted     int          `json:"deleted"`
+	Skipped     int          `json:"skipped"`
+	Hosts       []HostResult `json:"hosts"`
+}
+
+// Plan computes what Reconcile WOULD do, without changing anything: it reads
+// the config, lists the cluster and runs the exact same planReconcile
+// Reconcile does, but never applies it. Like ReconcileNow it refuses rather
+// than queue behind a run already in flight - a preview of a moving target is
+// worth less than an honest 409.
+func (d *Discoverer) Plan(ctx context.Context) (Plan, error) {
+	if d == nil || d.load == nil {
+		return Plan{}, fmt.Errorf("ingress discovery: no configuration source wired")
+	}
+	if !d.single.TryLock() {
+		return Plan{}, ErrReconcileInProgress
+	}
+	defer d.single.Unlock()
+
+	p := Plan{GeneratedAt: time.Now().UTC()}
+	cfg, settings, err := d.load(ctx)
+	if err != nil {
+		return p, fmt.Errorf("ingress discovery: load config: %w", err)
+	}
+	conf := settings.IngressDiscovery
+	p.Enabled = conf.Enabled
+	if !conf.Enabled {
+		return p, nil
+	}
+	if err := conf.Validate(); err != nil {
+		return p, fmt.Errorf("ingress discovery: %w", err)
+	}
+	client, err := d.clientFor(conf)
+	if err != nil {
+		return p, fmt.Errorf("ingress discovery: %w", err)
+	}
+	listCtx, cancelList := context.WithTimeout(ctx, listDeadline)
+	ingresses, err := client.ListIngresses(listCtx)
+	cancelList()
+	if err != nil {
+		return p, fmt.Errorf("ingress discovery: list ingresses: %w", err)
+	}
+	plan := planReconcile(cfg, conf, ingresses)
+	p.Discovered = plan.discovered
+	p.Managed = plan.managedAfter
+	p.Created = plan.created
+	p.Updated = plan.updated
+	p.Deleted = len(plan.deletes)
+	p.Skipped = plan.skipped
+	p.Hosts = plan.results
+	return p, nil
+}
+
 // fail records a run that could not complete and returns the error. It keeps
 // LastSuccess from the previous good run: freezing means the managed hosts are
 // untouched, and the status has to say how stale that state is.
@@ -364,6 +429,26 @@ func managedHost(h model.ProxyHost) bool {
 	return h.Labels[model.ManagedByLabel] == model.ManagedByIngressDiscovery
 }
 
+// operatorDisabled reports whether a managed host's Disabled: true was set by
+// the OPERATOR rather than by discovery's own fail-closed revocation path (see
+// model.DisabledByLabel). Discovery must never re-enable a host it did not
+// disable itself - that would turn a hand-disable, the obvious move when an
+// app has to come offline now, into a no-op on the very next poll.
+func operatorDisabled(cur model.ProxyHost) bool {
+	return cur.Disabled && cur.Labels[model.DisabledByLabel] != model.DisabledByIngressDiscovery
+}
+
+// cloneLabels copies a label map so a write through the copy can never mutate
+// the map the caller's ProxyHost still shares (Go maps are reference types, and
+// `off := cur` only shallow-copies the struct).
+func cloneLabels(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // planReconcile computes the whole reconcile without performing any I/O, which
 // is what makes every ownership and freeze rule directly testable.
 func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingresses []Ingress) reconcilePlan {
@@ -424,6 +509,14 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			if cur, ok := managed[name]; ok && isUnknownProfile(err) && !cur.Disabled {
 				off := cur
 				off.Disabled = true
+				// Mark the disable as DISCOVERY's own, so the next reconcile that
+				// resolves cleanly is free to clear it - an operator's own disable
+				// (no label, or a different one) never gets this treatment. off.Labels
+				// aliases cur.Labels (off := cur is a shallow copy), so it is cloned
+				// before being written to, or this would mutate cur - and, through it,
+				// the config the caller still holds - out from under the read.
+				off.Labels = cloneLabels(cur.Labels)
+				off.Labels[model.DisabledByLabel] = model.DisabledByIngressDiscovery
 				disable[name] = off
 				p.updated++
 				p.results = append(p.results, HostResult{Name: name, Ingress: ref, Domains: cur.Domains,
@@ -537,13 +630,33 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			claim(name, want.Domains)
 			// Carry the original creation timestamp so an update does not rewrite it.
 			want.CreatedAt = cur.CreatedAt
+			// disabled: true is OPERATOR-owned state once discovery did not set it
+			// itself: a hand-disabled host must not be re-enabled by the next poll
+			// just because its Ingress still derives cleanly. A host discovery
+			// disabled (gpm.rake.pro/disabled-by: ingress-discovery) is exempt - that
+			// disable is discovery's own fail-closed hold, and a clean derive is
+			// exactly the signal that lifts it (want.Disabled is already false here,
+			// and want carries no disabled-by label, so it clears on its own).
+			reenable := false
+			if operatorDisabled(cur) {
+				want.Disabled = true
+			} else if cur.Disabled {
+				reenable = true
+			}
 			if sameHost(cur, want) {
 				p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionUnchanged, Profile: profile[name]})
 				continue
 			}
 			p.upserts = append(p.upserts, want)
 			p.updated++
-			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionUpdated, Profile: profile[name]})
+			reason := ""
+			switch {
+			case operatorDisabled(cur):
+				reason = "operator-disabled host: other fields refreshed, disabled state preserved"
+			case reenable:
+				reason = "profile resolves again: re-enabling the host discovery had disabled"
+			}
+			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionUpdated, Profile: profile[name], Reason: reason})
 		}
 	}
 
@@ -671,7 +784,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 	// regression that nobody would see. The name is returned so the caller
 	// protects any existing host for this Ingress from deletion - a typo in an
 	// annotation must not take a host offline either.
-	tmpl, prof, ok := conf.ResolveProfile(ing.Metadata.Annotations[model.AnnotationProfile])
+	tmpl, prof, ok := conf.ResolveProfileFor(ns, ing.Metadata.Labels, ing.Metadata.Annotations[model.AnnotationProfile])
 	if !ok {
 		// The rejected name is echoed back so the operator can see the typo, but it
 		// is cluster-supplied and an annotation value can be very large, so it is
@@ -696,7 +809,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 			rejected = append(rejected, rule.Host+" (not a valid hostname; wildcards are not supported)")
 			continue
 		}
-		if !conf.AllowedDomain(h) {
+		if !conf.AllowedDomainFor(tmpl, h) {
 			rejected = append(rejected, h+" (outside allowedDomainSuffixes)")
 			continue
 		}

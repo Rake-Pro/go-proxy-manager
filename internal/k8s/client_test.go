@@ -89,16 +89,26 @@ func writeList(w http.ResponseWriter, items []string, cont string) {
 
 // ingressJSON builds one Ingress item with the given annotations and hosts.
 func ingressJSON(ns, name string, annotations map[string]string, hosts ...string) string {
+	return ingressJSONWithLabels(ns, name, nil, annotations, hosts...)
+}
+
+// ingressJSONWithLabels is ingressJSON plus metadata.labels, for tests that
+// exercise settings.ingressDiscovery.profileRules' matchLabels.
+func ingressJSONWithLabels(ns, name string, labels, annotations map[string]string, hosts ...string) string {
 	ann := make([]string, 0, len(annotations))
 	for k, v := range annotations {
 		ann = append(ann, fmt.Sprintf("%q:%q", k, v))
+	}
+	lbl := make([]string, 0, len(labels))
+	for k, v := range labels {
+		lbl = append(lbl, fmt.Sprintf("%q:%q", k, v))
 	}
 	rules := make([]string, 0, len(hosts))
 	for _, h := range hosts {
 		rules = append(rules, fmt.Sprintf(`{"host":%q}`, h))
 	}
-	return fmt.Sprintf(`{"metadata":{"name":%q,"namespace":%q,"annotations":{%s}},"spec":{"rules":[%s]}}`,
-		name, ns, strings.Join(ann, ","), strings.Join(rules, ","))
+	return fmt.Sprintf(`{"metadata":{"name":%q,"namespace":%q,"labels":{%s},"annotations":{%s}},"spec":{"rules":[%s]}}`,
+		name, ns, strings.Join(lbl, ","), strings.Join(ann, ","), strings.Join(rules, ","))
 }
 
 func TestListIngressesSendsBearerAndDecodes(t *testing.T) {

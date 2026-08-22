@@ -202,6 +202,11 @@ type hostHandler struct {
 	// stripped on top, regardless of these.
 	identityHeaders []string
 	trustedNets     []*net.IPNet
+
+	// certID is the compiled client-certificate identity passthrough, or nil when
+	// this host does not forward the peer certificate's identity upstream. Applied
+	// in serveHTTPS, always after the identity strip.
+	certID *certIdentity
 }
 
 // route returns the handler and upstream label for a request path: the

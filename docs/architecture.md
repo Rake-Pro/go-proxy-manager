@@ -247,6 +247,21 @@ the challenge, finalize the CSR, and write `fullchain.pem` + `privkey.pem`
 atomically. Renewal triggers when a cert is unissued, its domain set changed, or
 it is within 30 days of expiry. On any change it signals the data plane to reload.
 
+**HA role gate** (`internal/ha`, phase 1 of [design/ha.md](design/ha.md)). A
+two-node pair designates its single writer statically: `GPM_HA_ROLE=leader`
+(default) runs the ACME and Ingress-discovery loops and accepts admin/API
+writes; `GPM_HA_ROLE=follower` disables both loops and wraps the API mux in a
+gate that refuses every mutating method with `503`, naming the leader. The
+follower's config arrives instead from `Store.FollowRemote`, which polls
+`git pull --ff-only` against the leader's repo and calls the same `reload()` path
+as any other change, but only when HEAD actually moved; a pull that is not a
+clean fast-forward is refused and logged, never merged or reset, so the two repos
+cannot diverge. Independently of the role, every instance re-reads the persisted
+SSO revocation watermark (`<cert-dir>/sso_not_before`) on a ticker and advances
+it monotonically, so a revoke - or any out-of-band edit - takes effect within one
+interval rather than at the next restart. Traffic-side failover is out of
+process (keepalived VIP, see [ha.md](ha.md)).
+
 ## Data plane
 
 **Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+ by default, a

@@ -340,6 +340,10 @@ func TestScopeEnforcement(t *testing.T) {
 		{"wildcard read reaches ingress-discovery status", []string{"*:read"}, "GET", "/ingress-discovery/status", "", http.StatusNotImplemented},
 		{"wildcard read does not reach ingress-discovery reconcile", []string{"*:read"}, "POST", "/ingress-discovery/reconcile", "", http.StatusForbidden},
 		{"admin reaches ingress-discovery reconcile", []string{model.ScopeAdmin}, "POST", "/ingress-discovery/reconcile", "", http.StatusNotImplemented},
+
+		{"ingress-discovery read reaches plan", []string{"ingress-discovery:read"}, "GET", "/ingress-discovery/plan", "", http.StatusNotImplemented},
+		{"ingress-discovery write implies read for plan", []string{"ingress-discovery:write"}, "GET", "/ingress-discovery/plan", "", http.StatusNotImplemented},
+		{"unrelated scope blocks ingress-discovery plan", []string{"dns-sync:write"}, "GET", "/ingress-discovery/plan", "", http.StatusForbidden},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -666,6 +670,48 @@ func TestIngressDiscoveryEndpointsUnwired(t *testing.T) {
 	}
 	if w := do(t, h, "POST", "/ingress-discovery/reconcile", ""); w.Code != http.StatusNotImplemented {
 		t.Fatalf("reconcile = %d, want 501", w.Code)
+	}
+	if w := do(t, h, "GET", "/ingress-discovery/plan", ""); w.Code != http.StatusNotImplemented {
+		t.Fatalf("plan = %d, want 501", w.Code)
+	}
+}
+
+// The dry run must be able to say "a run is already in flight" (409) and "the
+// cluster could not be read" (502) without either looking like the other -
+// mirroring TestDNSSyncPlanEndpoint exactly.
+func TestIngressDiscoveryPlanEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	var planErr error
+	calls := 0
+	h := api.New(api.Deps{
+		Store: st,
+		IngressDiscoveryPlan: func(context.Context) (any, error) {
+			calls++
+			if planErr != nil {
+				return nil, planErr
+			}
+			return map[string]any{"hosts": []any{}}, nil
+		},
+	})
+
+	w := do(t, h, "GET", "/ingress-discovery/plan", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("plan called %d times, want 1", calls)
+	}
+	planErr = fmt.Errorf("preview refused: %w", k8s.ErrReconcileInProgress)
+	if w := do(t, h, "GET", "/ingress-discovery/plan", ""); w.Code != http.StatusConflict {
+		t.Fatalf("plan while running = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	planErr = fmt.Errorf("api server unreachable")
+	if w := do(t, h, "GET", "/ingress-discovery/plan", ""); w.Code != http.StatusBadGateway {
+		t.Fatalf("failing plan = %d, want 502", w.Code)
 	}
 }
 

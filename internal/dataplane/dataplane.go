@@ -181,6 +181,11 @@ func (s *Server) Start(ctx context.Context) error {
 		},
 	}
 
+	// Poll every configured client-CA CRL file for an out-of-band refresh, the
+	// same way the GeoIP database is watched. Reload already re-reads them; this
+	// covers a CRL that changes with no config change.
+	go watchCRLs(ctx, crlWatchInterval)
+
 	errCh := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", s.httpAddr).Msg("data plane HTTP listening")

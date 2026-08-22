@@ -33,6 +33,7 @@ const (
 	AuthModeOIDC        = "oidc"         // redirect the browser through the OIDC flow
 	AuthModeForwardAuth = "forward-auth" // accept a trusted forward-auth identity
 	AuthModeAuthRequest = "auth-request" // delegate to an external auth_request endpoint
+	AuthModeClientCert  = "client-cert"  // gate on a verified mTLS client certificate
 )
 
 // AuthMiddleware gates requests through a named IdentityProvider and, optionally,
@@ -46,6 +47,11 @@ type AuthMiddleware struct {
 	// any-of, network-exempt bypass so trusted networks (e.g. LAN) can skip SSO.
 	// Applies to auth-request mode.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+	// ClientCertRoles maps a verified client certificate to a role in client-cert
+	// mode: the key is the certificate subject (RFC 2253 form, e.g.
+	// "CN=ops,O=Corp") or its bare common name, the value is the role name
+	// RequiredRoles is checked against. Empty means cert presence alone passes.
+	ClientCertRoles map[string]string `json:"clientCertRoles,omitempty" yaml:"clientCertRoles,omitempty"`
 }
 
 // HeadersMiddleware mutates request/response headers declaratively (security
@@ -170,17 +176,34 @@ func (m Middleware) Validate() error {
 	}
 	switch m.Type {
 	case MWTypeAuth:
-		if m.Auth == nil || m.Auth.IdentityProvider == "" {
+		if m.Auth == nil {
+			return fmt.Errorf("middleware %q: auth spec required", m.Name)
+		}
+		// client-cert mode authenticates from the TLS handshake, so it is the one
+		// auth mode with no identity provider to name.
+		if m.Auth.Mode != AuthModeClientCert && m.Auth.IdentityProvider == "" {
 			return fmt.Errorf("middleware %q: auth.identityProvider is required", m.Name)
 		}
 		switch mode := m.Auth.Mode; mode {
 		case "", AuthModeOIDC, AuthModeForwardAuth:
+		case AuthModeClientCert:
+			if m.Auth.IdentityProvider != "" {
+				return fmt.Errorf("middleware %q: auth.identityProvider is not used in client-cert mode (the TLS handshake is the identity source)", m.Name)
+			}
+			// requiredRoles with no mapping could never match, silently denying
+			// every request; reject it rather than compile a dead gate.
+			if len(m.Auth.RequiredRoles) > 0 && len(m.Auth.ClientCertRoles) == 0 {
+				return fmt.Errorf("middleware %q: auth.requiredRoles in client-cert mode needs auth.clientCertRoles to map a subject to a role", m.Name)
+			}
 		case AuthModeAuthRequest:
 			if len(m.Auth.RequiredRoles) > 0 {
 				return fmt.Errorf("middleware %q: auth.requiredRoles is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", m.Name)
 			}
 		default:
-			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth|auth-request, got %q", m.Name, mode)
+			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth|auth-request|client-cert, got %q", m.Name, mode)
+		}
+		if len(m.Auth.ClientCertRoles) > 0 && m.Auth.Mode != AuthModeClientCert {
+			return fmt.Errorf("middleware %q: auth.clientCertRoles is only used in client-cert mode", m.Name)
 		}
 		for _, c := range m.Auth.AllowFrom {
 			if !validCIDROrIP(c) {

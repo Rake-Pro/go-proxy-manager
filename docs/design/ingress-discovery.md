@@ -498,8 +498,14 @@ escalation path.
 Option C is strictly stronger (nothing on the Ingress selects anything) but
 inverts the ergonomics: the operator has to maintain a rule table that mirrors
 the cluster's shape, and every new service needs a settings commit before it can
-be published — which is most of the toil discovery exists to remove. Deferred,
-not rejected: profiles are the substrate a selector layer would sit on.
+be published — which is most of the toil discovery exists to remove. **Shipped**
+as `ingressDiscovery.profileRules` (ordered `{namespace?, matchLabels?,
+profile}`, first match wins, evaluated before the annotation) plus
+`profileSelection: "rules-only"` to stop reading the annotation at all when no
+rule matches. Profiles are, as anticipated, the substrate the selector layer
+sits on: a rule can only route to `template` or a profile written here, never
+describe a chain of its own. See
+[docs/configuration.md](../configuration.md#operator-side-profile-selection-profilerules).
 
 #### Resolution rules
 
@@ -730,16 +736,24 @@ repo entirely rather than relying on placeholder discipline.
 - Per-host ACME for names outside the wildcard (option C in section 1).
 - Watch-based discovery, if a sub-minute convergence requirement ever appears.
 - Discovery of `Gateway`/`HTTPRoute` (Gateway API) as a second source.
-- A dry-run mode (`GET /ingress-discovery/plan`) that reports the diff without
-  writing. Cheap to add on top of the reconciler's existing plan/apply split if
-  operators ask for it.
-- **Operator-side profile selection** (option C in §5a): mapping rules in
-  settings (`namespace`/label ⇒ profile) so the Ingress selects nothing at all.
-  Strictly stronger than the annotation, at the cost of a settings commit per new
-  service. Profiles are the substrate it would sit on.
-- **Per-profile `allowedDomainSuffixes`**, so a permissive profile could be
-  restricted to a subset of the published namespace. The current suffix list is
-  global.
+- ~~A dry-run mode (`GET /ingress-discovery/plan`)~~ **Shipped.** `GET
+  /ingress-discovery/plan` (`ingress-discovery:read`) runs `planReconcile`
+  against a fresh cluster list and reports the same per-host decisions
+  `Reconcile` would take, without ever calling `Applier` - built on top of the
+  reconciler's existing plan/apply split exactly as anticipated here, and wired
+  into the settings UI as **Preview changes** next to the manual reconcile.
+  See [docs/configuration.md](../configuration.md).
+- ~~Operator-side profile selection~~ **Shipped** as option C in §5a:
+  `ingressDiscovery.profileRules` (ordered `{namespace?, matchLabels?, profile}`,
+  first match wins, evaluated before the annotation) plus `profileSelection:
+  "rules-only"` to stop reading the annotation at all. Profiles remained the
+  substrate it sits on, exactly as anticipated. See
+  [docs/configuration.md](../configuration.md#operator-side-profile-selection-profilerules).
+- ~~Per-profile `allowedDomainSuffixes`~~ **Shipped.**
+  `IngressHostTemplate.AllowedDomainSuffixes` narrows the global list for a
+  template/profile; `Settings.Validate` rejects one that is not a **subset** of
+  the global list, so a profile can only shrink the domains a tenant may
+  publish, never grow them. See [docs/configuration.md](../configuration.md).
 - **`locations` on a template/profile** (§5, "`locations` is deliberately not a
   template field"). Not a gap: locations are per-service path routing, and
   discovery forwards everything to the cluster ingress controller by vhost so the

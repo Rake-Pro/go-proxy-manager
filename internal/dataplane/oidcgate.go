@@ -178,6 +178,64 @@ func ssoRevokedAt() int64 {
 	return ssoNotBefore.Load()
 }
 
+// defaultSSOWatermarkInterval is how often the persisted revocation watermark is
+// re-read when WatchSSOWatermark is started without an explicit interval.
+const defaultSSOWatermarkInterval = 30 * time.Second
+
+// WatchSSOWatermark re-reads the persisted revocation watermark on a ticker and
+// advances the in-memory value, so a revocation issued elsewhere - by an HA peer
+// writing the shared file, or an out-of-band edit - is honored within one
+// interval instead of at the next restart. It blocks until ctx is done; run it
+// in a goroutine. interval <= 0 uses defaultSSOWatermarkInterval.
+func WatchSSOWatermark(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultSSOWatermarkInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			refreshSSOWatermark()
+		}
+	}
+}
+
+// refreshSSOWatermark reconciles the in-memory watermark with the persisted one.
+// It only ever moves the watermark FORWARD: a peer whose file is stale (rsync
+// lag) or whose clock is behind must never weaken a revocation already in force
+// here, matching the guard in RevokeAllSSOSessions.
+func refreshSSOWatermark() {
+	// Force the lazy one-shot load first, so it cannot fire later and overwrite
+	// the value stored below.
+	cur := ssoRevokedAt()
+	d := ssoKeyDir.Load()
+	if d == nil || *d == "" {
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Warn().Err(err).Msg("data-plane SSO: cannot re-read the revocation watermark")
+		}
+		return
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		log.Warn().Err(err).Msg("data-plane SSO: malformed revocation watermark on disk; keeping the in-memory value")
+		return
+	}
+	for v > cur {
+		if ssoNotBefore.CompareAndSwap(cur, v) {
+			log.Info().Int64("notBefore", v).Msg("data-plane SSO: revocation watermark advanced from disk")
+			return
+		}
+		cur = ssoNotBefore.Load()
+	}
+}
+
 // RevokeAllSSOSessions invalidates every outstanding data-plane SSO session by
 // moving the revocation watermark to now: a session issued strictly before it
 // fails the gate and the user re-authenticates at the IdP (sessions minted in

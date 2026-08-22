@@ -1,11 +1,14 @@
 package dataplane
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
+	"net/textproto"
 	"path"
 	"sort"
 	"strconv"
@@ -60,10 +63,13 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 	if err != nil {
 		return nil, err
 	}
-	clientCAs, err := buildClientCAPools(cfg.ClientCAs)
+	clientCAs, err := buildClientCAAnchors(cfg.ClientCAs, certDir)
 	if err != nil {
 		return nil, err
 	}
+	// Publish the file-backed CRLs of THIS build to the mtime watch, so the watch
+	// loop started once at listener start always polls the live set.
+	registerCRLAnchors(clientCAs)
 	reg := buildRegistry(cfg)
 	reg.health = health
 
@@ -115,6 +121,13 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
+		// Client-certificate passthrough headers ride the same strip model: the
+		// fixed names are in the baseline denylist, and a custom subject header is
+		// added to this host's strip set, so no untrusted peer can assert either -
+		// only gpm sets them, after the strip, from a verified certificate.
+		if hh.certID = compileCertIdentity(h.TLS); hh.certID != nil {
+			hh.identityHeaders = append(hh.identityHeaders, hh.certID.subject)
+		}
 		hh.hsts = hstsHeader(h.TLS.HSTS)
 		hh.robots = robotsHeader(h.RobotsNoIndex)
 		for _, d := range h.Domains {
@@ -149,29 +162,6 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		}
 	}
 	return rt, nil
-}
-
-// buildClientCAPools resolves each ClientCA object's PEM (inline or via a
-// ${FILE:...}/${ENV:...} placeholder) into an x509 pool keyed by name. A CA whose
-// PEM resolves but parses to zero certificates is a hard error so a host requiring
-// mTLS never compiles against an empty trust anchor (which would reject everyone).
-func buildClientCAPools(cas []model.ClientCA) (map[string]*x509.CertPool, error) {
-	pools := map[string]*x509.CertPool{}
-	for _, ca := range cas {
-		if ca.Disabled {
-			continue
-		}
-		pem, err := model.Secret(ca.CAPEM).Resolve()
-		if err != nil {
-			return nil, fmt.Errorf("client CA %q: %w", ca.Name, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM([]byte(pem)) {
-			return nil, fmt.Errorf("client CA %q: caPEM parsed to no certificates", ca.Name)
-		}
-		pools[ca.Name] = pool
-	}
-	return pools, nil
 }
 
 // hostKey normalizes a domain or Host header to the router map key: port stripped,
@@ -329,7 +319,7 @@ func clientAuthType(mode string) tls.ClientAuthType {
 // listener default applies). A clientAuth referencing a CA that did not compile
 // into a pool is a hard error, so the host fails closed rather than serving
 // without the client-certificate check.
-func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*x509.CertPool, certs *certResolver) (*tls.Config, error) {
+func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*clientCAAnchor, certs *certResolver) (*tls.Config, error) {
 	c := hostTLSConfig(t.MinTLSVersion, certs)
 	if t.ClientAuth == nil {
 		return c, nil // version pin only (may be nil)
@@ -337,12 +327,18 @@ func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*x509.CertPool, cer
 	if c == nil {
 		c = baseHostTLSConfig(certs)
 	}
-	pool := clientCAs[t.ClientAuth.CARef]
-	if pool == nil {
+	anchor := clientCAs[t.ClientAuth.CARef]
+	if anchor == nil || anchor.pool == nil {
 		return nil, fmt.Errorf("clientAuth references client CA %q with no usable certificates", t.ClientAuth.CARef)
 	}
-	c.ClientCAs = pool
+	c.ClientCAs = anchor.pool
 	c.ClientAuth = clientAuthType(t.ClientAuth.Mode)
+	if anchor.crlConfigured {
+		// Revocation is the one check stdlib chain verification does not make, so
+		// it hangs off VerifyPeerCertificate - which runs after the chain builds,
+		// on the handshake, for every host referencing this CA.
+		c.VerifyPeerCertificate = anchor.verifyPeer
+	}
 	return c, nil
 }
 
@@ -452,6 +448,9 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hh.stripUntrustedIdentity(r)
+		if hh.certID != nil {
+			hh.certID.apply(r)
+		}
 		if hh.hsts != "" {
 			// Set before serving so it rides the upstream's response; only on HTTPS
 			// (browsers ignore HSTS received over plain HTTP anyway).
@@ -531,4 +530,84 @@ func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	u.Scheme = "https"
 	u.Host = hostKey(r.Host)
 	http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
+}
+
+// certIdentity is a host's compiled client-certificate identity passthrough:
+// which attributes of the VERIFIED peer certificate are forwarded upstream and
+// under which header names.
+type certIdentity struct {
+	subject     string // canonicalized header name for the certificate subject
+	san         bool
+	serial      bool
+	fingerprint bool
+}
+
+// compileCertIdentity returns the passthrough for a host's TLS settings, or nil
+// when the host did not opt in (no clientAuth, or no identityHeaders block).
+func compileCertIdentity(t model.TLSSettings) *certIdentity {
+	if t.ClientAuth == nil || t.ClientAuth.IdentityHeaders == nil {
+		return nil
+	}
+	ih := t.ClientAuth.IdentityHeaders
+	name := ih.SubjectHeader
+	if name == "" {
+		name = model.DefaultClientCertSubjectHeader
+	}
+	return &certIdentity{
+		subject:     textproto.CanonicalMIMEHeaderKey(name),
+		san:         ih.SAN,
+		serial:      ih.Serial,
+		fingerprint: ih.Fingerprint,
+	}
+}
+
+// apply sets the passthrough headers from the client certificate the handshake
+// VERIFIED. It is a no-op without a verified chain - in optional mode a certless
+// (or unverified) request must not reach the upstream carrying an identity - and
+// it always runs AFTER stripUntrustedIdentity, so gpm is the only asserter.
+func (ci *certIdentity) apply(r *http.Request) {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+		return
+	}
+	c := r.TLS.PeerCertificates[0]
+	r.Header.Set(ci.subject, headerSafe(c.Subject.String()))
+	if ci.san {
+		r.Header.Set(model.ClientCertSANHeader, headerSafe(strings.Join(certSANs(c), ",")))
+	}
+	if ci.serial {
+		r.Header.Set(model.ClientCertSerialHeader, serialKey(c.SerialNumber))
+	}
+	if ci.fingerprint {
+		sum := sha256.Sum256(c.Raw)
+		r.Header.Set(model.ClientCertFingerprintHeader, hex.EncodeToString(sum[:]))
+	}
+}
+
+// certSANs flattens a certificate's subject alternative names into one ordered
+// list (DNS, email, IP, URI) for the X-Client-Cert-SAN header.
+func certSANs(c *x509.Certificate) []string {
+	var out []string
+	out = append(out, c.DNSNames...)
+	out = append(out, c.EmailAddresses...)
+	for _, ip := range c.IPAddresses {
+		out = append(out, ip.String())
+	}
+	for _, u := range c.URIs {
+		out = append(out, u.String())
+	}
+	return out
+}
+
+// headerSafe strips anything outside printable US-ASCII from a value taken from
+// a certificate, so an attacker-chosen subject (which a CA operator may allow to
+// contain arbitrary UTF-8) cannot inject CR/LF or control bytes into the
+// upstream request.
+func headerSafe(v string) string {
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; c >= 0x20 && c < 0x7f {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }

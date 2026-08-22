@@ -138,3 +138,112 @@ func TestClientAuthValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestClientCARevocationValidation covers the phase-2 CRL fields: the file ref is
+// confined to the cert store like a custom certificate's, the two sources are
+// mutually exclusive, and a policy without a source is a configuration error.
+func TestClientCARevocationValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		ca      ClientCA
+		wantErr string
+	}{
+		{"no revocation configured", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x"}, ""},
+		{"relative crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "corp.crl"}, ""},
+		{"inline crlPEM", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLPEM: "-----BEGIN X509 CRL-----"}, ""},
+		{"fail-open policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: CRLPolicyFailOpen}, ""},
+		{"both sources", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPEM: "p"}, "not both"},
+		{"absolute crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "/etc/shadow"}, "must be relative to the cert store"},
+		{"traversal crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "../../etc/shadow"}, "must be relative to the cert store"},
+		{"unknown policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: "maybe"}, "crlPolicy must be"},
+		{"policy without a source", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLPolicy: CRLPolicyFailOpen}, "no crlFile or crlPEM"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.ca.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestClientCertPassthroughValidation covers tls.clientAuth.identityHeaders: the
+// default header name needs no config, and a custom one must be a real header
+// token that does not collide with the X-Forwarded-* headers gpm sets itself.
+func TestClientCertPassthroughValidation(t *testing.T) {
+	withHeaders := func(ih *ClientCertHeaders) TLSSettings {
+		return TLSSettings{ForceSSL: true, ClientAuth: &ClientAuth{CARef: "corp", IdentityHeaders: ih}}
+	}
+	tests := []struct {
+		name    string
+		tls     TLSSettings
+		wantErr string
+	}{
+		{"defaults", withHeaders(&ClientCertHeaders{}), ""},
+		{"all attributes", withHeaders(&ClientCertHeaders{SAN: true, Serial: true, Fingerprint: true}), ""},
+		{"custom name", withHeaders(&ClientCertHeaders{SubjectHeader: "X-Corp-Client"}), ""},
+		{"header with a space", withHeaders(&ClientCertHeaders{SubjectHeader: "X Corp"}), "not a valid header name"},
+		{"header with CRLF", withHeaders(&ClientCertHeaders{SubjectHeader: "X-C\r\nInjected"}), "not a valid header name"},
+		{"x-forwarded collision", withHeaders(&ClientCertHeaders{SubjectHeader: "X-Forwarded-User"}), "must not be an X-Forwarded-*"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.tls.validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestClientCertAuthModeValidation covers the client-cert auth middleware mode:
+// it takes no identity provider, and requiredRoles without a subject mapping
+// could never match, so it is refused rather than compiled into a dead gate.
+func TestClientCertAuthModeValidation(t *testing.T) {
+	mw := func(a AuthMiddleware) Middleware {
+		return Middleware{ObjectMeta: ObjectMeta{Name: "cert"}, Type: MWTypeAuth, Auth: &a}
+	}
+	tests := []struct {
+		name    string
+		mw      Middleware
+		wantErr string
+	}{
+		{"bare client-cert", mw(AuthMiddleware{Mode: AuthModeClientCert}), ""},
+		{"with a subject mapping", mw(AuthMiddleware{Mode: AuthModeClientCert,
+			RequiredRoles: []string{"admin"}, ClientCertRoles: map[string]string{"ops": "admin"}}), ""},
+		{"identity provider set", mw(AuthMiddleware{Mode: AuthModeClientCert, IdentityProvider: "authentik"}),
+			"not used in client-cert mode"},
+		{"roles without a mapping", mw(AuthMiddleware{Mode: AuthModeClientCert, RequiredRoles: []string{"admin"}}),
+			"needs auth.clientCertRoles"},
+		{"mapping in another mode", mw(AuthMiddleware{Mode: AuthModeForwardAuth, IdentityProvider: "authentik",
+			ClientCertRoles: map[string]string{"ops": "admin"}}), "only used in client-cert mode"},
+		{"no provider in another mode", mw(AuthMiddleware{Mode: AuthModeOIDC}), "auth.identityProvider is required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.mw.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}

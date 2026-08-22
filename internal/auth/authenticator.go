@@ -486,7 +486,7 @@ type Principal struct {
 	Name      string
 	Role      Role
 	IdP       string
-	SessionID string
+	SessionID string `json:"-"`
 	// CSRFToken is the session's anti-CSRF token, surfaced to the SPA via
 	// /api/me and required back as the X-CSRF-Token header on mutating requests.
 	CSRFToken string `json:"csrfToken,omitempty"`

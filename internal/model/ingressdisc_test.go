@@ -156,6 +156,80 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 				TLS:      TLSSettings{CertificateRef: "wildcard"},
 			}}
 		}, "reserved"},
+
+		// Per-profile allowedDomainSuffixes: narrowing is fine, widening is not.
+		{"template suffix override, valid subset", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"example.com"}
+			d.Template.AllowedDomainSuffixes = []string{"apps.example.com"}
+		}, ""},
+		{"template suffix override, exact match to global is a valid subset", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"example.com"}
+			d.Template.AllowedDomainSuffixes = []string{"example.com"}
+		}, ""},
+		{"template suffix override widens the global list", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"apps.example.com"}
+			d.Template.AllowedDomainSuffixes = []string{"example.com"}
+		}, "not covered by the global allowedDomainSuffixes"},
+		{"template suffix override names a different domain entirely", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"example.com"}
+			d.Template.AllowedDomainSuffixes = []string{"example.net"}
+		}, "not covered by the global allowedDomainSuffixes"},
+		{"template suffix override must itself be a valid domain", func(d *IngressDiscoverySettings) {
+			d.Template.AllowedDomainSuffixes = []string{"*.example.com"}
+		}, "not a valid domain suffix"},
+		{"profile suffix override, valid subset", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"example.com"}
+			d.Profiles = map[string]IngressHostTemplate{"public": {
+				Upstream:              Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:                   TLSSettings{CertificateRef: "wildcard"},
+				AllowedDomainSuffixes: []string{"public.example.com"},
+			}}
+		}, ""},
+		{"profile suffix override widens the global list", func(d *IngressDiscoverySettings) {
+			d.AllowedDomainSuffixes = []string{"internal.example.com"}
+			d.Profiles = map[string]IngressHostTemplate{"public": {
+				Upstream:              Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:                   TLSSettings{CertificateRef: "wildcard"},
+				AllowedDomainSuffixes: []string{"example.com"},
+			}}
+		}, `profiles["public"].allowedDomainSuffixes "example.com" is not covered`},
+
+		// profileSelection.
+		{"profileSelection empty is the default", func(d *IngressDiscoverySettings) { d.ProfileSelection = "" }, ""},
+		{"profileSelection annotation-or-rules accepted", func(d *IngressDiscoverySettings) {
+			d.ProfileSelection = ProfileSelectionAnnotationOrRules
+		}, ""},
+		{"profileSelection rules-only accepted", func(d *IngressDiscoverySettings) {
+			d.ProfileSelection = ProfileSelectionRulesOnly
+		}, ""},
+		{"profileSelection rejects an unknown value", func(d *IngressDiscoverySettings) {
+			d.ProfileSelection = "bogus"
+		}, "profileSelection must be"},
+
+		// profileRules: operator-side selection, strictly stronger than the
+		// annotation, so it is validated as strictly as everything else here.
+		{"rule targeting the default template", func(d *IngressDiscoverySettings) {
+			d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring", Profile: DefaultProfileName}}
+		}, ""},
+		{"rule targeting a defined profile", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
+				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:      TLSSettings{CertificateRef: "wildcard"},
+			}}
+			d.ProfileRules = []IngressProfileRule{{MatchLabels: map[string]string{"team": "core"}, Profile: "sso-internal"}}
+		}, ""},
+		{"rule targeting an undefined profile", func(d *IngressDiscoverySettings) {
+			d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring", Profile: "no-such-profile"}}
+		}, `profileRules[0].profile "no-such-profile" is not defined`},
+		{"rule with no profile at all", func(d *IngressDiscoverySettings) {
+			d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring"}}
+		}, "profileRules[0].profile is required"},
+		{"rule with a bad namespace", func(d *IngressDiscoverySettings) {
+			d.ProfileRules = []IngressProfileRule{{Namespace: "Not A Namespace", Profile: DefaultProfileName}}
+		}, "profileRules[0].namespace"},
+		{"rule with an empty matchLabels key", func(d *IngressDiscoverySettings) {
+			d.ProfileRules = []IngressProfileRule{{MatchLabels: map[string]string{"": "x"}, Profile: DefaultProfileName}}
+		}, "profileRules[0].matchLabels has an empty key"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,6 +377,92 @@ func TestResolveProfile(t *testing.T) {
 	}
 }
 
+// ResolveProfileFor is strictly stronger than the annotation: a matching rule
+// wins regardless of what the (possibly hostile) annotation says, and
+// "rules-only" mode never reads the annotation at all.
+func TestResolveProfileFor(t *testing.T) {
+	sso := IngressHostTemplate{
+		Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+		Middlewares: []string{"sso"},
+	}
+	def := IngressHostTemplate{
+		Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+		TLS:      TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+	}
+	base := IngressDiscoverySettings{
+		Template: def,
+		Profiles: map[string]IngressHostTemplate{"sso-internal": sso, "public-ratelimited": {}},
+	}
+
+	t.Run("first matching rule wins over the annotation", func(t *testing.T) {
+		d := base
+		d.ProfileRules = []IngressProfileRule{
+			{Namespace: "monitoring", Profile: "sso-internal"},
+			{Profile: DefaultProfileName}, // catch-all; must never be reached first
+		}
+		// The Ingress asks for public-ratelimited via the annotation; the rule
+		// overrides it without even looking.
+		got, name, ok := d.ResolveProfileFor("monitoring", nil, "public-ratelimited")
+		if !ok || name != "sso-internal" || strings.Join(got.Middlewares, ",") != "sso" {
+			t.Fatalf("ResolveProfileFor = (%+v, %q, %v), want the ruled sso-internal", got, name, ok)
+		}
+	})
+
+	t.Run("rule matches on labels", func(t *testing.T) {
+		d := base
+		d.ProfileRules = []IngressProfileRule{{MatchLabels: map[string]string{"team": "core"}, Profile: "sso-internal"}}
+		if _, name, ok := d.ResolveProfileFor("other-ns", map[string]string{"team": "core", "extra": "x"}, ""); !ok || name != "sso-internal" {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want sso-internal (label subset matched)", name, ok)
+		}
+		if _, name, ok := d.ResolveProfileFor("other-ns", map[string]string{"team": "edge"}, ""); !ok || name != DefaultProfileName {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want the default (label mismatch, no rule matches)", name, ok)
+		}
+	})
+
+	t.Run("rule can target the default template by name", func(t *testing.T) {
+		d := base
+		d.ProfileRules = []IngressProfileRule{{Namespace: "public", Profile: DefaultProfileName}}
+		if _, name, ok := d.ResolveProfileFor("public", nil, "sso-internal"); !ok || name != DefaultProfileName {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want template (rule overrides the annotation)", name, ok)
+		}
+	})
+
+	t.Run("no rule matches: annotation-or-rules falls back to the annotation", func(t *testing.T) {
+		d := base
+		d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring", Profile: "sso-internal"}}
+		if _, name, ok := d.ResolveProfileFor("other-ns", nil, "public-ratelimited"); !ok || name != "public-ratelimited" {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want the annotation's choice", name, ok)
+		}
+		if _, name, ok := d.ResolveProfileFor("other-ns", nil, ""); !ok || name != DefaultProfileName {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want the default (absent annotation)", name, ok)
+		}
+		if _, _, ok := d.ResolveProfileFor("other-ns", nil, "no-such-profile"); ok {
+			t.Fatal("an unresolvable annotation must still fail closed when no rule matches")
+		}
+	})
+
+	t.Run("rules-only never reads the annotation", func(t *testing.T) {
+		d := base
+		d.ProfileSelection = ProfileSelectionRulesOnly
+		d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring", Profile: "sso-internal"}}
+		// A namespace match still wins.
+		if _, name, ok := d.ResolveProfileFor("monitoring", nil, "public-ratelimited"); !ok || name != "sso-internal" {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want the rule's sso-internal", name, ok)
+		}
+		// No rule matches: the default template, NOT the annotation's choice, and
+		// NOT a skip - exactly as if the Ingress carried no annotation at all.
+		got, name, ok := d.ResolveProfileFor("other-ns", nil, "public-ratelimited")
+		if !ok || name != DefaultProfileName || got.TLS.CertificateRef != def.TLS.CertificateRef {
+			t.Fatalf("ResolveProfileFor = (%+v, %q, %v), want the default template, annotation ignored", got, name, ok)
+		}
+		// Even a garbage annotation value must not cause a skip in rules-only mode.
+		if _, name, ok := d.ResolveProfileFor("other-ns", nil, "../../etc/passwd"); !ok || name != DefaultProfileName {
+			t.Fatalf("ResolveProfileFor = (_, %q, %v), want the default (annotation never consulted)", name, ok)
+		}
+	})
+}
+
 // Settings are persisted as YAML, so a profile map that did not round-trip would
 // be silently dropped on the next save - the chain would vanish and every host
 // selecting it would start being skipped.
@@ -340,6 +500,54 @@ func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(in.IngressDiscovery.Profiles, out.IngressDiscovery.Profiles) {
 		t.Fatalf("profiles did not round-trip:\n got %+v\nwant %+v", out.IngressDiscovery.Profiles, in.IngressDiscovery.Profiles)
+	}
+	if err := out.Validate(); err != nil {
+		t.Fatalf("round-tripped settings must still validate: %v", err)
+	}
+}
+
+// profileRules, profileSelection and a profile's own allowedDomainSuffixes are
+// as persistence-critical as the profile map itself - a dropped rule silently
+// hands profile selection back to the untrusted annotation.
+func TestProfileRulesSurviveYAMLRoundTrip(t *testing.T) {
+	in := DefaultSettings()
+	in.IngressDiscovery = validIngressDiscovery()
+	in.IngressDiscovery.AllowedDomainSuffixes = []string{"example.com"}
+	in.IngressDiscovery.Template.AllowedDomainSuffixes = []string{"apps.example.com"}
+	in.IngressDiscovery.Profiles = map[string]IngressHostTemplate{
+		"sso-internal": {
+			Upstream:              Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			TLS:                   TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+			AllowedDomainSuffixes: []string{"internal.example.com"},
+		},
+	}
+	in.IngressDiscovery.ProfileSelection = ProfileSelectionRulesOnly
+	in.IngressDiscovery.ProfileRules = []IngressProfileRule{
+		{Namespace: "monitoring", MatchLabels: map[string]string{"team": "core"}, Profile: "sso-internal"},
+		{Profile: DefaultProfileName},
+	}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("fixture must be valid: %v", err)
+	}
+	b, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Settings
+	if err := yaml.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in.IngressDiscovery.ProfileRules, out.IngressDiscovery.ProfileRules) {
+		t.Fatalf("profileRules did not round-trip:\n got %+v\nwant %+v", out.IngressDiscovery.ProfileRules, in.IngressDiscovery.ProfileRules)
+	}
+	if out.IngressDiscovery.ProfileSelection != ProfileSelectionRulesOnly {
+		t.Fatalf("profileSelection = %q, want %q", out.IngressDiscovery.ProfileSelection, ProfileSelectionRulesOnly)
+	}
+	if strings.Join(out.IngressDiscovery.Template.AllowedDomainSuffixes, ",") != "apps.example.com" {
+		t.Fatalf("template.allowedDomainSuffixes = %v", out.IngressDiscovery.Template.AllowedDomainSuffixes)
+	}
+	if strings.Join(out.IngressDiscovery.Profiles["sso-internal"].AllowedDomainSuffixes, ",") != "internal.example.com" {
+		t.Fatalf("profiles[sso-internal].allowedDomainSuffixes = %v", out.IngressDiscovery.Profiles["sso-internal"].AllowedDomainSuffixes)
 	}
 	if err := out.Validate(); err != nil {
 		t.Fatalf("round-tripped settings must still validate: %v", err)
@@ -456,6 +664,25 @@ func TestAllowedDomain(t *testing.T) {
 	// With no suffixes configured nothing is allowed (fail closed).
 	if (IngressDiscoverySettings{}).AllowedDomain("app.example.com") {
 		t.Fatal("an empty suffix list must allow nothing")
+	}
+}
+
+// AllowedDomainFor uses the resolved template's OWN narrower list when it sets
+// one, and only falls back to the global list when it does not - a profile
+// with an override must never see names the global list alone would allow.
+func TestAllowedDomainFor(t *testing.T) {
+	d := IngressDiscoverySettings{AllowedDomainSuffixes: []string{"example.com"}}
+	unset := IngressHostTemplate{}
+	narrowed := IngressHostTemplate{AllowedDomainSuffixes: []string{"public.example.com"}}
+
+	if !d.AllowedDomainFor(unset, "anything.example.com") {
+		t.Fatal("a template with no override must fall back to the global list")
+	}
+	if !d.AllowedDomainFor(narrowed, "app.public.example.com") {
+		t.Fatal("a name within the narrowed suffix must be allowed")
+	}
+	if d.AllowedDomainFor(narrowed, "other.example.com") {
+		t.Fatal("a name outside the narrowed suffix must be rejected even though the global list would allow it")
 	}
 }
 

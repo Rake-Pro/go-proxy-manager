@@ -16,6 +16,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
+	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
@@ -85,9 +86,19 @@ type Deps struct {
 	// IngressDiscoveryStatus, if set, returns the last reconcile result
 	// (marshalled as-is) for GET /ingress-discovery/status. May be nil (501).
 	IngressDiscoveryStatus func() any
+	// IngressDiscoveryPlan, if set, returns the read-only preview of what a
+	// reconcile WOULD create, update, delete and skip (GET
+	// /ingress-discovery/plan), without changing anything. Mirrors DNSSyncPlan.
+	// May be nil (501).
+	IngressDiscoveryPlan func(context.Context) (any, error)
 	// IngressDiscoveryEnabled, if set, reports whether Ingress discovery is
 	// configured, for the capability probe. May be nil (reported disabled).
 	IngressDiscoveryEnabled func() bool
+	// Role is the static HA role of this instance (docs/design/ha.md phase 1).
+	// A follower refuses every config write with 503 and reports itself
+	// read-only in the capability probe; reads are unaffected. The zero value is
+	// the leader, i.e. today's single-node behaviour.
+	Role ha.Role
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -98,6 +109,7 @@ type capabilities struct {
 	APITokens        apiTokenCapability         `json:"apiTokens"`
 	DNSSync          dnsSyncCapability          `json:"dnsSync"`
 	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
+	HA               haCapability               `json:"ha"`
 	// ScopeSubjects is model.ScopePlurals, served so the SPA renders the token
 	// form from the authoritative list instead of a hand-maintained copy. The
 	// copy drifted the moment ingress-discovery was added, granting the UI no
@@ -128,6 +140,14 @@ type ingressDiscoveryCapability struct {
 	// settings. The SPA uses it to show the status panel rather than offering a
 	// control that cannot work.
 	Enabled bool `json:"enabled"`
+}
+
+type haCapability struct {
+	// Role is "leader" or "follower". ReadOnly is true on a follower: the SPA
+	// greys out every write control rather than accepting a change the API will
+	// refuse (see internal/ui/static/app.js).
+	Role     string `json:"role"`
+	ReadOnly bool   `json:"readOnly"`
 }
 
 func (d Deps) author(r *http.Request) store.Author {
@@ -350,6 +370,7 @@ func New(d Deps) http.Handler {
 			IngressDiscovery: ingressDiscoveryCapability{
 				Enabled: d.IngressDiscoveryEnabled != nil && d.IngressDiscoveryEnabled(),
 			},
+			HA:            haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
 			ScopeSubjects: model.ScopePlurals,
 		})
 	})
@@ -439,6 +460,27 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.IngressDiscoveryStatus())
+	}))
+	// Dry run, mirroring GET /dns-sync/plan exactly: the same per-host decisions
+	// Reconcile would take, computed without writing anything. It is a read, so
+	// it takes ingress-discovery:read.
+	mux.HandleFunc("GET /ingress-discovery/plan", d.scoped("ingress-discovery:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.IngressDiscoveryPlan == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("Ingress discovery is not wired"))
+			return
+		}
+		plan, err := d.IngressDiscoveryPlan(r.Context())
+		if err != nil {
+			// Same reasoning as the reconcile route: a run in flight is a conflict,
+			// and a preview of a moving target is worth less than an honest 409.
+			if errors.Is(err, k8s.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, plan)
 	}))
 
 	// Live upstream-group health (read-only): which upstreams each group currently
@@ -595,7 +637,30 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, settings)
 	}))
 
+	if d.Role.IsFollower() {
+		return followerReadOnly(mux)
+	}
 	return mux
+}
+
+// errFollowerReadOnly names the role that CAN take the write, so the operator
+// (or the SPA) is told where to make the change rather than just that it failed.
+var errFollowerReadOnly = fmt.Errorf(
+	"this instance runs as an HA follower (%s=%s) and is read-only: make config changes on the leader (%s=%s), they replicate here by git pull",
+	ha.EnvRole, ha.RoleFollower, ha.EnvRole, ha.RoleLeader)
+
+// followerReadOnly refuses every mutating request on a follower. Method-based
+// rather than route-based so a route added later is refused by default: on this
+// mux every write is a POST/PUT/DELETE and every GET/HEAD is a read.
+func followerReadOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+		default:
+			writeErr(w, http.StatusServiceUnavailable, errFollowerReadOnly)
+		}
+	})
 }
 
 // resource describes one config kind and how to project/decode it.

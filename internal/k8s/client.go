@@ -78,6 +78,12 @@ type Ingress struct {
 		Name        string            `json:"name"`
 		Namespace   string            `json:"namespace"`
 		Annotations map[string]string `json:"annotations"`
+		// Labels is decoded so settings.ingressDiscovery.profileRules can match on
+		// them (operator-side profile selection). It contributes to profile
+		// SELECTION only, never to the derived host's own object metadata - the
+		// same containment as everything else that comes off an untrusted
+		// Ingress.
+		Labels map[string]string `json:"labels"`
 	} `json:"metadata"`
 	Spec struct {
 		Rules []struct {
