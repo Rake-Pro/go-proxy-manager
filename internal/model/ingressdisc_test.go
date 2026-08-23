@@ -46,7 +46,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"custom annotationPrefix accepted", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "acme.corp.internal" }, ""},
 		{"single-label annotationPrefix accepted", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm" }, ""},
 		{"annotationPrefix with a slash rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm.rake.pro/x" }, "annotationPrefix"},
-		{"annotationPrefix with uppercase rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "GPM.rake.pro" }, "annotationPrefix"},
+		{"annotationPrefix with uppercase rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "GPM.example.com" }, "annotationPrefix"},
 		{"annotationPrefix with a leading dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = ".gpm.rake.pro" }, "annotationPrefix"},
 		{"annotationPrefix with a trailing dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm.rake.pro." }, "annotationPrefix"},
 		{"annotationPrefix with a double dot rejected", func(d *IngressDiscoverySettings) { d.AnnotationPrefix = "gpm..pro" }, "annotationPrefix"},

@@ -1,5 +1,16 @@
 # Architecture
 
+## Relationship to Nginx Proxy Manager
+
+go-proxy-manager is a clean-room reimplementation of the ideas behind
+[Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager)
+(MIT) and [NPMplus](https://github.com/ZoeyVid/NPMplus) (AGPLv3); no code or
+configuration was copied from either. NPMplus is referenced as behavioural
+inspiration only, given its AGPLv3 license. The one place either project's
+format is read directly is `internal/importer/`, which parses Nginx Proxy
+Manager's export schema to migrate hosts, certificates, and access lists into
+go-proxy-manager's own config model.
+
 go-proxy-manager is one process with two cooperating halves: a **control plane**
 that owns configuration and a **data plane** that serves traffic. They are
 decoupled by an in-memory snapshot — a config change recompiles the data plane

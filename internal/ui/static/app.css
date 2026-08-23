@@ -94,24 +94,17 @@ select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible, .switch:
   box-shadow:inset 1px 0 0 var(--brand);
 }
 .nav-item.active svg { opacity:1; color:var(--brand); }
-.sidebar-footer {
-  padding:13px 18px; border-top:1px solid var(--border-soft);
-  display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted);
-  font-family:var(--mono);
-}
 .dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
 .dot.ok { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,132,.16); }
 .dot.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(232,177,76,.16); }
 .dot.err { background:var(--err); box-shadow:0 0 0 3px rgba(229,104,122,.16); }
-.dot.live { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,132,.16); animation:pulse 2.4s ease-in-out infinite; }
-@keyframes pulse { 0%,100%{ box-shadow:0 0 0 3px rgba(63,185,132,.16);} 50%{ box-shadow:0 0 0 5px rgba(63,185,132,.05);} }
 
 /* main */
 .main { flex:1 1 auto; margin-left:var(--sidebar-w); min-width:0; display:flex; flex-direction:column; }
 
 /* topbar */
 .topbar {
-  position:sticky; top:0; z-index:30;
+  position:sticky; top:0; z-index:30; min-width:0;
   display:flex; align-items:center; gap:16px;
   padding:13px 28px; background:var(--topbar-bg);
   backdrop-filter:blur(10px); border-bottom:1px solid var(--border);
@@ -119,7 +112,12 @@ select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible, .switch:
 .topbar .menu-btn { display:none; background:var(--raised); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:6px 9px; }
 .page-title { font-family:var(--display); font-size:19px; font-weight:600; letter-spacing:-.4px; margin:0; }
 .topbar .spacer { flex:1 1 auto; }
-.topbar .ident { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+/* min-width:0 lets these flex children shrink and ellipsize instead of
+   forcing the topbar wider than the viewport (a flex item's default
+   min-width is auto, i.e. its content width, which is what caused the
+   identity block to push past the right edge on a packed topbar). */
+.topbar .ident { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; min-width:0; max-width:100%; }
+.instance, .badge { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .instance { font-family:var(--mono); font-size:12.5px; color:var(--cyan); }
 .badge {
   font-family:var(--mono); font-size:11.5px; padding:3px 8px; border-radius:6px;
@@ -129,7 +127,7 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .principal {
   display:flex; align-items:center; gap:7px; padding:4px 10px 4px 4px;
   background:var(--raised); border:1px solid var(--border); border-radius:999px;
-  font-size:12.5px; color:var(--muted);
+  font-size:12.5px; color:var(--muted); min-width:0; max-width:260px;
 }
 .avatar {
   width:22px; height:22px; border-radius:50%; flex:0 0 22px;
@@ -138,6 +136,10 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
   font-weight:600; font-size:11px; color:#0E1320; font-family:var(--display);
 }
 .principal b { color:var(--text); font-weight:600; }
+/* The name/role/idp text is a flex item with no flex-basis, so its default
+   min-width:auto (content width) is what pushed the topbar wider than the
+   viewport - min-width:0 lets it shrink and ellipsize instead. */
+.principal > span:last-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* content */
 .content { padding:28px; max-width:1156px; width:100%; margin:0 auto; }
@@ -355,6 +357,7 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .hint.warn { color:var(--warn); }
 .inline-fields { display:flex; gap:9px; }
 .inline-fields .field-group { flex:1; margin:0; }
+.field-narrow { flex:0 1 16rem; }
 
 /* toggle switch */
 .toggle-line { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid var(--border-soft); }
@@ -438,6 +441,22 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .empty-state { text-align:center; padding:46px 20px; color:var(--muted); border:1px dashed var(--border); border-radius:var(--r-card); }
 .empty-state .es-title { font-family:var(--display); font-size:16px; color:var(--text); margin-bottom:6px; font-weight:600; }
 .empty-state .es-sub { font-size:13px; margin-bottom:16px; }
+
+/* scope table (API tokens create form) */
+.scope-table-wrap { max-height:420px; overflow-y:auto; }
+.scope-table { min-width:0; }
+.scope-table thead th { position:sticky; top:0; z-index:1; }
+.scope-table .scope-check { width:76px; text-align:center; white-space:nowrap; }
+.scope-table td.mono { font-size:12.5px; }
+.scope-table input[type="checkbox"] { accent-color:var(--brand); width:15px; height:15px; cursor:pointer; }
+.scope-table input[type="checkbox"]:disabled { cursor:not-allowed; opacity:.45; }
+.scope-table .scope-all { display:inline-flex; justify-content:center; padding:0; font-size:11px; text-transform:uppercase; letter-spacing:.7px; color:var(--faint); font-weight:600; }
+.scope-table .scope-all:hover { background:transparent; color:var(--text); }
+.scope-group td {
+  background:var(--raised); color:var(--faint); font-size:11px; text-transform:uppercase;
+  letter-spacing:.7px; font-weight:600; padding:7px 16px; border-bottom:1px solid var(--border);
+}
+.scope-group:first-child td { border-top:0; }
 
 /* checkbox multi-select */
 .check-list { display:flex; flex-direction:column; gap:2px; max-height:560px; overflow-y:auto; border:1px solid var(--border); border-radius:var(--r-input); background:var(--raised); padding:6px; }

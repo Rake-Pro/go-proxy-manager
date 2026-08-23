@@ -446,21 +446,21 @@ this:
 
 | host | middlewares | access lists |
 |---|---|---|
+| `blog` | *(none)* | *(none — public)* |
+| `grafana` | `sso` | `vpn-only` |
 | `paste` | `rate-limit` | *(none — deliberately public)* |
-| `notes` | `joplin-login-lan` | `home-vpn` |
-| `wiki` | `rate-limit` | `home-vpn` |
-| `cloud` | `nextcloud-login-lan` | *(none — public)* |
-| `plex` | *(none)* | *(none — public)* |
-| `radarr` / `jackett` | `sso` / `sso-lan` | `home-vpn` |
-| `alertmanager` | `sso-lan` | `home-vpn` |
-| most others | *(none)* | `home-vpn` |
+| `app-with-own-login` | `app-login-lan` | `vpn-only` |
 
-Only the last group matches the single template. Adopting anything else into
-discovery would either **drop** its `sso` / `rate-limit` / login middleware, or
-**impose** `home-vpn` on a host that is public on purpose. Both are
-security-relevant regressions, and both are silent — the host keeps serving, just
-with a chain nobody chose. So in practice discovery could only ever adopt the
-uniform tail of the fleet, which is not where the operational cost is.
+A single template supplies one fixed middleware and access-list combination for
+every host derived from it, and none of the four above share the same
+combination. Deriving `grafana` or `app-with-own-login` from a template built
+for `blog` or `paste` would **drop** their `sso` / login middleware entirely;
+deriving `blog` or `paste` from a template built for `grafana` would **impose**
+`vpn-only` on hosts that are public on purpose. Both are security-relevant
+regressions, and both are silent — the host keeps serving, just with a chain
+nobody chose. So in practice discovery could only ever adopt the subset of the
+fleet that happens to share one template's fixed chain, which is not where the
+operational cost is.
 
 ### Options
 

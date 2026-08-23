@@ -1,6 +1,6 @@
 // Package version exposes build metadata, populated at link time via -ldflags.
 // Reporting the real build identity (not a hardcoded constant) is an explicit
-// project goal: the NPM fork's false "vX available" came from a stale package.json.
+// project goal: a stale upstream-version banner erodes trust in the update check.
 package version
 
 import (
