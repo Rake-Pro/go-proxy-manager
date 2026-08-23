@@ -120,11 +120,10 @@ func TestStreamManagerReconcile(t *testing.T) {
 	defer m.stopAll()
 
 	host := model.StreamHost{
-		ObjectMeta:  model.ObjectMeta{Name: "s"},
-		ListenPort:  port,
-		Protocol:    "tcp",
-		ForwardHost: "127.0.0.1",
-		ForwardPort: portOf(t, backend),
+		ObjectMeta: model.ObjectMeta{Name: "s"},
+		ListenPort: port,
+		Protocol:   "tcp",
+		Target:     model.StreamTarget{Host: "127.0.0.1", Port: portOf(t, backend)},
 	}
 	m.reload(model.Config{StreamHosts: []model.StreamHost{host}}, nil)
 	if len(m.tcp) != 1 || m.tcp[port] == nil {

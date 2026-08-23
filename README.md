@@ -38,8 +38,8 @@ builds it with a narrower, more focused design:
   sticky ip-hash across multiple backends, with active TCP/HTTP health checks,
   passive connect-failure detection, and signed sticky-session cookies with a
   configurable TTL
-- Redirect hosts, raw TCP/UDP **stream** forwarding, and dead hosts (absorb
-  unmatched vhosts)
+- Redirect hosts, raw TCP/UDP **stream** forwarding, and parked hosts (reserve a
+  name without serving anything; absorb unmatched vhosts)
 - **Stream TLS/SNI**: several TCP stream hosts share one port, routed by the SNI
   in the ClientHello, either passed through untouched (never decrypted) or
   terminated at gpm; plus **L4 access lists** (IP + geo) evaluated before any
@@ -173,7 +173,7 @@ tls: {certificateRef: wildcard, forceSSL: true}
 over plain HTTP on `:80` with no certificate configured yet; add `tls` once
 you're ready to issue or attach one.
 
-The complete object reference (proxy/redirect/stream/dead hosts, certificates,
+The complete object reference (proxy/redirect/stream/parked hosts, certificates,
 DNS providers, identity providers, access lists, middlewares, settings) with
 validation rules and examples is in **[docs/configuration.md](docs/configuration.md)**.
 

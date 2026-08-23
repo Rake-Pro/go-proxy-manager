@@ -20,7 +20,7 @@ var kindDir = map[string]string{
 	"ProxyHost":        "proxy-hosts",
 	"RedirectHost":     "redirect-hosts",
 	"StreamHost":       "stream-hosts",
-	"DeadHost":         "dead-hosts",
+	"ParkedHost":       "parked-hosts",
 	"Certificate":      "certificates",
 	"ClientCA":         "client-cas",
 	"DNSProvider":      "dns-providers",
@@ -29,6 +29,48 @@ var kindDir = map[string]string{
 	"AccessList":       "access-lists",
 	"Middleware":       "middlewares",
 	"APIToken":         "api-tokens",
+}
+
+// legacyKindDirs maps a retired kind subdirectory to the one that replaced it.
+// A tree still carrying the old directory is REFUSED rather than migrated: the
+// config store is a git working tree, and silently renaming a directory under
+// the operator would produce a commit they never authored (and a diff their
+// GitOps source of truth does not have). See checkLegacyKindDirs.
+var legacyKindDirs = map[string]string{
+	"dead-hosts": "parked-hosts",
+}
+
+// checkLegacyKindDirs refuses to load a config tree that still holds objects in
+// a retired kind directory while its replacement holds none, naming the exact
+// git commands that fix it. Callers hold s.mu.
+func (s *Store) checkLegacyKindDirs() error {
+	for old, current := range legacyKindDirs {
+		if countYAML(filepath.Join(s.dir, old)) == 0 {
+			continue
+		}
+		if countYAML(filepath.Join(s.dir, current)) > 0 {
+			continue
+		}
+		return fmt.Errorf("config/%s/ holds objects but config/%s/ is empty: that kind was renamed and gpm will not rewrite a git-backed tree for you. Fix it in the config repo (%s) and restart:\n"+
+			"    git mv config/%s config/%s\n"+
+			"    git commit -m \"Rename config/%s to config/%s\"", old, current, s.dir, old, current, old, current)
+	}
+	return nil
+}
+
+// countYAML returns how many .yaml files sit directly in dir (0 if absent).
+func countYAML(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".yaml" {
+			n++
+		}
+	}
+	return n
 }
 
 const settingsFile = "settings.yaml"
@@ -117,6 +159,9 @@ func (s *Store) Init(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.checkLegacyKindDirs(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return err
 	}
@@ -155,6 +200,10 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	cfg.SchemaVersion = model.SchemaVersion
 	var err error
 
+	if err = s.checkLegacyKindDirs(); err != nil {
+		return cfg, model.Settings{}, err
+	}
+
 	if cfg.ProxyHosts, err = loadDir[model.ProxyHost](s.dir, "proxy-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
@@ -164,7 +213,7 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	if cfg.StreamHosts, err = loadDir[model.StreamHost](s.dir, "stream-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.DeadHosts, err = loadDir[model.DeadHost](s.dir, "dead-hosts"); err != nil {
+	if cfg.ParkedHosts, err = loadDir[model.ParkedHost](s.dir, "parked-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	if cfg.Certificates, err = loadDir[model.Certificate](s.dir, "certificates"); err != nil {
@@ -364,8 +413,8 @@ func findObject(cfg model.Config, kind, name string) (model.Object, bool) {
 		for _, o := range cfg.StreamHosts {
 			list = append(list, o)
 		}
-	case "DeadHost":
-		for _, o := range cfg.DeadHosts {
+	case "ParkedHost":
+		for _, o := range cfg.ParkedHosts {
 			list = append(list, o)
 		}
 	case "Certificate":

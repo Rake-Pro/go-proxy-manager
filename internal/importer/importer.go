@@ -43,7 +43,7 @@ type CertCopy struct {
 
 // Result is the full outcome of a best-effort import.
 type Result struct {
-	Objects  []model.Object // mapped ProxyHost/RedirectHost/DeadHost/StreamHost/AccessList/Certificate values
+	Objects  []model.Object // mapped ProxyHost/RedirectHost/ParkedHost/StreamHost/AccessList/Certificate values
 	Certs    []CertCopy
 	Warnings []Warning
 	Summary  map[string]int // counts keyed by kind, e.g. {"ProxyHost":7,"Certificate":2,...}
@@ -133,7 +133,7 @@ func (s *importState) run() error {
 	if err := s.importRedirectionHosts(); err != nil {
 		return err
 	}
-	if err := s.importDeadHosts(); err != nil {
+	if err := s.importParkedHosts(); err != nil {
 		return err
 	}
 	if err := s.importStreams(); err != nil {

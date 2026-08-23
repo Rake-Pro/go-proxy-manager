@@ -66,7 +66,7 @@ func metricsHook() MetricsHook {
 type hostNameKey struct{}
 
 // unknownHostLabel is the host label for a request that matched no proxy host -
-// an unknown Host header, or a redirect/dead host. Folding them all onto one
+// an unknown Host header, or a redirect/parked host. Folding them all onto one
 // label is what keeps an unrouted flood from inflating the series count.
 const unknownHostLabel = "-"
 

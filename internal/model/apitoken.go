@@ -29,7 +29,7 @@ var ScopePlurals = []string{
 	"proxy-hosts",
 	"redirect-hosts",
 	"stream-hosts",
-	"dead-hosts",
+	"parked-hosts",
 	"certificates",
 	"client-cas",
 	"dns-providers",

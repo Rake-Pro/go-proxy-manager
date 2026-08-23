@@ -242,7 +242,11 @@ func (s *importState) importRedirectionHosts() error {
 	return nil
 }
 
-func (s *importState) importDeadHosts() error {
+// importParkedHosts reads NPM's `dead_host` table - NPM's own name for a domain
+// that answers 404 and nothing else - and emits gpm ParkedHost objects. The
+// table name stays NPM's because that is the schema on disk; only the gpm-side
+// vocabulary is ours.
+func (s *importState) importParkedHosts() error {
 	want := []string{
 		"id", "domain_names", "certificate_id", "ssl_forced",
 		"hsts_enabled", "hsts_subdomains", "enabled", "advanced_config", "is_deleted",
@@ -264,13 +268,13 @@ func (s *importState) importDeadHosts() error {
 		domains, dok := parseDomains(asString(r["domain_names"]))
 		label := fmt.Sprintf("dead_host #%d (%s)", id, domainLabel(domains))
 		if !dok {
-			s.warn(label, "domain_names", "could not parse domain_names; dead host skipped")
+			s.warn(label, "domain_names", "could not parse domain_names; parked host skipped")
 			continue
 		}
 
-		name := s.uniqueName("DeadHost", domains[0], "deadhost", id)
+		name := s.uniqueName("ParkedHost", domains[0], "parkedhost", id)
 
-		dh := model.DeadHost{
+		ph := model.ParkedHost{
 			ObjectMeta: model.ObjectMeta{
 				Name:        name,
 				DisplayName: domains[0],
@@ -285,7 +289,7 @@ func (s *importState) importDeadHosts() error {
 				"raw nginx advanced config not imported (go-proxy-manager uses typed middleware, not raw nginx); review and re-create as middleware/headers")
 		}
 
-		s.add(label, "", dh)
+		s.add(label, "", ph)
 	}
 	return nil
 }
@@ -338,10 +342,12 @@ func (s *importState) importStreams() error {
 				Name:     name,
 				Disabled: asInt(r["enabled"]) == 0,
 			},
-			ListenPort:  int(asInt(r["incoming_port"])),
-			Protocol:    proto,
-			ForwardHost: host,
-			ForwardPort: int(asInt(r["forwarding_port"])),
+			ListenPort: int(asInt(r["incoming_port"])),
+			Protocol:   proto,
+			Target: model.StreamTarget{
+				Host: host,
+				Port: int(asInt(r["forwarding_port"])),
+			},
 		}
 
 		s.add(label, "", sh)

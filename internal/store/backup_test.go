@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -165,5 +167,45 @@ func TestRestoreRejectsUnsafePath(t *testing.T) {
 
 	if _, err := st.Restore(context.Background(), buf.Bytes(), Author{}); err == nil {
 		t.Fatal("expected restore to reject a traversal archive entry")
+	}
+}
+
+// An archive taken before DeadHost became ParkedHost still restores: entries
+// under the retired dead-hosts/ directory are mapped onto parked-hosts/. The
+// mapping is one-way - nothing is ever written back under the old name.
+func TestRestoreMapsLegacyDeadHostsEntries(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	legacy := []byte("name: gone\ndomains: [gone.example.com]\nstatusCode: 410\n")
+	archive := archiveWith(t, map[string][]byte{"dead-hosts/gone.yaml": legacy})
+
+	if _, err := st.Restore(ctx, archive, Author{Name: "admin"}); err != nil {
+		t.Fatalf("restore of a pre-rename archive: %v", err)
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.ParkedHosts) != 1 || cfg.ParkedHosts[0].Name != "gone" || cfg.ParkedHosts[0].StatusCode != 410 {
+		t.Fatalf("legacy dead-hosts entry did not restore as a parked host: %+v", cfg.ParkedHosts)
+	}
+	if _, err := os.Stat(filepath.Join(st.Dir(), "parked-hosts", "gone.yaml")); err != nil {
+		t.Fatalf("expected the object under parked-hosts/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(st.Dir(), "dead-hosts")); !os.IsNotExist(err) {
+		t.Fatalf("restore must not recreate the retired dead-hosts/ directory (err=%v)", err)
+	}
+}
+
+// The remap is a rename of the leading directory only; it must not become a
+// traversal hole. A hostile entry that merely starts with the retired prefix is
+// still rejected by allowedRestorePath after the rewrite.
+func TestRestoreLegacyRemapStillRejectsTraversal(t *testing.T) {
+	st := newTestStore(t)
+	archive := archiveWith(t, map[string][]byte{"dead-hosts/../../escape.yaml": []byte("name: x\n")})
+	if _, err := st.Restore(context.Background(), archive, Author{}); err == nil {
+		t.Fatal("restore accepted a traversal path under the retired directory prefix")
 	}
 }

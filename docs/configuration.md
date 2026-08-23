@@ -13,7 +13,7 @@ config/
   proxy-hosts/<name>.yaml
   redirect-hosts/<name>.yaml
   stream-hosts/<name>.yaml
-  dead-hosts/<name>.yaml
+  parked-hosts/<name>.yaml
   certificates/<name>.yaml
   dns-providers/<name>.yaml
   identity-providers/<name>.yaml
@@ -88,7 +88,7 @@ references it).
 ## Domains are exclusive
 
 The data plane routes by hostname, so **at most one enabled host may claim a
-given domain**. Two enabled proxy, redirect or dead hosts listing the same domain
+given domain**. Two enabled proxy, redirect or parked hosts listing the same domain
 are rejected at load time (`hosts "a" and "b" both claim domain "x.example.com"`)
 rather than resolved by whichever file happens to be read last. *Disabled* hosts
 are exempt: they are excluded from the running data plane entirely, so staging a
@@ -1012,8 +1012,7 @@ backend is dialled.
 |-------|------|----------|-------|
 | `listenPort` | int | yes | 1–65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port — a bind failure is logged and that one port is skipped, never fatal. |
 | `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
-| `forwardHost` | string | yes | Backend host. |
-| `forwardPort` | int | yes | 1–65535. |
+| `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme - a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
 | `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
 
@@ -1021,10 +1020,18 @@ backend is dialled.
 name: postgres
 listenPort: 5432
 protocol: tcp
-forwardHost: db.internal
-forwardPort: 5432
+target:
+  host: db.internal
+  port: 5432
 accessLists: [lan-only]
 ```
+
+### StreamTarget (`target`)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `host` | string | yes | Backend host. |
+| `port` | int | yes | 1-65535. |
 
 ### L4 access lists (`accessLists`)
 
@@ -1088,8 +1095,9 @@ either.
 name: pg-blue
 listenPort: 5432
 protocol: tcp
-forwardHost: pg-blue.internal
-forwardPort: 5432
+target:
+  host: pg-blue.internal
+  port: 5432
 accessLists: [lan-only]
 tls:
   mode: passthrough
@@ -1099,8 +1107,9 @@ tls:
 name: mqtt
 listenPort: 8883
 protocol: tcp
-forwardHost: mosquitto.internal
-forwardPort: 1883
+target:
+  host: mosquitto.internal
+  port: 1883
 tls:
   mode: terminate
   sniMatch: [mqtt.example.com]
@@ -1109,10 +1118,10 @@ tls:
 
 ---
 
-## DeadHost (`config/dead-hosts/`)
+## ParkedHost (`config/parked-hosts/`)
 
-Returns a fixed status for claimed domains — useful to absorb unmatched vhosts and
-stop default-host leakage.
+Returns a fixed status for claimed domains: reserve a name without serving
+anything. Useful to absorb unmatched vhosts and stop default-host leakage.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -1120,7 +1129,7 @@ stop default-host leakage.
 | `statusCode` | int | no | Default 404. |
 | `tls` | TLSSettings | no | |
 
-A dead host's response renders the [settings-level error page](#errorpagesconfig-settingserrorpages--proxyhosterrorpages)
+A parked host's response renders the [settings-level error page](#errorpagesconfig-settingserrorpages--proxyhosterrorpages)
 for `statusCode`, when one is configured, falling back to the plain-text body
 otherwise; it has no `errorPages` field of its own to override with.
 
@@ -1850,7 +1859,7 @@ operator rotated away, so rotation would stop meaning revocation. Create a
 replacement token instead.
 
 Valid subjects are the REST resource plurals — `proxy-hosts`, `redirect-hosts`,
-`stream-hosts`, `dead-hosts`, `certificates`, `client-cas`, `dns-providers`,
+`stream-hosts`, `parked-hosts`, `certificates`, `client-cas`, `dns-providers`,
 `identity-providers`, `upstream-groups`, `access-lists`, `middlewares`,
 `api-tokens` — plus four pseudo-resources for non-CRUD endpoint groups:
 `settings`, `dns-sync`, `ingress-discovery` and `metrics`. An unknown subject or verb is rejected at write time.

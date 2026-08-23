@@ -189,7 +189,7 @@ func (s *Server) Reload(cfg model.Config) error {
 	log.Info().
 		Int("proxyHosts", len(rt.hosts)).
 		Int("redirectHosts", len(rt.redirects)).
-		Int("deadHosts", len(rt.dead)).
+		Int("parkedHosts", len(rt.parked)).
 		Int("streamHosts", len(cfg.StreamHosts)).
 		Msg("data plane reloaded")
 	return nil

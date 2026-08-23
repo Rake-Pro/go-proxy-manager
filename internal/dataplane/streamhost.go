@@ -213,7 +213,7 @@ func buildStreamRoutes(cfg model.Config, certs *certResolver) (map[int]*streamRo
 		}
 		target := streamTarget{
 			name:       h.Name,
-			addr:       net.JoinHostPort(h.ForwardHost, strconv.Itoa(h.ForwardPort)),
+			addr:       net.JoinHostPort(h.Target.Host, strconv.Itoa(h.Target.Port)),
 			geoCountry: geoCountry,
 			geoLoaded:  geoLoaded,
 		}

@@ -601,8 +601,8 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 			TargetDomain: "elsewhere.example.com",
 		}
 	}
-	dead := func(name, domain string) DeadHost {
-		return DeadHost{ObjectMeta: ObjectMeta{Name: name}, Domains: []string{domain}}
+	parked := func(name, domain string) ParkedHost {
+		return ParkedHost{ObjectMeta: ObjectMeta{Name: name}, Domains: []string{domain}}
 	}
 	withDomains := func(name string, domains ...string) ProxyHost {
 		return proxyHost(name, func(h *ProxyHost) { h.Domains = domains })
@@ -632,10 +632,10 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 			wantErr: `both claim domain "app.example.com"`,
 		},
 		{
-			name: "proxy host and dead host",
+			name: "proxy host and parked host",
 			cfg: Config{
-				ProxyHosts: []ProxyHost{withDomains("app", "app.example.com")},
-				DeadHosts:  []DeadHost{dead("absorb", "app.example.com")},
+				ProxyHosts:  []ProxyHost{withDomains("app", "app.example.com")},
+				ParkedHosts: []ParkedHost{parked("absorb", "app.example.com")},
 			},
 			wantErr: `both claim domain "app.example.com"`,
 		},
@@ -672,7 +672,7 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 			cfg: Config{
 				ProxyHosts:    []ProxyHost{withDomains("a", "a.example.com")},
 				RedirectHosts: []RedirectHost{redirect("b", "b.example.com")},
-				DeadHosts:     []DeadHost{dead("c", "c.example.com")},
+				ParkedHosts:   []ParkedHost{parked("c", "c.example.com")},
 			},
 		},
 	}

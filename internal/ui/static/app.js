@@ -7,7 +7,7 @@ const ICON = {
   globe: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a9 9 0 100 18 9 9 0 000-18z"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>',
   redirect: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h11a4 4 0 014 4v0a4 4 0 01-4 4H4"/><path d="M8 3 4 7l4 4"/></svg>',
   stream: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h18M3 16h18M7 4v16M17 4v16"/></svg>',
-  skull: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a8 8 0 00-5 14v3h10v-3a8 8 0 00-5-14z"/><circle cx="9" cy="11" r="1.4"/><circle cx="15" cy="11" r="1.4"/></svg>',
+  parked: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="3.5" width="17" height="17" rx="3.5"/><path d="M9.5 17V7h3.2a3 3 0 010 6H9.5"/></svg>',
   lock: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg>',
   user: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/></svg>',
   shield: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg>',
@@ -35,7 +35,7 @@ const NAV = [
   { id: 'hosts', label: 'Proxy Hosts', icon: ICON.globe },
   { id: 'redirects', label: 'Redirects', icon: ICON.redirect },
   { id: 'streams', label: 'Streams', icon: ICON.stream },
-  { id: 'dead', label: 'Dead hosts', icon: ICON.skull },
+  { id: 'parked', label: 'Parked hosts', icon: ICON.parked },
   { id: 'certs', label: 'Certificates', icon: ICON.cert },
   { id: 'clientcas', label: 'Client CAs', icon: ICON.clientUser },
   { id: 'identity', label: 'Identity', icon: ICON.user },
@@ -51,7 +51,7 @@ const NAV = [
 
 const TITLES = {
   overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
-  dead: 'Dead hosts', certs: 'Certificates', clientcas: 'Client CAs', identity: 'Identity', access: 'Access Lists',
+  parked: 'Parked hosts', certs: 'Certificates', clientcas: 'Client CAs', identity: 'Identity', access: 'Access Lists',
   middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
   tokens: 'API Tokens', logs: 'Access Logs', history: 'History', settings: 'Settings',
 };
@@ -59,7 +59,7 @@ const TITLES = {
 // plural API paths per section
 const PLURAL = {
   hosts: 'proxy-hosts', redirects: 'redirect-hosts', streams: 'stream-hosts',
-  dead: 'dead-hosts', certs: 'certificates', clientcas: 'client-cas', identity: 'identity-providers',
+  parked: 'parked-hosts', certs: 'certificates', clientcas: 'client-cas', identity: 'identity-providers',
   access: 'access-lists', middleware: 'middlewares', upstreams: 'upstream-groups',
   dns: 'dns-providers', tokens: 'api-tokens',
 };
@@ -68,7 +68,7 @@ const PLURAL = {
 // API path, for offering a per-object revert straight from the history feed.
 const KIND_PLURAL = {
   ProxyHost: 'proxy-hosts', RedirectHost: 'redirect-hosts', StreamHost: 'stream-hosts',
-  DeadHost: 'dead-hosts', Certificate: 'certificates', ClientCA: 'client-cas',
+  ParkedHost: 'parked-hosts', Certificate: 'certificates', ClientCA: 'client-cas',
   DNSProvider: 'dns-providers', IdentityProvider: 'identity-providers',
   UpstreamGroup: 'upstream-groups', AccessList: 'access-lists', Middleware: 'middlewares',
   APIToken: 'api-tokens',
@@ -440,9 +440,9 @@ function makeChipInput(container, initial, placeholder) {
 
 // ---------- clone ----------
 // Kinds whose objects carry a flat .domains list that collides across the
-// store (proxy/redirect/dead hosts all share one domain namespace) - cleared
+// store (proxy/redirect/parked hosts all share one domain namespace) - cleared
 // on clone so the copy doesn't fail the duplicate-domain check on save.
-const CLONE_CLEAR_DOMAINS = new Set(['hosts', 'redirects', 'dead']);
+const CLONE_CLEAR_DOMAINS = new Set(['hosts', 'redirects', 'parked']);
 
 // Recursively blanks any string value the API masked as "***" - the exact
 // sentinel model.Secret.MarshalJSON uses for a literal (non-placeholder)
@@ -531,7 +531,7 @@ async function route() {
       case 'dns': await genericSection(c, 'dns', sub); break;
       case 'redirects': await genericSection(c, 'redirects', sub); break;
       case 'streams': await genericSection(c, 'streams', sub); break;
-      case 'dead': await genericSection(c, 'dead', sub); break;
+      case 'parked': await genericSection(c, 'parked', sub); break;
       case 'tokens': await viewTokens(c); break;
       case 'logs': await viewLogs(c); break;
       case 'history': await viewHistory(c); break;
@@ -1611,12 +1611,12 @@ const SECTION_META = {
     title: 'Streams', sub: 'Raw TCP/UDP forwarding for non-HTTP services.',
     singular: 'stream', addLabel: 'Add stream',
     summary: (o) => (o.listenPort != null ? `<span class="k">Listen</span><span class="v">:${esc(o.listenPort)}</span>` : '') +
-      (o.forwardHost ? `<span class="k">Forward</span><span class="v">${esc((o.forwardHost || '') + ':' + (o.forwardPort != null ? o.forwardPort : ''))}</span>` : '') +
+      (o.target && o.target.host ? `<span class="k">Target</span><span class="v">${esc(o.target.host + ':' + (o.target.port != null ? o.target.port : ''))}</span>` : '') +
       (o.protocol ? `<span class="k">Protocol</span><span class="v">${esc(o.protocol)}</span>` : ''),
   },
-  dead: {
-    title: 'Dead hosts', sub: 'Hosts kept for 404 handling or scheduled decommission.',
-    singular: 'dead host', addLabel: 'Add dead host',
+  parked: {
+    title: 'Parked hosts', sub: 'Domains that answer 404 - reserve a name without serving anything.',
+    singular: 'parked host', addLabel: 'Add parked host',
     summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>`,
   },
   upstreams: {
@@ -1878,8 +1878,8 @@ async function streamEditor(c, name) {
         </select></div>
       </div>
       <div class="inline-fields" style="margin-top:14px">
-        <div class="field-group" style="flex:2"><label>Forward host</label><input class="field mono" id="ed-fhost" value="${esc(o.forwardHost || '')}" placeholder="10.0.0.5" /></div>
-        <div class="field-group"><label>Forward port</label><input class="field mono" id="ed-fport" type="number" value="${esc(o.forwardPort != null ? o.forwardPort : '')}" placeholder="53" /></div>
+        <div class="field-group" style="flex:2"><label>Target host</label><input class="field mono" id="ed-fhost" value="${esc((o.target && o.target.host) || '')}" placeholder="10.0.0.5" /></div>
+        <div class="field-group"><label>Target port</label><input class="field mono" id="ed-fport" type="number" value="${esc(o.target && o.target.port != null ? o.target.port : '')}" placeholder="53" /></div>
       </div>
     </div>
     <div class="card form-section"><p class="section-label">TLS &amp; SNI</p>
@@ -1935,9 +1935,9 @@ async function streamEditor(c, name) {
   wireEditor('streams', 'stream-hosts', meta, isNew, name || o.name, () => {
     const lp = parseInt($('#ed-listen').value, 10); const fp = parseInt($('#ed-fport').value, 10); const fh = $('#ed-fhost').value.trim();
     if (isNaN(lp)) { toast('Listen port required', 'Enter a listen port.', 'err'); return null; }
-    if (!fh || isNaN(fp)) { toast('Forward target required', 'Set forward host and port.', 'err'); return null; }
+    if (!fh || isNaN(fp)) { toast('Target required', 'Set target host and port.', 'err'); return null; }
     const proto = $('#ed-proto').value;
-    const body = { listenPort: lp, protocol: proto, forwardHost: fh, forwardPort: fp };
+    const body = { listenPort: lp, protocol: proto, target: { host: fh, port: fp } };
     const mode = $('#ed-tlsmode').value;
     if (mode && proto === 'tcp') {
       const tls = { mode };
@@ -1956,26 +1956,26 @@ async function streamEditor(c, name) {
   wireCloneButton('streams', o);
 }
 
-// ---------- DEAD HOST EDITOR ----------
-async function deadEditor(c, name) {
-  const meta = SECTION_META.dead; const isNew = !name;
-  const seed = isNew ? takeCloneSeed('dead') : null;
+// ---------- PARKED HOST EDITOR ----------
+async function parkedEditor(c, name) {
+  const meta = SECTION_META.parked; const isNew = !name;
+  const seed = isNew ? takeCloneSeed('parked') : null;
   const [certsR, objR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
-    isNew ? Promise.resolve({ data: {} }) : api('/api/dead-hosts/' + encodeURIComponent(name)),
+    isNew ? Promise.resolve({ data: {} }) : api('/api/parked-hosts/' + encodeURIComponent(name)),
   ]);
   const certs = arr(certsR.data); const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
   const o = seed ? seed.data : (objR.data || {});
-  c.innerHTML = editorHead('dead', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+  c.innerHTML = editorHead('parked', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
     <div class="card form-section"><p class="section-label">Response</p>
       <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Returned for every request to these domains. Default 404.</div></div>
     </div>
-  </div><div class="stack">${tlsCard(o.tls, certs, certDomains)}</div></div>` + saveBar('dead', isNew, meta.addLabel);
+  </div><div class="stack">${tlsCard(o.tls, certs, certDomains)}</div></div>` + saveBar('parked', isNew, meta.addLabel);
   const domainsCtl = makeChipInput($('#ed-domains'), arr(o.domains), 'add domain...');
   wireTls();
-  wireEditor('dead', 'dead-hosts', meta, isNew, name || o.name, () => {
+  wireEditor('parked', 'parked-hosts', meta, isNew, name || o.name, () => {
     const domains = domainsCtl.get();
     if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return null; }
     const body = { domains };
@@ -1983,7 +1983,7 @@ async function deadEditor(c, name) {
     const tls = readTls(); if (tls) body.tls = tls;
     return body;
   });
-  wireCloneButton('dead', o);
+  wireCloneButton('parked', o);
 }
 
 // DNS-01 providers with a built-in solver (mirrors model.KnownDNSProviders).
@@ -2663,7 +2663,7 @@ async function upstreamGroupEditor(c, name) {
 }
 
 const EDITORS = {
-  redirects: redirectEditor, streams: streamEditor, dead: deadEditor, dns: dnsEditor,
+  redirects: redirectEditor, streams: streamEditor, parked: parkedEditor, dns: dnsEditor,
   clientcas: clientCAEditor,
   identity: idpEditor, access: accessEditor, middleware: middlewareEditor,
   upstreams: upstreamGroupEditor,
@@ -2676,7 +2676,7 @@ const EDITORS = {
 // it silently went stale when ingress-discovery was added, leaving no way to
 // mint a token for it.
 const TOKEN_SUBJECTS_FALLBACK = [
-  'proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts', 'certificates',
+  'proxy-hosts', 'redirect-hosts', 'stream-hosts', 'parked-hosts', 'certificates',
   'client-cas', 'dns-providers', 'identity-providers', 'upstream-groups',
   'access-lists', 'middlewares', 'api-tokens', 'settings', 'dns-sync',
   'ingress-discovery',
@@ -2693,7 +2693,7 @@ function tokenSubjects() {
 // new one added to model.ScopePlurals before this list catches up) still
 // renders, filed under "Other" instead of silently vanishing.
 const SCOPE_GROUPS = [
-  { label: 'Hosts', subjects: ['proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts'] },
+  { label: 'Hosts', subjects: ['proxy-hosts', 'redirect-hosts', 'stream-hosts', 'parked-hosts'] },
   { label: 'Trust & auth', subjects: ['certificates', 'client-cas', 'identity-providers', 'access-lists', 'middlewares'] },
   { label: 'Routing', subjects: ['upstream-groups', 'dns-providers'] },
   { label: 'Operations', subjects: ['settings', 'dns-sync', 'ingress-discovery', 'api-tokens', 'metrics'] },
@@ -3262,7 +3262,7 @@ async function viewSettings(c) {
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Error pages</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Default custom HTML pages for errors gpm itself generates - upstream unreachable, access denied, rate limited, a dead host, a dangling middleware reference. A proxy host's own Error pages card (in its editor) overrides this per host. Blank leaves gpm's built-in plain-text output in effect, exactly as before this was configurable.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Default custom HTML pages for errors gpm itself generates - upstream unreachable, access denied, rate limited, a parked host, a dangling middleware reference. A proxy host's own Error pages card (in its editor) overrides this per host. Blank leaves gpm's built-in plain-text output in effect, exactly as before this was configurable.</p>
       <div class="field-group">
         <label>Templates directory</label>
         <input class="field mono" id="set-errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages" />

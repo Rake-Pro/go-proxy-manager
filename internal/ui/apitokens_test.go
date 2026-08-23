@@ -50,7 +50,7 @@ func TestStaticBundleScopeTableGrouping(t *testing.T) {
 
 	for _, want := range []string{
 		"const SCOPE_GROUPS = [",
-		"{ label: 'Hosts', subjects: ['proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts'] }",
+		"{ label: 'Hosts', subjects: ['proxy-hosts', 'redirect-hosts', 'stream-hosts', 'parked-hosts'] }",
 		"{ label: 'Trust & auth', subjects: ['certificates', 'client-cas', 'identity-providers', 'access-lists', 'middlewares'] }",
 		"{ label: 'Routing', subjects: ['upstream-groups', 'dns-providers'] }",
 		"{ label: 'Operations', subjects: ['settings', 'dns-sync', 'ingress-discovery', 'api-tokens', 'metrics'] }",

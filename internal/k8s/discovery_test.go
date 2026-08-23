@@ -833,7 +833,7 @@ func TestDerivedHostCannotShadowAnOperatorDomain(t *testing.T) {
 			Domains:      []string{"sso.example.com"},
 			TargetDomain: "elsewhere.example.com",
 		}}}},
-		{"dead host", model.Config{DeadHosts: []model.DeadHost{{
+		{"parked host", model.Config{ParkedHosts: []model.ParkedHost{{
 			ObjectMeta: model.ObjectMeta{Name: "sso"},
 			Domains:    []string{"sso.example.com"},
 		}}}},

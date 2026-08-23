@@ -53,7 +53,7 @@ tags:
 - name: Proxy hosts
 - name: Redirect hosts
 - name: Stream hosts
-- name: Dead hosts
+- name: Parked hosts
 - name: Certificates
 - name: Client CAs
 - name: DNS providers
@@ -370,12 +370,8 @@ components:
           - tcp
           - udp
           - both
-        forwardHost:
-          type: string
-        forwardPort:
-          type: integer
-          minimum: 1
-          maximum: 65535
+        target:
+          $ref: '#/components/schemas/StreamTarget'
         tls:
           $ref: '#/components/schemas/StreamTLS'
         accessLists:
@@ -389,9 +385,23 @@ components:
       - name
       - listenPort
       - protocol
-      - forwardHost
-      - forwardPort
+      - target
       description: Forwards raw TCP/UDP from a listen port to a backend.
+    StreamTarget:
+      type: object
+      description: 'The backend a stream host forwards to. Mirrors Upstream''s host/port
+        vocabulary minus the scheme: a raw TCP/UDP stream carries an arbitrary protocol,
+        so an http/https scheme has no meaning for it.'
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      required:
+      - host
+      - port
     StreamTLS:
       type: object
       description: 'TLS awareness for a TCP stream host: SNI routing on a shared listen
@@ -417,7 +427,7 @@ components:
             passthrough.
       required:
       - mode
-    DeadHost:
+    ParkedHost:
       type: object
       properties:
         name: *id001
@@ -440,7 +450,8 @@ components:
       required:
       - name
       - domains
-      description: Serves a 404 (or custom status) for claimed domains, absorbing unmatched vhosts.
+      description: 'Serves a 404 (or custom status) for claimed domains: reserves a name
+        without serving anything, absorbing unmatched vhosts.'
     ACMESpec:
       type: object
       properties:
@@ -1355,10 +1366,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StreamHost'
-        deadHosts:
+        parkedHosts:
           type: array
           items:
-            $ref: '#/components/schemas/DeadHost'
+            $ref: '#/components/schemas/ParkedHost'
         certificates:
           type: array
           items:
@@ -2457,11 +2468,11 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
-  /api/dead-hosts:
+  /api/parked-hosts:
     get:
-      summary: List dead hosts
+      summary: List parked hosts
       tags:
-      - Dead hosts
+      - Parked hosts
       responses:
         '200':
           description: OK
@@ -2470,50 +2481,50 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/DeadHost'
+                  $ref: '#/components/schemas/ParkedHost'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:read
-  /api/dead-hosts/{name}:
+      x-scope: parked-hosts:read
+  /api/parked-hosts/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
     get:
-      summary: Get one DeadHost
+      summary: Get one ParkedHost
       tags:
-      - Dead hosts
+      - Parked hosts
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeadHost'
+                $ref: '#/components/schemas/ParkedHost'
         '404':
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:read
+      x-scope: parked-hosts:read
     put:
-      summary: Create or update a DeadHost
+      summary: Create or update a ParkedHost
       tags:
-      - Dead hosts
+      - Parked hosts
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/DeadHost'
+              $ref: '#/components/schemas/ParkedHost'
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeadHost'
+                $ref: '#/components/schemas/ParkedHost'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -2522,11 +2533,11 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:write
+      x-scope: parked-hosts:write
     delete:
-      summary: Delete a DeadHost
+      summary: Delete a ParkedHost
       tags:
-      - Dead hosts
+      - Parked hosts
       responses:
         '204':
           $ref: '#/components/responses/NoContent'
@@ -2540,15 +2551,15 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:write
-  /api/dead-hosts/{name}/history:
+      x-scope: parked-hosts:write
+  /api/parked-hosts/{name}/history:
     parameters:
     - $ref: '#/components/parameters/NamePath'
     get:
-      summary: Commit history for one DeadHost
+      summary: Commit history for one ParkedHost
       description: Up to the 50 most recent commits touching this object's file.
       tags:
-      - Dead hosts
+      - Parked hosts
       responses:
         '200':
           description: OK
@@ -2562,17 +2573,17 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:read
-  /api/dead-hosts/{name}/revert:
+      x-scope: parked-hosts:read
+  /api/parked-hosts/{name}/revert:
     parameters:
     - $ref: '#/components/parameters/NamePath'
     post:
-      summary: Revert one DeadHost to a past commit
+      summary: Revert one ParkedHost to a past commit
       description: Restores only this object's file to its state at the given commit; every other object
         is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
         an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
       tags:
-      - Dead hosts
+      - Parked hosts
       requestBody:
         required: true
         content:
@@ -2594,7 +2605,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dead-hosts:write
+      x-scope: parked-hosts:write
   /api/dns-providers:
     get:
       summary: List dns providers

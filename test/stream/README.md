@@ -33,7 +33,7 @@ port published).
 - The data-plane HTTP/S/admin ports are parked on 8080/8443/8081 so the harness
   needs no privileged ports; only the stream port 15432 is published.
 - To point at a **real backend** instead of the echo, edit
-  `config/stream-hosts/echo.yaml` (`forwardHost` / `forwardPort` / `protocol`)
+  `config/stream-hosts/echo.yaml` (`target.host` / `target.port` / `protocol`)
   and the published `ports:` in `docker-compose.yaml`, then `up -d` again — gpm
   reconciles the listeners on reload.
 - `protocol` accepts `tcp`, `udp`, or `both`. A `listenPort` that fails to bind

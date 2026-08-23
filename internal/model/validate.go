@@ -133,13 +133,13 @@ func (c Config) Validate() error {
 		checkRef(&errs, "redirect host", h.Name, "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "redirect host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
-	for _, h := range c.DeadHosts {
+	for _, h := range c.ParkedHosts {
 		if err := h.Validate(); err != nil {
 			errs = append(errs, err)
 		}
 		register("host", h.Name, seenHost)
-		checkRef(&errs, "dead host", h.Name, "certificate", h.TLS.CertificateRef, certs)
-		checkClientAuthRef(&errs, "dead host", h.Name, h.TLS, clientCAs, disabledClientCAs)
+		checkRef(&errs, "parked host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkClientAuthRef(&errs, "parked host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
 	// Stream hosts: per-object validation, then the two cross-object rules that
 	// need the whole config - what an access list actually contains, and who else
@@ -245,7 +245,7 @@ func (c Config) Validate() error {
 	for _, h := range c.RedirectHosts {
 		claimDomains(h.Name, h.Disabled, h.Domains)
 	}
-	for _, h := range c.DeadHosts {
+	for _, h := range c.ParkedHosts {
 		claimDomains(h.Name, h.Disabled, h.Domains)
 	}
 

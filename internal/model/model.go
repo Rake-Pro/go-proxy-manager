@@ -29,7 +29,7 @@ type Config struct {
 	ProxyHosts        []ProxyHost        `json:"proxyHosts,omitempty" yaml:"proxyHosts,omitempty"`
 	RedirectHosts     []RedirectHost     `json:"redirectHosts,omitempty" yaml:"redirectHosts,omitempty"`
 	StreamHosts       []StreamHost       `json:"streamHosts,omitempty" yaml:"streamHosts,omitempty"`
-	DeadHosts         []DeadHost         `json:"deadHosts,omitempty" yaml:"deadHosts,omitempty"`
+	ParkedHosts       []ParkedHost       `json:"parkedHosts,omitempty" yaml:"parkedHosts,omitempty"`
 	Certificates      []Certificate      `json:"certificates,omitempty" yaml:"certificates,omitempty"`
 	ClientCAs         []ClientCA         `json:"clientCAs,omitempty" yaml:"clientCAs,omitempty"`
 	DNSProviders      []DNSProvider      `json:"dnsProviders,omitempty" yaml:"dnsProviders,omitempty"`

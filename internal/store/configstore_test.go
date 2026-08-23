@@ -977,3 +977,51 @@ func TestSaveSettingsRejectsDanglingDiscoveryRefs(t *testing.T) {
 		}
 	})
 }
+
+// A config tree still carrying the retired dead-hosts/ directory must be
+// refused - at Init and at every later Load - with an error that names the exact
+// git commands that fix it. gpm never renames the directory itself: the store is
+// a git working tree, and a silent migration would author a commit the operator
+// (and their GitOps source of truth) never made.
+func TestLegacyDeadHostsDirectoryIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "dead-hosts"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte("name: gone\ndomains: [gone.example.com]\n")
+	if err := os.WriteFile(filepath.Join(dir, "dead-hosts", "gone.yaml"), legacy, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	st := New(dir, NewExecGit(dir))
+	err := st.Init(context.Background())
+	if err == nil {
+		t.Fatal("Init accepted a tree still holding config/dead-hosts/")
+	}
+	for _, want := range []string{"config/dead-hosts/", "config/parked-hosts/", "git mv config/dead-hosts config/parked-hosts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Init error does not name %q:\n%s", want, err)
+		}
+	}
+
+	// Same refusal on the reload path, so a follower that pulls an unmigrated
+	// tree fails loudly instead of serving a config with no parked hosts in it.
+	if _, _, err := st.Load(context.Background()); err == nil {
+		t.Fatal("Load accepted a tree still holding config/dead-hosts/")
+	}
+
+	// Once the rename has happened the same tree loads clean.
+	if err := os.Rename(filepath.Join(dir, "dead-hosts"), filepath.Join(dir, "parked-hosts")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init after rename: %v", err)
+	}
+	cfg, _, err := st.Load(context.Background())
+	if err != nil {
+		t.Fatalf("load after rename: %v", err)
+	}
+	if len(cfg.ParkedHosts) != 1 || cfg.ParkedHosts[0].Name != "gone" {
+		t.Fatalf("renamed directory did not load as parked hosts: %+v", cfg.ParkedHosts)
+	}
+}

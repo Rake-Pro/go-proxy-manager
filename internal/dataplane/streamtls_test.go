@@ -44,8 +44,7 @@ func streamHostFor(name, addr string, port int, tlsCfg *model.StreamTLS, acls ..
 		ObjectMeta:  model.ObjectMeta{Name: name},
 		ListenPort:  port,
 		Protocol:    "tcp",
-		ForwardHost: host,
-		ForwardPort: fp,
+		Target:      model.StreamTarget{Host: host, Port: fp},
 		TLS:         tlsCfg,
 		AccessLists: acls,
 	}
@@ -322,8 +321,7 @@ func TestStreamUDPAccessList(t *testing.T) {
 				ObjectMeta:  model.ObjectMeta{Name: "udp-host"},
 				ListenPort:  port,
 				Protocol:    "udp",
-				ForwardHost: host,
-				ForwardPort: bport,
+				Target:      model.StreamTarget{Host: host, Port: bport},
 				AccessLists: []string{listName},
 			}},
 		}

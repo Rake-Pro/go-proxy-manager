@@ -114,7 +114,7 @@ func main() {
 		Int("proxyHosts", len(cfg.ProxyHosts)).
 		Int("redirectHosts", len(cfg.RedirectHosts)).
 		Int("streamHosts", len(cfg.StreamHosts)).
-		Int("deadHosts", len(cfg.DeadHosts)).
+		Int("parkedHosts", len(cfg.ParkedHosts)).
 		Int("certificates", len(cfg.Certificates)).
 		Int("identityProviders", len(cfg.IdentityProviders)).
 		Int("accessLists", len(cfg.AccessLists)).

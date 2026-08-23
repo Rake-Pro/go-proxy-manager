@@ -372,7 +372,7 @@ upstream socket to exist.
 **Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
 **proxy hosts** run the middleware chain to a reverse proxy; **redirect hosts**
 return the configured 3xx to their target (scheme/status/path-preservation per
-config); **dead hosts** return a fixed status (default 404). An unknown host →
+config); **parked hosts** return a fixed status (default 404). An unknown host →
 404; no default-host leakage. On the HTTP listener, a host with `forceSSL` gets a
 308 redirect to HTTPS. Within a proxy host, **locations** are matched
 longest-prefix-first and fall back to the host default; a location carries its own
