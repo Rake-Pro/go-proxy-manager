@@ -55,7 +55,23 @@ func knownScopePlural(p string) bool {
 
 // splitScope parses "<plural>:<verb>" into its parts. ok is false for anything
 // that is not in that shape (including the bare "admin" scope).
+// legacyScopePlurals maps a retired scope subject to its replacement so tokens
+// minted before a kind rename keep loading and keep granting the same access.
+var legacyScopePlurals = map[string]string{
+	"dead-hosts": "parked-hosts",
+}
+
 func splitScope(s string) (plural, verb string, ok bool) {
+	plural, verb, ok = splitScopeRaw(s)
+	if ok {
+		if canon, legacy := legacyScopePlurals[plural]; legacy {
+			plural = canon
+		}
+	}
+	return plural, verb, ok
+}
+
+func splitScopeRaw(s string) (plural, verb string, ok bool) {
 	i := strings.IndexByte(s, ':')
 	if i <= 0 || i == len(s)-1 {
 		return "", "", false
