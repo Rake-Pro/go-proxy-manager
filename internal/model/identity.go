@@ -24,7 +24,8 @@ type OIDCSpec struct {
 	UsePKCE              *bool `json:"usePKCE,omitempty" yaml:"usePKCE,omitempty"`
 	RequireVerifiedEmail bool  `json:"requireVerifiedEmail,omitempty" yaml:"requireVerifiedEmail,omitempty"`
 	// TrustIdPMFA delegates MFA to the IdP: trust acr/amr instead of prompting a
-	// second local TOTP (avoids the NPM TOTP + Authentik MFA double prompt).
+	// second local TOTP (avoids a double MFA prompt when the IdP already
+	// enforces MFA).
 	TrustIdPMFA bool `json:"trustIdPMFA,omitempty" yaml:"trustIdPMFA,omitempty"`
 }
 

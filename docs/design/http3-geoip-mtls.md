@@ -79,7 +79,7 @@ data-plane handler) rather than reworking the core.
 
 **Goal.** Require (or optionally accept) a client certificate per host, verified
 against an operator-supplied CA, enforced at the TLS handshake. Community ask
-#768 (~82👍); NPMplus already ships it.
+#768 (~82 upvotes); NPMplus already ships it.
 
 **Dependency:** none. `crypto/tls` does it all (`ClientCAs`, `ClientAuth`,
 `VerifyClientCertIfGiven` / `RequireAndVerifyClientCert`).
@@ -164,7 +164,7 @@ parse to ≥1 cert at load; `mode` ∈ {require, optional}.
 > (stronger) layer than first proposed - see the correction under "Security /
 > open questions" below.
 
-**Goal.** Allow/deny requests by client-IP country. Community ask #46 (51👍,
+**Goal.** Allow/deny requests by client-IP country. Community ask #46 (51 upvotes,
 128 comments); NPMplus #730 is its most-commented open issue. "Do it cleanly /
 native" per FEATURES.
 
@@ -249,7 +249,7 @@ gap, some cloud/VPN ranges - cannot slip past a "these countries only" gate. Set
 ## 3. HTTP/3 (QUIC)
 
 **Goal.** Serve HTTP/3 over QUIC (UDP/443), advertised via `Alt-Svc`. Community
-ask #1550 (~80👍); NPMplus has it.
+ask #1550 (~80 upvotes); NPMplus has it.
 
 **Dependency — the real cost.** Go's stdlib has **no** HTTP/3 server. The only
 realistic path is `quic-go/quic-go` + `quic-go/http3` (pure-Go, no CGO, used by

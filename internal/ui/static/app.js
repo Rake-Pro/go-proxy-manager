@@ -107,7 +107,7 @@ function $$(sel, root) { return Array.from((root || document).querySelectorAll(s
 // A leading "*." is stripped first; a wildcard's remainder already names the
 // zone (*.iot.example.com -> iot.example.com), so the label-drop below only runs
 // for non-wildcard domains with more than 2 labels (sensor.iot.example.com
-// -> iot.example.com, gpm.rake.pro -> rake.pro, rake.pro -> rake.pro).
+// -> iot.example.com, app.example.com -> example.com, example.com -> example.com).
 function domainZone(d) {
   let s = String(d || '');
   const wildcard = s.startsWith('*.');
@@ -243,10 +243,6 @@ function buildShell() {
         <nav class="nav" id="nav" aria-label="Primary">
           ${NAV.map((n) => `<button class="nav-item" data-view="${n.id}">${n.icon}${esc(n.label)}</button>`).join('')}
         </nav>
-        <div class="sidebar-footer">
-          <span class="dot live" aria-hidden="true"></span>
-          data plane: live
-        </div>
       </aside>
       <div class="main">
         <header class="topbar">
@@ -2691,6 +2687,39 @@ function tokenSubjects() {
   return Array.isArray(fromCaps) && fromCaps.length ? fromCaps : TOKEN_SUBJECTS_FALLBACK;
 }
 
+// Groups subjects into labelled sections for the scope table below. Purely a
+// display grouping - tokenSubjects() above stays the source of truth for what
+// subjects exist, so a subject this grouping doesn't know about yet (e.g. a
+// new one added to model.ScopePlurals before this list catches up) still
+// renders, filed under "Other" instead of silently vanishing.
+const SCOPE_GROUPS = [
+  { label: 'Hosts', subjects: ['proxy-hosts', 'redirect-hosts', 'stream-hosts', 'dead-hosts'] },
+  { label: 'Trust & auth', subjects: ['certificates', 'client-cas', 'identity-providers', 'access-lists', 'middlewares'] },
+  { label: 'Routing', subjects: ['upstream-groups', 'dns-providers'] },
+  { label: 'Operations', subjects: ['settings', 'dns-sync', 'ingress-discovery', 'api-tokens', 'metrics'] },
+];
+
+// Subjects with no write action at all, so the scope table renders no write
+// checkbox for them. "metrics" is the only one: model.ScopeMetricsRead is the
+// sole scope /metrics checks (server.go's GET /metrics handler), there is no
+// metrics:write endpoint. Mirrors internal/model/apitoken.go.
+const SCOPE_READONLY = new Set(['metrics']);
+
+// Buckets tokenSubjects() into SCOPE_GROUPS order, appending an "Other"
+// section for anything not covered above.
+function groupedScopeSubjects() {
+  const all = tokenSubjects();
+  const placed = new Set();
+  const groups = SCOPE_GROUPS.map((g) => {
+    const subjects = g.subjects.filter((s) => all.includes(s));
+    subjects.forEach((s) => placed.add(s));
+    return { label: g.label, subjects };
+  }).filter((g) => g.subjects.length);
+  const rest = all.filter((s) => !placed.has(s));
+  if (rest.length) groups.push({ label: 'Other', subjects: rest });
+  return groups;
+}
+
 // Subjects whose endpoints require Full admin however the per-subject boxes are
 // ticked, so the boxes are greyed out instead of granting nothing:
 //   api-tokens - a token that could mint tokens could widen itself,
@@ -2748,22 +2777,26 @@ async function viewTokens(c) {
     return;
   }
   const tokens = arr((await api('/api/api-tokens')).data);
+  const scopeChips = (scopes) => {
+    const list = arr(scopes);
+    if (list.length === 1 && list[0] === 'admin') return '<span class="chip brand">Full admin</span>';
+    if (!list.length) return '<span class="faint">none</span>';
+    return list.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ');
+  };
   const rows = tokens.map((t) => `
-    <div class="card" data-name="${esc(t.name)}">
-      <div class="card-head">
-        <div><h3>${esc(t.name)}${t.disabled ? ' <span class="chip">disabled</span>' : ''}</h3></div>
-        <div style="display:flex;gap:8px">
+    <tr data-name="${esc(t.name)}">
+      <td><span class="mono host">${esc(t.name)}</span>${t.disabled ? ' <span class="chip warn">disabled</span>' : ''}</td>
+      <td><div class="chip-row">${scopeChips(t.scopes)}</div></td>
+      <td class="mono faint" style="white-space:nowrap">${t.createdAt ? esc(fmtTime(t.createdAt)) : ''}</td>
+      <td class="mono" style="white-space:nowrap">${tokenExpiryLabel(t)}</td>
+      <td class="mono faint" style="white-space:nowrap">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never'}</td>
+      <td>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
           <button class="btn ghost sm danger tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
         </div>
-      </div>
-      <div class="kv">
-        <span class="k">Scopes</span><span class="v">${esc(arr(t.scopes).join(', '))}</span>
-        <span class="k">Expires</span><span class="v">${tokenExpiryLabel(t)}</span>
-        <span class="k">Last used</span><span class="v">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never (since restart)'}</span>
-        <span class="k">Created</span><span class="v">${t.createdAt ? esc(fmtTime(t.createdAt)) : ''}</span>
-      </div>
-    </div>`).join('');
+      </td>
+    </tr>`).join('');
 
   c.innerHTML = viewHead('API Tokens',
     'Non-interactive credentials for scripts and CI. Send as Authorization: Bearer gpm_...; scopes limit what each token can reach.') +
@@ -2771,7 +2804,7 @@ async function viewTokens(c) {
       <p class="section-label">Create token</p>
       <div class="inline-fields">
         <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" placeholder="ci-deploy" /><div class="hint">Immutable. Lowercase alphanumeric with <span class="mono">-_.</span></div></div>
-        <div class="field-group"><label>Expires</label><input class="field mono" id="tok-expires" type="date" /><div class="hint">Blank never expires.</div></div>
+        <div class="field-group field-narrow"><label>Expires</label><input class="field mono" id="tok-expires" type="date" /><div class="hint">Blank never expires.</div></div>
       </div>
       <div class="field-group" style="margin-top:10px">
         <label>Scopes</label>
@@ -2779,25 +2812,72 @@ async function viewTokens(c) {
           <div class="tl-text"><div class="nm">Full admin</div><div class="ds">Every endpoint, including token management, restore and whole-config revert</div></div>
           ${switchHtml('tok-admin', false, 'Full admin')}
         </div>
-        <div id="tok-scopes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px;margin-top:8px">
-          ${tokenSubjects().map((p) => `
-            <div class="loc-row" style="gap:6px;align-items:center">
-              <span class="mono" style="flex:1 1 auto;font-size:11.5px">${esc(p)}</span>
-              <label class="check-item"><input type="checkbox" class="tok-read" data-p="${esc(p)}" />read</label>
-              <label class="check-item"><input type="checkbox" class="tok-write" data-p="${esc(p)}" />write</label>
-            </div>`).join('')}
+        <div class="table-wrap scope-table-wrap" id="tok-scopes" style="margin-top:8px">
+          <table class="scope-table">
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th class="scope-check"><label class="check-item scope-all"><input type="checkbox" id="tok-read-all" aria-label="Toggle all read" />Read</label></th>
+                <th class="scope-check"><label class="check-item scope-all"><input type="checkbox" id="tok-write-all" aria-label="Toggle all write" />Write</label></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${groupedScopeSubjects().map((g) => `
+                <tr class="scope-group"><td colspan="3">${esc(g.label)}</td></tr>
+                ${g.subjects.map((p) => `
+                  <tr>
+                    <td class="mono">${esc(p)}</td>
+                    <td class="scope-check"><input type="checkbox" class="tok-read" data-p="${esc(p)}" aria-label="${esc(p)} read" /></td>
+                    <td class="scope-check">${SCOPE_READONLY.has(p) ? '<span class="faint" aria-hidden="true">-</span>' : `<input type="checkbox" class="tok-write" data-p="${esc(p)}" aria-label="${esc(p)} write" />`}</td>
+                  </tr>`).join('')}`).join('')}
+            </tbody>
+          </table>
         </div>
-        <div class="hint" style="margin-top:8px">Write implies read. <span class="mono">api-tokens</span>, <em>writing</em> <span class="mono">settings</span>, restore, whole-config revert and the pprof endpoints need Full admin.</div>
+        <div class="hint" style="margin-top:8px">Write implies read - checking write ticks and locks read. <span class="mono">api-tokens</span>, <em>writing</em> <span class="mono">settings</span>, restore, whole-config revert and the pprof endpoints need Full admin.</div>
       </div>
-      <div style="display:flex;gap:10px;margin-top:12px">
+      <div class="row-between" style="margin-top:12px">
+        <span></span>
         <button class="btn primary" id="tok-create" type="button">${ICON.plus}Create token</button>
       </div>
     </div>` +
-    (tokens.length ? `<div class="cards">${rows}</div>`
+    (tokens.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`
       : emptyState('No API tokens yet', 'Create one above to script against this instance.'));
 
   const adminSw = $('#tok-admin');
   const scopeGrid = $('#tok-scopes');
+
+  // Write implies read: checking write force-checks and locks the read box so
+  // the pair can never show an ambiguous state. Unchecking write hands read
+  // back, unless that subject's read is itself Full-admin-only (api-tokens).
+  scopeGrid.querySelectorAll('.tok-write').forEach((w) => {
+    w.addEventListener('change', () => {
+      const r = scopeGrid.querySelector(`.tok-read[data-p="${w.dataset.p}"]`);
+      if (!r) return;
+      if (w.checked) { r.checked = true; r.disabled = true; }
+      else {
+        const rule = ADMIN_ONLY_SCOPES[w.dataset.p];
+        if (!(rule && rule.read)) r.disabled = false;
+      }
+    });
+  });
+  // Header "select all" checkboxes flip every enabled box in their column and
+  // fire a change event so the write-implies-read wiring above stays in sync.
+  const wireScopeAll = (id, cls) => {
+    const all = $('#' + id);
+    if (!all) return;
+    all.addEventListener('change', () => {
+      scopeGrid.querySelectorAll('.' + cls + ':not(:disabled)').forEach((box) => {
+        box.checked = all.checked;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    });
+  };
+  wireScopeAll('tok-read-all', 'tok-read');
+  wireScopeAll('tok-write-all', 'tok-write');
+
   const syncAdmin = () => {
     const perSubject = !isOn('tok-admin');
     gateControl(scopeGrid, perSubject, 'Full admin already covers every scope.');
@@ -2812,6 +2892,14 @@ async function viewTokens(c) {
         box.disabled = true;
         box.title = rule.why;
       });
+    });
+    // The gate above just re-enabled every box, including read boxes that a
+    // checked write box implies-and-locks - reassert that lock so it survives
+    // an admin-switch round trip.
+    scopeGrid.querySelectorAll('.tok-write').forEach((w) => {
+      if (!w.checked) return;
+      const r = scopeGrid.querySelector(`.tok-read[data-p="${w.dataset.p}"]`);
+      if (r) r.disabled = true;
     });
   };
   adminSw.addEventListener('switchchange', syncAdmin);

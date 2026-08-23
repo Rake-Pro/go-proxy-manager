@@ -130,8 +130,7 @@ All findings from that review are remediated in the same change (see CHANGELOG
 ## Public release (deferred - owner wants this, not yet ready)
 
 - [ ] **Take the repo public** once it has had a polish pass and a dedicated
-  security-surface review. *(2026-08-22: review done - report
-  gpm-pre-public-review-2026-08-22; batches 1+2 shipped same day: 4 Med + 2 Low
+  security-surface review. *(2026-08-22: review done; batches 1+2 shipped same day: 4 Med + 2 Low
   security fixes, location-chain data-loss fix, HTTP-01/EAB/3 DNS providers,
   OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
   annotation prefix, ops docs. Batch 3 shipped 2026-08-23: metrics, bouncer,
@@ -158,13 +157,12 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   `1b6eeaf` image via the `test/stream/` harness (TCP + UDP echo round-tripped
   from an external client through a published 15432 → gpm forwarder → backend).
 - [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
-  (HELD 2026-08-22: only the 8 `auth-request` hosts without native OIDC would
-  benefit - claude, radarr, sonarr, jackett, prometheus, alertmanager, dev0910 -
-  revisit when the outpost becomes a nuisance; shared client, one callback URI
-  per host)
+  (HELD 2026-08-22: only the handful of auth-request hosts fronting apps without
+  native OIDC would benefit - revisit when the outpost becomes a nuisance;
+  shared client, one callback URI per host)
   (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
   walk a host through redirect → callback → session).
-- [x] **Kubernetes Ingress discovery** against the real cluster (live since 2026-08-01; 23 managed hosts, reconcile no-op verified 2026-08-22): apply
+- [x] **Kubernetes Ingress discovery** validated against a live cluster: apply
   `deploy/k8s-ingress-discovery-rbac.yaml`, extract the token, enable discovery
   with the wildcard `certificateRef`, annotate one Ingress, and confirm the
   derived host appears, the DNS sync publishes its records, a second reconcile is
@@ -213,7 +211,7 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 ## DNS sync (phase 2: Kubernetes Ingress discovery)
 
 Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) and
-phase 2 (Kubernetes Ingress discovery) are both ✓ shipped — see CHANGELOG
+phase 2 (Kubernetes Ingress discovery) are both shipped — see CHANGELOG
 `Added`, [docs/configuration.md](docs/configuration.md#ingressdiscoverysettings-settingsingressdiscovery)
 and the design record
 [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
@@ -423,10 +421,10 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 ## Roadmap
 
-See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts ✓, backup/
+See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts shipped, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
 (HTTP/3, hardened TLS, proxy protocol, IPv6, multi-ACME EAB - GeoIP
-geoblocking and mTLS client certs phase 1 are now ✓ shipped, see FEATURES.md),
+geoblocking and mTLS client certs phase 1 are now shipped, see FEATURES.md),
 P3 (local-admin passkeys + TOTP for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd, OCSP,
 WAF/CrowdSec, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM,
 MPTCP, Anubis, cosign signing).
@@ -435,7 +433,7 @@ MPTCP, Anubis, cosign signing).
 
 - **Kubernetes Ingress discovery** —
   [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md)
-  (✓ implemented). Settles the certificate strategy (template wildcard ref, not
+  (implemented). Settles the certificate strategy (template wildcard ref, not
   per-host ACME), commit granularity (one per reconcile), freeze-on-error
   semantics, poll-vs-watch, and the Ingress → ProxyHost field mapping for an
   off-cluster gpm.
@@ -444,7 +442,7 @@ MPTCP, Anubis, cosign signing).
   automatic election / active/active.
 - **HTTP/3** — [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
-  from the same document are now ✓ shipped - see FEATURES.md and
+  from the same document are now shipped - see FEATURES.md and
   CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
   `client-cert` middleware mode) shipped 2026-08-22; OCSP deliberately not
   implemented (CRL only), see

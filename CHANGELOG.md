@@ -75,6 +75,15 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- API Tokens page: the scope picker is a compact grouped table (Hosts / Trust
+  and auth / Routing / Operations) with header select-all toggles and a locked
+  read box when write is checked, replacing the card grid; `metrics` no longer
+  offers a write box (`metrics:write` does not exist); the token list is a
+  table with a Last used column; the top-bar identity block ellipsizes instead
+  of overflowing; the sidebar "data plane: live" indicator is gone.
+- Public-release prep: example zones, fleet tables and test fixtures use
+  `example.com` / `proxy-admins`; status glyphs replaced with plain text;
+  "Relationship to Nginx Proxy Manager" section added to docs/architecture.md.
 - Reverse proxy: upstream timeouts now respond 504 Gateway Timeout instead of
   502 (connect/reset failures remain 502).
 - Startup logs a warning naming `GPM_LOCAL_ADMIN_USER` /
