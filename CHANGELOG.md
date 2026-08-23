@@ -38,7 +38,7 @@ All notable changes to go-proxy-manager are documented here. The format follows
   already-encoded responses, sets `Vary`.
 - **Custom error pages** (`settings.errorPages`, per-host `errorPages`:
   `dir`, `inline`, `interceptUpstream`) for gpm-generated errors (upstream
-  unreachable, denied, rate-limited, dangling reference, dead host), rendered
+  unreachable, denied, rate-limited, dangling reference, parked host), rendered
   through html/template.
 - Web UI: **Clone** action on every object kind (name/secrets cleared,
   domains cleared for host-like kinds); **light theme** (auto/light/dark
@@ -75,6 +75,19 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- **BREAKING - two renames, neither migrated automatically.** `DeadHost` is now
+  `ParkedHost` (`config/dead-hosts/` -> `config/parked-hosts/`, `/api/dead-hosts`
+  -> `/api/parked-hosts`, scope subject `dead-hosts` -> `parked-hosts`,
+  `deadHosts` -> `parkedHosts`), and a stream host's `forwardHost`/`forwardPort`
+  are now a single `target: {host, port}`. Migration, before starting the new
+  binary: (1) `git mv config/dead-hosts config/parked-hosts` and commit -
+  startup and reload fail with that command in the error while the old directory
+  still holds objects, because gpm will not author a commit in your config repo;
+  (2) rewrite every `config/stream-hosts/*.yaml` `forwardHost`/`forwardPort` pair
+  as `target`, and update any API token naming a `dead-hosts:*` scope. A file
+  still using the old stream keys is rejected at load rather than accepted with
+  no backend; a backup archive taken before the rename still restores, its
+  `dead-hosts/` entries mapped onto `parked-hosts/` one-way at restore time.
 - API Tokens page: the scope picker is a compact grouped table (Hosts / Trust
   and auth / Routing / Operations) with header select-all toggles and a locked
   read box when write is checked, replacing the card grid; `metrics` no longer

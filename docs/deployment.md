@@ -696,6 +696,43 @@ promotion, and what does not survive a failover - is in [ha.md](ha.md).
 
 ## Upgrading and rolling back
 
+> **BREAKING - the next release renames two things, and neither is migrated for
+> you.** The config store is a git working tree, so gpm refuses an unmigrated
+> tree at startup with the exact fix in the error rather than authoring a commit
+> you never made. Do both steps in the config repo *before* starting the new
+> binary:
+>
+> 1. **`DeadHost` is now `ParkedHost`.** Rename the directory and commit it:
+>
+>    ```
+>    git mv config/dead-hosts config/parked-hosts
+>    git commit -m "Rename config/dead-hosts to config/parked-hosts"
+>    ```
+>
+>    Startup and every reload fail while `config/dead-hosts/` still holds
+>    objects and `config/parked-hosts/` holds none. The API path becomes
+>    `/api/parked-hosts`, the token scope subject becomes `parked-hosts`
+>    (update any API token that names `dead-hosts:read` / `dead-hosts:write`),
+>    and the whole-config `deadHosts` key becomes `parkedHosts`.
+>
+> 2. **A stream host's `forwardHost`/`forwardPort` become a single `target`.**
+>    Edit every file under `config/stream-hosts/` and commit:
+>
+>    ```yaml
+>    # before                    # after
+>    forwardHost: db.internal    target:
+>    forwardPort: 5432             host: db.internal
+>                                  port: 5432
+>    ```
+>
+>    A file still using the old keys is **rejected at load** with an error
+>    naming the new shape - it is never silently accepted with no backend.
+>
+> Restore is the one place the old name still works: a `GET /api/backup`
+> archive taken before the rename restores fine, its `dead-hosts/` entries
+> mapped onto `parked-hosts/` (logged at info). That mapping is one-way and
+> restore-only; nothing is ever written back under the old name.
+
 **Pin explicitly, and verify before you deploy.** Bump the image tag/digest
 (GitOps) or the binary version (bare metal) deliberately rather than tracking
 `latest` - see [Verifying the image](#verifying-the-image) above for the

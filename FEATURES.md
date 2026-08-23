@@ -5,7 +5,7 @@ Target feature set and roadmap for `go-proxy-manager`, synthesized from **NPM**
 OIDC-enabled reverse proxy in production**.
 
 > **Status board** (current):
-> - **P0** - shipped: proxy/redirect/stream/dead hosts, DNS-01 + custom certs,
+> - **P0** - shipped: proxy/redirect/stream/parked hosts, DNS-01 + custom certs,
 >   IP access lists, OIDC + data-plane forward-auth + auth-request, the NPM
 >   importer, typed per-host middleware, REST API + web UI, git-backed config.
 >   Two P0 design goals were deliberately **reversed** after security review
@@ -38,7 +38,8 @@ the Go version (gap we want to close).
 ## 1. NPM baseline (MIT)
 
 - `[NPM]` Host types: **proxy hosts**, **redirection hosts**, **stream hosts
-  (TCP/UDP)**, **404/dead hosts**.
+  (TCP/UDP)**, **404 hosts** (NPM calls them dead hosts; gpm calls them **parked
+  hosts**).
 - `[NPM]` SSL: **Let's Encrypt** via certbot (HTTP-01 + DNS-01), **wildcard** via
   DNS-01, **custom certificates**.
 - `[NPM]` Access control: **Access Lists** - HTTP basic auth (user/pass) +
@@ -375,7 +376,7 @@ earlier tiers or duplicating work (see "Architecture for extension").
   (contextually escaped), rendered for errors **gpm itself** generates -
   upstream unreachable (502/504), access denied (access-list/guard/geo, 403),
   rate-limited (429), a dangling middleware/access-list reference (503), and a
-  dead host - never for the upstream's own error response unless its status is
+  parked host - never for the upstream's own error response unless its status is
   also listed in `interceptUpstream`. Templates see `{{.Status}}`
   `{{.StatusText}}` `{{.Host}}` `{{.RequestID}}`; a host override wins over the
   settings-level pages; parse errors fail the config reload with a clear

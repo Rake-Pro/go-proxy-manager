@@ -261,11 +261,11 @@ func New(d Deps) http.Handler {
 			return v, err
 		},
 	})
-	register(mux, d, "dead-hosts", resource[model.DeadHost]{
-		kind: "DeadHost",
-		list: func(c model.Config) []model.DeadHost { return c.DeadHosts },
-		decode: func(b []byte, name string) (model.DeadHost, error) {
-			var v model.DeadHost
+	register(mux, d, "parked-hosts", resource[model.ParkedHost]{
+		kind: "ParkedHost",
+		list: func(c model.Config) []model.ParkedHost { return c.ParkedHosts },
+		decode: func(b []byte, name string) (model.ParkedHost, error) {
+			var v model.ParkedHost
 			err := json.Unmarshal(b, &v)
 			v.Name = name
 			return v, err

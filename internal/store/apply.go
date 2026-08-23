@@ -29,8 +29,8 @@ func withObject(cfg *model.Config, obj model.Object) model.Config {
 		c.RedirectHosts = upsert(c.RedirectHosts, o)
 	case model.StreamHost:
 		c.StreamHosts = upsert(c.StreamHosts, o)
-	case model.DeadHost:
-		c.DeadHosts = upsert(c.DeadHosts, o)
+	case model.ParkedHost:
+		c.ParkedHosts = upsert(c.ParkedHosts, o)
 	case model.Certificate:
 		c.Certificates = upsert(c.Certificates, o)
 	case model.ClientCA:
@@ -62,8 +62,8 @@ func withoutObject(cfg *model.Config, kind, name string) model.Config {
 		c.RedirectHosts = dropNamed(c.RedirectHosts, name)
 	case "StreamHost":
 		c.StreamHosts = dropNamed(c.StreamHosts, name)
-	case "DeadHost":
-		c.DeadHosts = dropNamed(c.DeadHosts, name)
+	case "ParkedHost":
+		c.ParkedHosts = dropNamed(c.ParkedHosts, name)
 	case "Certificate":
 		c.Certificates = dropNamed(c.Certificates, name)
 	case "ClientCA":
@@ -114,7 +114,7 @@ func stampTimes(obj model.Object, now time.Time) any {
 	case model.StreamHost:
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
-	case model.DeadHost:
+	case model.ParkedHost:
 		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
 		return o
 	case model.Certificate:

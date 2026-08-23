@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog/log"
 )
 
 // maxRestoreBytes bounds an uploaded restore archive (uncompressed, per entry and
@@ -112,6 +113,20 @@ func (s *Store) allowedRestorePath(name string) bool {
 	return false
 }
 
+// remapLegacyRestorePath rewrites an archive entry that names a retired kind
+// directory (legacyKindDirs) onto the directory that replaced it, so an archive
+// taken before the rename still restores. It is deliberately ONE-WAY and
+// restore-only: gpm never writes the old name back out, and the on-disk tree is
+// never migrated behind the operator (see checkLegacyKindDirs).
+func remapLegacyRestorePath(name string) (string, bool) {
+	for old, current := range legacyKindDirs {
+		if rest, ok := strings.CutPrefix(name, old+"/"); ok {
+			return current + "/" + rest, true
+		}
+	}
+	return "", false
+}
+
 // Restore replaces the entire config with the contents of a gzip-tar archive
 // produced by Export, validates the result, and commits it as one revision. If
 // the archive yields an invalid config the working tree is rolled back to HEAD
@@ -190,7 +205,13 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 		if hdr.Typeflag != tar.TypeReg {
 			continue // skip directories and anything non-regular
 		}
-		if !s.allowedRestorePath(hdr.Name) {
+		entry := hdr.Name
+		if mapped, ok := remapLegacyRestorePath(entry); ok {
+			log.Info().Str("entry", entry).Str("restoredAs", mapped).
+				Msg("restore: archive entry names a retired config directory; mapping it onto its replacement")
+			entry = mapped
+		}
+		if !s.allowedRestorePath(entry) {
 			return nil, fmt.Errorf("restore: archive entry %q is not an allowed config path", hdr.Name)
 		}
 		if len(files) >= maxRestoreEntries {
@@ -204,7 +225,7 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("restore: read entry %q: %w", hdr.Name, err)
 		}
-		files[path.Clean(hdr.Name)] = b
+		files[path.Clean(entry)] = b
 	}
 	return files, nil
 }

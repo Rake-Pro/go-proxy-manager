@@ -115,7 +115,7 @@ func (p *ProxyProtocolSettings) validate() error {
 
 // ErrorPagesConfig configures custom HTML pages served for errors gpm ITSELF
 // generates - upstream unreachable (502/504), no healthy upstream, access
-// denied (access-list/guard/geo), rate-limited (429), a dead host, or a host
+// denied (access-list/guard/geo), rate-limited (429), a parked host, or a host
 // whose middleware/access-list reference cannot be resolved (503). The
 // upstream's own error response is left untouched unless its status is also
 // listed in InterceptUpstream. See dataplane's error-page renderer.

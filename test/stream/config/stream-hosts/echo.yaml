@@ -1,5 +1,6 @@
 name: echo
 listenPort: 15432
 protocol: both
-forwardHost: echo
-forwardPort: 9000
+target:
+  host: echo
+  port: 9000

@@ -616,7 +616,7 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 	for _, h := range cfg.RedirectHosts {
 		claim(h.Name, h.Domains)
 	}
-	for _, h := range cfg.DeadHosts {
+	for _, h := range cfg.ParkedHosts {
 		claim(h.Name, h.Domains)
 	}
 

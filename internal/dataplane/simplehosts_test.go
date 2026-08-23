@@ -49,8 +49,8 @@ func TestRedirectHostServes(t *testing.T) {
 	}
 }
 
-func TestDeadHostServes(t *testing.T) {
-	cfg := model.Config{DeadHosts: []model.DeadHost{
+func TestParkedHostServes(t *testing.T) {
+	cfg := model.Config{ParkedHosts: []model.ParkedHost{
 		{ObjectMeta: model.ObjectMeta{Name: "gone"}, Domains: []string{"gone.com"}},
 		{ObjectMeta: model.ObjectMeta{Name: "teapot"}, Domains: []string{"teapot.com"}, StatusCode: 418},
 	}}
@@ -59,10 +59,10 @@ func TestDeadHostServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rec := serveOn(rt, true, "GET", "https://gone.com/whatever", "gone.com"); rec.Code != http.StatusNotFound {
-		t.Fatalf("dead default: got %d, want 404", rec.Code)
+		t.Fatalf("parked default: got %d, want 404", rec.Code)
 	}
 	if rec := serveOn(rt, true, "GET", "https://teapot.com/", "teapot.com"); rec.Code != http.StatusTeapot {
-		t.Fatalf("dead custom: got %d, want 418", rec.Code)
+		t.Fatalf("parked custom: got %d, want 418", rec.Code)
 	}
 	// Unknown host still 404s.
 	if rec := serveOn(rt, true, "GET", "https://unknown.com/", "unknown.com"); rec.Code != http.StatusNotFound {
@@ -70,10 +70,10 @@ func TestDeadHostServes(t *testing.T) {
 	}
 }
 
-func TestRedirectAndDeadForceSSL(t *testing.T) {
+func TestRedirectAndParkedForceSSL(t *testing.T) {
 	cfg := model.Config{
 		RedirectHosts: []model.RedirectHost{{ObjectMeta: model.ObjectMeta{Name: "r"}, Domains: []string{"r.com"}, TargetDomain: "t.com", TLS: model.TLSSettings{ForceSSL: true}}},
-		DeadHosts:     []model.DeadHost{{ObjectMeta: model.ObjectMeta{Name: "d"}, Domains: []string{"d.com"}, TLS: model.TLSSettings{ForceSSL: true}}},
+		ParkedHosts:   []model.ParkedHost{{ObjectMeta: model.ObjectMeta{Name: "d"}, Domains: []string{"d.com"}, TLS: model.TLSSettings{ForceSSL: true}}},
 	}
 	rt, err := buildRouter(cfg, "", nil)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestRedirectAndDeadForceSSL(t *testing.T) {
 		t.Fatalf("redirect forceSSL: got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 	if rec := serveOn(rt, false, "GET", "http://d.com/x", "d.com"); rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "https://d.com/x" {
-		t.Fatalf("dead forceSSL: got %d %q", rec.Code, rec.Header().Get("Location"))
+		t.Fatalf("parked forceSSL: got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 	// Over HTTPS the redirect host serves its redirect (auto scheme = https).
 	if rec := serveOn(rt, true, "GET", "https://r.com/", "r.com"); rec.Header().Get("Location") != "https://t.com" {

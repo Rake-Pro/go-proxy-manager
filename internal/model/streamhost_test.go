@@ -1,17 +1,19 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func streamHost(name string, port int, proto string) StreamHost {
 	return StreamHost{
-		ObjectMeta:  ObjectMeta{Name: name},
-		ListenPort:  port,
-		Protocol:    proto,
-		ForwardHost: "10.0.0.5",
-		ForwardPort: 5432,
+		ObjectMeta: ObjectMeta{Name: name},
+		ListenPort: port,
+		Protocol:   proto,
+		Target:     StreamTarget{Host: "10.0.0.5", Port: 5432},
 	}
 }
 
@@ -310,5 +312,92 @@ func TestProxyProtocolSettingsValidation(t *testing.T) {
 	}
 	if got := (&ProxyProtocolSettings{Timeout: "7s"}).HeaderTimeout(); got.String() != "7s" {
 		t.Fatalf("timeout = %v, want 7s", got)
+	}
+}
+
+// The retired forwardHost/forwardPort keys must fail loudly rather than decode
+// into nothing: neither encoding/json nor yaml.v3 errors on an unknown key, so a
+// stale config would otherwise validate with an empty target and silently lose
+// its backend.
+func TestStreamHostRejectsRetiredForwardKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host StreamHost
+	}{
+		{"host only", StreamHost{
+			ObjectMeta:        ObjectMeta{Name: "s"},
+			ListenPort:        5432,
+			Protocol:          "tcp",
+			LegacyForwardHost: "10.0.0.5",
+		}},
+		{"port only", StreamHost{
+			ObjectMeta:        ObjectMeta{Name: "s"},
+			ListenPort:        5432,
+			Protocol:          "tcp",
+			LegacyForwardPort: 5432,
+		}},
+		{"both, alongside a valid target", StreamHost{
+			ObjectMeta:        ObjectMeta{Name: "s"},
+			ListenPort:        5432,
+			Protocol:          "tcp",
+			Target:            StreamTarget{Host: "10.0.0.5", Port: 5432},
+			LegacyForwardHost: "10.0.0.9",
+			LegacyForwardPort: 9999,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.host.Validate()
+			if err == nil {
+				t.Fatal("a config still using forwardHost/forwardPort must be rejected")
+			}
+			if !strings.Contains(err.Error(), "target") {
+				t.Fatalf("the error must name the new shape, got %v", err)
+			}
+		})
+	}
+}
+
+// The rejection has to survive the decoders the store and API actually use:
+// both drop unknown keys silently, so the legacy keys are decoded into the
+// shadow fields and caught by Validate.
+func TestStreamHostRetiredKeysSurviveDecoding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		decode func([]byte, *StreamHost) error
+		blob   []byte
+	}{
+		{"yaml", func(b []byte, h *StreamHost) error { return yaml.Unmarshal(b, h) },
+			[]byte("name: s\nlistenPort: 5432\nprotocol: tcp\nforwardHost: 10.0.0.5\nforwardPort: 5432\n")},
+		{"json", func(b []byte, h *StreamHost) error { return json.Unmarshal(b, h) },
+			[]byte(`{"name":"s","listenPort":5432,"protocol":"tcp","forwardHost":"10.0.0.5","forwardPort":5432}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h StreamHost
+			if err := tc.decode(tc.blob, &h); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := h.Validate(); err == nil || !strings.Contains(err.Error(), "target") {
+				t.Fatalf("a decoded legacy config must be refused with the new shape named, got %v", err)
+			}
+		})
+	}
+}
+
+// Nothing gpm writes carries the retired keys: they are omitempty, so a
+// round-trip of a current object stays clean in both encodings.
+func TestStreamHostDoesNotEmitRetiredKeys(t *testing.T) {
+	h := streamHost("s", 5432, "tcp")
+	y, err := yaml.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{string(y), string(j)} {
+		if strings.Contains(out, "forwardHost") || strings.Contains(out, "forwardPort") {
+			t.Fatalf("marshalled output still carries a retired key:\n%s", out)
+		}
 	}
 }

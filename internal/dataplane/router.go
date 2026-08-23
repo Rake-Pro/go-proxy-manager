@@ -23,7 +23,7 @@ import (
 type router struct {
 	hosts     map[string]*hostHandler // proxy hosts (full middleware chain)
 	redirects map[string]*redirectHandler
-	dead      map[string]*deadHandler
+	parked    map[string]*parkedHandler
 	certs     *certResolver
 
 	// tlsConfigs holds a per-domain TLS config for any host (of any type) that
@@ -76,7 +76,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 	rt := &router{
 		hosts:      map[string]*hostHandler{},
 		redirects:  map[string]*redirectHandler{},
-		dead:       map[string]*deadHandler{},
+		parked:     map[string]*parkedHandler{},
 		certs:      certs,
 		tlsConfigs: map[string]*tls.Config{},
 		clientAuth: map[string]*clientAuthReq{},
@@ -162,16 +162,16 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 			return nil, fmt.Errorf("redirect host %q: %w", h.Name, err)
 		}
 	}
-	for _, h := range cfg.DeadHosts {
+	for _, h := range cfg.ParkedHosts {
 		if h.Disabled {
 			continue
 		}
-		dh := newDeadHandler(h)
+		ph := newParkedHandler(h)
 		for _, d := range h.Domains {
-			rt.dead[hostKey(d)] = dh
+			rt.parked[hostKey(d)] = ph
 		}
 		if err := pinTLS(h.Domains, h.TLS); err != nil {
-			return nil, fmt.Errorf("dead host %q: %w", h.Name, err)
+			return nil, fmt.Errorf("parked host %q: %w", h.Name, err)
 		}
 	}
 	return rt, nil
@@ -240,7 +240,7 @@ func normalizeLocationPrefix(p string) string {
 // hostProxy returns the terminal reverse-proxy handler and its upstream label
 // for a host: a single upstream, or a health-checked failover group resolved
 // from the live health state (reconciled before the router build, so a missing
-// group here is a hard build error rather than a silently dead host). ep is the
+// group here is a hard build error rather than a silently unreachable host). ep is the
 // host's compiled errorPages override (nil if it has none), handed to the
 // reverse proxy for a 502/504 page and InterceptUpstream. When the host opts
 // into compression, the terminal handler is wrapped to gzip eligible responses
@@ -412,7 +412,7 @@ func (rt *router) tlsConfigForSNI(serverName string) *tls.Config {
 }
 
 // lookup returns the proxy-host handler for the request's Host (port stripped),
-// if any. Redirect and dead hosts are dispatched separately in serveHTTP(S).
+// if any. Redirect and parked hosts are dispatched separately in serveHTTP(S).
 func (rt *router) lookup(hostHeader string) (*hostHandler, bool) {
 	hh, ok := rt.hosts[hostKey(hostHeader)]
 	return hh, ok
@@ -493,7 +493,7 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 }
 
 // serveHTTPS dispatches a TLS-terminated request to its host by Host header:
-// proxy hosts run the middleware chain; redirect and dead hosts serve directly.
+// proxy hosts run the middleware chain; redirect and parked hosts serve directly.
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	name := hostKey(r.Host)
 	// mTLS is enforced per REQUEST here, not only by the SNI-selected tls.Config:
@@ -529,8 +529,8 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		rh.serve(w, r)
 		return
 	}
-	if dh, ok := rt.dead[name]; ok {
-		dh.serve(w, r)
+	if ph, ok := rt.parked[name]; ok {
+		ph.serve(w, r)
 		return
 	}
 	http.Error(w, "no such host", http.StatusNotFound)
@@ -574,12 +574,12 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		rh.serve(w, r)
 		return
 	}
-	if dh, ok := rt.dead[name]; ok {
-		if dh.forceSSL {
+	if ph, ok := rt.parked[name]; ok {
+		if ph.forceSSL {
 			redirectToHTTPS(w, r)
 			return
 		}
-		dh.serve(w, r)
+		ph.serve(w, r)
 		return
 	}
 	http.Error(w, "no such host", http.StatusNotFound)

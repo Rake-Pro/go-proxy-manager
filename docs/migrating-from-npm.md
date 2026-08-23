@@ -70,6 +70,27 @@ If it fails with "no NPM sqlite database found", the snapshot directory must
 directly contain `database.sqlite`. If it reports missing certificate files,
 the `letsencrypt/` copy wasn't done with `sudo` + `chmod -R a+rX` above.
 
+### What NPM's tables become
+
+The importer reads NPM's schema as-is and emits gpm's own object kinds. Where
+the two projects name the same thing differently, the gpm name is what you will
+see in the UI, the API and `config/`:
+
+| NPM table | gpm kind | `config/` directory | API path |
+|-----------|----------|---------------------|----------|
+| `proxy_host` | ProxyHost | `proxy-hosts/` | `/api/proxy-hosts` |
+| `redirection_host` | RedirectHost | `redirect-hosts/` | `/api/redirect-hosts` |
+| `dead_host` | **ParkedHost** | `parked-hosts/` | `/api/parked-hosts` |
+| `stream` | StreamHost | `stream-hosts/` | `/api/stream-hosts` |
+| `access_list` (+ `access_list_auth` / `access_list_client`) | AccessList | `access-lists/` | `/api/access-lists` |
+| `certificate` | Certificate | `certificates/` | `/api/certificates` |
+
+NPM's `dead_host` is a domain that answers 404 and nothing else. gpm calls that
+a **parked host** - the domain is reserved without serving anything - because
+nothing about it is dead: it is a live, TLS-terminating vhost doing exactly what
+it was configured to do. NPM's `stream.forwarding_host`/`forwarding_port` become
+the stream host's single `target: {host, port}`.
+
 **Not imported: NPM's local user accounts, 2FA settings, or audit log** -
 go-proxy-manager has no local-user table to import them into (a single
 break-glass local admin plus OIDC group-to-role mapping instead; see

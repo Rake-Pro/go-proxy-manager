@@ -42,26 +42,26 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, h.status)
 }
 
-// deadHandler serves a DeadHost: a fixed status (default 404) for claimed domains,
-// so an unmatched vhost is absorbed instead of leaking to a default host.
-type deadHandler struct {
+// parkedHandler serves a ParkedHost: a fixed status (default 404) for claimed
+// domains, so an unmatched vhost is absorbed instead of leaking to a default host.
+type parkedHandler struct {
 	forceSSL bool
 	status   int
 	name     string
 }
 
-func newDeadHandler(h model.DeadHost) *deadHandler {
+func newParkedHandler(h model.ParkedHost) *parkedHandler {
 	status := h.StatusCode
 	if status == 0 {
 		status = http.StatusNotFound
 	}
-	return &deadHandler{forceSSL: h.TLS.ForceSSL, status: status, name: h.Name}
+	return &parkedHandler{forceSSL: h.TLS.ForceSSL, status: status, name: h.Name}
 }
 
 // serve renders the settings-level error page for h.status when one is
-// configured (a DeadHost has no errorPages override of its own), falling back
+// configured (a ParkedHost has no errorPages override of its own), falling back
 // to the historical plain-text status body otherwise.
-func (h *deadHandler) serve(w http.ResponseWriter, r *http.Request) {
+func (h *parkedHandler) serve(w http.ResponseWriter, r *http.Request) {
 	serveErrorPage(w, h.status, nil, h.name, func() {
 		http.Error(w, http.StatusText(h.status), h.status)
 	})

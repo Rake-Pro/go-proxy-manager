@@ -96,7 +96,7 @@ func TestStaticBundleHasCloneHelper(t *testing.T) {
 	// Every list view for a kind with a "Clone" affordance must call the
 	// shared startClone helper rather than hand-rolling its own navigation -
 	// one call site per kind covers proxy hosts, certificates, and (via
-	// genericList) every other listed kind (redirects, streams, dead hosts,
+	// genericList) every other listed kind (redirects, streams, parked hosts,
 	// access lists, middlewares, upstream groups, identity/DNS providers,
 	// client CAs).
 	for _, want := range []string{
@@ -113,7 +113,7 @@ func TestStaticBundleHasCloneHelper(t *testing.T) {
 	// one shared wireCloneButton helper - a per-kind reimplementation here
 	// would be exactly the duplication the shared helper exists to avoid.
 	for _, section := range []string{
-		"hosts", "certs", "redirects", "streams", "dead", "dns",
+		"hosts", "certs", "redirects", "streams", "parked", "dns",
 		"access", "identity", "middleware", "clientcas", "upstreams",
 	} {
 		if !strings.Contains(js, "wireCloneButton('"+section+"'") {

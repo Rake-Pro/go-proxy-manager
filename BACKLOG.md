@@ -421,7 +421,7 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 ## Roadmap
 
-See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/dead hosts shipped, backup/
+See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts shipped, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
 (HTTP/3, hardened TLS, proxy protocol, IPv6, multi-ACME EAB - GeoIP
 geoblocking and mTLS client certs phase 1 are now shipped, see FEATURES.md),

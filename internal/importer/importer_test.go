@@ -128,7 +128,7 @@ func TestImport(t *testing.T) {
 	wantCounts := map[string]int{
 		"ProxyHost":    2,
 		"RedirectHost": 1,
-		"DeadHost":     1,
+		"ParkedHost":   1,
 		"StreamHost":   1,
 		"AccessList":   1,
 		"Certificate":  2,
@@ -216,7 +216,7 @@ func TestImport(t *testing.T) {
 
 	// Stream: tcp+udp -> both.
 	sh := findStream(t, res.Objects)
-	if sh.Protocol != "both" || sh.ListenPort != 5353 || sh.ForwardHost != "dns.local" || sh.ForwardPort != 53 {
+	if sh.Protocol != "both" || sh.ListenPort != 5353 || sh.Target.Host != "dns.local" || sh.Target.Port != 53 {
 		t.Errorf("stream host = %+v", sh)
 	}
 

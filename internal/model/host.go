@@ -463,14 +463,41 @@ func validSNIMatch(s string) bool {
 	return true
 }
 
+// StreamTarget is the backend a stream host forwards to. It mirrors Upstream's
+// host/port vocabulary deliberately, minus the scheme: a raw TCP/UDP stream
+// carries an arbitrary protocol, so an http/https scheme has no meaning for it.
+type StreamTarget struct {
+	Host string `json:"host" yaml:"host"`
+	Port int    `json:"port" yaml:"port"`
+}
+
+func (t StreamTarget) validate(hostName string) error {
+	if t.Host == "" {
+		return fmt.Errorf("stream host %q: target.host is required", hostName)
+	}
+	if t.Port < 1 || t.Port > 65535 {
+		return fmt.Errorf("stream host %q: target.port %d out of range", hostName, t.Port)
+	}
+	return nil
+}
+
 // StreamHost forwards raw TCP/UDP from a listen port to a backend.
 type StreamHost struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 
-	ListenPort  int    `json:"listenPort" yaml:"listenPort"`
-	Protocol    string `json:"protocol" yaml:"protocol"` // tcp | udp | both
-	ForwardHost string `json:"forwardHost" yaml:"forwardHost"`
-	ForwardPort int    `json:"forwardPort" yaml:"forwardPort"`
+	ListenPort int    `json:"listenPort" yaml:"listenPort"`
+	Protocol   string `json:"protocol" yaml:"protocol"` // tcp | udp | both
+
+	// Target is the backend this port forwards to.
+	Target StreamTarget `json:"target" yaml:"target"`
+
+	// LegacyForwardHost/LegacyForwardPort exist ONLY so a config still written in
+	// the pre-target shape fails loudly instead of silently losing its backend.
+	// Neither encoding/json nor yaml.v3 errors on an unknown key here, so the two
+	// retired keys are decoded into these fields and rejected by Validate. They
+	// are omitempty, so nothing gpm writes ever carries them.
+	LegacyForwardHost string `json:"forwardHost,omitempty" yaml:"forwardHost,omitempty"`
+	LegacyForwardPort int    `json:"forwardPort,omitempty" yaml:"forwardPort,omitempty"`
 
 	// TLS opts a TCP stream host into SNI routing and/or TLS termination. nil
 	// (the default) keeps the historical blind byte forwarder.
@@ -498,11 +525,11 @@ func (h StreamHost) Validate() error {
 	if h.ListenPort < 1 || h.ListenPort > 65535 {
 		return fmt.Errorf("stream host %q: listenPort %d out of range", h.Name, h.ListenPort)
 	}
-	if h.ForwardHost == "" {
-		return fmt.Errorf("stream host %q: forwardHost is required", h.Name)
+	if h.LegacyForwardHost != "" || h.LegacyForwardPort != 0 {
+		return fmt.Errorf("stream host %q: forwardHost/forwardPort were replaced by a single target; write `target: {host: <host>, port: <port>}` instead", h.Name)
 	}
-	if h.ForwardPort < 1 || h.ForwardPort > 65535 {
-		return fmt.Errorf("stream host %q: forwardPort %d out of range", h.Name, h.ForwardPort)
+	if err := h.Target.validate(h.Name); err != nil {
+		return err
 	}
 	if err := h.TLS.validate(h.Name, h.Protocol); err != nil {
 		return err
@@ -523,9 +550,10 @@ func (h StreamHost) SNINames() []string {
 	return out
 }
 
-// DeadHost serves a 404 (or custom status) for claimed domains, useful to
-// absorb unmatched vhosts and stop default-host leakage.
-type DeadHost struct {
+// ParkedHost serves a 404 (or custom status) for claimed domains: it reserves a
+// name without serving anything, absorbing unmatched vhosts so nothing leaks to
+// a default host.
+type ParkedHost struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 
 	Domains    []string    `json:"domains" yaml:"domains"`
@@ -533,14 +561,14 @@ type DeadHost struct {
 	TLS        TLSSettings `json:"tls,omitempty" yaml:"tls,omitempty"`
 }
 
-func (h DeadHost) Kind() string { return "DeadHost" }
+func (h ParkedHost) Kind() string { return "ParkedHost" }
 
-func (h DeadHost) Validate() error {
+func (h ParkedHost) Validate() error {
 	if err := ValidateName(h.Name); err != nil {
 		return err
 	}
 	if len(h.Domains) == 0 {
-		return fmt.Errorf("dead host %q: at least one domain is required", h.Name)
+		return fmt.Errorf("parked host %q: at least one domain is required", h.Name)
 	}
 	return nil
 }
