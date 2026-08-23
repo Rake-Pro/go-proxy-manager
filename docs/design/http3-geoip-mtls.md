@@ -1,8 +1,9 @@
 # Design: HTTP/3, GeoIP geoblocking, mTLS client certs
 
 Status: **mixed.** mTLS (phases 1 and 2) and GeoIP geoblocking are **implemented**
-(see CHANGELOG.md / FEATURES.md); HTTP/3 remains a **proposal** (not
-started). Scope: three P2 edge features from [FEATURES.md](../../FEATURES.md).
+(see CHANGELOG.md / FEATURES.md); HTTP/3 is **held** (decision
+2026-08-23): not before Go stdlib ships an HTTP/3 server (golang/go#58547);
+the quic-go quarantine design below stays as the fallback plan. Scope: three P2 edge features from [FEATURES.md](../../FEATURES.md).
 This document records the intended design, the schema/wiring, and —
 critically for this project — the **dependency decision** for each, so
 implementation can start from a settled plan.

@@ -136,7 +136,10 @@ All findings from that review are remediated in the same change (see CHANGELOG
   OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
   annotation prefix, ops docs. Batch 3 shipped 2026-08-23: metrics, bouncer,
   PROXY protocol, stream SNI/L4 ACLs, gzip, error pages, clone, light theme,
-  IPv6 docs. HTTP/3 deferred (dependency footprint). Remaining at flip time: author-identity history
+  IPv6 docs. HTTP/3 HELD (owner decision 2026-08-23): stays in the backlog
+  until Go stdlib ships an HTTP/3 server (golang/go#58547, milestone
+  Unreleased); quic-go re-check 2026-08-23 found nothing lighter (~20 modules,
+  +2.1 MB, 3 advisories/12 months). Remaining at flip time: author-identity history
   rewrite (real email on 43 commits), CLAUDE.md purge, final leakage pass.)* Publishing the source of the live edge proxy is a
   deliberate exposure decision: the full pre-publication pipeline applies
   (all-history secret/infra audit, author-identity normalization, tag/release
