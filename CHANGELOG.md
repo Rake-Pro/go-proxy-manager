@@ -7,6 +7,46 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Prometheus metrics** (opt-in): `GET /metrics` on the admin listener,
+  enabled with `-metrics` / `GPM_METRICS=1` (404 when off), gated by admin
+  role plus a dedicated `metrics:read` API-token scope. Text exposition from a
+  small internal package (`internal/metrics`), no new dependency. Per-host
+  request counts / latency histogram / bytes / in-flight, upstream errors,
+  websocket upgrades, denials by tier, stream connections, ACME expiry and
+  renew failures, DNS-sync and Ingress-discovery timestamps, HA role, build
+  info, Go runtime. Host labels are operator object names, never client
+  `Host` headers; every metric caps its series count. `dnsSync` status now
+  reports `lastSuccess`.
+- **Bouncer middleware (WAF/CrowdSec deny hook)**: new `bouncer` middleware
+  type, hook-only. Providers `crowdsec` (LAPI flow; `ban`/`captcha` deny;
+  optional `stream: true` keeps decisions in memory with CIDR support) and
+  `http` (generic 2xx=allow / 403=deny). Runs after the access list and
+  before auth; `allowFrom` bypass; `onError: fail-open|fail-closed` (default
+  fail-open); bounded per-IP verdict cache, error verdicts capped at 5s.
+- **Inbound PROXY protocol** v1 + v2 via `settings.proxyProtocol` (`enabled`,
+  `trustedCIDRs` required, `timeout` 5s) on the :80/:443 and TCP stream
+  listeners. Honoured only from a trusted peer; the parsed source replaces
+  the connection address so every IP-based control sees the real client.
+  Config is read live per connection.
+- **Stream TLS/SNI routing**: `StreamHost.tls.mode: passthrough|terminate`
+  with `sniMatch` and (terminate) `certificateRef`; several hosts may share
+  one TCP port when all are SNI-routed.
+- **L4 access lists on stream hosts** (`accessLists`, IP/CIDR + geo),
+  evaluated before any backend dial.
+- **Per-host gzip compression** (`compression`: `enabled`, `minBytes` 1024,
+  `types`), stdlib only, Accept-Encoding aware, skips upgrades/event-streams/
+  already-encoded responses, sets `Vary`.
+- **Custom error pages** (`settings.errorPages`, per-host `errorPages`:
+  `dir`, `inline`, `interceptUpstream`) for gpm-generated errors (upstream
+  unreachable, denied, rate-limited, dangling reference, dead host), rendered
+  through html/template.
+- Web UI: **Clone** action on every object kind (name/secrets cleared,
+  domains cleared for host-like kinds); **light theme** (auto/light/dark
+  toggle in the top bar, persisted, applied before first paint); login page
+  follows the OS preference. Stream editor gains TLS/SNI/cert/ACL fields;
+  Settings gains PROXY protocol, error pages and metrics cards.
+- IPv6: dual-stack binds verified by test; `IPv6` subsection in
+  docs/deployment.md for the Docker-side requirements.
 - **ACME HTTP-01 challenge support**: `certificate.acme.challenge: http-01`
   issues without any DNS credential; the data plane's plaintext `:80` listener
   serves `/.well-known/acme-challenge/<token>` ahead of host routing, the
@@ -35,6 +75,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- Reverse proxy: upstream timeouts now respond 504 Gateway Timeout instead of
+  502 (connect/reset failures remain 502).
 - Startup logs a warning naming `GPM_LOCAL_ADMIN_USER` /
   `GPM_LOCAL_ADMIN_PASSWORD_HASH` and `settings.adminAuth.providers` when
   neither is configured (the admin panel was previously unreachable with no
@@ -59,6 +101,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Security
 
+- A PROXY header from a peer outside `trustedCIDRs` is treated as payload and
+  the peer address stands (warned once per peer); a malformed header closes
+  the connection; a stalled one is cut at `timeout`.
+- Config validation rejects a stream host referencing an access list with
+  `basicAuth` users, `tls` on a udp/both stream, port sharing unless all hosts
+  are SNI-routed, and duplicate SNI claims; a stream host whose access list or
+  certificate cannot be resolved is dropped rather than served ungated.
 - Released images are signed keylessly with cosign via GitHub Actions OIDC.
 - Data-plane OIDC gate: a request whose `Host` is not a configured domain of
   the gated host is refused (404) instead of minting and caching a per-Host

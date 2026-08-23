@@ -198,7 +198,7 @@ func newTestEnv(t *testing.T, o envOpts) *testEnv {
 			SSOOnly:           o.ssoOnly,
 		},
 	})
-	return &testEnv{t: t, idp: idp, authn: authn, srv: New(":0", nil, authn, nil, nil, false), sess: st}
+	return &testEnv{t: t, idp: idp, authn: authn, srv: New(":0", nil, authn, nil, nil, nil, false), sess: st}
 }
 
 func (e *testEnv) do(req *http.Request) *http.Response {

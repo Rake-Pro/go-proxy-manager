@@ -32,7 +32,7 @@ func TestAccessListIP(t *testing.T) {
 			{Action: model.ActionDeny, CIDR: "0.0.0.0/0"},
 		},
 	}
-	h := accessListHandler(compileAccessList(al), nil, nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), nil, nil, nil, "", nil, okHandler())
 
 	cases := []struct {
 		ip   string
@@ -43,7 +43,7 @@ func TestAccessListIP(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ip, func(t *testing.T) {
-			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), nil, nil, okHandler())
+			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), nil, nil, "", nil, okHandler())
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 			if rec.Code != c.want {
@@ -60,7 +60,7 @@ func TestAccessListBasicAuth(t *testing.T) {
 		ObjectMeta: model.ObjectMeta{Name: "auth"},
 		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
 	}
-	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), nil, nil, "", nil, okHandler())
 
 	// No creds -> 401 with challenge.
 	rec := httptest.NewRecorder()
@@ -98,7 +98,7 @@ func TestAccessListSatisfyAny(t *testing.T) {
 		BasicAuth:     []model.BasicAuthUser{{Username: "u", PasswordHash: string(hash)}},
 	}
 	// Trusted IP, no creds -> allowed because satisfyAny.
-	h := accessListHandler(compileAccessList(al), ipFrom("10.9.9.9"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("10.9.9.9"), nil, nil, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusOK {
@@ -108,7 +108,7 @@ func TestAccessListSatisfyAny(t *testing.T) {
 
 func TestAccessListEmptyIsOpen(t *testing.T) {
 	al := model.AccessList{ObjectMeta: model.ObjectMeta{Name: "empty"}}
-	h := accessListHandler(compileAccessList(al), ipFrom("8.8.8.8"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("8.8.8.8"), nil, nil, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusOK {
@@ -124,7 +124,7 @@ func TestAccessListEmptyDefaultDenyIsClosed(t *testing.T) {
 		ObjectMeta:    model.ObjectMeta{Name: "locked"},
 		DefaultAction: model.ActionDeny,
 	}
-	h := accessListHandler(compileAccessList(al), ipFrom("8.8.8.8"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("8.8.8.8"), nil, nil, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusForbidden {
@@ -171,7 +171,7 @@ func TestAccessListGeoCountryDeny(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ip, func(t *testing.T) {
-			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, okHandler())
+			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, "", nil, okHandler())
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 			if rec.Code != c.want {
@@ -204,7 +204,7 @@ func TestAccessListGeoCountryAllow(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ip, func(t *testing.T) {
-			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, okHandler())
+			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, "", nil, okHandler())
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 			if rec.Code != c.want {
@@ -234,7 +234,7 @@ func TestAccessListGeoWhitelistUnknownDefaultsClosed(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ip, func(t *testing.T) {
-			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, okHandler())
+			h := accessListHandler(compileAccessList(al), ipFrom(c.ip), geo, geoLoadedTrue, "", nil, okHandler())
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 			if rec.Code != c.want {
@@ -254,7 +254,7 @@ func TestAccessListGeoDenyListUnknownDefaultsOpen(t *testing.T) {
 		Geo:           &model.AccessListGeo{CountryDeny: []string{"CN"}}, // no onUnknown
 	}
 	geo := geoLookupFrom(map[string]string{"1.2.3.4": "CN"})
-	h := accessListHandler(compileAccessList(al), ipFrom("9.9.9.9"), geo, geoLoadedTrue, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("9.9.9.9"), geo, geoLoadedTrue, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusOK {
@@ -272,7 +272,7 @@ func TestAccessListGeoIPRulesTakePriority(t *testing.T) {
 	// 1.2.3.4 resolves to CN in the fake geo lookup, but the explicit IP
 	// allow rule matches first and wins outright.
 	geo := geoLookupFrom(map[string]string{"1.2.3.4": "CN"})
-	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), geo, geoLoadedTrue, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), geo, geoLoadedTrue, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusOK {
@@ -289,7 +289,7 @@ func TestAccessListGeoOnlyStillGates(t *testing.T) {
 		Geo:           &model.AccessListGeo{CountryDeny: []string{"CN"}},
 	}
 	geo := geoLookupFrom(map[string]string{"1.2.3.4": "CN"})
-	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), geo, geoLoadedTrue, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), geo, geoLoadedTrue, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusForbidden {
@@ -307,7 +307,7 @@ func TestAccessListGeoSatisfyAny(t *testing.T) {
 		BasicAuth:     []model.BasicAuthUser{{Username: "u", PasswordHash: string(hash)}},
 	}
 	geo := geoLookupFrom(map[string]string{"9.9.9.9": "RU"}) // not allow-listed
-	h := accessListHandler(compileAccessList(al), ipFrom("9.9.9.9"), geo, geoLoadedTrue, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("9.9.9.9"), geo, geoLoadedTrue, "", nil, okHandler())
 
 	// Wrong country, no creds -> 401 challenge: under satisfyAny, valid creds
 	// could still let the request through, so the gate prompts rather than
@@ -341,7 +341,7 @@ func TestAccessListGeoNilLookupTreatsEveryIPAsUnknown(t *testing.T) {
 		DefaultAction: model.ActionDeny,
 		Geo:           &model.AccessListGeo{CountryDeny: []string{"CN"}, OnUnknown: model.ActionAllow},
 	}
-	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), nil, geoLoadedTrue, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("1.2.3.4"), nil, geoLoadedTrue, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusOK {
@@ -374,7 +374,7 @@ func TestAccessListGeoDBUnavailableFailsClosed(t *testing.T) {
 		{"nil", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := accessListHandler(compileAccessList(al), ipFrom("1.1.1.1"), geo, tc.geoLoaded, okHandler())
+			h := accessListHandler(compileAccessList(al), ipFrom("1.1.1.1"), geo, tc.geoLoaded, "", nil, okHandler())
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 			if rec.Code != http.StatusForbidden {
@@ -394,7 +394,7 @@ func TestAccessListBasicAuthLocksOutAfterRepeatedFailures(t *testing.T) {
 		ObjectMeta: model.ObjectMeta{Name: "auth"},
 		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
 	}
-	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.9"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.9"), nil, nil, "", nil, okHandler())
 
 	try := func(user, pass string, creds bool) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -439,7 +439,7 @@ func TestAccessListBasicAuthLocksOutAfterRepeatedFailures(t *testing.T) {
 	}
 
 	// A different client IP is unaffected: the throttle is per key, not global.
-	other := accessListHandler(compileAccessList(al), ipFrom("198.51.100.7"), nil, nil, okHandler())
+	other := accessListHandler(compileAccessList(al), ipFrom("198.51.100.7"), nil, nil, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.SetBasicAuth("admin", "hunter2")
@@ -457,7 +457,7 @@ func TestAccessListBasicAuthSuccessClearsFailures(t *testing.T) {
 		ObjectMeta: model.ObjectMeta{Name: "auth"},
 		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
 	}
-	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.10"), nil, nil, okHandler())
+	h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.10"), nil, nil, "", nil, okHandler())
 	try := func(pass string) int {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/", nil)

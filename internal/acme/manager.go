@@ -28,6 +28,62 @@ type Manager struct {
 	http01 *HTTP01Store
 
 	mu sync.Mutex // serialises issuance (one order at a time)
+
+	// obsMu guards obs, the per-certificate expiry and failure counts the
+	// optional /metrics endpoint pulls at scrape time. It is a separate lock
+	// from mu so a scrape never waits behind a multi-minute DNS-01 propagation
+	// wait.
+	obsMu sync.Mutex
+	obs   map[string]*CertObservation
+}
+
+// CertObservation is one ACME certificate's observable state: when the issued
+// artifact expires, and how many issue/renew attempts have failed since this
+// process started. Both are read at scrape time by the /metrics collector, which
+// is why they live here rather than being pushed into a metrics package the
+// acme package would then have to depend on.
+type CertObservation struct {
+	Name          string
+	NotAfter      time.Time
+	RenewFailures int64
+}
+
+// CertObservations returns a snapshot of every ACME certificate this manager has
+// looked at, for the /metrics collector. Only the HA leader runs the manager, so
+// a follower exports no ACME series at all - which is correct: it is not the
+// issuer, and a zero there would read as "expired".
+func (m *Manager) CertObservations() []CertObservation {
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+	out := make([]CertObservation, 0, len(m.obs))
+	for _, o := range m.obs {
+		out = append(out, *o)
+	}
+	return out
+}
+
+func (m *Manager) observation(name string) *CertObservation {
+	o := m.obs[name]
+	if o == nil {
+		o = &CertObservation{Name: name}
+		m.obs[name] = o
+	}
+	return o
+}
+
+// recordExpiry notes a certificate's current expiry, whether or not this cycle
+// renewed it, so the gauge is populated for healthy certificates too.
+func (m *Manager) recordExpiry(name string, notAfter time.Time) {
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+	m.observation(name).NotAfter = notAfter
+}
+
+// recordFailure counts one failed issue/renew attempt for a certificate.
+func (m *Manager) recordFailure(name string) {
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+	m.observation(name).RenewFailures++
 }
 
 // Options configures a Manager. Zero values fall back to sane defaults.
@@ -54,6 +110,7 @@ func NewManager(o Options) *Manager {
 		newSolver:           o.NewSolver,
 		onChange:            o.OnChange,
 		http01:              NewHTTP01Store(),
+		obs:                 map[string]*CertObservation{},
 	}
 	if o.Resolver != nil {
 		m.resolver = o.Resolver
@@ -97,6 +154,12 @@ func (m *Manager) EnsureAll(ctx context.Context, cfg model.Config) (bool, error)
 		if cert.Disabled || cert.Type != model.CertTypeACME || cert.ACME == nil {
 			continue
 		}
+		// Record the current expiry for EVERY acme certificate, renewed or not -
+		// the gauge is about how close a cert is to expiring, so the healthy ones
+		// are the majority of what it has to report.
+		if meta, err := loadMeta(m.certDir, cert.Name); err == nil {
+			m.recordExpiry(cert.Name, meta.NotAfter)
+		}
 		if !m.needsRenewal(cert) {
 			continue
 		}
@@ -107,11 +170,13 @@ func (m *Manager) EnsureAll(ctx context.Context, cfg model.Config) (bool, error)
 			provider, ok := providers[cert.ACME.DNSProvider]
 			if !ok {
 				errs = append(errs, fmt.Errorf("certificate %q: dns provider %q not found", cert.Name, cert.ACME.DNSProvider))
+				m.recordFailure(cert.Name)
 				continue
 			}
 			s, err := m.newSolver(provider)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("certificate %q: build solver: %w", cert.Name, err))
+				m.recordFailure(cert.Name)
 				continue
 			}
 			solver = s
@@ -119,17 +184,25 @@ func (m *Manager) EnsureAll(ctx context.Context, cfg model.Config) (bool, error)
 		eab, err := externalAccountBinding(cert.ACME.EAB)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
+			m.recordFailure(cert.Name)
 			continue
 		}
 		client, err := newClient(ctx, m.certDir, cert.ACME.DirectoryURL, cert.ACME.Email, eab)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
+			m.recordFailure(cert.Name)
 			continue
 		}
 		log.Info().Str("cert", cert.Name).Str("challenge", cert.ACME.EffectiveChallenge()).Msg("issuing/renewing certificate")
 		if err := m.issue(ctx, client, cert, solver); err != nil {
 			errs = append(errs, fmt.Errorf("certificate %q: %w", cert.Name, err))
+			m.recordFailure(cert.Name)
 			continue
+		}
+		// Re-read the freshly issued artifact so the expiry gauge reflects the new
+		// certificate rather than the one it replaced.
+		if meta, err := loadMeta(m.certDir, cert.Name); err == nil {
+			m.recordExpiry(cert.Name, meta.NotAfter)
 		}
 		changed = true
 	}

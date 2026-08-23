@@ -33,7 +33,7 @@ func TestTCPForwarder(t *testing.T) {
 	backend, stop := tcpEcho(t)
 	defer stop()
 
-	f, err := startTCPForwarder(0, backend) // :0 = ephemeral
+	f, err := startTCPForwarder(0, &streamRoutes{def: &streamTarget{name: "s", addr: backend}}, nil) // :0 = ephemeral
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestUDPForwarder(t *testing.T) {
 		}
 	}()
 
-	f, err := startUDPForwarder(0, bpc.LocalAddr().String())
+	f, err := startUDPForwarder(0, streamTarget{name: "s", addr: bpc.LocalAddr().String()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,12 +126,12 @@ func TestStreamManagerReconcile(t *testing.T) {
 		ForwardHost: "127.0.0.1",
 		ForwardPort: portOf(t, backend),
 	}
-	m.reload([]model.StreamHost{host})
+	m.reload(model.Config{StreamHosts: []model.StreamHost{host}}, nil)
 	if len(m.tcp) != 1 || m.tcp[port] == nil {
 		t.Fatalf("expected a tcp forwarder on %d", port)
 	}
 	// Reconcile to empty -> the forwarder is stopped and removed.
-	m.reload(nil)
+	m.reload(model.Config{}, nil)
 	if len(m.tcp) != 0 {
 		t.Fatalf("forwarder should be removed on reconcile, have %d", len(m.tcp))
 	}

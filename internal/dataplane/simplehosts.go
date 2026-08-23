@@ -47,6 +47,7 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 type deadHandler struct {
 	forceSSL bool
 	status   int
+	name     string
 }
 
 func newDeadHandler(h model.DeadHost) *deadHandler {
@@ -54,9 +55,14 @@ func newDeadHandler(h model.DeadHost) *deadHandler {
 	if status == 0 {
 		status = http.StatusNotFound
 	}
-	return &deadHandler{forceSSL: h.TLS.ForceSSL, status: status}
+	return &deadHandler{forceSSL: h.TLS.ForceSSL, status: status, name: h.Name}
 }
 
+// serve renders the settings-level error page for h.status when one is
+// configured (a DeadHost has no errorPages override of its own), falling back
+// to the historical plain-text status body otherwise.
 func (h *deadHandler) serve(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, http.StatusText(h.status), h.status)
+	serveErrorPage(w, h.status, nil, h.name, func() {
+		http.Error(w, http.StatusText(h.status), h.status)
+	})
 }

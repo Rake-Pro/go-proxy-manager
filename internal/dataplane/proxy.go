@@ -1,6 +1,8 @@
 package dataplane
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -93,23 +95,26 @@ func (p *bufferPool) Put(b []byte) {
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
-// timeouts is nil for the shared, pooled transport, or a per-host override.
-func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string) http.Handler {
+// timeouts is nil for the shared, pooled transport, or a per-host override. ep
+// is the host's compiled errorPages override (nil if it has none); it drives
+// the custom page for a 502/504 upstream-unreachable response and, when
+// configured, InterceptUpstream replacement of the upstream's own error body.
+func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages) http.Handler {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 	}
-	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders)
+	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep)
 }
 
 // newGroupReverseProxy builds the terminal handler for a host backed by an
 // upstream group. The Rewrite target is nominally the group's first upstream;
 // the groupTransport re-points each attempt at the healthiest candidate, so the
 // URL set here only seeds scheme/host for X-Forwarded computation.
-func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string) http.Handler {
+func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders)
+	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep)
 }
 
 // reassertIdentity re-applies the identity headers gpm itself set on the inbound
@@ -138,7 +143,7 @@ func reassertIdentity(pr *httputil.ProxyRequest, names []string) {
 	}
 }
 
-func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string) http.Handler {
+func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string, ep *compiledErrorPages) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
@@ -148,16 +153,40 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Warn().Str("host", hostName).Str("path", r.URL.Path).Err(err).Msg("upstream error")
-			w.WriteHeader(http.StatusBadGateway)
+			if mh := metricsHook(); mh != nil {
+				mh.UpstreamError(hostName)
+			}
+			// A timeout awaiting the upstream (dial, or ResponseHeaderTimeout/
+			// context deadline) is a Gateway Timeout; anything else reaching this
+			// upstream (refused, reset, TLS failure) is a Bad Gateway.
+			status := http.StatusBadGateway
+			if isUpstreamTimeout(err) {
+				status = http.StatusGatewayTimeout
+			}
+			serveErrorPage(w, status, ep, hostName, func() {
+				w.WriteHeader(status)
+			})
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rewriteUpstreamRedirect(resp)
+			interceptUpstreamResponse(resp, ep, hostName)
 			return nil
 		},
 		Transport:  transport,
 		BufferPool: proxyBufPool,
 	}
 	return longLivedProxy(rp)
+}
+
+// isUpstreamTimeout reports whether err represents a timeout waiting on the
+// upstream (dial timeout, TLS handshake timeout, ResponseHeaderTimeout, or a
+// context deadline) rather than an outright connection failure.
+func isUpstreamTimeout(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // longLivedProxy clears the listener's per-connection read/write deadlines for
@@ -283,6 +312,12 @@ type hostHandler struct {
 	// this host does not forward the peer certificate's identity upstream. Applied
 	// in serveHTTPS, always after the identity strip.
 	certID *certIdentity
+
+	// errorPages is this host's own compiled errorPages override, or nil when it
+	// has none (the settings-level pages, if any, still apply - see
+	// serveErrorPage). Threaded into the middleware chain and the terminal proxy
+	// at build time (see buildRouter/hostProxy).
+	errorPages *compiledErrorPages
 }
 
 // route returns the handler and upstream label for a request path: the

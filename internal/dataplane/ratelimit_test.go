@@ -291,7 +291,7 @@ func serveRL(h http.Handler, remote, target string) *httptest.ResponseRecorder {
 }
 
 func TestRateLimitHandler429WithRetryAfter(t *testing.T) {
-	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 2}, peerIP, okHandler())
+	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 2}, peerIP, "", nil, okHandler())
 
 	if rec := serveRL(h, "9.9.9.9:1", "http://c/"); rec.Code != http.StatusOK {
 		t.Fatalf("request 1 should pass, got %d", rec.Code)
@@ -310,7 +310,7 @@ func TestRateLimitHandler429WithRetryAfter(t *testing.T) {
 
 func TestRateLimitHandlerNilIPSharedBucket(t *testing.T) {
 	nilIP := func(*http.Request) net.IP { return nil }
-	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1}, nilIP, okHandler())
+	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1}, nilIP, "", nil, okHandler())
 
 	// Distinct source addresses, but an unresolvable IP collapses them to one
 	// shared bucket, so the second request is denied regardless of source.
@@ -335,7 +335,7 @@ func TestChainEnforcesRateLimit(t *testing.T) {
 		ObjectMeta:  model.ObjectMeta{Name: "app"},
 		Middlewares: []string{"rl"},
 	}
-	h := buildChain(okHandler(), host, reg)
+	h := buildChain(okHandler(), host, reg, nil)
 
 	if rec := serveRL(h, "203.0.113.5:1", "http://app/"); rec.Code != http.StatusOK {
 		t.Fatalf("first request should reach the backend, got %d", rec.Code)
@@ -350,7 +350,7 @@ func TestChainEnforcesRateLimit(t *testing.T) {
 // sends, while a non-matching client is still limited as today.
 func TestRateLimitHandlerAllowFromBypasses(t *testing.T) {
 	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"10.0.0.0/8"}}
-	h := rateLimitHandler(rl, peerIP, okHandler())
+	h := rateLimitHandler(rl, peerIP, "", nil, okHandler())
 
 	for i := 0; i < 10; i++ {
 		if rec := serveRL(h, "10.1.2.3:1", "http://c/"); rec.Code != http.StatusOK {
@@ -374,7 +374,7 @@ func TestRateLimitHandlerAllowFromBypasses(t *testing.T) {
 func TestRateLimitHandlerNilIPNeverMatchesAllowFrom(t *testing.T) {
 	nilIP := func(*http.Request) net.IP { return nil }
 	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"0.0.0.0/0"}}
-	h := rateLimitHandler(rl, nilIP, okHandler())
+	h := rateLimitHandler(rl, nilIP, "", nil, okHandler())
 
 	if rec := serveRL(h, "1.1.1.1:1", "http://c/"); rec.Code != http.StatusOK {
 		t.Fatalf("first nil-IP request should pass, got %d", rec.Code)
@@ -402,7 +402,7 @@ func TestRateLimitRunsBeforeAuth(t *testing.T) {
 	}
 	reg := buildRegistry(cfg)
 	host := model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "app"}, Middlewares: []string{"sso", "rl"}}
-	h := buildChain(okHandler(), host, reg)
+	h := buildChain(okHandler(), host, reg, nil)
 
 	// First request: rate-limit admits, auth rejects an untrusted peer -> 401.
 	if rec := serveRL(h, "203.0.113.5:1", "http://app/"); rec.Code != http.StatusUnauthorized {
@@ -441,7 +441,7 @@ func TestAccessListRunsBeforeAuth(t *testing.T) {
 			Middlewares: []string{"sso"},
 			AccessLists: []string{al.Name},
 		}
-		h := buildChain(okHandler(), host, reg)
+		h := buildChain(okHandler(), host, reg, nil)
 		return serveRL(h, "203.0.113.5:1", "http://app/").Code
 	}
 

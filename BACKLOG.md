@@ -134,7 +134,9 @@ All findings from that review are remediated in the same change (see CHANGELOG
   gpm-pre-public-review-2026-08-22; batches 1+2 shipped same day: 4 Med + 2 Low
   security fixes, location-chain data-loss fix, HTTP-01/EAB/3 DNS providers,
   OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
-  annotation prefix, ops docs. Remaining at flip time: author-identity history
+  annotation prefix, ops docs. Batch 3 shipped 2026-08-23: metrics, bouncer,
+  PROXY protocol, stream SNI/L4 ACLs, gzip, error pages, clone, light theme,
+  IPv6 docs. HTTP/3 deferred (dependency footprint). Remaining at flip time: author-identity history
   rewrite (real email on 43 commits), CLAUDE.md purge, final leakage pass.)* Publishing the source of the live edge proxy is a
   deliberate exposure decision: the full pre-publication pipeline applies
   (all-history secret/infra audit, author-identity normalization, tag/release

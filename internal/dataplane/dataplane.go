@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,11 @@ type Server struct {
 	// listener. Wired once at startup (SetACMEChallengeStore); atomic so a late
 	// or replaced wiring races nothing.
 	acmeChallenge atomic.Pointer[ACMEChallengeStore]
+
+	// proxyProto holds the compiled inbound PROXY protocol config. It is read
+	// per accepted connection (never cached in the listener), so a settings
+	// change applies to the next connection with no listener restart. nil = off.
+	proxyProto atomic.Pointer[proxyProtoConfig]
 }
 
 // Config holds the data plane's bind addresses, cert directory, and the optional
@@ -127,7 +133,7 @@ func New(c Config) *Server {
 	if bufSize <= 0 {
 		bufSize = 1000
 	}
-	return &Server{
+	s := &Server{
 		httpsAddr:     c.HTTPSAddr,
 		httpAddr:      c.HTTPAddr,
 		certDir:       c.CertDir,
@@ -138,6 +144,11 @@ func New(c Config) *Server {
 		streams:       newStreamManager(),
 		health:        newHealthManager(),
 	}
+	// Stream listeners read the PROXY protocol config through this accessor, so a
+	// listener opened before the setting arrives (or while it is off) still picks
+	// the change up on its next connection instead of needing a rebind.
+	s.streams.proxyProto = s.currentProxyProtocol
+	return s
 }
 
 // AccessLogEnabled reports whether request capture is on. When false the /api/logs
@@ -174,7 +185,7 @@ func (s *Server) Reload(cfg model.Config) error {
 	}
 	stage.commit()
 	s.cur.Store(rt)
-	s.streams.reload(cfg.StreamHosts)
+	s.streams.reload(cfg, rt.certs)
 	log.Info().
 		Int("proxyHosts", len(rt.hosts)).
 		Int("redirectHosts", len(rt.redirects)).
@@ -214,16 +225,33 @@ func (s *Server) Start(ctx context.Context) error {
 	// covers a CRL that changes with no config change.
 	go watchCRLs(ctx, crlWatchInterval)
 
+	// The listeners are opened explicitly rather than via ListenAndServe so the
+	// inbound PROXY protocol wrapper can sit under them. A bare ":port" address
+	// binds the v6 wildcard with v4-mapped addresses enabled (Go's default
+	// dual-stack behaviour), so both families reach the same handlers and the
+	// client IP an access list sees is whichever family the client used.
+	httpLn, err := net.Listen("tcp", s.httpAddr)
+	if err != nil {
+		return fmt.Errorf("http listener: %w", err)
+	}
+	httpsLn, err := net.Listen("tcp", s.httpsAddr)
+	if err != nil {
+		_ = httpLn.Close()
+		return fmt.Errorf("https listener: %w", err)
+	}
+	httpLn = wrapProxyProtocol(httpLn, s.currentProxyProtocol)
+	httpsLn = wrapProxyProtocol(httpsLn, s.currentProxyProtocol)
+
 	errCh := make(chan error, 2)
 	go func() {
 		log.Info().Str("addr", s.httpAddr).Msg("data plane HTTP listening")
-		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpSrv.Serve(httpLn); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("http listener: %w", err)
 		}
 	}()
 	go func() {
 		log.Info().Str("addr", s.httpsAddr).Msg("data plane HTTPS listening")
-		if err := s.httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		if err := s.httpsSrv.ServeTLS(httpsLn, "", ""); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("https listener: %w", err)
 		}
 	}()
@@ -241,6 +269,27 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	}
 }
+
+// SetProxyProtocol configures inbound PROXY protocol from settings. It applies
+// to the HTTP/HTTPS listeners and to every TCP stream listener, and takes effect
+// on the next accepted connection - no listener restart, no dropped conns. A nil
+// or disabled setting turns it off and restores untouched connections.
+//
+// Settings live outside model.Config, so this is called alongside Reload rather
+// than from it.
+func (s *Server) SetProxyProtocol(p *model.ProxyProtocolSettings) {
+	cfg := compileProxyProtocol(p)
+	s.proxyProto.Store(cfg)
+	if cfg == nil {
+		log.Debug().Msg("proxy protocol: disabled")
+		return
+	}
+	log.Info().Int("trustedCIDRs", len(cfg.trusted)).Dur("timeout", cfg.timeout).
+		Msg("proxy protocol: inbound headers accepted from trusted peers")
+}
+
+// currentProxyProtocol is the live config read by every listener wrapper.
+func (s *Server) currentProxyProtocol() *proxyProtoConfig { return s.proxyProto.Load() }
 
 // SetACMEChallengeStore wires the ACME manager's in-flight HTTP-01 tokens into
 // the plaintext listener. Passing nil detaches it.

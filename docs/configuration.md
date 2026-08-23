@@ -144,7 +144,9 @@ Singleton application configuration.
 | `adminAuth.ssoOnly` | bool | Disable local login entirely. Requires at least one `providers` entry. Recovery from an SSO outage is by redeploying with local login re-enabled. |
 | `webhooks` | []WebhookConfig | Outbound lifecycle notifications (below). |
 | `dnsSync` | DNSSyncSettings | Optional DNS record reconcilers (below). |
+| `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
+| `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
@@ -208,6 +210,51 @@ ingressDiscovery:
       upstream: { scheme: http, host: 10.0.0.40, port: 80 }
       tls: { certificateRef: wildcard, forceSSL: true, http2: true }
       middlewares: [rate-limit]     # and no access list: public on purpose
+```
+
+### ProxyProtocolSettings (`settings.proxyProtocol`)
+
+Accepts the HAProxy **PROXY protocol** (v1 text and v2 binary) on the data-plane
+`:80`/`:443` listeners **and on every TCP stream listener**, so gpm behind an L4
+load balancer (HAProxy, an AWS NLB with proxy protocol enabled, a Kubernetes
+`Service` with `externalTrafficPolicy` behind an LB that sends it) sees the real
+client address instead of the balancer's.
+
+The parsed source address replaces the connection's `RemoteAddr`, which is the
+single value every IP-based control derives from — so access lists, geo rules,
+guards, rate limits, the basic-auth lockout, `X-Forwarded-For`, the access log,
+the OIDC gate and the metrics labels all see the real client with no per-feature
+wiring.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `enabled` | bool | no | Default false — listeners are untouched. |
+| `trustedCIDRs` | []string | **yes when enabled** | CIDRs or bare IPs of the balancers whose header is believed. There is no "trust everyone" mode. |
+| `timeout` | duration | no | Deadline for reading a complete header from a trusted peer. Default `5s`, maximum `1m`. |
+
+**The header is an unauthenticated claim.** Anyone who can open the port can
+assert any source address, so gpm parses it **only** when the TCP peer is inside
+`trustedCIDRs`. From any other peer the bytes are treated as ordinary payload and
+the peer address stands (logged once per peer at warn) — otherwise enabling this
+would hand every client a free source-IP spoof past every rule above. A malformed
+header from a trusted peer closes the connection; a stalled one is cut at
+`timeout`. A trusted peer that sends **no** header (the usual load-balancer TCP
+health check) is served normally with its own address as the client IP.
+
+v2 TLVs are consumed and ignored. `PROXY UNKNOWN` (v1), the v2 `LOCAL` command and
+the v2 `AF_UNSPEC` family assert no address, so the real peer stands. There is no
+UDP support: a UDP stream listener is unaffected by this setting.
+
+> Turning this on when your balancer does **not** send the header will not break
+> HTTP (the request bytes are simply not a PROXY header), but a *server-first*
+> TCP stream backend fronted by a trusted peer that never speaks first will stall
+> for `timeout` before the connection is closed. Enable it on the balancer first.
+
+```yaml
+proxyProtocol:
+  enabled: true
+  trustedCIDRs: [10.0.0.0/8, "2001:db8::/64"]
+  timeout: 5s
 ```
 
 ### DNSSyncSettings (`settings.dnsSync`)
@@ -750,6 +797,47 @@ per-host list of actions (`created` / `updated` / `unchanged` / `deleted` /
 `skipped`, with the resolved `profile` and a reason for each skip). The cluster-side RBAC to apply is
 [`deploy/k8s-ingress-discovery-rbac.yaml`](../deploy/k8s-ingress-discovery-rbac.yaml).
 
+### ErrorPagesConfig (`settings.errorPages` / `proxyHost.errorPages`)
+
+Custom HTML pages for errors **gpm itself generates**: upstream unreachable
+(502 connect/handshake failure, 504 a timeout awaiting the upstream), access
+denied (403 from an access list, a guard middleware, or a geo rule), rate
+limited (429), a dangling middleware/access-list reference (503), and a dead
+host. The upstream's own error response (its own 500, its own 404 page) is left
+untouched **unless** its status is also listed in `interceptUpstream`. A status
+with no matching template — and unconfigured settings/host entirely — falls
+back to gpm's historical plain-text output, unchanged from before this feature.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `dir` | string | Directory of `html/template` files named `<status>.html` (e.g. `502.html`), plus an optional `default.html` fallback used when no status-specific template matches. Relative to the managed cert store — confined exactly like a custom certificate's files: no absolute path, no `..`. |
+| `inline` | map[string]string | Status code (as a string, e.g. `"502"`) — or the literal `"default"` — mapped directly to `html/template` source, for a handful of pages an operator would rather keep in config than mount a directory. |
+| `interceptUpstream` | []int | Status codes (4xx/5xx) for which the **upstream's own** error response body is also replaced by the configured page. Default: only gpm-generated errors are replaced, never the upstream's own. |
+
+Templates execute with `{{.Status}}` (int), `{{.StatusText}}` (e.g. `"Bad
+Gateway"`), `{{.Host}}` (the matched ProxyHost name), and `{{.RequestID}}` (the
+`X-GPM-Request-Id` value when `-debug-headers`/`GPM_DEBUG_HEADERS=1` is on,
+empty otherwise) — `html/template`, so all four are contextually escaped. A
+**ProxyHost's own `errorPages`** is resolved first for a given status (falling
+back to its own `default` template, then to the settings-level pages) so a host
+override always wins; a host with no override of its own uses the
+settings-level pages outright. Templates are parsed at config reload — a parse
+error (or an unreadable `dir`) **fails the reload** with a clear message rather
+than installing a half-broken set.
+
+```yaml
+# settings.yaml
+errorPages:
+  dir: errorpages                    # relative to GPM_CERT_DIR
+  interceptUpstream: [502, 503]
+
+# a proxy host overriding just its own 429 page
+errorPages:
+  inline:
+    "429": |
+      <html><body><h1>Slow down</h1><p>{{.Host}} is rate-limiting you.</p></body></html>
+```
+
 ---
 
 ## ProxyHost (`config/proxy-hosts/`)
@@ -769,6 +857,8 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
 | `accessLists` | []string | no | Host-wide access-list names. |
 | `locations` | []Location | no | Path-scoped overrides (below). |
+| `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
+| `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](#errorpagesconfig-settingserrorpages--proxyhosterrorpages) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. |
 
 **Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
 
@@ -841,6 +931,32 @@ A location may set its own single `upstream` **or** its own `upstreamGroupRef`
 (mutually exclusive); with neither it inherits the host's backend, including an
 upstream group.
 
+**Compression** (`compression`) gzip-compresses eligible response bodies from
+this host's upstream, using only the standard library's `compress/gzip` (via a
+pooled `sync.Pool` of writers).
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `enabled` | bool | false | Off means byte-for-byte today's behaviour: no compression. |
+| `minBytes` | int | 1024 | Smallest response body gzip bothers with. The body is buffered up to this size before the compress/pass-through decision is made, so a response that never reaches it is sent uncompressed. |
+| `types` | []string | text/html, text/plain, text/css, text/csv, application/json, application/javascript, text/javascript, application/xml, text/xml, image/svg+xml | Response `Content-Type`s (media type only; `charset` etc. ignored) eligible for compression. |
+
+Compression honours the client's `Accept-Encoding` and is skipped outright when:
+the request is `HEAD`; the client sent no `Accept-Encoding: gzip`; the upstream
+already set `Content-Encoding` (never double-encoded); the response
+`Content-Type` doesn't match `types`; the body stays under `minBytes`; the
+status is `204`, `304`, or `101` (protocol switch); or the response is
+`text/event-stream` or otherwise starts **streaming** (the handler flushes
+before the compress decision is made — this is also what keeps a WebSocket
+upgrade, which is hijacked rather than written through, untouched). A
+compressed response gets `Content-Encoding: gzip`, `Vary: Accept-Encoding`, and
+has `Content-Length` stripped (the compressed size isn't known up front).
+**BREACH**: compressing a response whose size depends on attacker-controlled
+input reflected alongside a secret (e.g. a CSRF token) can leak that secret
+through the compressed size — that trade-off is why compression is opt-in per
+host rather than default-on; hosts serving that shape of response should leave
+it off.
+
 ```yaml
 name: app
 domains: [app.example.com]
@@ -849,6 +965,7 @@ websocketsUpgrade: true
 tls: {certificateRef: wildcard, forceSSL: true}
 dns: {lanDirect: true, publicCname: true}
 middlewares: [require-sso]
+compression: {enabled: true}
 locations:
   - path: /metrics
     accessLists: [internal-only]      # /metrics also requires the internal CIDR
@@ -886,12 +1003,10 @@ or both) and forwards to the backend; listeners are reconciled on every reload
 (ports added/removed, backend swapped, with no listener restart for unchanged
 ports). UDP uses per-client sessions with an idle timeout.
 
-> **No access control at L4.** Stream hosts blind-forward: access lists, geo rules,
-> rate limits, and identity/SSO are HTTP-layer controls and do **not** apply here.
-> The only built-in bound is `maxUDPSessions` (4096), which caps spoofed-source UDP
-> memory. Expose a stream port only on a trusted network, or put IP filtering in
-> front of it at the firewall / host level. Do not publish a stream port to the
-> public internet expecting gpm to gate it.
+A TCP stream can additionally be **TLS-aware** (`tls`): SNI-routed so several
+hosts share one port, either passed through untouched or terminated at gpm. And
+it can be **gated at L4** (`accessLists`) on the client IP, evaluated before any
+backend is dialled.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -899,6 +1014,8 @@ ports). UDP uses per-client sessions with an idle timeout.
 | `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
 | `forwardHost` | string | yes | Backend host. |
 | `forwardPort` | int | yes | 1–65535. |
+| `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
+| `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
 
 ```yaml
 name: postgres
@@ -906,6 +1023,88 @@ listenPort: 5432
 protocol: tcp
 forwardHost: db.internal
 forwardPort: 5432
+accessLists: [lan-only]
+```
+
+### L4 access lists (`accessLists`)
+
+A stream host may reference AccessList objects, exactly like a proxy host. Only
+the **IP/CIDR rules and the geo rules** are evaluated — basic auth is an HTTP
+challenge/response with nowhere to live in a raw stream, so referencing a list
+that has `basicAuth` users is **rejected at validation** rather than silently
+half-applied. All referenced lists must allow, and the check runs **before any
+backend is dialled**, so a denied client cannot make gpm open a socket to the
+backend at all.
+
+For UDP the list is evaluated once per session (the first packet from a source);
+a denied source creates no session and no upstream socket. Geo rules follow the
+same fail-closed rule as HTTP: with geo configured and no GeoIP database loaded,
+the port denies.
+
+Behind an L4 balancer, enable `settings.proxyProtocol` — otherwise every
+connection looks like it came from the balancer and the rules match the wrong
+address.
+
+The `maxUDPSessions` bound (4096 per listener) still caps spoofed-source UDP
+memory independently of any access list.
+
+### StreamTLS (`tls`)
+
+Makes a TCP stream port TLS-aware: several hosts can share one port, separated by
+the SNI in the ClientHello, and gpm can either forward the handshake untouched or
+terminate it.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `mode` | string | yes | `passthrough` \| `terminate`. |
+| `sniMatch` | []string | see below | Server names this host claims. Exact (`db.example.com`) or a single-label wildcard (`*.example.com`). |
+| `certificateRef` | string | terminate only | Names a Certificate. **Required** in `terminate`, **forbidden** in `passthrough`. |
+
+- **`passthrough`** peeks the ClientHello (a bounded, stdlib-only parse of the
+  record, handshake and `server_name` extension), routes on the SNI, and replays
+  the peeked bytes to the backend. gpm never decrypts and never needs the key —
+  the backend terminates, end to end.
+- **`terminate`** completes the handshake at gpm with `certificateRef` from the
+  normal certificate store (custom or ACME-issued) and forwards **plaintext** to
+  the backend. The floor is TLS 1.2 with the same AEAD cipher suites the HTTPS
+  listener uses. No ALPN is offered: what rides inside a stream is an arbitrary
+  TCP protocol.
+
+**Port sharing.** Two or more enabled stream hosts may share a TCP `listenPort`
+**only if every one of them sets `sniMatch`** — that is the only thing that tells
+their connections apart. Validation rejects a mixed or duplicate claim, so
+routing can never fall back to "whichever host compiled last". A host alone on its
+port may omit `sniMatch` and take every connection. On an SNI-routed port, a
+connection whose server name no host claims (or that sends no SNI) is closed
+rather than handed to an arbitrary backend, and a connection that is not TLS at
+all is closed too.
+
+**UDP.** `tls` requires `protocol: tcp`. A UDP datagram carries no ClientHello, so
+`udp` and `both` are rejected at validation; two hosts can never share a UDP port
+either.
+
+```yaml
+# Two Postgres instances behind one public 5432, separated by SNI, never decrypted.
+name: pg-blue
+listenPort: 5432
+protocol: tcp
+forwardHost: pg-blue.internal
+forwardPort: 5432
+accessLists: [lan-only]
+tls:
+  mode: passthrough
+  sniMatch: [blue.db.example.com]
+---
+# TLS terminated at gpm, plaintext to a backend that speaks none.
+name: mqtt
+listenPort: 8883
+protocol: tcp
+forwardHost: mosquitto.internal
+forwardPort: 1883
+tls:
+  mode: terminate
+  sniMatch: [mqtt.example.com]
+  certificateRef: wildcard
 ```
 
 ---
@@ -920,6 +1119,10 @@ stop default-host leakage.
 | `domains` | []string | yes | |
 | `statusCode` | int | no | Default 404. |
 | `tls` | TLSSettings | no | |
+
+A dead host's response renders the [settings-level error page](#errorpagesconfig-settingserrorpages--proxyhosterrorpages)
+for `statusCode`, when one is configured, falling back to the plain-text body
+otherwise; it has no `errorPages` field of its own to override with.
 
 ---
 
@@ -1267,6 +1470,12 @@ roleMapping:
 | `basicAuth` | []BasicAuthUser | `username` + `passwordHash` (bcrypt). |
 | `rules` | []IPRule | Ordered `action` (`allow`/`deny`) + `cidr` (CIDR or bare IP). |
 | `defaultAction` | string | `allow` \| `deny` (default `deny`). |
+| `geo` | AccessListGeo | Country allow/deny over the same resolved client IP (requires `GPM_GEOIP_DB`). |
+
+A list can also be attached to a **StreamHost**, where only the `rules` and `geo`
+dimensions are evaluated (there is no request to carry basic auth). A list with
+`basicAuth` users is rejected for a stream host at validation — see
+[StreamHost](#streamhost-configstream-hosts).
 
 ```yaml
 name: internal-only
@@ -1287,6 +1496,7 @@ defaultAction: deny
 | `guard` | GuardMiddleware | Conditionally deny requests. |
 | `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
 | `rewrite` | RewriteMiddleware | Exact-match request-path replacement (upstream-facing). |
+| `bouncer` | BouncerMiddleware | Deny hook: ask an external bouncer (CrowdSec LAPI or any HTTP endpoint) whether the client IP is banned. |
 
 **AuthMiddleware**: `identityProvider` (required except in `client-cert` mode),
 `mode` (`oidc`|`forward-auth`|`auth-request`|`client-cert`, defaults from the IdP
@@ -1372,8 +1582,8 @@ access lists; a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches
 `allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
 so a flood is shed before it can drive an auth subrequest or any other
-per-request work: rate-limit → access-list → auth → guard → headers → rewrite →
-upstream.
+per-request work: rate-limit → access-list → bouncer → auth → guard → headers →
+rewrite → upstream.
 
 `blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
 harsher penalty on top of the token bucket: the first request that exceeds
@@ -1389,6 +1599,100 @@ to `burst`, so the client gets a normal allotment, not an instant re-burst).
 Omit `blockFor` (the default) for today's behavior: only the token bucket
 governs, and a client that outwaits the refill rate is let back through
 immediately.
+
+**BouncerMiddleware**: `provider` (`crowdsec`|`http`, default `crowdsec`), `url`
+(required), `apiKey` (Secret — `${ENV:...}` / `${FILE:...}`), `timeout`
+(default `2s`), `cacheTTL` (default `60s`), `cacheMaxEntries` (default `10000`),
+`onError` (`fail-open`|`fail-closed`, default `fail-open`), `denyStatus`
+(default `403`), `denyWith` (`error-page`|`plain`, default `error-page`),
+`stream` (crowdsec only, default off).
+
+This is a **hook, not a WAF**. gpm ships no rules, no signatures and no
+detection engine: it asks an operator-run bouncer whether the client IP is
+currently banned and acts on that verdict. What "banned" means lives entirely
+outside gpm.
+
+It sits **after the access list and before auth**: an operator allow-list still
+wins outright (it is evaluated first, so an explicitly allowed IP is never
+overridden by an external feed), and a banned IP never reaches the IdP — no
+forward-auth subrequest, no OIDC redirect. A denial is reported to the per-host
+denial counter.
+
+**`crowdsec` provider.** Per uncached client IP, gpm calls the LAPI bouncer
+endpoint `GET {url}/v1/decisions?ip=<client>` with `X-Api-Key: <apiKey>`. A
+`null` or empty body means "no decisions" (allow); any decision of type `ban`
+or `captcha` denies. **`captcha` is treated as a deny**: it is the LAPI telling
+the bouncer this client must prove it is human, and gpm has no captcha flow to
+hand it — serving the request anyway would silently downgrade the operator's
+decision to an allow. Decision types gpm does not implement are ignored rather
+than guessed at. The LAPI resolves range (CIDR) decisions itself, so one `ip=`
+query covers those too.
+
+**`stream: true`** (crowdsec only) swaps the per-IP lookup for a local one: gpm
+pulls the whole decision set once
+(`GET {url}/v1/decisions/stream?startup=true`) and then deltas every `cacheTTL`,
+keeping the banned IPs and CIDR ranges in memory, so the request hot path never
+calls the LAPI at all. Only the very first request waits on the startup pull;
+refreshes happen in the background while the current set keeps serving, and a
+failed refresh logs and keeps the previous set rather than dropping it. Use it
+on a busy edge or with a large decision set; leave it off for the simpler
+live-lookup mode.
+
+**`http` provider** is a generic deny hook so any custom bouncer can plug in:
+
+```
+GET {url}?ip=<client>&host=<host>&path=<path>
+X-Forwarded-For: <client>          # the RESOLVED client IP, not the inbound header
+X-Original-URL: <absolute request URL>
+X-Api-Key: <apiKey>                # only when apiKey is set
+```
+
+`2xx` = allow, `403` = deny, **anything else** = no usable answer, so `onError`
+governs. The contract is deliberately trivial: a shell script, a fail2ban shim
+or a corporate threat feed can implement it in a few lines.
+
+`onError` covers a timeout, a connection failure, an unexpected status, an
+undecodable body, an unresolvable `apiKey` secret, and a client IP that cannot
+be resolved at all. It defaults to **`fail-open`** (allow): an unreachable
+threat feed must not take the site down, which is the opposite of the right
+default for auth. Choose `fail-closed` when the bouncer is a hard requirement
+and you would rather serve `403` than serve an unvetted client.
+
+Verdicts are cached per middleware, keyed by client IP, for `cacheTTL`, bounded
+at `cacheMaxEntries` with LRU eviction (so a rotating-source-IP flood cannot
+grow it without bound). A verdict derived from an **error** rather than a real
+answer is capped at **5s** regardless of `cacheTTL`, so an outage cannot pin a
+minute of guessed verdicts and keep guessing long after the bouncer recovered.
+
+`denyWith: error-page` (the default) renders the host's configured custom error
+page for `denyStatus`, falling back to the plain status body when none is
+configured; `plain` opts out of the custom page deliberately —
+a bare status body gives a scanner nothing to fingerprint.
+
+**CrowdSec quickstart.** On the host running the CrowdSec LAPI:
+
+```
+cscli bouncers add gpm
+```
+
+Copy the printed key into the environment gpm runs with (e.g.
+`CROWDSEC_BOUNCER_KEY`) and reference it as a placeholder — never commit the
+literal:
+
+```yaml
+name: crowdsec
+type: bouncer
+bouncer:
+  provider: crowdsec
+  url: http://crowdsec:8080
+  apiKey: ${ENV:CROWDSEC_BOUNCER_KEY}
+  stream: true          # local lookups; deltas pulled every cacheTTL
+  cacheTTL: 60s
+  onError: fail-open    # an unreachable LAPI must not take the site down
+```
+
+Verify with `cscli decisions add --ip <your-test-ip> --duration 1m` and confirm
+the host answers `403`, then `cscli decisions delete --ip <your-test-ip>`.
 
 ```yaml
 # Require SSO, but let the LAN through without it
@@ -1438,6 +1742,20 @@ rateLimit:
   blockFor: 5m
 ```
 ```yaml
+# Generic deny hook: any endpoint answering 2xx/403. Fail closed - this bouncer
+# is a hard requirement, so an outage denies rather than admits.
+name: threat-feed
+type: bouncer
+bouncer:
+  provider: http
+  url: https://bouncer.internal/check
+  apiKey: ${FILE:/run/secrets/bouncer_key}
+  timeout: 1s
+  cacheTTL: 30s
+  onError: fail-closed
+  denyStatus: 403
+```
+```yaml
 # Add the trailing slash a client strips off Authentik's token endpoint, so the
 # request reaches Django as /application/o/token/ (POST + body preserved) instead
 # of getting a 405. Exact-match, upstream-facing only.
@@ -1451,12 +1769,14 @@ rewrite:
 ### Middleware ordering
 
 Middlewares are applied in a fixed order per request regardless of the order you
-list them: **rate-limit → access-list → auth → guard → headers → rewrite →
-upstream**. Rate limiting is outermost (evaluated first, so floods are shed before
-any work); the access-list is evaluated ahead of auth, so a denied IP never
-reaches the IdP; path rewrites are innermost (closest to the backend), so every
-security tier above still sees the original client path. Host-wide middlewares run
-before any location-scoped ones.
+list them: **rate-limit → access-list → bouncer → auth → guard → headers →
+rewrite → upstream**. Rate limiting is outermost (evaluated first, so floods are
+shed before any work); the access-list is evaluated ahead of the bouncer, so an
+explicit operator allow-list is never overridden by an external feed's verdict,
+and both are ahead of auth, so a denied or banned IP never reaches the IdP; path
+rewrites are innermost (closest to the backend), so every security tier above
+still sees the original client path. Host-wide middlewares run before any
+location-scoped ones.
 
 ---
 
@@ -1509,6 +1829,9 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
     token principal is admin-*role* by construction, so the role gate alone is
     not a boundary there.
 
+  `GET /metrics` is gated the same way but on its own, narrower scope
+  (`metrics:read`) rather than `admin` — an exposition is not a credential dump.
+
 **`settings:write` does not reach `PUT /api/settings`.** Writing settings is
 admin-equivalent and takes the `admin` scope: a settings write can point
 `dnsSync.pihole.url` or a webhook at an attacker-controlled URL while supplying
@@ -1529,8 +1852,15 @@ replacement token instead.
 Valid subjects are the REST resource plurals — `proxy-hosts`, `redirect-hosts`,
 `stream-hosts`, `dead-hosts`, `certificates`, `client-cas`, `dns-providers`,
 `identity-providers`, `upstream-groups`, `access-lists`, `middlewares`,
-`api-tokens` — plus three pseudo-resources for non-CRUD endpoint groups:
-`settings`, `dns-sync` and `ingress-discovery`. An unknown subject or verb is rejected at write time.
+`api-tokens` — plus four pseudo-resources for non-CRUD endpoint groups:
+`settings`, `dns-sync`, `ingress-discovery` and `metrics`. An unknown subject or verb is rejected at write time.
+
+**`metrics:read`** is what a Prometheus scrape credential needs for
+`GET /metrics` (mounted only with `GPM_METRICS=1`, see
+[deployment.md](deployment.md#metrics-prometheus)). It is its own subject rather
+than `*:read` so a token that lives in a monitoring config forever buys exactly
+one thing: the exposition names hosts and certificates but carries no field
+values, so it is not a config read.
 `GET /api/capabilities` and `GET /api/me` need no scope: any authenticated caller
 may ask what the instance supports.
 

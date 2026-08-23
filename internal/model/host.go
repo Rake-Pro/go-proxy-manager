@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -187,6 +188,69 @@ type Location struct {
 	AccessLists      []string  `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 }
 
+// DefaultCompressionMinBytes is the smallest response body gzip bothers with
+// when Compression.MinBytes is unset (0). Smaller bodies are sent uncompressed:
+// gzip's own framing overhead can make them larger, not smaller.
+const DefaultCompressionMinBytes = 1024
+
+// DefaultCompressionTypes is applied when Compression.Types is empty: a
+// conventional text/JS/CSS/SVG/XML/JSON allowlist. Binary and already-compressed
+// formats (images, video, fonts, archives) are deliberately excluded - gzipping
+// them wastes CPU for no size win.
+var DefaultCompressionTypes = []string{
+	"text/html", "text/plain", "text/css", "text/csv",
+	"application/json", "application/javascript", "text/javascript",
+	"application/xml", "text/xml", "image/svg+xml",
+}
+
+// Compression optionally gzip-compresses eligible response bodies from this
+// host's upstream before they reach the client, honouring the client's
+// Accept-Encoding. Off by default (Enabled: false), so an unconfigured host
+// behaves exactly as before this feature shipped. See dataplane's compression
+// handler for the exclusions (upstream already encoded, non-matching type,
+// below MinBytes, websocket/streaming/event-stream responses, 204/304/HEAD).
+type Compression struct {
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// MinBytes is the smallest response body gzip bothers with. 0 (default)
+	// selects DefaultCompressionMinBytes.
+	MinBytes int `json:"minBytes,omitempty" yaml:"minBytes,omitempty"`
+	// Types lists the response Content-Types (the media type only; parameters
+	// like charset are ignored) eligible for compression. Empty (default)
+	// selects DefaultCompressionTypes.
+	Types []string `json:"types,omitempty" yaml:"types,omitempty"`
+}
+
+// EffectiveMinBytes returns MinBytes, or DefaultCompressionMinBytes when unset.
+func (c Compression) EffectiveMinBytes() int {
+	if c.MinBytes > 0 {
+		return c.MinBytes
+	}
+	return DefaultCompressionMinBytes
+}
+
+// EffectiveTypes returns Types, or DefaultCompressionTypes when unset.
+func (c Compression) EffectiveTypes() []string {
+	if len(c.Types) > 0 {
+		return c.Types
+	}
+	return DefaultCompressionTypes
+}
+
+func (c Compression) validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.MinBytes < 0 {
+		return fmt.Errorf("compression.minBytes must be >= 0, got %d", c.MinBytes)
+	}
+	for _, t := range c.Types {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("compression.types entries must not be empty")
+		}
+	}
+	return nil
+}
+
 // ProxyHost terminates TLS for one or more domains and reverse-proxies to an
 // upstream, applying an ordered middleware chain and access lists.
 type ProxyHost struct {
@@ -223,6 +287,17 @@ type ProxyHost struct {
 	Middlewares []string   `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string   `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Locations   []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
+
+	// Compression opts this host into gzip response compression. The zero value
+	// (Enabled: false) is today's behaviour: no compression.
+	Compression Compression `json:"compression,omitempty" yaml:"compression,omitempty"`
+
+	// ErrorPages overrides settings.errorPages for this host's own gpm-generated
+	// error responses (upstream unreachable, access denied, rate-limited, a
+	// dangling middleware/access-list reference). nil (default) uses the
+	// settings-level pages, if any. POINTER for the same reason as DNS above: a
+	// struct value's omitempty is ignored by encoding/json.
+	ErrorPages *ErrorPagesConfig `json:"errorPages,omitempty" yaml:"errorPages,omitempty"`
 }
 
 func (h ProxyHost) Kind() string { return "ProxyHost" }
@@ -246,6 +321,14 @@ func (h ProxyHost) Validate() error {
 	}
 	if err := h.Timeouts.validate(); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := h.Compression.validate(); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if h.ErrorPages != nil {
+		if err := h.ErrorPages.validate(); err != nil {
+			return fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
 	}
 	for _, l := range h.Locations {
 		if l.Path == "" {
@@ -295,6 +378,91 @@ func (h RedirectHost) Validate() error {
 	return nil
 }
 
+// Stream TLS modes (StreamTLS.Mode).
+const (
+	// StreamTLSPassthrough peeks the ClientHello for SNI and forwards the
+	// connection byte-for-byte, encrypted end to end. gpm never sees plaintext
+	// and needs no certificate.
+	StreamTLSPassthrough = "passthrough"
+	// StreamTLSTerminate completes the TLS handshake at gpm using the referenced
+	// certificate and forwards plaintext to the backend.
+	StreamTLSTerminate = "terminate"
+)
+
+// StreamTLS adds TLS awareness to a TCP stream host: SNI-based routing on a
+// shared listen port, with the handshake either forwarded untouched
+// (passthrough) or terminated at gpm (terminate).
+//
+// It is TCP-only. UDP carries no TLS record stream to inspect, so a UDP (or
+// "both") stream host cannot express it - see StreamHost.Validate.
+type StreamTLS struct {
+	// Mode is passthrough or terminate. Required when tls is set.
+	Mode string `json:"mode" yaml:"mode"`
+	// SNIMatch lists the server names this host claims on its listen port.
+	// Entries may be exact ("db.example.com") or a single-label wildcard
+	// ("*.example.com"). It is REQUIRED for every host that shares its listen
+	// port with another stream host - that is the only thing that makes two
+	// hosts on one port separable. A host alone on its port may leave it empty
+	// and take every connection.
+	SNIMatch []string `json:"sniMatch,omitempty" yaml:"sniMatch,omitempty"`
+	// CertificateRef names the Certificate used to terminate. Required in
+	// terminate mode, and forbidden in passthrough (which never decrypts).
+	CertificateRef string `json:"certificateRef,omitempty" yaml:"certificateRef,omitempty"`
+}
+
+func (t *StreamTLS) validate(hostName, protocol string) error {
+	if t == nil {
+		return nil
+	}
+	if protocol != "tcp" {
+		return fmt.Errorf("stream host %q: tls requires protocol tcp (TLS/SNI has no meaning for udp), got %q", hostName, protocol)
+	}
+	switch t.Mode {
+	case StreamTLSPassthrough:
+		if t.CertificateRef != "" {
+			return fmt.Errorf("stream host %q: tls.certificateRef is not allowed in passthrough mode (the connection is never decrypted)", hostName)
+		}
+	case StreamTLSTerminate:
+		if t.CertificateRef == "" {
+			return fmt.Errorf("stream host %q: tls.certificateRef is required in terminate mode", hostName)
+		}
+	default:
+		return fmt.Errorf("stream host %q: tls.mode must be %s|%s, got %q", hostName, StreamTLSPassthrough, StreamTLSTerminate, t.Mode)
+	}
+	seen := map[string]bool{}
+	for _, n := range t.SNIMatch {
+		name := strings.ToLower(strings.TrimSpace(n))
+		if name == "" {
+			return fmt.Errorf("stream host %q: tls.sniMatch contains an empty server name", hostName)
+		}
+		if !validSNIMatch(name) {
+			return fmt.Errorf("stream host %q: invalid tls.sniMatch %q (want a hostname or a *.suffix wildcard)", hostName, n)
+		}
+		if seen[name] {
+			return fmt.Errorf("stream host %q: duplicate tls.sniMatch %q", hostName, name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+var sniLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validSNIMatch reports whether s is an acceptable SNI match: a dotted hostname,
+// optionally prefixed with "*." for a single-level wildcard.
+func validSNIMatch(s string) bool {
+	s = strings.TrimPrefix(s, "*.")
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if !sniLabelRe.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
 // StreamHost forwards raw TCP/UDP from a listen port to a backend.
 type StreamHost struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
@@ -303,6 +471,17 @@ type StreamHost struct {
 	Protocol    string `json:"protocol" yaml:"protocol"` // tcp | udp | both
 	ForwardHost string `json:"forwardHost" yaml:"forwardHost"`
 	ForwardPort int    `json:"forwardPort" yaml:"forwardPort"`
+
+	// TLS opts a TCP stream host into SNI routing and/or TLS termination. nil
+	// (the default) keeps the historical blind byte forwarder.
+	TLS *StreamTLS `json:"tls,omitempty" yaml:"tls,omitempty"`
+
+	// AccessLists gate the connection at L4 on the client IP, evaluated before
+	// any backend is dialled. Only the IP/CIDR and geo dimensions of a list
+	// apply - basic auth is an HTTP challenge/response and has nowhere to live
+	// in a raw stream, so a list carrying basicAuth is rejected at validation
+	// rather than silently ignored.
+	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 }
 
 func (h StreamHost) Kind() string { return "StreamHost" }
@@ -325,7 +504,23 @@ func (h StreamHost) Validate() error {
 	if h.ForwardPort < 1 || h.ForwardPort > 65535 {
 		return fmt.Errorf("stream host %q: forwardPort %d out of range", h.Name, h.ForwardPort)
 	}
+	if err := h.TLS.validate(h.Name, h.Protocol); err != nil {
+		return err
+	}
 	return nil
+}
+
+// SNINames returns this stream host's lower-cased SNI matches, or nil when it
+// does not route by SNI.
+func (h StreamHost) SNINames() []string {
+	if h.TLS == nil || len(h.TLS.SNIMatch) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(h.TLS.SNIMatch))
+	for _, n := range h.TLS.SNIMatch {
+		out = append(out, strings.ToLower(strings.TrimSpace(n)))
+	}
+	return out
 }
 
 // DeadHost serves a 404 (or custom status) for claimed domains, useful to

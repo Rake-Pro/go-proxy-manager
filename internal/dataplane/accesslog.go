@@ -114,15 +114,33 @@ func (o *responseObserver) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Unwrap lets http.ResponseController (Go 1.20+) find the base writer.
 func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }
 
-// observe wraps next with request access logging, slow-request warnings, and
-// debug headers, per the Server's toggles. When all three are off it returns next
-// unwrapped so there is zero per-request overhead in the default configuration.
+// observe wraps next with request access logging, slow-request warnings, debug
+// headers, and the /metrics counters, per the Server's toggles. When all of them
+// are off it returns next unwrapped so there is zero per-request overhead in the
+// default configuration.
+//
+// It is also where a request is tagged with the ProxyHost NAME it matched, which
+// the access-control tiers read back for their denial counters (see
+// metricshook.go). Resolving it once here keeps the label bounded by config and
+// keeps every middleware constructor's signature unchanged.
 func (s *Server) observe(next http.Handler) http.Handler {
-	if !s.accessLog && s.slowThreshold <= 0 && !s.debugHeaders {
+	mh := metricsHook()
+	if !s.accessLog && s.slowThreshold <= 0 && !s.debugHeaders && mh == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+
+		// The matched proxy host, resolved once: the debug headers and the metric
+		// labels want the same answer, and lookup is a map hit.
+		hostName := ""
+		if s.debugHeaders || mh != nil {
+			if rt := s.current(); rt != nil {
+				if hh, ok := rt.lookup(r.Host); ok {
+					hostName = hh.host
+				}
+			}
+		}
 
 		var rid string
 		if s.debugHeaders {
@@ -139,10 +157,42 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			}
 		}
 
+		var body *countingBody
+		if mh != nil {
+			mh.RequestStarted()
+			defer mh.RequestFinished()
+			r = withHostName(r, hostName)
+			if r.Body != nil && r.Body != http.NoBody {
+				body = &countingBody{ReadCloser: r.Body}
+				r.Body = body
+			}
+		}
+
 		obs := &responseObserver{ResponseWriter: w}
 		next.ServeHTTP(obs, r)
 
 		dur := time.Since(start)
+		if mh != nil {
+			status := obs.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			label := hostName
+			if label == "" {
+				label = unknownHostLabel
+			}
+			var in int64
+			if body != nil {
+				in = body.n
+			}
+			mh.HTTPRequest(label, r.Method, status, dur, in, obs.bytes)
+			// A hijacked upgrade never writes a status through the observer, so
+			// treat the hijack itself as the success signal alongside a 101.
+			if isUpgradeRequest(r) && (obs.hijacked || status == http.StatusSwitchingProtocols) {
+				mh.WebsocketUpgrade(label)
+			}
+		}
+
 		slow := s.slowThreshold > 0 && dur >= s.slowThreshold
 		if !s.accessLog && !slow {
 			return

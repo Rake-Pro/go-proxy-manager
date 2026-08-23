@@ -62,15 +62,21 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <title>{{.AppName}} - Sign in</title>
 <style>
   :root{--bg1:#0b1220;--bg2:#020617;--card:#0f1729;--ink:#e2e8f0;--muted:#94a3b8;
-        --line:#1e293b;--accent:#3b82f6;--accent-h:#60a5fa;--field:#0b1220}
+        --line:#1e293b;--accent:#3b82f6;--accent-h:#60a5fa;--field:#0b1220;
+        --glow:#172033;--heading:#f1f5f9}
+  @media (prefers-color-scheme:light){
+    :root{--bg1:#eef1f8;--bg2:#f7f8fc;--card:#ffffff;--ink:#161b2c;--muted:#5b6377;
+          --line:#dfe3ee;--accent:#3b82f6;--accent-h:#2f6fe0;--field:#f4f6fb;
+          --glow:#dbe3f7;--heading:#161b2c}
+  }
   *{box-sizing:border-box}
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
        padding:1.5rem;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-       color:var(--ink);background:radial-gradient(1200px 600px at 50% -10%,#172033,var(--bg2)),linear-gradient(135deg,var(--bg1),var(--bg2))}
+       color:var(--ink);background:radial-gradient(1200px 600px at 50% -10%,var(--glow),var(--bg2)),linear-gradient(135deg,var(--bg1),var(--bg2))}
   .card{width:100%;max-width:23rem;background:var(--card);border:1px solid var(--line);border-radius:14px;
         box-shadow:0 20px 50px rgba(0,0,0,.55);padding:2.25rem 2rem 2rem}
   .brand{text-align:center;margin-bottom:1.5rem}
-  .brand h1{font-size:1.2rem;font-weight:650;margin:0;letter-spacing:.01em;color:#f1f5f9}
+  .brand h1{font-size:1.2rem;font-weight:650;margin:0;letter-spacing:.01em;color:var(--heading)}
   .brand p{margin:.4rem 0 0;color:var(--muted);font-size:.85rem}
   .btn{display:block;width:100%;border:0;border-radius:9px;padding:.72rem 1rem;
        font-size:.95rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none}

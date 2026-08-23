@@ -50,7 +50,7 @@ func TestPprofDisabledByDefault(t *testing.T) {
 	t.Cleanup(func() { sessStore.Close() })
 	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
 
-	s := New(":0", nil, authn, nil, nil, false)
+	s := New(":0", nil, authn, nil, nil, nil, false)
 	rec := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/debug/pprof/", nil))
 	if rec.Code != http.StatusNotFound {
@@ -66,7 +66,7 @@ func TestPprofEnabledIsAdminGated(t *testing.T) {
 	t.Cleanup(func() { sessStore.Close() })
 	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
 
-	s := New(":0", nil, authn, nil, nil, true)
+	s := New(":0", nil, authn, nil, nil, nil, true)
 
 	// No session -> 401, not the profiling data.
 	rec := httptest.NewRecorder()
@@ -115,7 +115,7 @@ func TestPprofRequiresAdminScopeForTokens(t *testing.T) {
 			{ObjectMeta: model.ObjectMeta{Name: "root"}, TokenHash: adminHash, Scopes: []string{model.ScopeAdmin}},
 		}
 	})
-	s := New(":0", nil, authn, nil, nil, true)
+	s := New(":0", nil, authn, nil, nil, nil, true)
 
 	for _, tc := range []struct {
 		name       string

@@ -29,7 +29,10 @@ type Server struct {
 // REST CRUD API (mounted under /api/ behind an admin-role gate); uiHandler, if
 // non-nil, is the embedded SPA (mounted at /). pprofEnabled mounts net/http/pprof
 // under /debug/pprof/, behind the same admin-role gate as apiHandler.
-func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, uiHandler http.Handler, pprofEnabled bool) *Server {
+// metricsHandler, if non-nil, is the Prometheus exposition served at /metrics
+// behind an admin-role gate plus a "metrics:read" token-scope check; nil serves
+// a 404 there instead.
+func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, uiHandler, metricsHandler http.Handler, pprofEnabled bool) *Server {
 	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -59,6 +62,26 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	// CSRF token on mutating methods; sameOriginGuard is the outer belt.
 	if apiHandler != nil {
 		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler))))
+	}
+
+	// Prometheus exposition, opt-in (-metrics / GPM_METRICS). It is on the admin
+	// listener because it is admin data: the payload names every proxy host,
+	// stream host and certificate, so it is authenticated exactly like the API -
+	// admin role, plus an explicit "metrics:read" scope for a token principal so
+	// a scrape credential parked in a monitoring config buys nothing else.
+	//
+	// The route is registered either way: with metrics off it answers 404
+	// explicitly, because the SPA's catch-all at "/" would otherwise serve the
+	// app shell with a 200 and make "is metrics enabled?" unanswerable from a
+	// scrape. There is no same-origin guard - it is a GET, so the guard is a
+	// no-op, and a Prometheus scraper is not a browser.
+	if metricsHandler != nil {
+		mux.Handle("GET /metrics", s.authn.RequireRole(auth.RoleAdmin, requireScope(model.ScopeMetricsRead, metricsHandler)))
+		log.Info().Msg("prometheus metrics enabled on admin server at /metrics (admin role + metrics:read scope gated)")
+	} else {
+		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
 	}
 
 	// net/http/pprof, opt-in and gated like the REST API above (admin role +
@@ -98,9 +121,17 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 // cleartext. Session principals are unaffected: RequireScope only ever
 // constrains tokens.
 func requireAdminScope(next http.Handler) http.Handler {
+	return requireScope(model.ScopeAdmin, next)
+}
+
+// requireScope refuses an API-token principal that does not hold scope. It
+// mirrors internal/api's scoped() helper for the routes that live on this mux
+// rather than under /api/. Session principals are unaffected: auth.RequireScope
+// only ever constrains tokens.
+func requireScope(scope string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p, ok := auth.PrincipalFrom(r.Context()); ok {
-			if err := auth.RequireScope(p, model.ScopeAdmin); err != nil {
+			if err := auth.RequireScope(p, scope); err != nil {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}

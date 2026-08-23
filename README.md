@@ -40,6 +40,15 @@ builds it with a narrower, more focused design:
   configurable TTL
 - Redirect hosts, raw TCP/UDP **stream** forwarding, and dead hosts (absorb
   unmatched vhosts)
+- **Stream TLS/SNI**: several TCP stream hosts share one port, routed by the SNI
+  in the ClientHello, either passed through untouched (never decrypted) or
+  terminated at gpm; plus **L4 access lists** (IP + geo) evaluated before any
+  backend is dialled
+- **Inbound PROXY protocol** (v1 + v2) from trusted load-balancer CIDRs, so the
+  real client IP drives access lists, geo, rate limits, `X-Forwarded-For` and the
+  access log
+- **Dual-stack**: one listener serves IPv4 and IPv6, and a v6 client is gated and
+  logged as its own address
 
 **Certificates**
 - Let's Encrypt (or any ACME CA) via **DNS-01** (Cloudflare, DigitalOcean,
@@ -55,6 +64,7 @@ builds it with a narrower, more focused design:
 - **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)
 - Request **guards** (deny by path/method/query, with CIDR exemptions)
 - Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
+- **Bouncer** deny hook (CrowdSec LAPI or any generic HTTP endpoint) — hook-only, no bundled WAF
 - Composable, ordered middleware chain per host and per location
 
 **Automation & DNS**
@@ -84,6 +94,9 @@ builds it with a narrower, more focused design:
   history, and revert (whole-config or scoped to a single object)
 - One-time importer from an existing Nginx-Proxy-Manager/NPMplus data directory
 - Structured logging (zerolog), optional access log, slow-request warnings
+- Opt-in Prometheus metrics at `/metrics` on the admin listener (`GPM_METRICS=1`),
+  with no `client_golang` dependency and host labels bounded by config, not by
+  client-supplied `Host` headers
 
 See [FEATURES.md](FEATURES.md) for the full roadmap (P0–P3 tiers).
 
