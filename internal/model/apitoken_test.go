@@ -147,3 +147,19 @@ func TestSettingsValidateIncludesDNSSync(t *testing.T) {
 		t.Fatal("settings validation must reject an invalid dnsSync block")
 	}
 }
+
+func TestLegacyDeadHostsScopeStillLoadsAndGrants(t *testing.T) {
+	tok := APIToken{ObjectMeta: ObjectMeta{Name: "old"}, Scopes: []string{"dead-hosts:write"}}
+	if err := tok.Validate(); err != nil {
+		t.Fatalf("legacy dead-hosts scope must validate: %v", err)
+	}
+	if !ScopeSatisfied(tok.Scopes, "parked-hosts:write") {
+		t.Fatal("dead-hosts:write must grant parked-hosts:write")
+	}
+	if !ScopeSatisfied(tok.Scopes, "parked-hosts:read") {
+		t.Fatal("write implies read")
+	}
+	if ScopeSatisfied(tok.Scopes, "proxy-hosts:read") {
+		t.Fatal("legacy scope must not widen")
+	}
+}

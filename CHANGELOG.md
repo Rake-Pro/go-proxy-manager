@@ -112,6 +112,10 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Fixed
 
+- API tokens minted before the ParkedHost rename that carry `dead-hosts:read` /
+  `dead-hosts:write` scopes load again and grant the equivalent `parked-hosts`
+  scope; 1.0.18 refused the whole config (and crash-looped the edge) on such a
+  token. Rotate them at leisure; no action is required to start.
 - Admin UI: saving a proxy host with `locations` no longer drops each
   location's `middlewares` / `accessLists` when the host was authored outside
   the UI; the save merges over the loaded location by path, mirroring the
