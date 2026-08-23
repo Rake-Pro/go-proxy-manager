@@ -75,6 +75,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- API Tokens page: the scope table no longer scrolls inside the card, and
+  checking write simply auto-selects read instead of greying it out.
 - **BREAKING - two renames, neither migrated automatically.** `DeadHost` is now
   `ParkedHost` (`config/dead-hosts/` -> `config/parked-hosts/`, `/api/dead-hosts`
   -> `/api/parked-hosts`, scope subject `dead-hosts` -> `parked-hosts`,

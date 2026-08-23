@@ -443,7 +443,6 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .empty-state .es-sub { font-size:13px; margin-bottom:16px; }
 
 /* scope table (API tokens create form) */
-.scope-table-wrap { max-height:420px; overflow-y:auto; }
 .scope-table { min-width:0; }
 .scope-table thead th { position:sticky; top:0; z-index:1; }
 .scope-table .scope-check { width:76px; text-align:center; white-space:nowrap; }
