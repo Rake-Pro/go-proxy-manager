@@ -55,8 +55,8 @@ func TestStaticBundleScopeTableGrouping(t *testing.T) {
 		"{ label: 'Routing', subjects: ['upstream-groups', 'dns-providers'] }",
 		"{ label: 'Operations', subjects: ['settings', 'dns-sync', 'ingress-discovery', 'api-tokens', 'metrics'] }",
 		"function groupedScopeSubjects()",
-		// write implies read: checking write force-checks and locks the read box
-		"r.checked = true; r.disabled = true;",
+		// write implies read: checking write auto-selects the read box
+		"if (r && w.checked) r.checked = true;",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing scope table grouping marker %q", want)

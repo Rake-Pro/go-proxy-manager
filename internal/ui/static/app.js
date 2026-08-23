@@ -2849,18 +2849,12 @@ async function viewTokens(c) {
   const adminSw = $('#tok-admin');
   const scopeGrid = $('#tok-scopes');
 
-  // Write implies read: checking write force-checks and locks the read box so
-  // the pair can never show an ambiguous state. Unchecking write hands read
-  // back, unless that subject's read is itself Full-admin-only (api-tokens).
+  // Write implies read: checking write auto-selects the read box. Read stays
+  // an ordinary checkbox (unchecking write leaves it as is).
   scopeGrid.querySelectorAll('.tok-write').forEach((w) => {
     w.addEventListener('change', () => {
       const r = scopeGrid.querySelector(`.tok-read[data-p="${w.dataset.p}"]`);
-      if (!r) return;
-      if (w.checked) { r.checked = true; r.disabled = true; }
-      else {
-        const rule = ADMIN_ONLY_SCOPES[w.dataset.p];
-        if (!(rule && rule.read)) r.disabled = false;
-      }
+      if (r && w.checked) r.checked = true;
     });
   });
   // Header "select all" checkboxes flip every enabled box in their column and
@@ -2892,14 +2886,6 @@ async function viewTokens(c) {
         box.disabled = true;
         box.title = rule.why;
       });
-    });
-    // The gate above just re-enabled every box, including read boxes that a
-    // checked write box implies-and-locks - reassert that lock so it survives
-    // an admin-switch round trip.
-    scopeGrid.querySelectorAll('.tok-write').forEach((w) => {
-      if (!w.checked) return;
-      const r = scopeGrid.querySelector(`.tok-read[data-p="${w.dataset.p}"]`);
-      if (r) r.disabled = true;
     });
   };
   adminSw.addEventListener('switchchange', syncAdmin);
