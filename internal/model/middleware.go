@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -26,6 +27,41 @@ const (
 	MWTypeGuard     = "guard"
 	MWTypeRateLimit = "rate-limit" // per-host, per-client-IP token bucket
 	MWTypeRewrite   = "rewrite"    // exact-match upstream-facing request-path replacement
+	MWTypeBouncer   = "bouncer"    // deny hook: ask an external bouncer/WAF about the client IP
+)
+
+// Bouncer providers. crowdsec speaks the CrowdSec LAPI bouncer protocol; http is
+// a generic deny hook any custom bouncer can implement.
+const (
+	BouncerProviderCrowdSec = "crowdsec"
+	BouncerProviderHTTP     = "http"
+)
+
+// Bouncer behaviour when the bouncer cannot be reached (or answers
+// unintelligibly). fail-open is the default: an unreachable bouncer must not
+// take the site down, which is the operationally safer posture for a
+// reputation/threat feed (unlike auth, whose failure mode must deny).
+const (
+	BouncerOnErrorFailOpen   = "fail-open"
+	BouncerOnErrorFailClosed = "fail-closed"
+)
+
+// How a bouncer denial is rendered. error-page routes the denial through the
+// custom error-page renderer; plain writes a bare status body.
+const (
+	BouncerDenyWithErrorPage = "error-page"
+	BouncerDenyWithPlain     = "plain"
+)
+
+// Bouncer defaults, applied by the data plane when the field is unset.
+const (
+	DefaultBouncerTimeout         = 2 * time.Second
+	DefaultBouncerCacheTTL        = 60 * time.Second
+	DefaultBouncerCacheMaxEntries = 10000
+	// MaxBouncerErrorCacheTTL caps how long a verdict derived from an ERROR
+	// (rather than a real answer) is cached. A bouncer outage must not pin a
+	// whole cacheTTL worth of guessed verdicts.
+	MaxBouncerErrorCacheTTL = 5 * time.Second
 )
 
 // AuthMode selects how an auth middleware authenticates.
@@ -156,6 +192,103 @@ type RewriteMiddleware struct {
 	ReplacePath map[string]string `json:"replacePath,omitempty" yaml:"replacePath,omitempty"`
 }
 
+// BouncerMiddleware is a deny hook: before a request reaches authentication, gpm
+// asks an operator-run bouncer whether the client IP is currently banned. It is
+// a HOOK, not a bundled WAF - gpm ships no rules, no engine and no signature
+// feed; the verdict is entirely the external service's.
+//
+// It sits after the access list and before auth, so an operator allow-list still
+// wins outright and a banned IP never reaches the IdP (no forward-auth
+// subrequest, no OIDC redirect).
+type BouncerMiddleware struct {
+	// Provider selects the wire protocol: "crowdsec" (CrowdSec LAPI bouncer) or
+	// "http" (generic deny hook). Empty defaults to crowdsec.
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// URL is the bouncer base URL: the LAPI root (e.g. http://crowdsec:8080) for
+	// crowdsec, or the full endpoint to GET for http.
+	URL string `json:"url" yaml:"url"`
+	// APIKey is sent as X-Api-Key. Required for crowdsec (register it with
+	// "cscli bouncers add gpm"); optional for http.
+	APIKey Secret `json:"apiKey,omitempty" yaml:"apiKey,omitempty"`
+	// Timeout is a Go duration string bounding one bouncer call (default "2s").
+	// A bouncer is on the request hot path; it never gets to hang a request.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	// CacheTTL is a Go duration string: how long a verdict is reused for the same
+	// client IP (default "60s"). In stream mode it is also the delta poll
+	// interval. A verdict derived from an error is capped at 5s regardless.
+	CacheTTL string `json:"cacheTTL,omitempty" yaml:"cacheTTL,omitempty"`
+	// CacheMaxEntries bounds the per-middleware verdict cache (default 10000),
+	// so a rotating-source-IP flood cannot grow it without bound.
+	CacheMaxEntries int `json:"cacheMaxEntries,omitempty" yaml:"cacheMaxEntries,omitempty"`
+	// OnError is the verdict when the bouncer errors, times out or answers
+	// unintelligibly: "fail-open" (default, allow) or "fail-closed" (deny).
+	OnError string `json:"onError,omitempty" yaml:"onError,omitempty"`
+	// DenyStatus is the status a denied request gets (default 403).
+	DenyStatus int `json:"denyStatus,omitempty" yaml:"denyStatus,omitempty"`
+	// DenyWith selects the denial body: "error-page" (default) renders through
+	// the custom error-page path, "plain" writes a bare status body.
+	DenyWith string `json:"denyWith,omitempty" yaml:"denyWith,omitempty"`
+	// AllowFrom lists client CIDRs that bypass the bouncer entirely: a matching
+	// request is never looked up and never denied by it. An operator allow-list
+	// must be able to win outright over an external feed's verdict - the same
+	// any-of, network-exempt bypass auth/guard/rate-limit already carry.
+	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+	// Stream (crowdsec only) pulls the full decision set once
+	// (/v1/decisions/stream?startup=true) and then deltas every CacheTTL,
+	// keeping an in-memory IP/range set so the hot path is a local lookup with
+	// no per-request call to the LAPI. Off means a live lookup per uncached IP.
+	Stream bool `json:"stream,omitempty" yaml:"stream,omitempty"`
+}
+
+// ProviderOrDefault returns the configured provider, defaulting to crowdsec.
+func (b BouncerMiddleware) ProviderOrDefault() string {
+	if b.Provider == "" {
+		return BouncerProviderCrowdSec
+	}
+	return b.Provider
+}
+
+// TimeoutOrDefault returns the per-call timeout. An unset or unparseable value
+// (validation rejects the latter) yields DefaultBouncerTimeout.
+func (b BouncerMiddleware) TimeoutOrDefault() time.Duration {
+	return durationOr(b.Timeout, DefaultBouncerTimeout)
+}
+
+// CacheTTLOrDefault returns the verdict cache TTL / stream poll interval.
+func (b BouncerMiddleware) CacheTTLOrDefault() time.Duration {
+	return durationOr(b.CacheTTL, DefaultBouncerCacheTTL)
+}
+
+// CacheMaxEntriesOrDefault returns the verdict-cache bound.
+func (b BouncerMiddleware) CacheMaxEntriesOrDefault() int {
+	if b.CacheMaxEntries <= 0 {
+		return DefaultBouncerCacheMaxEntries
+	}
+	return b.CacheMaxEntries
+}
+
+// FailOpen reports whether an errored bouncer call allows the request.
+func (b BouncerMiddleware) FailOpen() bool { return b.OnError != BouncerOnErrorFailClosed }
+
+// DenyStatusOrDefault returns the status a denied request gets.
+func (b BouncerMiddleware) DenyStatusOrDefault() int {
+	if b.DenyStatus == 0 {
+		return 403
+	}
+	return b.DenyStatus
+}
+
+func durationOr(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
 // Middleware is a reusable, named processing step referenced by hosts/locations.
 type Middleware struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
@@ -166,6 +299,7 @@ type Middleware struct {
 	Guard     *GuardMiddleware     `json:"guard,omitempty" yaml:"guard,omitempty"`
 	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
 	Rewrite   *RewriteMiddleware   `json:"rewrite,omitempty" yaml:"rewrite,omitempty"`
+	Bouncer   *BouncerMiddleware   `json:"bouncer,omitempty" yaml:"bouncer,omitempty"`
 }
 
 func (m Middleware) Kind() string { return "Middleware" }
@@ -279,8 +413,79 @@ func (m Middleware) Validate() error {
 				return fmt.Errorf("middleware %q: rewrite.replacePath[%q] rewrites a path to itself (no-op)", m.Name, k)
 			}
 		}
+	case MWTypeBouncer:
+		if m.Bouncer == nil {
+			return fmt.Errorf("middleware %q: bouncer spec required", m.Name)
+		}
+		if err := m.Bouncer.validate(m.Name); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("middleware %q: unknown type %q", m.Name, m.Type)
+	}
+	return nil
+}
+
+// validate checks a BouncerMiddleware; name is the owning middleware's name, so
+// the error reads the same way every other middleware error does.
+func (b *BouncerMiddleware) validate(name string) error {
+	provider := b.ProviderOrDefault()
+	switch provider {
+	case BouncerProviderCrowdSec, BouncerProviderHTTP:
+	default:
+		return fmt.Errorf("middleware %q: bouncer.provider must be crowdsec|http, got %q", name, b.Provider)
+	}
+	if strings.TrimSpace(b.URL) == "" {
+		return fmt.Errorf("middleware %q: bouncer.url is required", name)
+	}
+	u, err := url.Parse(b.URL)
+	if err != nil {
+		return fmt.Errorf("middleware %q: bouncer.url is not a valid URL: %w", name, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("middleware %q: bouncer.url must be an absolute http(s) URL, got %q", name, b.URL)
+	}
+	// The CrowdSec LAPI authenticates every bouncer call by API key; without one
+	// every request would 403 and the middleware would silently run on its
+	// onError policy forever.
+	if provider == BouncerProviderCrowdSec && b.APIKey.IsEmpty() {
+		return fmt.Errorf("middleware %q: bouncer.apiKey is required for the crowdsec provider (register one with \"cscli bouncers add gpm\")", name)
+	}
+	if b.Stream && provider != BouncerProviderCrowdSec {
+		return fmt.Errorf("middleware %q: bouncer.stream is only supported by the crowdsec provider", name)
+	}
+	for _, f := range []struct{ field, value string }{{"timeout", b.Timeout}, {"cacheTTL", b.CacheTTL}} {
+		if f.value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(f.value)
+		if err != nil {
+			return fmt.Errorf("middleware %q: bouncer.%s must be a valid duration (e.g. \"2s\", \"60s\"), got %q: %w", name, f.field, f.value, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("middleware %q: bouncer.%s must be > 0, got %q", name, f.field, f.value)
+		}
+	}
+	if b.CacheMaxEntries < 0 {
+		return fmt.Errorf("middleware %q: bouncer.cacheMaxEntries must be >= 0, got %d", name, b.CacheMaxEntries)
+	}
+	switch b.OnError {
+	case "", BouncerOnErrorFailOpen, BouncerOnErrorFailClosed:
+	default:
+		return fmt.Errorf("middleware %q: bouncer.onError must be fail-open|fail-closed, got %q", name, b.OnError)
+	}
+	switch b.DenyWith {
+	case "", BouncerDenyWithErrorPage, BouncerDenyWithPlain:
+	default:
+		return fmt.Errorf("middleware %q: bouncer.denyWith must be error-page|plain, got %q", name, b.DenyWith)
+	}
+	if s := b.DenyStatus; s != 0 && (s < 400 || s > 599) {
+		return fmt.Errorf("middleware %q: bouncer.denyStatus must be a 4xx/5xx code, got %d", name, s)
+	}
+	for _, c := range b.AllowFrom {
+		if !validCIDROrIP(c) {
+			return fmt.Errorf("middleware %q: bouncer.allowFrom has invalid CIDR/IP %q", name, c)
+		}
 	}
 	return nil
 }

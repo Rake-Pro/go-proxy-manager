@@ -48,6 +48,8 @@ tags:
   description: Scoped bearer credentials for automation.
 - name: Profiling (opt-in)
   description: net/http/pprof, only mounted with GPM_PPROF=1.
+- name: Metrics (opt-in)
+  description: Prometheus text exposition, only mounted with GPM_METRICS=1.
 - name: Proxy hosts
 - name: Redirect hosts
 - name: Stream hosts
@@ -374,6 +376,15 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        tls:
+          $ref: '#/components/schemas/StreamTLS'
+        accessLists:
+          type: array
+          description: 'AccessList names gating the connection on the client IP, evaluated
+            before any backend dial. Only the ip rules and geo apply at L4; a list with
+            basicAuth users is rejected.'
+          items:
+            type: string
       required:
       - name
       - listenPort
@@ -381,6 +392,31 @@ components:
       - forwardHost
       - forwardPort
       description: Forwards raw TCP/UDP from a listen port to a backend.
+    StreamTLS:
+      type: object
+      description: 'TLS awareness for a TCP stream host: SNI routing on a shared listen
+        port, with the handshake either forwarded untouched or terminated at gpm. Requires
+        protocol tcp.'
+      properties:
+        mode:
+          type: string
+          description: passthrough (route on SNI, never decrypt) | terminate (handshake
+            at gpm, plaintext upstream).
+          enum:
+          - passthrough
+          - terminate
+        sniMatch:
+          type: array
+          description: 'Server names this host claims: exact, or a single-label *.suffix
+            wildcard. Required for every host that shares its listen port.'
+          items:
+            type: string
+        certificateRef:
+          type: string
+          description: Certificate to present. Required in terminate mode, forbidden in
+            passthrough.
+      required:
+      - mode
     DeadHost:
       type: object
       properties:
@@ -940,6 +976,66 @@ components:
             type: string
       required:
       - replacePath
+    BouncerMiddleware:
+      type: object
+      description: >-
+        Deny hook: ask an operator-run bouncer whether the client IP is banned.
+        A hook, not a bundled WAF - gpm ships no rules or detection engine.
+      properties:
+        provider:
+          type: string
+          description: crowdsec (LAPI bouncer flow) | http (generic deny hook). Default crowdsec.
+          enum:
+          - crowdsec
+          - http
+        url:
+          type: string
+          description: crowdsec - the LAPI base URL. http - the full endpoint to GET.
+        apiKey:
+          type: string
+          description: >-
+            Sent as X-Api-Key. Required for crowdsec (cscli bouncers add gpm).
+            Store as a ${ENV:...} / ${FILE:...} placeholder; a literal value
+            reads back as ***.
+        timeout:
+          type: string
+          description: Go duration bounding one bouncer call. Default 2s.
+        cacheTTL:
+          type: string
+          description: >-
+            Go duration a verdict is reused for the same client IP, and the
+            stream-mode delta poll interval. Default 60s. An error-derived
+            verdict is capped at 5s regardless.
+        cacheMaxEntries:
+          type: integer
+          description: Bound on the per-middleware verdict cache. Default 10000.
+        onError:
+          type: string
+          description: Verdict when the bouncer gives no usable answer. Default fail-open.
+          enum:
+          - fail-open
+          - fail-closed
+        denyStatus:
+          type: integer
+          description: Status for a denied request. Default 403.
+        denyWith:
+          type: string
+          description: Denial body - the custom error page, or a bare status body. Default error-page.
+          enum:
+          - error-page
+          - plain
+        allowFrom:
+          type: array
+          description: Client CIDRs that bypass the bouncer entirely.
+          items:
+            type: string
+        stream:
+          type: boolean
+          description: >-
+            crowdsec only. Pull the whole decision set once and then deltas
+            every cacheTTL, so the request path is a local IP/CIDR lookup.
+      required:
+      - url
     Middleware:
       type: object
       properties:
@@ -952,13 +1048,14 @@ components:
         updatedAt: *id007
         type:
           type: string
-          description: auth | headers | guard | rate-limit | rewrite.
+          description: auth | headers | guard | rate-limit | rewrite | bouncer.
           enum:
           - auth
           - headers
           - guard
           - rate-limit
           - rewrite
+          - bouncer
         auth:
           $ref: '#/components/schemas/AuthMiddleware'
         headers:
@@ -969,6 +1066,8 @@ components:
           $ref: '#/components/schemas/RateLimitMiddleware'
         rewrite:
           $ref: '#/components/schemas/RewriteMiddleware'
+        bouncer:
+          $ref: '#/components/schemas/BouncerMiddleware'
       required:
       - name
       - type
@@ -1213,9 +1312,32 @@ components:
             $ref: '#/components/schemas/WebhookConfig'
         dnsSync:
           $ref: '#/components/schemas/DNSSyncSettings'
+        proxyProtocol:
+          $ref: '#/components/schemas/ProxyProtocolSettings'
         ingressDiscovery:
           $ref: '#/components/schemas/IngressDiscoverySettings'
       description: Singleton application configuration (config/settings.yaml).
+    ProxyProtocolSettings:
+      type: object
+      description: 'Inbound HAProxy PROXY protocol (v1 and v2) on the data-plane HTTP/HTTPS
+        listeners and every TCP stream listener. The parsed source replaces the connection
+        RemoteAddr, so access lists, geo, rate limits, X-Forwarded-For, the access log
+        and metrics all see the real client. The header is an unauthenticated claim and
+        is honoured ONLY from a peer inside trustedCIDRs.'
+      properties:
+        enabled:
+          type: boolean
+        trustedCIDRs:
+          type: array
+          description: CIDRs or bare IPs of the load balancers whose header is believed.
+            Required when enabled; there is no trust-everyone mode.
+          items:
+            type: string
+        timeout:
+          type: string
+          description: 'Go duration deadline for reading a complete header from a trusted
+            peer. Default 5s, maximum 1m.'
+          example: 5s
     Config:
       type: object
       properties:
@@ -1387,11 +1509,18 @@ components:
               - follower
             readOnly:
               type: boolean
+        metrics:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              description: True when GET /metrics is mounted (GPM_METRICS=1). The SPA greys the link
+                out when false rather than linking at a route that answers 404.
         scopeSubjects:
           type: array
           items:
             type: string
-          description: The authoritative list of scope subjects (resource plurals + settings/dns-sync/ingress-discovery),
+          description: The authoritative list of scope subjects (resource plurals + settings/dns-sync/ingress-discovery/metrics),
             for building a token-scope form.
       description: 'Read-only runtime feature-availability probe. Not scope-gated: any authenticated caller
         may ask.'
@@ -1401,6 +1530,11 @@ components:
         lastRun:
           type: string
           format: date-time
+        lastSuccess:
+          type: string
+          format: date-time
+          description: The last reconcile in which nothing failed. Separate from lastRun because a
+            backend failing since six hours ago is exactly what "last run 2 minutes ago" hides.
         pihole:
           type: object
           properties:
@@ -4073,6 +4207,33 @@ paths:
                 type: string
                 example: ok
       security: []
+  /metrics:
+    get:
+      summary: Prometheus metrics exposition
+      description: Only mounted when the instance is started with GPM_METRICS=1 (-metrics); a 404 here
+        means metrics are off, not that this route doesn't exist. Gated by admin role plus a `metrics:read`
+        API-token scope check (an admin session needs no scope). The body is Prometheus text exposition
+        format 0.0.4, namespaced `gpm_`; host labels are ProxyHost/StreamHost NAMES from the committed
+        config, never client-supplied Host headers, and series count is capped per metric. It names hosts
+        and certificates, so it is admin data - do not expose the admin listener to scrape it, scrape it
+        over your own private path.
+      tags:
+      - Metrics (opt-in)
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP gpm_http_requests_total Data-plane HTTP requests, by proxy host, method and status class.
+                  # TYPE gpm_http_requests_total counter
+                  gpm_http_requests_total{host="app",method="GET",status="2xx"} 12
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /version:
     get:
       summary: Build identity

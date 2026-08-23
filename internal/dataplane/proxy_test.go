@@ -348,7 +348,7 @@ func TestProxyReassertsIdentityStrippedByConnectionHeader(t *testing.T) {
 	}))
 	defer closeFn()
 
-	h := newReverseProxy(up, "app", nil, []string{"X-Forwarded-User", "X-Forwarded-Groups", "X-Client-Cert-Subject"})
+	h := newReverseProxy(up, "app", nil, []string{"X-Forwarded-User", "X-Forwarded-Groups", "X-Client-Cert-Subject"}, nil)
 
 	r := httptest.NewRequest("GET", "http://app.example.com/x", nil)
 	// What gpm's auth tier asserted...

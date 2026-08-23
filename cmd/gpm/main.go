@@ -27,6 +27,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/logging"
+	"github.com/Rake-Pro/go-proxy-manager/internal/metrics"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/server"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
@@ -69,6 +70,7 @@ func main() {
 		haRole        = flag.String("ha-role", envOr("GPM_HA_ROLE", string(ha.RoleLeader)), "HA role: leader (runs ACME and Ingress discovery, accepts config writes) or follower (read-only, pulls the leader's config repo)")
 		haPollInt     = flag.Duration("ha-poll-interval", envDur("GPM_HA_POLL_INTERVAL", store.DefaultFollowInterval), "how often a follower fast-forwards the config repo from the leader remote")
 		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin role + admin scope gated)")
+		metricsOn     = flag.Bool("metrics", os.Getenv("GPM_METRICS") == "1", "expose a Prometheus text exposition on the admin server at /metrics (admin role + metrics:read scope gated)")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -120,6 +122,19 @@ func main() {
 		Str("externalBaseURL", settings.ExternalBaseURL).
 		Msg("config loaded")
 
+	// Prometheus metrics, opt-in. The registry is built before the data plane so
+	// SetMetricsHook lands before the first Reload and before Start: the listener
+	// wrapper decides once, at build time, whether to observe at all, so a run
+	// without -metrics carries no per-request cost.
+	var mx *metrics.Metrics
+	if *metricsOn {
+		bi := version.Get()
+		mx = metrics.NewMetrics(bi.Version, bi.Commit, bi.Go)
+		mx.RegisterHA(role.String())
+		dataplane.SetMetricsHook(mx)
+		log.Info().Msg("prometheus metrics enabled (GET /metrics on the admin listener)")
+	}
+
 	dp := dataplane.New(dataplane.Config{
 		HTTPSAddr:                     *httpsAddr,
 		HTTPAddr:                      *httpAddr,
@@ -168,6 +183,19 @@ func main() {
 	// data-plane compile fails closed (deny) for any geo rule already committed
 	// before the DB went missing, so a geo host can never boot-loop or serve open.
 	st.SetGeoAvailability(geoResolver.Loaded)
+
+	// Inbound PROXY protocol (settings, not Config) is applied before the first
+	// compile so the stream listeners opened by Reload are wrapped from their
+	// very first connection.
+	dp.SetProxyProtocol(settings.ProxyProtocol)
+
+	// Settings-level custom error pages, compiled before the first Reload for
+	// the same reason as PROXY protocol above: it is consulted live by every
+	// host that has no errorPages override of its own, so it must be in place
+	// before any request can be served.
+	if err := dataplane.SetErrorPages(settings.ErrorPages, *certDir); err != nil {
+		log.Fatal().Err(err).Msg("failed to compile settings-level error pages")
+	}
 
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
@@ -227,6 +255,19 @@ func main() {
 			log.Error().Err(err).Msg("reload: failed to load config")
 			return err
 		}
+		// Inbound PROXY protocol first: it governs which address the data plane
+		// treats as the client, and it is read live per connection, so applying it
+		// ahead of the compile means any listener the compile opens is already
+		// wrapped.
+		dp.SetProxyProtocol(st2.ProxyProtocol)
+		// Same reasoning as the initial load: compile the settings-level error
+		// pages before the data plane, so a template that fails to parse fails
+		// the whole reload with a clear message rather than serving half of a
+		// changed config.
+		if err := dataplane.SetErrorPages(st2.ErrorPages, *certDir); err != nil {
+			log.Error().Err(err).Msg("reload: failed to compile settings-level error pages")
+			return err
+		}
 		// Reload the data plane FIRST: only reconfigure the auth layer once the
 		// data plane has accepted the new config, so a rejected reload never
 		// leaves auth and dataplane drifted against each other.
@@ -250,6 +291,18 @@ func main() {
 		log.Info().Msg("HA follower: ACME renewal loop disabled (the leader is the only issuer)")
 	} else {
 		acmeMgr := acme.NewManager(acme.Options{CertDir: *certDir, OnChange: func() { _ = reload() }})
+		if mx != nil {
+			// Leader-only on purpose: a follower is not the issuer, and exporting a
+			// zero expiry there would read as "expired" to any sane alert.
+			mx.RegisterACME(func() []metrics.CertStatus {
+				obs := acmeMgr.CertObservations()
+				out := make([]metrics.CertStatus, 0, len(obs))
+				for _, o := range obs {
+					out = append(out, metrics.CertStatus{Name: o.Name, NotAfter: o.NotAfter, RenewFailures: o.RenewFailures})
+				}
+				return out
+			})
+		}
 		// HTTP-01 challenges are answered by the data plane's plaintext listener
 		// from the manager's in-flight token map.
 		dp.SetACMEChallengeStore(acmeMgr.HTTP01Challenges())
@@ -286,6 +339,20 @@ func main() {
 	dnsSyncer := dnssync.New(func(c context.Context) (model.Config, model.Settings, error) {
 		return st.Load(c)
 	}, dnsLedgerStore{st})
+
+	if mx != nil {
+		mx.RegisterDNSSync(func() metrics.DNSSyncStatus {
+			st := dnsSyncer.Status()
+			return metrics.DNSSyncStatus{
+				LastRun:     st.LastRun,
+				LastSuccess: st.LastSuccess,
+				Backends: []metrics.DNSBackendStatus{
+					{Name: "pihole", Enabled: st.Pihole.Enabled, OK: st.Pihole.OK, Desired: st.Pihole.Desired, Managed: st.Pihole.Managed},
+					{Name: "cloudflare", Enabled: st.Cloudflare.Enabled, OK: st.Cloudflare.OK, Desired: st.Cloudflare.Desired, Managed: st.Cloudflare.Managed},
+				},
+			}
+		})
+	}
 
 	// Kubernetes Ingress discovery: derives managed proxy hosts from annotated
 	// cluster Ingresses (read-only against the cluster) and writes them as ONE
@@ -325,6 +392,19 @@ func main() {
 			dnsSyncer.Trigger()
 		},
 	)
+	if mx != nil {
+		mx.RegisterIngressDiscovery(func() metrics.IngressStatus {
+			st := ingressDisc.Status()
+			return metrics.IngressStatus{
+				Enabled:     st.Enabled,
+				LastRun:     st.LastRun,
+				LastSuccess: st.LastSuccess,
+				Discovered:  st.Discovered,
+				Managed:     st.Managed,
+			}
+		})
+	}
+
 	// The reconciler is tracked, not fire-and-forget: a run that is mid-commit when
 	// the process is asked to stop has to be allowed to finish (or roll back)
 	// before main returns, or shutdown is exactly the window that leaves the config
@@ -390,6 +470,11 @@ func main() {
 		},
 		IngressDiscoveryEnabled: ingressDisc.Enabled,
 
+		// Reported so the SPA can grey out the metrics link instead of pointing at
+		// a route that answers 404. The endpoint itself is on the admin mux, not
+		// under /api/.
+		MetricsEnabled: mx != nil,
+
 		// A follower serves the admin API read-only: writes are refused with a
 		// 503 naming the leader, and the SPA greys the controls out.
 		Role: role,
@@ -400,7 +485,11 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to initialise admin UI")
 	}
 
-	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler, *pprofEnabled)
+	var metricsHandler http.Handler
+	if mx != nil {
+		metricsHandler = mx.Handler()
+	}
+	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler, metricsHandler, *pprofEnabled)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()

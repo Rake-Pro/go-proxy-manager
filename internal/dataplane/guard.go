@@ -82,8 +82,11 @@ func (t guardTrigger) matches(r *http.Request) bool {
 
 // guardHandler denies a matching request with denyStatus unless ipOf(r) is in
 // the allow networks. It fails closed: a matched request with an unresolvable
-// client IP is denied (ipInNets(nil, ...) is false).
-func guardHandler(c guard, ipOf func(*http.Request) net.IP, next http.Handler) http.Handler {
+// client IP is denied (ipInNets(nil, ...) is false). host and ep resolve the
+// custom error page for the denial (see serveErrorPage); ep is nil when the
+// host has no errorPages override, in which case the settings-level pages
+// still apply.
+func guardHandler(c guard, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A ';' in the raw query is a matcher/backend divergence, the query-string
 		// twin of the path check in normalizeRequestPath. r.URL.Query() follows the
@@ -106,7 +109,10 @@ func guardHandler(c guard, ipOf func(*http.Request) net.IP, next http.Handler) h
 			}
 		}
 		if matched && !ipInNets(ipOf(r), c.allowNets) {
-			http.Error(w, http.StatusText(c.denyStatus), c.denyStatus)
+			countDenial(r, "guard")
+			serveErrorPage(w, c.denyStatus, ep, host, func() {
+				http.Error(w, http.StatusText(c.denyStatus), c.denyStatus)
+			})
 			return
 		}
 		next.ServeHTTP(w, r)

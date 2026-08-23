@@ -35,8 +35,70 @@ The admin plane is authenticated, but you should still keep it off the public
 internet. Bind it to loopback (`127.0.0.1:8081`) and reach it via a tunnel, or
 front it with your own authenticating ingress.
 
-There is no `/metrics` endpoint - the admin server exposes only `/healthz` and
-`/version`.
+Stream hosts open one additional listener per `listenPort` (see
+[StreamHost](configuration.md#streamhost-configstream-hosts)); publish those
+ports explicitly.
+
+Both data-plane listeners bind a bare `:port` by default (`GPM_HTTP_ADDR=:80`,
+`GPM_HTTPS_ADDR=:443`), which in Go binds the **IPv6 wildcard with v4-mapped
+addresses enabled** — one socket serving both families. See
+[IPv6](#ipv6) below.
+
+A Prometheus exposition is available at `/metrics` on the **admin** listener,
+off by default (`-metrics` / `GPM_METRICS=1`) and gated like the rest of the
+admin plane - see [Metrics (Prometheus)](#metrics-prometheus) below. Unauthenticated,
+the admin server exposes only `/healthz` and `/version`.
+
+### IPv6
+
+gpm listens dual-stack out of the box: a bare `:80` / `:443` bind accepts IPv4 and
+IPv6 on the same socket, the router and every middleware are address-family
+agnostic, and the client IP an access list, geo rule, rate limit or
+`X-Forwarded-For` sees is whichever address the client actually used — a v6 client
+appears as its v6 address, not a v4 stand-in. There is no IPv6 toggle to set.
+
+Pinning a bind to one family is still possible and is a deliberate choice:
+`GPM_HTTPS_ADDR=0.0.0.0:443` is v4-only, `GPM_HTTPS_ADDR=[::]:443` is v6 (with
+v4-mapped addresses, so still both on Linux unless the host has
+`net.ipv6.bindv6only=1`).
+
+What usually blocks inbound IPv6 is Docker, not gpm. Standard Docker behaviour:
+
+- **The daemon needs IPv6 enabled.** Set `"ip6tables": true` and (for a
+  user-defined bridge) `"experimental": true` where your Docker version still
+  requires it in `/etc/docker/daemon.json`, then restart the daemon. Without
+  `ip6tables` the daemon does not program v6 NAT/forwarding rules and published
+  ports are not reachable over v6.
+- **The network needs `enable_ipv6`.** A compose network must declare it (and, on
+  older Compose file versions, a v6 subnet):
+
+  ```yaml
+  networks:
+    edge:
+      enable_ipv6: true
+      ipam:
+        config:
+          - subnet: fd00:dead:beef::/64   # ULA is fine; a routed /64 is better
+  ```
+
+- **The container needs a real IPv6 address**, not just a v4 port mapping. A
+  published port on a v4-only network is unreachable over v6 no matter what gpm
+  binds.
+- **`userland-proxy` changes what the app sees.** With the default
+  `"userland-proxy": true` the daemon's `docker-proxy` relays the connection, so
+  the container sees the *proxy's* address as the peer — the real client IP is
+  lost for both families. Setting `"userland-proxy": false` in
+  `/etc/docker/daemon.json` keeps the connection on the kernel path (iptables /
+  ip6tables DNAT) so the original client address arrives intact.
+- **Host networking is the simplest alternative.** `network_mode: host` gives the
+  container the host's addresses directly: no NAT, no userland proxy, real client
+  IPs in both families, at the cost of losing port isolation (gpm then binds the
+  host's `:80`/`:443` and every stream port directly).
+
+If the edge in front of gpm is an L4 load balancer rather than the client, the
+client IP problem is not a Docker one — turn on
+[`settings.proxyProtocol`](configuration.md#proxyprotocolsettings-settingsproxyprotocol)
+so gpm reads the real client address (of either family) out of the PROXY header.
 
 ## Data directory
 
@@ -78,6 +140,7 @@ container deployments).
 | `-ha-role` | `GPM_HA_ROLE` | `leader` | HA role: `leader` runs ACME + Ingress discovery and accepts config writes; `follower` disables both and serves the admin API read-only (`503` on writes). See [ha.md](ha.md) |
 | `-ha-poll-interval` | `GPM_HA_POLL_INTERVAL` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved |
 | `-pprof` | `GPM_PPROF` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin role **and** `admin` scope gated) |
+| `-metrics` | `GPM_METRICS` | `false` | Expose a Prometheus text exposition on the admin server at `/metrics` (admin role **and** `metrics:read` scope gated) |
 | `-geoip-db` | `GPM_GEOIP_DB` | (none) | Path to an operator-supplied GeoLite2/GeoIP2 `.mmdb` file for AccessList geo rules; unset disables geo rules, no database is bundled |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
@@ -705,6 +768,79 @@ an upstream group for a custom load-balanced `upstream` block). Use
 For a full walkthrough — running gpm alongside a live NPM install, validating
 parity before any traffic moves, then cutting over — see
 [migrating-from-npm.md](migrating-from-npm.md).
+
+## Metrics (Prometheus)
+
+Off by default. Set `GPM_METRICS=1` (or `-metrics`) and restart; with it off,
+`/metrics` answers `404`.
+
+The endpoint is on the **admin server** (`-admin-addr`, default `:8081`), not
+the data plane, because the payload is admin data: it names every proxy host,
+stream host and certificate you have configured. It is gated by an admin-role
+principal **plus**, for an API token, an explicit `metrics:read` scope - so the
+credential you park in a Prometheus config can scrape and nothing else. Mint one
+with a single scope:
+
+```
+curl -sS -X PUT https://gpm.example.com/api/api-tokens/prometheus \
+  -H 'Content-Type: application/json' -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
+  -d '{"scopes":["metrics:read"]}'
+```
+
+then scrape with `Authorization: Bearer gpm_...`. An admin browser session works
+too and needs no scope.
+
+**Series cardinality is bounded by design.** Every `host` label is the
+ProxyHost/StreamHost **name** from committed config, never the client's `Host`
+header - a header is attacker-chosen, and using it would let one client mint
+unbounded series and exhaust the process. A request matching no host is labelled
+`-`. Each metric additionally caps its series count and folds the rest into a
+single `__overflow__` series, so no bug downstream of that rule can grow memory
+without limit.
+
+There is no `prometheus/client_golang` dependency: the exposition is a small
+internal implementation (`internal/metrics`), matching this project's rule that
+every third-party dependency has to earn its place.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `gpm_build_info` | gauge | `version`, `commit`, `go` |
+| `gpm_http_requests_total` | counter | `host`, `method`, `status` (class, e.g. `2xx`) |
+| `gpm_http_request_duration_seconds` | histogram | `host` |
+| `gpm_http_requests_in_flight` | gauge | — |
+| `gpm_http_request_bytes_total` | counter | `host` |
+| `gpm_http_response_bytes_total` | counter | `host` |
+| `gpm_http_upstream_errors_total` | counter | `host` |
+| `gpm_http_websocket_upgrades_total` | counter | `host` |
+| `gpm_denials_total` | counter | `host`, `reason` (`rate-limit`, `access-list`, `access-list-auth`, `guard`, `geo`, `bouncer`) |
+| `gpm_stream_connections_active` | gauge | `host` |
+| `gpm_stream_connections_total` | counter | `host` |
+| `gpm_acme_certificate_expiry_timestamp_seconds` | gauge | `certificate` |
+| `gpm_acme_renew_failures_total` | counter | `certificate` |
+| `gpm_dns_sync_last_run_timestamp_seconds` | gauge | — |
+| `gpm_dns_sync_last_success_timestamp_seconds` | gauge | — |
+| `gpm_dns_sync_backend_up` | gauge | `backend` |
+| `gpm_dns_sync_records_desired` | gauge | `backend` |
+| `gpm_dns_sync_records_managed` | gauge | `backend` |
+| `gpm_ingress_discovery_enabled` | gauge | — |
+| `gpm_ingress_discovery_last_run_timestamp_seconds` | gauge | — |
+| `gpm_ingress_discovery_last_success_timestamp_seconds` | gauge | — |
+| `gpm_ingress_discovery_discovered_ingresses` | gauge | — |
+| `gpm_ingress_discovery_managed_hosts` | gauge | — |
+| `gpm_ha_role` | gauge | `role` (1 for this instance's role, 0 for the other) |
+| `gpm_go_goroutines` | gauge | — |
+| `gpm_go_memstats_alloc_bytes` | gauge | — |
+| `gpm_go_memstats_sys_bytes` | gauge | — |
+
+The ACME series exist only on the **leader** (it is the only issuer; a zero
+expiry on a follower would read as "expired" to any sane alert). `LastRun` and
+`LastSuccess` are separate on both reconcilers on purpose - freeze-on-error is
+precisely the state where they diverge, so alert on the gap between them:
+
+```
+time() - gpm_ingress_discovery_last_success_timestamp_seconds > 3600
+gpm_acme_certificate_expiry_timestamp_seconds - time() < 7 * 86400
+```
 
 ## Profiling (pprof)
 

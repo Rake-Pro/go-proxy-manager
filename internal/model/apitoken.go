@@ -11,9 +11,17 @@ import (
 // that no per-resource scope can reach.
 const ScopeAdmin = "admin"
 
+// ScopeMetricsRead is the scope a token needs to scrape the Prometheus
+// exposition at GET /metrics. It is its own subject rather than "*:read"
+// because a scrape credential lives in a monitoring config forever and should
+// buy nothing else - and because the exposition is not a config read: it names
+// hosts and certificates but carries no field values.
+const ScopeMetricsRead = "metrics:read"
+
 // ScopePlurals is the central list of scope subjects. Every entry is either a
 // REST resource plural (the path segment under /api/) or a pseudo-resource for a
-// non-CRUD endpoint group ("settings", "dns-sync", "ingress-discovery").
+// non-CRUD endpoint group ("settings", "dns-sync", "ingress-discovery",
+// "metrics").
 // APIToken.Validate checks
 // every configured scope against this list, so a typo is rejected at write time
 // instead of silently granting nothing.
@@ -33,6 +41,7 @@ var ScopePlurals = []string{
 	"settings",
 	"dns-sync",
 	"ingress-discovery",
+	"metrics",
 }
 
 func knownScopePlural(p string) bool {

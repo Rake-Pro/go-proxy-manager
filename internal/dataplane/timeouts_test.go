@@ -112,7 +112,7 @@ func TestUpgradeSurvivesListenerTimeouts(t *testing.T) {
 
 	up, closeFn := hijackEcho(t)
 	defer closeFn()
-	addr := listenWithPolicy(t, newReverseProxy(up, "ws", nil, nil))
+	addr := listenWithPolicy(t, newReverseProxy(up, "ws", nil, nil, nil))
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestSlowUploadIsNotTruncatedByReadTimeout(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer closeFn()
-	addr := listenWithPolicy(t, newReverseProxy(up, "upload", nil, nil))
+	addr := listenWithPolicy(t, newReverseProxy(up, "upload", nil, nil, nil))
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {

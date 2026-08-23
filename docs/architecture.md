@@ -277,6 +277,33 @@ it monotonically, so a revoke - or any out-of-band edit - takes effect within on
 interval rather than at the next restart. Traffic-side failover is out of
 process (keepalived VIP, see [ha.md](ha.md)).
 
+**Metrics** (`internal/metrics`). An optional Prometheus exposition at
+`GET /metrics` on the admin listener (`-metrics` / `GPM_METRICS=1`; `404` when
+off), gated by admin role plus a dedicated `metrics:read` token scope. It is a
+small in-tree implementation of the exposition format - integer counters and
+gauges, fixed-bucket histograms, a text writer - rather than
+`prometheus/client_golang`, whose transitive tree would have several times
+outweighed this project's entire direct dependency set for one read-only route.
+
+Two properties matter more than the metric list. **Cardinality is bounded by
+config, not by clients**: every `host` label is the operator's
+`ProxyHost`/`StreamHost` *name*, resolved once per request in the observe
+wrapper, never the client's `Host` header - a header is attacker-chosen, so
+labelling by it would hand any client an unbounded series generator pointed at
+this process's memory. A request matching no host collapses onto one `-` label,
+and each metric independently caps its series count and folds the rest into a
+single `__overflow__` series, so the bound survives a mistake upstream of that
+rule. And **the data plane does not know about metrics**: it declares a
+`MetricsHook` interface (`internal/dataplane/metricshook.go`) that
+`internal/metrics` happens to satisfy structurally, exactly as the ACME manager
+reaches the plaintext listener through `ACMEChallengeStore`. With no hook
+installed the observe wrapper returns the handler unwrapped and every call site
+is one atomic load, so an instance without `-metrics` pays nothing. Subsystems
+that already track their own state (ACME expiry and renewal failures, the DNS
+and Ingress reconcilers' run/success timestamps and counts) are read at scrape
+time through pull collectors wired in `cmd/gpm`, so nothing is mirrored into a
+second source of truth and no package gains a metrics import.
+
 ## Data plane
 
 **Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+ by default, a
@@ -287,9 +314,49 @@ per-connection by SNI: an exact-domain match wins, otherwise the left-most label
 is stripped and a wildcard match is tried; an unknown SNI is an error (there is no
 default certificate to leak). Custom certs load from the cert store; ACME certs
 load from their issued artifacts, and an unissued ACME cert is skipped until the
-manager produces it. **Stream hosts** add their own raw TCP and/or UDP listeners
-(one per `listenPort`), reconciled on every reload — ports added are opened, ports
-removed are closed, and a changed backend is swapped without dropping the port.
+manager produces it. Both listeners bind a bare `:port` by default, which in Go is
+the IPv6 wildcard with v4-mapped addresses enabled — one socket serving both
+families, so an inbound IPv6 client is routed, gated and logged as its own v6
+address with no second listener and no toggle. **Stream hosts** add their own raw
+TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload —
+ports added are opened, ports removed are closed, and a changed route table is
+swapped without dropping the port.
+
+**Inbound PROXY protocol** (`internal/dataplane/proxyproto.go`). When
+`settings.proxyProtocol` is on, every data-plane listener (HTTP, HTTPS, and each
+TCP stream listener) is wrapped so an accepted connection parses a HAProxy PROXY
+header — v1 text and v2 binary, hand-written against the spec with no dependency,
+v2 TLVs consumed and ignored — and the asserted source replaces the connection's
+`RemoteAddr`. That is deliberately the *only* integration point: every IP-based
+control in the system already derives from `RemoteAddr`, so access lists, geo,
+guards, rate limits, the basic-auth lockout, `X-Forwarded-For`, the access log,
+the OIDC gate and the metrics labels all follow with no per-feature wiring. The
+header is an unauthenticated claim, so it is parsed **only** when the real TCP
+peer is inside `trustedCIDRs`; from any other peer the bytes are left untouched as
+payload and the peer address stands (warned once per peer). Parsing is lazy — on
+the first `Read`/`RemoteAddr`, not in `Accept` — so one stalled sender cannot hold
+up the accept loop; a malformed header closes the connection with a sticky error,
+and a stalled one is cut at the configured deadline. The compiled config is read
+from an atomic pointer per connection, so a settings change applies without
+rebinding a listener.
+
+**Stream TLS and L4 access control** (`internal/dataplane/streamhost.go`,
+`clienthello.go`). A TCP stream host may declare `tls.mode`. In `passthrough`, the
+forwarder peeks the ClientHello with a hand-written, bounded, stdlib-only parser
+(record header → handshake message, reassembled across records → the
+`server_name` extension), routes on the SNI, and replays the peeked bytes
+verbatim to the backend — gpm never decrypts and never holds the key. In
+`terminate`, the same peeked bytes are replayed into `crypto/tls` with the
+referenced certificate and plaintext is forwarded on. Routing is compiled per
+listen port into an exact map plus single-label wildcard suffixes; a name no host
+claims (or a connection that is not TLS) is closed rather than handed to an
+arbitrary backend. Several hosts share a port only when every one of them is
+SNI-routed, which config validation enforces so routing can never depend on
+compile order. Independently, a stream host may reference access lists: only the
+IP/CIDR and geo dimensions are evaluated (basic auth has no challenge/response on
+a raw stream and is rejected at validation), and the gate runs **before the
+backend dial** — for UDP, once per session — so a denied client never causes an
+upstream socket to exist.
 
 **Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
 **proxy hosts** run the middleware chain to a reverse proxy; **redirect hosts**
@@ -323,13 +390,35 @@ them anyway. Live state is exposed at `GET /api/upstream-health`.
 to a handler that wraps the reverse proxy in a fixed order:
 
 ```
-request → rate-limit → access-list → auth → guard → headers → rewrite → reverse proxy → upstream
+request → rate-limit → access-list → bouncer → auth → guard → headers → rewrite → reverse proxy → upstream
 ```
 
 Rate limiting is outermost; path rewrite is innermost (closest to the backend).
 The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
+
+The **bouncer** middleware (`internal/dataplane/bouncer.go`) is a WAF/CrowdSec
+**deny hook, not a bundled WAF**: gpm ships no rules, no signatures and no
+detection engine, it asks an operator-run bouncer whether the client IP is
+currently banned and acts on that verdict. The `crowdsec` provider speaks the
+LAPI bouncer flow (`GET /v1/decisions?ip=` with `X-Api-Key`; `ban` and `captcha`
+both deny, since gpm has no captcha flow to hand the client and serving anyway
+would silently downgrade the operator's decision); the `http` provider is a
+generic `2xx`=allow / `403`=deny endpoint any custom bouncer can implement.
+Optional `stream` mode pulls the whole decision set once and then deltas on the
+cache interval, so the hot path is a local IP/CIDR lookup with no per-request
+LAPI call — refreshes run in the background off a request that finds the set
+stale (rather than a per-chain ticker, which would leak one poller per config
+reload), and a failed refresh keeps serving the previous set. Verdicts are
+cached per client IP with a bounded LRU; a verdict derived from an *error* is
+capped at 5s so an outage cannot pin a long TTL of guesses. `onError` decides
+what an unanswerable lookup means and defaults to **fail-open**: an unreachable
+threat feed must not take the site down, which is the opposite of the right
+default for auth. It sits between the access list and auth deliberately — an
+explicit operator allow-list (`allowFrom`, or the access list itself) still wins
+outright over an external feed, and a banned IP never reaches the IdP. Denials
+go through the shared per-host denial counter.
 
 **A reference that resolves to nothing fails the host closed.** If a host (or one
 of its locations) names a middleware or access list that does not exist in the

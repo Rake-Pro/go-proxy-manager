@@ -282,8 +282,11 @@ func (c accessList) authOK(r *http.Request) bool {
 // for geo rules (nil if no GeoIP database is configured); geoLoaded reports,
 // live, whether a GeoIP database is currently loaded (see
 // accessList.ipAllowed). The gate fails closed: a misconfigured or unmatched
-// request is denied, never allowed by default.
-func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, next http.Handler) http.Handler {
+// request is denied, never allowed by default. host and ep resolve the custom
+// error page for a 403 denial (see serveErrorPage); the basic-auth 401
+// challenge is left as plain text - it is a credential prompt, not a
+// gpm-generated error page.
+func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	// One gate per compiled list. A config reload rebuilds the chain and so
 	// resets the counters, which is acceptable: a reload is operator-driven (an
 	// admin write or a certificate renewal) and cannot be provoked by the client
@@ -296,7 +299,10 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		// restriction, as before.
 		if !c.hasIP && !c.hasAuth && !c.hasGeo {
 			if c.explicitDeny {
-				http.Error(w, "Forbidden", http.StatusForbidden)
+				countDenial(r, "access-list")
+				serveErrorPage(w, http.StatusForbidden, ep, host, func() {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+				})
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -305,6 +311,15 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		ipOK := true
 		if c.hasIP || c.hasGeo {
 			ipOK = c.ipAllowed(ipOf(r), geoLookup, geoLoaded)
+		}
+		// A list with geo rules and no database loaded denies everything
+		// (ipAllowed fails closed). That is a distinct operational state from a
+		// CIDR rule doing its job, so it gets its own denial reason - an operator
+		// seeing every request refused should be able to tell "GeoIP database
+		// missing" from "the access list works".
+		denyReason := "access-list"
+		if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
+			denyReason = "geo"
 		}
 
 		// Basic auth: throttle per client IP before spending a bcrypt compare.
@@ -347,10 +362,14 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		// Prompt for credentials when basic auth could still satisfy the gate.
 		if c.hasAuth && !authOK && (!c.satisfyAny || !ipOK) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="`+c.name+`"`)
+			countDenial(r, "access-list-auth")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		countDenial(r, denyReason)
+		serveErrorPage(w, http.StatusForbidden, ep, host, func() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		})
 	})
 }
 

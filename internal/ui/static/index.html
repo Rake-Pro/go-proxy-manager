@@ -2,6 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<script>
+// Applies a saved explicit theme choice before first paint, so a light/dark
+// pick never flashes the other palette. "auto" (or unset) leaves no
+// data-theme attribute and app.css's prefers-color-scheme media queries
+// decide instead. Kept in sync with the gpm.theme key app.js reads/writes.
+(function () {
+  try {
+    var t = localStorage.getItem('gpm.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { /* ignore */ }
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Go Proxy Manager</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />

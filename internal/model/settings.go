@@ -2,7 +2,12 @@ package model
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // AdminAuthSettings governs how operators authenticate to the admin panel.
@@ -33,6 +38,129 @@ type WebhookConfig struct {
 	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 }
 
+// DefaultProxyProtocolTimeout bounds how long a trusted peer has to deliver a
+// complete PROXY protocol header before the connection is closed. It is short on
+// purpose: the header is the very first thing a conforming sender writes, so a
+// stall is a broken or hostile peer, not a slow one.
+const DefaultProxyProtocolTimeout = 5 * time.Second
+
+// maxProxyProtocolTimeout caps the configurable header deadline. A large value
+// would let a trusted-CIDR peer pin a connection (and its file descriptor) for
+// that long by opening a socket and never writing the header.
+const maxProxyProtocolTimeout = time.Minute
+
+// ProxyProtocolSettings enables inbound HAProxy PROXY protocol (v1 and v2) on
+// the data-plane HTTP/HTTPS listeners and on every TCP stream listener, so gpm
+// behind an L4 load balancer sees the real client address instead of the
+// balancer's.
+//
+// The header is honoured ONLY from a peer inside TrustedCIDRs. From anyone else
+// the bytes are treated as ordinary payload and the connection peer stays the
+// client IP - a PROXY header is an unauthenticated claim about who the client
+// is, so accepting one from an arbitrary peer would let any client assert any
+// source address and walk straight through IP access lists, geo rules, rate
+// limits and the basic-auth lockout.
+type ProxyProtocolSettings struct {
+	// Enabled turns header parsing on. Off (the default) leaves every listener
+	// byte-for-byte as it was.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// TrustedCIDRs are the peers whose PROXY header is believed: the addresses of
+	// your load balancers, as CIDRs or bare IPs. Required when Enabled - there is
+	// no "trust everyone" mode.
+	TrustedCIDRs []string `json:"trustedCIDRs,omitempty" yaml:"trustedCIDRs,omitempty"`
+	// Timeout is the deadline for reading a complete header from a trusted peer,
+	// as a Go duration ("5s"). Empty selects DefaultProxyProtocolTimeout.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+}
+
+// HeaderTimeout returns the configured header deadline, or the default when
+// unset or unparseable (Validate rejects an unparseable value at write time, so
+// this fallback only covers a config that predates validation).
+func (p *ProxyProtocolSettings) HeaderTimeout() time.Duration {
+	if p == nil || p.Timeout == "" {
+		return DefaultProxyProtocolTimeout
+	}
+	d, err := time.ParseDuration(p.Timeout)
+	if err != nil || d <= 0 {
+		return DefaultProxyProtocolTimeout
+	}
+	return d
+}
+
+func (p *ProxyProtocolSettings) validate() error {
+	if p == nil || !p.Enabled {
+		return nil
+	}
+	if len(p.TrustedCIDRs) == 0 {
+		return fmt.Errorf("settings: proxyProtocol.trustedCIDRs is required when proxyProtocol.enabled is true (a PROXY header from an untrusted peer would let any client spoof its source IP)")
+	}
+	for _, c := range p.TrustedCIDRs {
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			if net.ParseIP(c) == nil {
+				return fmt.Errorf("settings: proxyProtocol.trustedCIDRs: invalid cidr/ip %q", c)
+			}
+		}
+	}
+	if p.Timeout != "" {
+		d, err := time.ParseDuration(p.Timeout)
+		if err != nil {
+			return fmt.Errorf("settings: proxyProtocol.timeout %q is not a duration (e.g. 5s)", p.Timeout)
+		}
+		if d <= 0 || d > maxProxyProtocolTimeout {
+			return fmt.Errorf("settings: proxyProtocol.timeout %s out of range (0 < timeout <= %s)", d, maxProxyProtocolTimeout)
+		}
+	}
+	return nil
+}
+
+// ErrorPagesConfig configures custom HTML pages served for errors gpm ITSELF
+// generates - upstream unreachable (502/504), no healthy upstream, access
+// denied (access-list/guard/geo), rate-limited (429), a dead host, or a host
+// whose middleware/access-list reference cannot be resolved (503). The
+// upstream's own error response is left untouched unless its status is also
+// listed in InterceptUpstream. See dataplane's error-page renderer.
+type ErrorPagesConfig struct {
+	// Dir is a directory of html/template files named "<status>.html" (e.g.
+	// "502.html") plus an optional "default.html" fallback, relative to the
+	// managed cert store - confined exactly like a custom certificate's files
+	// (no absolute path, no ".."), so config can never point the loader at an
+	// arbitrary host file.
+	Dir string `json:"dir,omitempty" yaml:"dir,omitempty"`
+	// Inline maps a status code (as a decimal string, e.g. "502") - or the
+	// literal "default" for the fallback - directly to html/template source,
+	// for a handful of pages an operator would rather keep in config than mount
+	// a directory.
+	Inline map[string]string `json:"inline,omitempty" yaml:"inline,omitempty"`
+	// InterceptUpstream lists status codes for which the UPSTREAM's own error
+	// response body is also replaced by the configured page (by default only
+	// errors gpm itself generates are replaced, never the upstream's own).
+	InterceptUpstream []int `json:"interceptUpstream,omitempty" yaml:"interceptUpstream,omitempty"`
+}
+
+func (e ErrorPagesConfig) validate() error {
+	if f := e.Dir; f != "" {
+		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
+		if filepath.IsAbs(f) || strings.HasPrefix(f, "/") || strings.HasPrefix(f, `\`) || strings.Contains(filepath.Clean(f), "..") {
+			return fmt.Errorf("errorPages.dir %q must be relative to the cert store (no absolute or .. paths)", f)
+		}
+	}
+	for k := range e.Inline {
+		if k == "default" {
+			continue
+		}
+		n, err := strconv.Atoi(k)
+		if err != nil || n < 100 || n > 599 {
+			return fmt.Errorf(`errorPages.inline key %q must be a 3-digit status code or "default"`, k)
+		}
+	}
+	for _, s := range e.InterceptUpstream {
+		if s < 400 || s > 599 {
+			return fmt.Errorf("errorPages.interceptUpstream %d must be a 4xx/5xx status code", s)
+		}
+	}
+	return nil
+}
+
 // Settings is the singleton app configuration, stored as config/settings.yaml.
 type Settings struct {
 	SchemaVersion int `json:"schemaVersion" yaml:"schemaVersion"`
@@ -55,10 +183,19 @@ type Settings struct {
 	// publish CNAMEs for proxy hosts opted in via their dns policy.
 	DNSSync DNSSyncSettings `json:"dnsSync,omitempty" yaml:"dnsSync,omitempty"`
 
+	// ProxyProtocol enables inbound PROXY protocol on the data-plane listeners
+	// (see ProxyProtocolSettings). nil or disabled leaves them untouched.
+	ProxyProtocol *ProxyProtocolSettings `json:"proxyProtocol,omitempty" yaml:"proxyProtocol,omitempty"`
+
 	// IngressDiscovery configures the optional read-only Kubernetes Ingress
 	// reconciler that derives managed proxy hosts from annotated cluster
 	// Ingresses, which then feed DNSSync above.
 	IngressDiscovery IngressDiscoverySettings `json:"ingressDiscovery,omitempty" yaml:"ingressDiscovery,omitempty"`
+
+	// ErrorPages configures the default custom error pages for every host; a
+	// ProxyHost's own errorPages overrides this. Zero value keeps today's plain
+	// gpm error output.
+	ErrorPages ErrorPagesConfig `json:"errorPages,omitempty" yaml:"errorPages,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -94,11 +231,17 @@ func (s Settings) Validate() error {
 			return fmt.Errorf("settings: webhook %q: url must be an absolute http(s) URL, got %q", w.Name, w.URL)
 		}
 	}
+	if err := s.ProxyProtocol.validate(); err != nil {
+		return err
+	}
 	if err := s.DNSSync.Validate(); err != nil {
 		return err
 	}
 	if err := s.IngressDiscovery.Validate(); err != nil {
 		return err
+	}
+	if err := s.ErrorPages.validate(); err != nil {
+		return fmt.Errorf("settings: %w", err)
 	}
 	return nil
 }

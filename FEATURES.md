@@ -19,9 +19,10 @@ OIDC-enabled reverse proxy in production**.
 > - **P2** - partially shipped: GeoIP geoblocking, mTLS client certs (phase 1
 >   verification **and** phase 2 CRL revocation + identity-passthrough
 >   headers), lifecycle webhooks, host tagging, reusable DNS credentials, and
->   cosign image signing (build pipeline) are done. HTTP/3, proxy protocol,
->   inbound IPv6, multi-ACME-server EAB, and the WAF/CrowdSec hook are not
->   started.
+>   cosign image signing (build pipeline) and the WAF/CrowdSec hook (the
+>   hook-only `bouncer` middleware), inbound proxy protocol (v1+v2), inbound
+>   IPv6, gzip response compression, and custom error pages are done. HTTP/3 and
+>   multi-ACME-server EAB are not started.
 > - **P3** - aspirational; nothing in this tier is built.
 >
 > For what actually ships and how to use it, see [README.md](README.md) and
@@ -239,6 +240,17 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - Redirect / stream (TCP/UDP) / 404 hosts (✓ shipped: the data plane now serves
   redirect, dead, and raw TCP/UDP stream hosts, not just proxy hosts); multiple
   access lists per host/location.
+- **Stream TLS/SNI + L4 access lists** ★ (✓ shipped): a TCP StreamHost gains
+  `tls.mode: passthrough|terminate` with `sniMatch` and (for terminate) a
+  `certificateRef`. Passthrough peeks the ClientHello with a hand-written,
+  bounded, stdlib-only parser and routes on SNI **without decrypting**, so
+  several hosts share one public port; terminate completes the handshake at gpm
+  from the normal certificate store and forwards plaintext. Sharing a port is
+  allowed only when every host on it is SNI-routed (validated), and `tls` is
+  rejected on `udp`/`both` (no ClientHello to read). StreamHosts also take
+  `accessLists`, evaluated on the client IP - IP rules and geo only, **before any
+  backend dial**; a list carrying `basicAuth` is rejected at validation rather
+  than silently half-applied, since a raw stream cannot issue an HTTP challenge.
 - Backup / export / restore ★ (✓ shipped: gzip-tar export + validated restore +
   config revert, with History-view UI), rate limiting ★ (✓ shipped: per-host,
   per-client-IP token bucket with 429 + Retry-After), dark mode (✓ shipped: the
@@ -252,7 +264,8 @@ earlier tiers or duplicating work (see "Architecture for extension").
   server-enforced TTL, active TCP/HTTP health probes + passive connect-failure
   detection, `GET /api/upstream-health`, typed UI editor),
   access-log viewer (✓ shipped: in-memory ring + `GET /api/logs` + "Access Logs"
-  view, gated on the access-log toggle) or metrics.
+  view, gated on the access-log toggle) or metrics (✓ shipped: opt-in
+  Prometheus `/metrics`, see P2).
 - Per-host OIDC relying-party gating on the data plane (✓ shipped: redirect →
   callback → signed SSO session cookie) and HSTS emission (✓ shipped).
 - **Scoped API tokens** for automation (✓ shipped): bearer credentials minted
@@ -283,23 +296,60 @@ earlier tiers or duplicating work (see "Architecture for extension").
   verified chain, `421` on mismatch, plus CRL revocation
   (`internal/dataplane/crl.go`, watched/hot-reloaded) and identity-passthrough
   headers (`X-Client-Cert-{SAN,Serial,Fingerprint,Subject}`); OCSP was never
-  implemented and is not currently planned), proxy protocol.
-- **WAF/CrowdSec hook** (hook-only, not a bundled WAF): a named step in the
-  middleware chain (`internal/dataplane/chain.go` already reserves the slot
-  after `guard`/before `proxy`) that calls out to an operator-run bouncer/WAF
-  and acts on its verdict - not an embedded WAF or CrowdSec engine.
+  implemented and is not currently planned).
+- **Inbound PROXY protocol** ★ (✓ shipped): `settings.proxyProtocol`
+  (`enabled`, `trustedCIDRs`, `timeout: 5s`) applies a hand-written v1 (text) and
+  v2 (binary) parser - stdlib only, TLVs consumed and ignored - as a listener
+  wrapper on `:80`/`:443` **and** on every TCP stream listener. The parsed source
+  replaces the connection `RemoteAddr`, so access lists, geo, guards, rate
+  limits, the basic-auth lockout, `X-Forwarded-For`, the access log, the OIDC
+  gate and the metrics labels all see the real client with no per-feature wiring.
+  The header is an unauthenticated claim, so it is honoured ONLY from a peer
+  inside `trustedCIDRs` (otherwise the bytes are payload and the peer address
+  stands, warned once per peer); a malformed header closes the connection and a
+  stalled one is cut at `timeout`. Config is read live per connection, so a
+  settings change needs no listener restart.
+- **WAF/CrowdSec hook** (hook-only, not a bundled WAF; ✓ shipped): the
+  `bouncer` middleware type (`internal/dataplane/bouncer.go`) asks an
+  operator-run bouncer whether the client IP is banned and acts on its verdict -
+  no embedded WAF, no rules, no CrowdSec engine. Two providers: `crowdsec`
+  (LAPI bouncer flow, `ban`/`captcha` = deny, optional `stream: true` for a
+  local in-memory decision set with CIDR support and background delta pulls) and
+  `http` (a generic `2xx`=allow / `403`=deny hook any custom bouncer can
+  implement). Sits after the access list and before auth, so an operator
+  allow-list wins outright and a banned IP never reaches the IdP;
+  `onError: fail-open|fail-closed` (default fail-open), bounded per-IP verdict
+  cache with an error-verdict cap, `apiKey` as a `${ENV:}`/`${FILE:}` Secret.
+- **Prometheus metrics** ★ (✓ shipped): opt-in `GET /metrics` on the admin
+  listener (`-metrics` / `GPM_METRICS=1`, `404` when off), gated by admin role
+  plus a dedicated `metrics:read` API-token scope so a scrape credential buys
+  nothing else. The exposition is a ~300-line internal implementation
+  (`internal/metrics`) rather than `prometheus/client_golang`, whose transitive
+  tree would have multiplied this project's vetted dependency set for one
+  read-only endpoint. Namespace `gpm_`: per-host request counts / latency
+  histogram / byte totals / in-flight, upstream errors, WebSocket upgrades,
+  access-control denials by tier (`rate-limit`, `access-list`,
+  `access-list-auth`, `guard`, `geo`, `bouncer`), stream connections, ACME cert
+  expiry + renew failures, DNS-sync and Ingress-discovery run/success
+  timestamps and counts, HA role, build info, Go runtime basics. Host labels are
+  the operator's ProxyHost/StreamHost **names**, never client `Host` headers, and
+  each metric caps its series count - so no client can inflate cardinality.
 - **cosign image signing** (build item, ✓ shipped): every release image is
   signed keylessly via GitHub Actions OIDC (`.github/workflows/release.yml`);
   `docs/deployment.md` documents `cosign verify`.
-- **Inbound IPv6** (NPM had it, disableable): bind the data plane on v6 and make
-  it actually reachable end-to-end. Gotchas learned in the field: with Docker
-  `userland-proxy:false` you can't DNAT v6 -> a v4-only container, so the gpm
-  container needs a real v6 address (Docker IPv6 + a routed prefix), not just a
-  v4 port-map; preserve the real client v6 in access lists / X-Forwarded-For (the
-  client-IP resolver must treat v6 the same as v4); and document that
-  dynamic-prefix ISPs (e.g. a residential ISP that rotates the prefix on reconnect) need DDNS for
-  the AAAA - a hardcoded SLAAC/EUI-64 address black-holes on every prefix change
-  and breaks dual-stack clients via Happy Eyeballs while v4 silently masks it.
+- **Inbound IPv6** ★ (✓ shipped): the data plane binds a bare `:80`/`:443`, which
+  in Go is the IPv6 wildcard with v4-mapped addresses - one socket, both
+  families, no toggle - and the client-IP resolver, access lists, geo rules and
+  `X-Forwarded-For` treat a v6 client as its own v6 address rather than a v4
+  stand-in (covered by an end-to-end `[::1]` test). What is left is deployment,
+  not code, and `docs/deployment.md` now carries an **IPv6** subsection for it:
+  the container needs a real v6 address (`enable_ipv6` + daemon `ip6tables`), not
+  just a v4 port-map; `userland-proxy: false` (or host networking) is what keeps
+  the real client address instead of the docker-proxy's. Still an operator
+  concern outside gpm: dynamic-prefix ISPs (e.g. a residential ISP that rotates
+  the prefix on reconnect) need DDNS for the AAAA - a hardcoded SLAAC/EUI-64
+  address black-holes on every prefix change and breaks dual-stack clients via
+  Happy Eyeballs while v4 silently masks it.
 - Lifecycle **webhooks** ★ (✓ shipped: `settings.webhooks`, async best-effort POST
   per config change), host grouping/tagging ★ (✓ shipped: `tags` on every object +
   Proxy Hosts list chips/filter), multiple ACME servers (partial: per-cert
@@ -307,6 +357,29 @@ earlier tiers or duplicating work (see "Architecture for extension").
   Google Public CA still open), reusable DNS creds (✓ shipped: DNS providers are
   shared first-class objects; certificates reference one credential set by
   name).
+- **Gzip response compression** ★ (✓ shipped): per-host `compression`
+  (`enabled`, `minBytes` default 1024, `types` allow-list), stdlib
+  `compress/gzip` only, pooled writers (`sync.Pool`). Honours the client's
+  `Accept-Encoding`, buffers up to `minBytes` before deciding so a small body is
+  never compressed, skips a response the upstream already encoded or that
+  doesn't match `types`, and never touches `204`/`304`/`101`, a WebSocket
+  upgrade, or anything that starts streaming (an early flush, which also covers
+  `text/event-stream`). A compressed response gets `Content-Encoding: gzip`,
+  `Vary: Accept-Encoding`, and loses its `Content-Length`. BREACH-aware: opt-in
+  per host rather than default-on, since compressing a response whose size
+  depends on attacker-controlled input reflected alongside a secret can leak
+  that secret through the compressed size.
+- **Custom error pages** ★ (✓ shipped): `settings.errorPages` (default) and a
+  per-`ProxyHost` `errorPages` override (`dir` of `<status>.html` +
+  `default.html` templates, and/or `inline` status->HTML), `html/template`
+  (contextually escaped), rendered for errors **gpm itself** generates -
+  upstream unreachable (502/504), access denied (access-list/guard/geo, 403),
+  rate-limited (429), a dangling middleware/access-list reference (503), and a
+  dead host - never for the upstream's own error response unless its status is
+  also listed in `interceptUpstream`. Templates see `{{.Status}}`
+  `{{.StatusText}}` `{{.Host}}` `{{.RequestID}}`; a host override wins over the
+  settings-level pages; parse errors fail the config reload with a clear
+  message; unconfigured behaviour is byte-identical to before this shipped.
 
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
@@ -332,8 +405,8 @@ earlier tiers or duplicating work (see "Architecture for extension").
 - Model **hosts, certs, identity providers, access rules, middleware** as
   first-class typed config objects with a stable schema + versioned migrations
   from day one - so P1-P3 add new types/fields, never a rewrite.
-- A **composable middleware chain** (rate-limit -> access-list -> auth -> guard
-  -> headers -> rewrite -> WAF hook -> proxy) so new behaviors slot in as ordered steps -
+- A **composable middleware chain** (rate-limit -> access-list -> bouncer (WAF/deny
+  hook) -> auth -> guard -> headers -> rewrite -> proxy) so new behaviors slot in as ordered steps -
   never the textual-collision bug that broke our forward-auth `location /`.
 - **Pluggable interfaces**: ACME/DNS provider, identity provider
   (OIDC / forward-auth / SAML / LDAP), data store - adding one is implementing an
@@ -353,8 +426,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
 | ECH | no | yes |
 | ML-KEM / post-quantum TLS | no | yes |
 | TLS 1.2 disable | no | yes |
-| Proxy protocol / MPTCP | no | yes |
-| WAF: CrowdSec / OpenAppSec | no | yes |
+| Proxy protocol (inbound) | **yes** | yes |
+| MPTCP | no | yes |
+| WAF: CrowdSec / OpenAppSec | hook only (`bouncer` middleware: CrowdSec LAPI + generic HTTP) | yes |
 | WAF: ModSecurity / Fail2ban | no | no |
 | Always-on security headers | no | yes |
 | HSTS | configurable | enforced |
@@ -362,7 +436,7 @@ earlier tiers or duplicating work (see "Architecture for extension").
 | Geoblocking (GeoIP2) | no | yes |
 | GoAccess analytics | no | yes |
 | Log rotation to disk | no | yes |
-| Prometheus metrics | no | no |
+| Prometheus metrics | no | no |  <!-- gpm: shipped, opt-in /metrics -->
 | Let's Encrypt | yes | yes |
 | ZeroSSL / Google Public CA | no | yes |
 | ACME profiles (shortlived) | no | yes |
@@ -409,7 +483,7 @@ is the high-demand items that **neither** project serves well (marked ★).
 | Dark mode UI | #707/#3538, ~169👍 | likely (new frontend) | MVP UI |
 | Backup / export / restore in UI ★ | #168, ~151👍 | no | **Yes** - underserved; pairs with portable-data goal |
 | Mail proxying (SMTP/IMAP/POP3, SNI/STARTTLS) | #1110, 148👍; NPMplus #1756 open | partial (streams) | Tier 2 |
-| Brute-force protection (Fail2Ban/CrowdSec) | #39/#1131, ~139👍 | yes (CrowdSec) | Tier 2 (WAF/bouncer hook) |
+| Brute-force protection (Fail2Ban/CrowdSec) | #39/#1131, ~139👍 | yes (CrowdSec) | ✓ shipped (`bouncer` middleware: CrowdSec LAPI or a generic HTTP deny hook) |
 | SSO: OIDC **+ SAML** admin login | ~134👍 across #437/#1624/#5126 | OIDC yes, SAML no | MVP (OIDC, headline); SAML backlog |
 | LDAP / AD admin login ★ | #159, ~89👍 | nginx LDAP module only, not admin login | Backlog - underserved for admin login |
 | Client cert / mTLS | #768, ~82👍 | shipped | Tier 2 |
@@ -418,7 +492,7 @@ is the high-demand items that **neither** project serves well (marked ★).
 | Load balancing / upstream groups | #156, 69👍 | yes | MVP/Tier 2 with UI |
 | GeoIP / geoblocking | #46, 51👍/128c; NPMplus #730 most-commented-open | module (community) | Tier 2 - do it cleanly/native |
 | Custom SSL cert mgmt (local path, edit existing) | #87/#1618/#593, ~117👍 | shipped (edit custom certs) | MVP |
-| Stream SNI/TLS | #1829, 53👍 | yes | Tier 2 |
+| Stream SNI/TLS | #1829, 53👍 | yes | ✓ shipped (passthrough + terminate, SNI-routed shared ports, L4 access lists) |
 | Anubis / bot protection | #4682, 36👍 (recent) | yes | Tier 3 / optional |
 | Access-log viewer in UI | #401, 27👍 | GoAccess | Tier 2 (or metrics) |
 | robots.txt / no-index toggle | #245, 35👍 | yes | MVP toggle |

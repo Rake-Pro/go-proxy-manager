@@ -111,13 +111,26 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		if h.Disabled {
 			continue
 		}
-		proxy, upLabel, err := hostProxy(h, reg)
+		// Host-level errorPages override, compiled once per host so every gpm-
+		// generated error site below (the terminal proxy and every middleware in
+		// its chain) shares the same compiled templates. nil when the host sets
+		// none - the settings-level pages (SetErrorPages) still apply as a
+		// fallback in that case (see serveErrorPage).
+		var hostEP *compiledErrorPages
+		if h.ErrorPages != nil {
+			var epErr error
+			hostEP, epErr = compileErrorPages(*h.ErrorPages, certDir)
+			if epErr != nil {
+				return nil, fmt.Errorf("proxy host %q: errorPages: %w", h.Name, epErr)
+			}
+		}
+		proxy, upLabel, err := hostProxy(h, reg, hostEP)
 		if err != nil {
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
-		handler := buildChain(proxy, h, reg)
-		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel}
-		if hh.locations, err = buildLocations(h, reg); err != nil {
+		handler := buildChain(proxy, h, reg, hostEP)
+		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel, errorPages: hostEP}
+		if hh.locations, err = buildLocations(h, reg, hostEP); err != nil {
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
@@ -227,20 +240,32 @@ func normalizeLocationPrefix(p string) string {
 // hostProxy returns the terminal reverse-proxy handler and its upstream label
 // for a host: a single upstream, or a health-checked failover group resolved
 // from the live health state (reconciled before the router build, so a missing
-// group here is a hard build error rather than a silently dead host).
-func hostProxy(h model.ProxyHost, reg *registry) (http.Handler, string, error) {
+// group here is a hard build error rather than a silently dead host). ep is the
+// host's compiled errorPages override (nil if it has none), handed to the
+// reverse proxy for a 502/504 page and InterceptUpstream. When the host opts
+// into compression, the terminal handler is wrapped to gzip eligible responses
+// - outside (closer to the client than) any InterceptUpstream body
+// replacement, so a rendered error page is itself eligible for compression.
+func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.Handler, string, error) {
 	ident := assertedIdentityHeaders(h, reg)
+	var proxy http.Handler
+	var label string
 	if h.UpstreamGroupRef == "" {
-		return newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident), upstreamLabel(h.Upstream), nil
+		proxy, label = newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident, ep), upstreamLabel(h.Upstream)
+	} else {
+		var gh *groupHealth
+		if reg.health != nil {
+			gh = reg.health.lookup(h.UpstreamGroupRef)
+		}
+		if gh == nil {
+			return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
+		}
+		proxy, label = newGroupReverseProxy(gh, h.Name, h.Timeouts, ident, ep), groupLabel(h.UpstreamGroupRef)
 	}
-	var gh *groupHealth
-	if reg.health != nil {
-		gh = reg.health.lookup(h.UpstreamGroupRef)
+	if h.Compression.Enabled {
+		proxy = compressionHandler(h.Compression, proxy)
 	}
-	if gh == nil {
-		return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
-	}
-	return newGroupReverseProxy(gh, h.Name, h.Timeouts, ident), groupLabel(h.UpstreamGroupRef), nil
+	return proxy, label, nil
 }
 
 // assertedIdentityHeaders is the canonical set of header names gpm may set on a
@@ -283,8 +308,10 @@ func assertedIdentityHeaders(h model.ProxyHost, reg *registry) []string {
 // inherits the host's middleware/access-list chain with its own appended, so
 // per-location auth is applied on top of the host gate rather than replacing it.
 // The request path is forwarded unchanged - the upstream receives the full
-// request path unmodified.
-func buildLocations(h model.ProxyHost, reg *registry) ([]locationRoute, error) {
+// request path unmodified. ep is the host's compiled errorPages override
+// (already resolved by the caller); a location has no override of its own, so
+// it shares its host's.
+func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([]locationRoute, error) {
 	if len(h.Locations) == 0 {
 		return nil, nil
 	}
@@ -304,13 +331,13 @@ func buildLocations(h model.ProxyHost, reg *registry) ([]locationRoute, error) {
 		lh.Middlewares = append(append([]string{}, h.Middlewares...), loc.Middlewares...)
 		lh.AccessLists = append(append([]string{}, h.AccessLists...), loc.AccessLists...)
 		lh.Locations = nil
-		proxy, upLabel, err := hostProxy(lh, reg)
+		proxy, upLabel, err := hostProxy(lh, reg, ep)
 		if err != nil {
 			return nil, fmt.Errorf("location %q: %w", loc.Path, err)
 		}
 		routes = append(routes, locationRoute{
 			prefix:   normalizeLocationPrefix(loc.Path),
-			handler:  buildChain(proxy, lh, reg),
+			handler:  buildChain(proxy, lh, reg, ep),
 			upstream: upLabel,
 		})
 	}

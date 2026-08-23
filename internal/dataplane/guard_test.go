@@ -18,7 +18,7 @@ func TestGuardNextcloudBreakGlass(t *testing.T) {
 		},
 		AllowFrom: []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"},
 	})
-	h := guardHandler(g, peerIP, okHandler())
+	h := guardHandler(g, peerIP, "", nil, okHandler())
 
 	serve := func(method, target, remote string) int {
 		rec := httptest.NewRecorder()
@@ -56,7 +56,7 @@ func TestGuardFailsClosedOnNilIP(t *testing.T) {
 		Triggers:  []model.GuardTrigger{{Paths: []string{"/login"}, Methods: []string{"POST"}}},
 		AllowFrom: []string{"10.0.0.0/8"},
 	})
-	h := guardHandler(g, peerIP, okHandler())
+	h := guardHandler(g, peerIP, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "http://c/login", nil)
 	req.RemoteAddr = "garbage"
@@ -79,7 +79,7 @@ func TestGuardFailsClosedOnSemicolonQuery(t *testing.T) {
 		},
 		AllowFrom: []string{"192.0.2.0/24"},
 	})
-	h := guardHandler(g, peerIP, okHandler())
+	h := guardHandler(g, peerIP, "", nil, okHandler())
 
 	serve := func(target, remote string) int {
 		rec := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestGuardWithoutQueryTriggersIgnoresSemicolons(t *testing.T) {
 		Triggers:  []model.GuardTrigger{{Paths: []string{"/login"}, Methods: []string{"POST"}}},
 		AllowFrom: []string{"192.0.2.0/24"},
 	})
-	h := guardHandler(g, peerIP, okHandler())
+	h := guardHandler(g, peerIP, "", nil, okHandler())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://c/files?a=1;b=2", nil)
 	req.RemoteAddr = "198.18.0.9:1"

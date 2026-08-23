@@ -94,6 +94,11 @@ type Deps struct {
 	// IngressDiscoveryEnabled, if set, reports whether Ingress discovery is
 	// configured, for the capability probe. May be nil (reported disabled).
 	IngressDiscoveryEnabled func() bool
+	// MetricsEnabled reports whether the Prometheus exposition is mounted at
+	// /metrics on the admin listener, for the capability probe. The endpoint
+	// itself lives in internal/server (it is not an /api/ route), so the API
+	// only ever reports on it.
+	MetricsEnabled bool
 	// Role is the static HA role of this instance (docs/design/ha.md phase 1).
 	// A follower refuses every config write with 503 and reports itself
 	// read-only in the capability probe; reads are unaffected. The zero value is
@@ -110,6 +115,7 @@ type capabilities struct {
 	DNSSync          dnsSyncCapability          `json:"dnsSync"`
 	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
 	HA               haCapability               `json:"ha"`
+	Metrics          metricsCapability          `json:"metrics"`
 	// ScopeSubjects is model.ScopePlurals, served so the SPA renders the token
 	// form from the authoritative list instead of a hand-maintained copy. The
 	// copy drifted the moment ingress-discovery was added, granting the UI no
@@ -139,6 +145,13 @@ type ingressDiscoveryCapability struct {
 	// Enabled reports that Kubernetes Ingress discovery is wired AND turned on in
 	// settings. The SPA uses it to show the status panel rather than offering a
 	// control that cannot work.
+	Enabled bool `json:"enabled"`
+}
+
+type metricsCapability struct {
+	// Enabled reports that GET /metrics is mounted on the admin listener
+	// (-metrics / GPM_METRICS=1). The SPA greys the settings-page link out when
+	// false rather than linking at a route that answers 404.
 	Enabled bool `json:"enabled"`
 }
 
@@ -371,6 +384,7 @@ func New(d Deps) http.Handler {
 				Enabled: d.IngressDiscoveryEnabled != nil && d.IngressDiscoveryEnabled(),
 			},
 			HA:            haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
+			Metrics:       metricsCapability{Enabled: d.MetricsEnabled},
 			ScopeSubjects: model.ScopePlurals,
 		})
 	})

@@ -145,8 +145,9 @@ func (l *rateLimiter) evictLRULocked() {
 // resolved via ipOf (the registry's shared, XFF-aware resolver); an unresolvable
 // IP falls back to the shared nil bucket. A client matching rl.AllowFrom bypasses
 // the limiter entirely (no token consumed, no 429); a nil/unresolvable IP never
-// matches, so it falls through to the shared bucket as before.
-func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, next http.Handler) http.Handler {
+// matches, so it falls through to the shared bucket as before. host and ep
+// resolve the custom error page for the 429 (see serveErrorPage).
+func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	l := newRateLimiter(rl)
 	var allowNets []*net.IPNet
 	for _, c := range rl.AllowFrom {
@@ -170,7 +171,10 @@ func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net
 				retry = 1
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
-			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			countDenial(r, "rate-limit")
+			serveErrorPage(w, http.StatusTooManyRequests, ep, host, func() {
+				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			})
 			return
 		}
 		next.ServeHTTP(w, r)

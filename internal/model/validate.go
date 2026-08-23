@@ -141,11 +141,75 @@ func (c Config) Validate() error {
 		checkRef(&errs, "dead host", h.Name, "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "dead host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
+	// Stream hosts: per-object validation, then the two cross-object rules that
+	// need the whole config - what an access list actually contains, and who else
+	// is already on the listen port.
+	basicAuthLists := map[string]bool{}
+	for _, a := range c.AccessLists {
+		if len(a.BasicAuth) > 0 {
+			basicAuthLists[a.Name] = true
+		}
+	}
+	type portClaim struct {
+		host string
+		sni  []string
+	}
+	tcpPorts := map[int][]portClaim{}
+	udpPorts := map[int]string{}
 	for _, h := range c.StreamHosts {
 		if err := h.Validate(); err != nil {
 			errs = append(errs, err)
 		}
 		register("host", h.Name, seenHost)
+		if h.TLS != nil {
+			checkRef(&errs, "stream host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		}
+		for _, a := range h.AccessLists {
+			checkRef(&errs, "stream host", h.Name, "accessList", a, als)
+			// Basic auth is an HTTP challenge/response; a raw TCP/UDP stream has no
+			// way to issue one. Reject the reference rather than silently evaluating
+			// only half the list an operator believed was gating the port.
+			if basicAuthLists[a] {
+				errs = append(errs, fmt.Errorf("stream host %q references accessList %q, which has basicAuth users: basic auth cannot be evaluated on a raw stream (use a list with only ip rules and/or geo, or attach this list to a proxy host)", h.Name, a))
+			}
+		}
+		if h.Disabled {
+			continue
+		}
+		if h.Protocol == "tcp" || h.Protocol == "both" {
+			tcpPorts[h.ListenPort] = append(tcpPorts[h.ListenPort], portClaim{host: h.Name, sni: h.SNINames()})
+		}
+		if h.Protocol == "udp" || h.Protocol == "both" {
+			if other, dup := udpPorts[h.ListenPort]; dup {
+				errs = append(errs, fmt.Errorf("stream hosts %q and %q both listen on udp port %d (a udp port carries no SNI and cannot be shared; give one of them a different port)", other, h.Name, h.ListenPort))
+			} else {
+				udpPorts[h.ListenPort] = h.Name
+			}
+		}
+	}
+	// A TCP listen port may be shared ONLY when every host on it routes by SNI -
+	// that is the sole thing that tells two connections apart. Without it the
+	// forwarder would have to pick one backend arbitrarily (previously: whichever
+	// host compiled last), which is exactly the order-dependent routing the
+	// duplicate-domain check above exists to prevent.
+	for port, claims := range tcpPorts {
+		if len(claims) < 2 {
+			continue
+		}
+		names := map[string]string{}
+		for _, cl := range claims {
+			if len(cl.sni) == 0 {
+				errs = append(errs, fmt.Errorf("stream host %q shares tcp port %d with another stream host but sets no tls.sniMatch (hosts may only share a port when every one of them routes by SNI)", cl.host, port))
+				continue
+			}
+			for _, n := range cl.sni {
+				if other, dup := names[n]; dup {
+					errs = append(errs, fmt.Errorf("stream hosts %q and %q both claim sni %q on tcp port %d", other, cl.host, n, port))
+					continue
+				}
+				names[n] = cl.host
+			}
+		}
 	}
 
 	// Reject two ENABLED hosts claiming the same domain. The router keys its

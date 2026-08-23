@@ -487,6 +487,107 @@ func TestClientAuthRequiresForceSSL(t *testing.T) {
 	}
 }
 
+func TestCompressionValidate(t *testing.T) {
+	// Disabled is always valid, whatever else is set - it is inert.
+	disabled := proxyHost("app", func(h *ProxyHost) {
+		h.Compression = Compression{Enabled: false, MinBytes: -1}
+	})
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("disabled compression should be valid regardless of other fields, got %v", err)
+	}
+	negative := proxyHost("app", func(h *ProxyHost) {
+		h.Compression = Compression{Enabled: true, MinBytes: -1}
+	})
+	if err := negative.Validate(); err == nil {
+		t.Fatal("negative minBytes must be rejected when enabled")
+	}
+	emptyType := proxyHost("app", func(h *ProxyHost) {
+		h.Compression = Compression{Enabled: true, Types: []string{"text/html", ""}}
+	})
+	if err := emptyType.Validate(); err == nil {
+		t.Fatal("an empty compression.types entry must be rejected")
+	}
+	ok := proxyHost("app", func(h *ProxyHost) {
+		h.Compression = Compression{Enabled: true, MinBytes: 2048, Types: []string{"text/html"}}
+	})
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid compression should pass, got %v", err)
+	}
+}
+
+func TestCompressionEffectiveDefaults(t *testing.T) {
+	var c Compression
+	if got := c.EffectiveMinBytes(); got != DefaultCompressionMinBytes {
+		t.Fatalf("EffectiveMinBytes() = %d, want default %d", got, DefaultCompressionMinBytes)
+	}
+	if got := c.EffectiveTypes(); len(got) == 0 {
+		t.Fatal("EffectiveTypes() must return the default list when unset")
+	}
+	c = Compression{MinBytes: 5000, Types: []string{"application/x-custom"}}
+	if got := c.EffectiveMinBytes(); got != 5000 {
+		t.Fatalf("EffectiveMinBytes() = %d, want 5000", got)
+	}
+	if got := c.EffectiveTypes(); len(got) != 1 || got[0] != "application/x-custom" {
+		t.Fatalf("EffectiveTypes() = %v, want the configured override", got)
+	}
+}
+
+func TestErrorPagesConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		e       ErrorPagesConfig
+		wantErr string
+	}{
+		{name: "empty is valid"},
+		{name: "relative dir is valid", e: ErrorPagesConfig{Dir: "errors"}},
+		{name: "absolute dir is rejected", e: ErrorPagesConfig{Dir: "/etc/passwd"}, wantErr: "relative"},
+		{name: "traversal dir is rejected", e: ErrorPagesConfig{Dir: "../secrets"}, wantErr: "relative"},
+		{name: "inline default key is valid", e: ErrorPagesConfig{Inline: map[string]string{"default": "<p>x</p>"}}},
+		{name: "inline status key is valid", e: ErrorPagesConfig{Inline: map[string]string{"502": "<p>x</p>"}}},
+		{name: "inline non-numeric key is rejected", e: ErrorPagesConfig{Inline: map[string]string{"oops": "<p>x</p>"}}, wantErr: "status code"},
+		{name: "interceptUpstream 4xx/5xx is valid", e: ErrorPagesConfig{InterceptUpstream: []int{404, 502}}},
+		{name: "interceptUpstream out of range is rejected", e: ErrorPagesConfig{InterceptUpstream: []int{200}}, wantErr: "4xx/5xx"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.e.validate()
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("expected success, got: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestProxyHostErrorPagesOverrideValidate(t *testing.T) {
+	bad := proxyHost("app", func(h *ProxyHost) {
+		h.ErrorPages = &ErrorPagesConfig{Dir: "/etc/passwd"}
+	})
+	if err := bad.Validate(); err == nil {
+		t.Fatal("proxy host errorPages override must be validated")
+	}
+	good := proxyHost("app", func(h *ProxyHost) {
+		h.ErrorPages = &ErrorPagesConfig{Inline: map[string]string{"502": "<p>x</p>"}}
+	})
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid errorPages override should pass, got %v", err)
+	}
+}
+
+func TestSettingsErrorPagesValidate(t *testing.T) {
+	s := DefaultSettings()
+	s.ErrorPages = ErrorPagesConfig{Dir: "../escape"}
+	if err := s.Validate(); err == nil {
+		t.Fatal("settings.errorPages must be validated")
+	}
+	s.ErrorPages = ErrorPagesConfig{Inline: map[string]string{"default": "<p>x</p>"}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("valid settings.errorPages should pass, got %v", err)
+	}
+}
+
 // Two enabled hosts claiming the same domain is a load-time error, whatever
 // wrote them. The data plane keys its per-domain maps by hostname and fills them
 // in config load order, so a duplicate is resolved by YAML filename rather than

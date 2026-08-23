@@ -100,11 +100,17 @@ type BackendStatus struct {
 }
 
 // Status is the full result of the last reconcile, served by GET /dns-sync/status.
+//
+// LastRun and LastSuccess are separate for the reason the Ingress reconciler
+// keeps them separate: "last run 2 minutes ago" hides "last CLEAN run six hours
+// ago", and a backend that has been failing since then is exactly what an
+// operator (or an alert on the /metrics gauge) needs to see.
 type Status struct {
-	LastRun    time.Time     `json:"lastRun,omitempty"`
-	Error      string        `json:"error,omitempty"`
-	Pihole     BackendStatus `json:"pihole"`
-	Cloudflare BackendStatus `json:"cloudflare"`
+	LastRun     time.Time     `json:"lastRun,omitempty"`
+	LastSuccess time.Time     `json:"lastSuccess,omitempty"`
+	Error       string        `json:"error,omitempty"`
+	Pihole      BackendStatus `json:"pihole"`
+	Cloudflare  BackendStatus `json:"cloudflare"`
 }
 
 // BackendPlan is what a reconcile WOULD do to one backend, computed without
@@ -192,6 +198,9 @@ type Syncer struct {
 
 	mu     sync.Mutex
 	status Status
+	// lastSuccess survives the Status replacement each run does, so a failing
+	// reconcile still reports when the last clean one was.
+	lastSuccess time.Time
 
 	// single serialises reconciles so two runs never race the same backend.
 	single sync.Mutex
@@ -403,7 +412,7 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	cfg, settings, err := s.load(ctx)
 	if err != nil {
 		s.mu.Lock()
-		s.status = Status{LastRun: now, Error: err.Error()}
+		s.status = Status{LastRun: now, LastSuccess: s.lastSuccess, Error: err.Error()}
 		s.mu.Unlock()
 		return fmt.Errorf("dnssync: load config: %w", err)
 	}
@@ -411,7 +420,7 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	if err != nil {
 		// Refuse to touch any backend without knowing what gpm owns.
 		s.mu.Lock()
-		s.status = Status{LastRun: now, Error: err.Error()}
+		s.status = Status{LastRun: now, LastSuccess: s.lastSuccess, Error: err.Error()}
 		s.mu.Unlock()
 		return err
 	}
@@ -445,7 +454,14 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 			log.Error().Err(err).Msg("dnssync: could not persist the DNS ownership ledger")
 		}
 	}
+	// A run counts as successful only when nothing failed: no top-level error and
+	// no enabled backend reporting one. A half-failed reconcile must not advance
+	// the success clock an alert is watching.
 	s.mu.Lock()
+	if st.Error == "" && (!st.Pihole.Enabled || st.Pihole.OK) && (!st.Cloudflare.Enabled || st.Cloudflare.OK) {
+		s.lastSuccess = now
+	}
+	st.LastSuccess = s.lastSuccess
 	s.status = st
 	s.mu.Unlock()
 	return nil

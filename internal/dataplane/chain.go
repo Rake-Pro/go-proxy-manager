@@ -208,18 +208,26 @@ func unresolvedRefs(host model.ProxyHost, reg *registry) string {
 // buildChain wraps the terminal proxy handler in the host's middleware chain.
 // Steps run in a fixed canonical order regardless of reference order:
 //
-//	rate-limit -> access-list -> auth -> guard -> headers -> rewrite -> (WAF ... later) -> proxy
+//	rate-limit -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> proxy
 //
 // Rewrite is innermost (closest to upstream), so the path replacement it applies
-// is upstream-facing only: rate-limit/access-list/auth/guard all evaluate the
-// ORIGINAL client path, never the rewritten one.
+// is upstream-facing only: rate-limit/access-list/bouncer/auth/guard all evaluate
+// the ORIGINAL client path, never the rewritten one.
 //
 // so new behaviours slot into defined positions instead of colliding as text.
 // Rate limiting is outermost so a flood is shed before it can drive work in the
 // auth/access-control tiers (notably a forward-auth subrequest to the IdP). The
 // access-list sits just inside rate-limit, ahead of auth, so an IP the list would
 // deny is dropped before any auth work (forward-auth subrequest, OIDC redirect).
-func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Handler {
+// The bouncer deny hook sits between them: an operator allow-list still wins
+// outright (it is evaluated first), and an IP the external bouncer has banned
+// never reaches the IdP either.
+//
+// ep is host's own compiled errorPages override (nil if it has none), threaded
+// into every gpm-generated denial/error site so a custom page renders there;
+// the settings-level pages still apply as a fallback even when ep is nil (see
+// serveErrorPage).
+func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *compiledErrorPages) http.Handler {
 	// FAIL CLOSED on a name that resolves to nothing. Every loop below skips a
 	// name it cannot find, which for an access list means a typo silently turns a
 	// restricted host into an open one - the exact opposite of what the reference
@@ -238,7 +246,9 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		log.Error().Str("host", host.Name).Str("unresolved", missing).
 			Msg("dataplane: host references a middleware or access list that does not exist; serving 503 rather than dropping the gate")
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			serveErrorPage(w, http.StatusServiceUnavailable, ep, host.Name, func() {
+				http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			})
 		})
 	}
 
@@ -280,7 +290,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeGuard || mw.Guard == nil {
 			continue
 		}
-		h = guardHandler(compileGuard(*mw.Guard), clientIP, h)
+		h = guardHandler(compileGuard(*mw.Guard), clientIP, host.Name, ep, h)
 	}
 
 	// Authentication: forward-auth / auth-request / per-host OIDC gating.
@@ -290,6 +300,18 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 			continue
 		}
 		h = authMiddlewareHandler(mw, reg, host.Name, host.Domains, clientIP, h)
+	}
+
+	// Bouncer deny hooks, just outside auth: an IP an operator-run bouncer
+	// (CrowdSec LAPI or a generic HTTP hook) currently bans is dropped before any
+	// auth work runs, and still inside the access list so an explicit operator
+	// allow-list is never overridden by an external feed's verdict.
+	for _, name := range host.Middlewares {
+		mw, ok := reg.middlewares[name]
+		if !ok || mw.Type != model.MWTypeBouncer || mw.Bouncer == nil {
+			continue
+		}
+		h = bouncerHandler(compileBouncer(mw.Name, *mw.Bouncer), host.Name, clientIP, ep, h)
 	}
 
 	// Access lists (host-level), wrapped outside auth so an IP the list would
@@ -305,7 +327,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		// here: accessListHandler/ipAllowed consult it live, at request time, so
 		// a database that (un)loads after this chain is built takes effect
 		// without a rebuild (see accessList.ipAllowed).
-		h = accessListHandler(cal, clientIP, reg.geoCountry, reg.geoLoaded, h)
+		h = accessListHandler(cal, clientIP, reg.geoCountry, reg.geoLoaded, host.Name, ep, h)
 	}
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
@@ -316,7 +338,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry) http.Ha
 		if !ok || mw.Type != model.MWTypeRateLimit || mw.RateLimit == nil {
 			continue
 		}
-		h = rateLimitHandler(*mw.RateLimit, clientIP, h)
+		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h)
 	}
 
 	return h

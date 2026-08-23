@@ -197,6 +197,39 @@ async function loadCapabilities() {
   return state.capabilities;
 }
 
+// ---------- theme ----------
+// gpm.theme in localStorage is 'light' | 'dark' | absent (auto, follows the OS).
+// index.html's inline head script applies the saved choice as documentElement's
+// data-theme before first paint (see it for why); everything here just keeps
+// the topbar toggle and that attribute in sync after the SPA boots.
+const THEME_KEY = 'gpm.theme';
+function getTheme() {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if (t === 'light' || t === 'dark') return t;
+  } catch (e) { /* ignore */ }
+  return 'auto';
+}
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  else document.documentElement.removeAttribute('data-theme');
+}
+function themeLabel(t) { return t === 'light' ? 'Light' : t === 'dark' ? 'Dark' : 'Auto'; }
+function updateThemeBtn() {
+  const btn = $('#themeBtn');
+  if (!btn) return;
+  const t = getTheme();
+  btn.textContent = 'Theme: ' + themeLabel(t);
+  btn.title = 'Click to change (auto follows your OS)';
+}
+function setTheme(t) {
+  try {
+    if (t === 'auto') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, t);
+  } catch (e) { /* ignore */ }
+  applyTheme(t);
+  updateThemeBtn();
+}
+
 function buildShell() {
   const app = document.getElementById('app');
   app.innerHTML = `
@@ -220,6 +253,7 @@ function buildShell() {
           <button class="menu-btn" id="menuBtn" aria-label="Open navigation">${ICON.menu}</button>
           <h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1>
           <div class="spacer"></div>
+          <button class="btn ghost sm" id="themeBtn" type="button"></button>
           <div class="ident" id="ident"></div>
         </header>
         <main class="content" id="content"></main>
@@ -231,6 +265,11 @@ function buildShell() {
   });
   $('#menuBtn').addEventListener('click', () => document.body.classList.add('nav-open'));
   $('#scrim').addEventListener('click', closeNav);
+  updateThemeBtn();
+  $('#themeBtn').addEventListener('click', () => {
+    const order = ['auto', 'light', 'dark'];
+    setTheme(order[(order.indexOf(getTheme()) + 1) % order.length]);
+  });
 }
 function closeNav() { document.body.classList.remove('nav-open'); }
 
@@ -401,6 +440,64 @@ function makeChipInput(container, initial, placeholder) {
   }
   render();
   return { get: () => tokens.slice() };
+}
+
+// ---------- clone ----------
+// Kinds whose objects carry a flat .domains list that collides across the
+// store (proxy/redirect/dead hosts all share one domain namespace) - cleared
+// on clone so the copy doesn't fail the duplicate-domain check on save.
+const CLONE_CLEAR_DOMAINS = new Set(['hosts', 'redirects', 'dead']);
+
+// Recursively blanks any string value the API masked as "***" - the exact
+// sentinel model.Secret.MarshalJSON uses for a literal (non-placeholder)
+// secret, and nothing else ever produces. Structural, not a per-kind
+// field-path list, so it stays correct as editors grow new Secret-typed
+// fields without this needing an update. Deliberately narrower than "any
+// ${ENV:...}/${FILE:...}-looking string": several non-secret fields (e.g. a
+// client CA's caPEM) legitimately use that same placeholder syntax to load
+// public material from a file, and must survive a clone untouched.
+function stripSecrets(v) {
+  if (Array.isArray(v)) { v.forEach(stripSecrets); return; }
+  if (v && typeof v === 'object') {
+    Object.keys(v).forEach((k) => {
+      const val = v[k];
+      if (val === '***') v[k] = '';
+      else stripSecrets(val);
+    });
+  }
+}
+// Deep-copies a stored object for the "Clone" action (JSON round-trip - none of
+// these carry functions/undefined), blanks its name so the editor prompts for a
+// new one, strips every secret-bearing field, and clears .domains for the kinds
+// that need it. tags and disabled are left as-is (both should survive a clone).
+function cloneObject(obj, clearDomains) {
+  const copy = JSON.parse(JSON.stringify(obj || {}));
+  copy.name = '';
+  if (clearDomains) copy.domains = [];
+  stripSecrets(copy);
+  return copy;
+}
+// Stashes a clone seed and navigates to that section's "new" editor, which
+// picks it up via takeCloneSeed instead of starting from a blank object.
+let cloneSeed = null;
+function startClone(section, obj) {
+  cloneSeed = { section, origName: (obj && obj.name) || '', data: cloneObject(obj, CLONE_CLEAR_DOMAINS.has(section)) };
+  location.hash = '#/' + section + '/_new';
+}
+// Consumes (one-shot) the pending clone seed for section, or returns null.
+function takeCloneSeed(section) {
+  if (cloneSeed && cloneSeed.section === section) {
+    const seed = cloneSeed;
+    cloneSeed = null;
+    return seed;
+  }
+  return null;
+}
+// Wires the editor's optional #ed-clone / btnId save-bar button (rendered only
+// for an existing object) to clone the object currently loaded in that editor.
+function wireCloneButton(section, orig, btnId) {
+  const btn = $('#' + (btnId || 'ed-clone'));
+  if (btn) btn.addEventListener('click', () => startClone(section, orig));
 }
 
 // ---------- router ----------
@@ -601,6 +698,7 @@ async function listHosts(c) {
       <td>${tls}</td>
       <td>${auth}</td>
       <td>${status}</td>
+      <td><button class="btn ghost sm host-clone" data-name="${esc(h.name)}" type="button">Clone</button></td>
     </tr>`;
   }).join('');
 
@@ -617,13 +715,23 @@ async function listHosts(c) {
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Domain</th><th>Upstream</th><th>TLS</th><th>Auth</th><th>Status</th></tr></thead>
+        <thead><tr><th>Domain</th><th>Upstream</th><th>TLS</th><th>Auth</th><th>Status</th><th></th></tr></thead>
         <tbody id="hostRows">${rows}</tbody>
       </table>
     </div>`;
 
   $$('#hostRows tr').forEach((tr) => {
-    tr.addEventListener('click', () => { location.hash = '#/hosts/' + encodeURIComponent(tr.dataset.name); });
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('.host-clone')) return;
+      location.hash = '#/hosts/' + encodeURIComponent(tr.dataset.name);
+    });
+  });
+  $$('.host-clone').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const h = hosts.find((x) => x.name === b.dataset.name);
+      if (h) startClone('hosts', h);
+    });
   });
   const filter = $('#hostFilter');
   function applyFilter() {
@@ -677,6 +785,7 @@ function mwIcon(type) {
   if (type === 'headers') return ICON.headers;
   if (type === 'rate-limit') return ICON.gauge;
   if (type === 'rewrite') return ICON.redirect;
+  if (type === 'bouncer') return ICON.shield;
   return ICON.layers;
 }
 
@@ -700,6 +809,7 @@ function renderHostFlow(rootEl, ctx) {
 
 async function hostEditor(c, name) {
   const isNew = !name;
+  const seed = isNew ? takeCloneSeed('hosts') : null;
   const [certsR, mwR, alR, ugR, hostR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
     api('/api/middlewares').catch(() => ({ data: [] })),
@@ -713,13 +823,16 @@ async function hostEditor(c, name) {
   const upstreamGroups = arr(ugR.data);
   const mwType = {}; middlewares.forEach((m) => { mwType[m.name] = m.type; });
   const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
-  const h = hostR.data || {};
+  const h = seed ? seed.data : (hostR.data || {});
   const up = h.upstream || {};
   const tls = h.tls || {};
   const hsts = tls.hsts || {};
   // Client-certificate identity passthrough, when this host runs mTLS.
   const certIDOn = !!(tls.clientAuth && tls.clientAuth.identityHeaders);
   const certID = (tls.clientAuth && tls.clientAuth.identityHeaders) || {};
+
+  const comp = h.compression || {};
+  const ep = h.errorPages || {};
 
   const selMw = arr(h.middlewares);
   const selAl = arr(h.accessLists);
@@ -757,7 +870,7 @@ async function hostEditor(c, name) {
           <div class="inline-fields">
             <div class="field-group">
               <label>Name</label>
-              <input class="field mono" id="f-name" value="${esc(h.name || '')}" ${isNew ? '' : 'disabled'} placeholder="internal-name" />
+              <input class="field mono" id="f-name" value="${esc(h.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed ? seed.origName + '-copy' : 'internal-name')}" />
               <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
             </div>
             <div class="field-group">
@@ -840,6 +953,44 @@ async function hostEditor(c, name) {
             </div>
           </div>
           <div class="hint">Blank keeps the shared pooled transport. Read timeout caps time-to-first-byte; it does not cut off slow streaming/websocket bodies.</div>
+        </div>
+
+        <div class="card form-section">
+          <p class="section-label">Compression</p>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">Gzip responses</div><div class="ds">Compress eligible upstream responses honouring Accept-Encoding</div></div>
+            ${switchHtml('f-gzip', !!comp.enabled, 'Gzip responses')}
+          </div>
+          <div id="gzip-fields" style="margin-top:10px;${comp.enabled ? '' : 'display:none'}">
+            <div class="inline-fields">
+              <div class="field-group"><label>Minimum bytes</label><input class="field mono" id="f-gzip-min" type="number" min="0" value="${esc(comp.minBytes || '')}" placeholder="1024" /></div>
+            </div>
+            <div class="field-group" style="margin-top:10px">
+              <label>Content types</label>
+              <textarea class="field mono" id="f-gzip-types" rows="2" placeholder="text/html, application/json, ...">${esc(arr(comp.types).join(', '))}</textarea>
+              <div class="hint">Comma-separated media types. Blank uses the built-in text/JSON/JS/CSS/SVG/XML list. Never applied to websocket upgrades, streaming, or event-stream responses.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card form-section">
+          <p class="section-label">Error pages</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
+          <div class="field-group">
+            <label>Templates directory</label>
+            <input class="field mono" id="f-errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
+            <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
+          </div>
+          <div class="field-group" style="margin-top:10px">
+            <label>Inline templates (JSON)</label>
+            <textarea class="field mono" id="f-errp-inline" rows="4" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
+            <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
+          </div>
+          <div class="field-group" style="margin-top:10px">
+            <label>Also replace upstream errors for</label>
+            <input class="field mono" id="f-errp-intercept" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
+            <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
+          </div>
         </div>
 
         <div class="card form-section" id="f-dns-card">
@@ -929,6 +1080,7 @@ async function hostEditor(c, name) {
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
+        ${isNew ? '' : `<button class="btn ghost" id="hostCloneBtn" type="button">Clone</button>`}
         ${isNew ? '' : `<button class="btn danger" id="deleteBtn" type="button">${ICON.trash}Delete</button>`}
         <a class="btn ghost" href="#/hosts">Cancel</a>
         <button class="btn primary" id="saveBtn" type="button">Save changes</button>
@@ -994,6 +1146,11 @@ async function hostEditor(c, name) {
   // HSTS show/hide
   $('#f-hsts').addEventListener('switchchange', () => {
     $('#hsts-fields').style.display = isOn('f-hsts') ? '' : 'none';
+  });
+
+  // Compression fields show/hide
+  $('#f-gzip').addEventListener('switchchange', () => {
+    $('#gzip-fields').style.display = isOn('f-gzip') ? '' : 'none';
   });
 
   // Client-certificate identity passthrough show/hide (only rendered for an
@@ -1064,6 +1221,30 @@ async function hostEditor(c, name) {
     if (!isNaN(toConnect) && toConnect > 0) timeouts.connectSeconds = toConnect;
     if (!isNaN(toRead) && toRead > 0) timeouts.readSeconds = toRead;
     if (Object.keys(timeouts).length) obj.timeouts = timeouts;
+
+    if (isOn('f-gzip')) {
+      const compObj = { enabled: true };
+      const minB = parseInt($('#f-gzip-min').value, 10);
+      if (!isNaN(minB) && minB > 0) compObj.minBytes = minB;
+      const types = $('#f-gzip-types').value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (types.length) compObj.types = types;
+      obj.compression = compObj;
+    }
+
+    const errpDir = $('#f-errp-dir').value.trim();
+    const errpInlineRaw = $('#f-errp-inline').value.trim();
+    const errpIntercept = $('#f-errp-intercept').value.split(',').map((s) => s.trim()).filter(Boolean)
+      .map((s) => parseInt(s, 10)).filter((n) => !isNaN(n));
+    if (errpDir || errpInlineRaw || errpIntercept.length) {
+      const errp = {};
+      if (errpDir) errp.dir = errpDir;
+      if (errpInlineRaw) {
+        try { errp.inline = JSON.parse(errpInlineRaw); }
+        catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
+      }
+      if (errpIntercept.length) errp.interceptUpstream = errpIntercept;
+      obj.errorPages = errp;
+    }
 
     const tlsObj = {};
     const cert = $('#f-cert').value;
@@ -1156,6 +1337,7 @@ async function hostEditor(c, name) {
       } catch (e) { toastErr(e); del.disabled = false; }
     });
   }
+  wireCloneButton('hosts', h, 'hostCloneBtn');
 }
 
 // Effective ACME challenge for a certificate: the explicit value, else dns-01
@@ -1188,7 +1370,10 @@ async function listCerts(c) {
     return `<div class="card" data-name="${esc(ct.name)}" role="button" tabindex="0" style="cursor:pointer">
       <div class="card-head">
         <div><h3>${esc(ct.name)}</h3><div class="mono muted" style="font-size:12px">${esc(domains)}</div></div>
-        <span class="chip ${ct.type === 'acme' ? 'cyan' : ''}">${esc(ct.type || 'cert')}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn ghost sm ct-clone" data-name="${esc(ct.name)}" type="button">Clone</button>
+          <span class="chip ${ct.type === 'acme' ? 'cyan' : ''}">${esc(ct.type || 'cert')}</span>
+        </div>
       </div>
       <div class="kv">${kv}</div>
     </div>`;
@@ -1201,8 +1386,15 @@ async function listCerts(c) {
     </div></div>`;
   $$('.cards .card[data-name]').forEach((el) => {
     const open = () => { location.hash = '#/certs/' + encodeURIComponent(el.dataset.name); };
-    el.addEventListener('click', open);
+    el.addEventListener('click', (e) => { if (!e.target.closest('.ct-clone')) open(); });
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+  });
+  $$('.ct-clone').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ct = certs.find((x) => x.name === b.dataset.name);
+      if (ct) startClone('certs', ct);
+    });
   });
   const nc = $('#newCert');
   nc.addEventListener('click', () => { location.hash = '#/certs/_new'; });
@@ -1212,17 +1404,19 @@ async function listCerts(c) {
 // ---------- CERTIFICATE EDITOR ----------
 async function certEditor(c, name) {
   const isNew = !name;
+  const seed = isNew ? takeCloneSeed('certs') : null;
   const [dnsR, certR] = await Promise.all([
     api('/api/dns-providers').catch(() => ({ data: [] })),
     isNew ? Promise.resolve({ data: {} }) : api('/api/certificates/' + encodeURIComponent(name)),
   ]);
   const dnsProviders = arr(dnsR.data);
-  const ct = certR.data || {};
+  const ct = seed ? seed.data : (certR.data || {});
   const acme = ct.acme || {};
   const custom = ct.custom || {};
   const type = ct.type || 'acme';
-  // Default a brand-new cert to dns-01 only when a provider exists to solve it.
-  const challenge = isNew ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
+  // Default a brand-new (non-cloned) cert to dns-01 only when a provider exists
+  // to solve it; a clone carries its source object's real challenge/provider.
+  const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
 
   c.innerHTML = `
     <div class="row-between view-head">
@@ -1238,7 +1432,7 @@ async function certEditor(c, name) {
         <p class="section-label">Certificate</p>
         <div class="field-group">
           <label>Name</label>
-          <input class="field mono" id="ct-name" value="${esc(ct.name || '')}" ${isNew ? '' : 'disabled'} placeholder="wild" />
+          <input class="field mono" id="ct-name" value="${esc(ct.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed ? seed.origName + '-copy' : 'wild')}" />
           <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
         </div>
         <div class="field-group">
@@ -1300,6 +1494,7 @@ async function certEditor(c, name) {
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
+        ${isNew ? '' : `<button class="btn ghost" id="ct-clone" type="button">Clone</button>`}
         ${isNew ? '' : `<button class="btn danger" id="ct-delete" type="button">${ICON.trash}Delete</button>`}
         <a class="btn ghost" href="#/certs">Cancel</a>
         <button class="btn primary" id="ct-save" type="button">${isNew ? 'Issue certificate' : 'Save changes'}</button>
@@ -1367,6 +1562,7 @@ async function certEditor(c, name) {
       refreshHeadSha(); location.hash = '#/certs';
     } catch (e) { toastErr(e); del.disabled = false; }
   });
+  wireCloneButton('certs', ct, 'ct-clone');
 }
 
 // ---------- GENERIC SECTIONS (list + JSON-editor form) ----------
@@ -1399,7 +1595,8 @@ const SECTION_META = {
       (o.auth ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider || '')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
       (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : '') +
-      (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${Object.keys(o.rewrite.replacePath).length} path(s)</span>` : ''),
+      (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${Object.keys(o.rewrite.replacePath).length} path(s)</span>` : '') +
+      (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'Credentials used for ACME dns-01 challenges.',
@@ -1456,15 +1653,25 @@ async function genericList(c, section) {
     <div class="card" data-name="${esc(o.name)}" role="button" tabindex="0" style="cursor:pointer">
       <div class="card-head">
         <div><h3>${esc(o.name)}</h3></div>
-        <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn ghost sm gs-clone" data-name="${esc(o.name)}" type="button">Clone</button>
+          <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
+        </div>
       </div>
       <div class="kv">${meta.summary(o)}</div>
     </div>`).join('');
   c.innerHTML = head + `<div class="cards">${cards}</div>`;
   $$('.cards .card[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
-    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del')) open(); });
+    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('.gs-clone')) open(); });
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+  });
+  $$('.gs-clone').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const obj = items.find((x) => x.name === b.dataset.name);
+      if (obj) startClone(section, obj);
+    });
   });
   $$('.gs-del').forEach((b) => {
     b.addEventListener('click', async (e) => {
@@ -1493,17 +1700,20 @@ function saveBar(section, isNew, addLabel) {
   return `<div class="panel save-bar">
     <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
     <div style="display:flex;gap:10px">
+      ${isNew ? '' : `<button class="btn ghost" id="ed-clone" type="button">Clone</button>`}
       ${isNew ? '' : `<button class="btn danger" id="ed-delete" type="button">${ICON.trash}Delete</button>`}
       <a class="btn ghost" href="#/${section}">Cancel</a>
       <button class="btn primary" id="ed-save" type="button">${esc(isNew ? addLabel : 'Save changes')}</button>
     </div>
   </div>`;
 }
-function nameCard(obj, isNew) {
+// clonePlaceholder, when set (rendering a clone seed's editor), replaces the
+// generic "internal-name" placeholder with "<original>-copy".
+function nameCard(obj, isNew, clonePlaceholder) {
   return `<div class="card form-section">
     <p class="section-label">Identity</p>
     <div class="inline-fields">
-      <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="internal-name" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
+      <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(clonePlaceholder || 'internal-name')}" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
       <div class="field-group"><label>Display name</label><input class="field" id="ed-display" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
     </div>
     <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the compiled data plane</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled')}</div>
@@ -1608,14 +1818,15 @@ function wireEditor(section, plural, meta, isNew, origName, buildBody) {
 // ---------- REDIRECT HOST EDITOR ----------
 async function redirectEditor(c, name) {
   const meta = SECTION_META.redirects; const isNew = !name;
+  const seed = isNew ? takeCloneSeed('redirects') : null;
   const [certsR, objR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
     isNew ? Promise.resolve({ data: {} }) : api('/api/redirect-hosts/' + encodeURIComponent(name)),
   ]);
   const certs = arr(certsR.data); const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
-  const o = objR.data || {};
+  const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('redirects', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
     <div class="card form-section"><p class="section-label">Redirect target</p>
       <div class="inline-fields">
@@ -1642,14 +1853,27 @@ async function redirectEditor(c, name) {
     const tls = readTls(); if (tls) body.tls = tls;
     return body;
   });
+  wireCloneButton('redirects', o);
 }
 
 // ---------- STREAM HOST EDITOR ----------
 async function streamEditor(c, name) {
   const meta = SECTION_META.streams; const isNew = !name;
-  const o = isNew ? {} : ((await api('/api/stream-hosts/' + encodeURIComponent(name))).data || {});
+  const seed = isNew ? takeCloneSeed('streams') : null;
+  const [certsR, alR] = await Promise.all([
+    api('/api/certificates').catch(() => ({ data: [] })),
+    api('/api/access-lists').catch(() => ({ data: [] })),
+  ]);
+  const streamCerts = arr(certsR.data);
+  // A list with basic-auth users cannot be evaluated on a raw stream (there is
+  // no request to challenge), so it is offered but disabled rather than
+  // accepted-then-rejected by the API.
+  const streamAls = arr(alR.data);
+  const o = seed ? seed.data : (isNew ? {} : ((await api('/api/stream-hosts/' + encodeURIComponent(name))).data || {}));
+  const stls = o.tls || {};
+  const selAl = arr(o.accessLists);
   c.innerHTML = editorHead('streams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Forwarding</p>
       <div class="inline-fields">
         <div class="field-group"><label>Listen port</label><input class="field mono" id="ed-listen" type="number" value="${esc(o.listenPort != null ? o.listenPort : '')}" placeholder="5353" /></div>
@@ -1662,26 +1886,92 @@ async function streamEditor(c, name) {
         <div class="field-group"><label>Forward port</label><input class="field mono" id="ed-fport" type="number" value="${esc(o.forwardPort != null ? o.forwardPort : '')}" placeholder="53" /></div>
       </div>
     </div>
+    <div class="card form-section"><p class="section-label">TLS &amp; SNI</p>
+      <div class="field-group"><label>Mode</label>
+        <select class="field mono" id="ed-tlsmode">
+          <option value=""${stls.mode ? '' : ' selected'}>none (blind forward)</option>
+          <option value="passthrough"${stls.mode === 'passthrough' ? ' selected' : ''}>passthrough (route on SNI, never decrypt)</option>
+          <option value="terminate"${stls.mode === 'terminate' ? ' selected' : ''}>terminate (handshake at gpm, plaintext upstream)</option>
+        </select>
+        <div class="hint" id="ed-tls-hint">TCP only. Two stream hosts may share a listen port only when every one of them matches on SNI.</div>
+      </div>
+      <div id="ed-tls-fields" style="display:none">
+        <div class="field-group"><label>SNI match</label><div class="chip-input" id="ed-sni"></div>
+          <div class="hint">Server names this host claims, e.g. <span class="mono">db.example.com</span> or <span class="mono">*.example.com</span>. Required when sharing a port; leave empty to take every connection on a port of your own.</div>
+        </div>
+        <div class="field-group" id="ed-cert-group"><label>Certificate</label>
+          <select class="field mono" id="ed-streamcert">
+            <option value="">(select a certificate)</option>
+            ${streamCerts.map((ct) => `<option value="${esc(ct.name)}"${stls.certificateRef === ct.name ? ' selected' : ''}>${esc(ct.name)} - ${esc(arr(ct.domains).join(', '))}</option>`).join('')}
+          </select>
+          <div class="hint">Terminate mode only. Passthrough never decrypts, so it needs no certificate.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card form-section"><p class="section-label">Access lists</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any backend is dialled. Only IP rules and geo apply at L4 - a list with basic-auth users cannot issue an HTTP challenge on a raw stream and is unavailable here.</p>
+      <div class="check-list" id="ed-stream-al">
+        ${streamAls.length ? streamAls.map((a) => {
+    const hasBasic = arr(a.basicAuth).length > 0;
+    return `<label class="check-item"${hasBasic ? ' style="opacity:.5;cursor:not-allowed" title="This list has basic-auth users, which a raw stream cannot evaluate."' : ''}><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !hasBasic ? ' checked' : ''}${hasBasic ? ' disabled' : ''}/>${esc(a.name)}<span class="ci-ty">${hasBasic ? 'basic-auth: n/a at L4' : 'ip / geo'}</span></label>`;
+  }).join('') : '<div class="check-empty">No access lists defined yet.</div>'}
+      </div>
+    </div>
   </div></div>` + saveBar('streams', isNew, meta.addLabel);
+  const sniCtl = makeChipInput($('#ed-sni'), arr(stls.sniMatch), 'add server name...');
+  // TLS is TCP-only and the certificate applies to terminate alone, so the
+  // fields that cannot apply are hidden/disabled rather than accepted and then
+  // rejected by the API.
+  function refreshStreamTLS() {
+    const mode = $('#ed-tlsmode').value;
+    const proto = $('#ed-proto').value;
+    const tcpOnly = proto === 'tcp';
+    $('#ed-tlsmode').disabled = !tcpOnly;
+    $('#ed-tls-fields').style.display = mode && tcpOnly ? '' : 'none';
+    $('#ed-cert-group').style.display = mode === 'terminate' ? '' : 'none';
+    $('#ed-tls-hint').textContent = tcpOnly
+      ? 'TCP only. Two stream hosts may share a listen port only when every one of them matches on SNI.'
+      : 'TLS/SNI needs protocol tcp: a UDP datagram carries no ClientHello to read.';
+  }
+  refreshStreamTLS();
+  $('#ed-tlsmode').addEventListener('change', refreshStreamTLS);
+  $('#ed-proto').addEventListener('change', refreshStreamTLS);
   wireEditor('streams', 'stream-hosts', meta, isNew, name || o.name, () => {
     const lp = parseInt($('#ed-listen').value, 10); const fp = parseInt($('#ed-fport').value, 10); const fh = $('#ed-fhost').value.trim();
     if (isNaN(lp)) { toast('Listen port required', 'Enter a listen port.', 'err'); return null; }
     if (!fh || isNaN(fp)) { toast('Forward target required', 'Set forward host and port.', 'err'); return null; }
-    return { listenPort: lp, protocol: $('#ed-proto').value, forwardHost: fh, forwardPort: fp };
+    const proto = $('#ed-proto').value;
+    const body = { listenPort: lp, protocol: proto, forwardHost: fh, forwardPort: fp };
+    const mode = $('#ed-tlsmode').value;
+    if (mode && proto === 'tcp') {
+      const tls = { mode };
+      const sni = sniCtl.get(); if (sni.length) tls.sniMatch = sni;
+      if (mode === 'terminate') {
+        const ref = $('#ed-streamcert').value;
+        if (!ref) { toast('Certificate required', 'Terminate mode needs a certificate to present.', 'err'); return null; }
+        tls.certificateRef = ref;
+      }
+      body.tls = tls;
+    }
+    const als = $$('#ed-stream-al input:checked').map((i) => i.value);
+    if (als.length) body.accessLists = als;
+    return body;
   });
+  wireCloneButton('streams', o);
 }
 
 // ---------- DEAD HOST EDITOR ----------
 async function deadEditor(c, name) {
   const meta = SECTION_META.dead; const isNew = !name;
+  const seed = isNew ? takeCloneSeed('dead') : null;
   const [certsR, objR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
     isNew ? Promise.resolve({ data: {} }) : api('/api/dead-hosts/' + encodeURIComponent(name)),
   ]);
   const certs = arr(certsR.data); const certDomains = {}; certs.forEach((ct) => { certDomains[ct.name] = arr(ct.domains).join(', '); });
-  const o = objR.data || {};
+  const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('dead', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
     <div class="card form-section"><p class="section-label">Response</p>
       <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Returned for every request to these domains. Default 404.</div></div>
@@ -1697,6 +1987,7 @@ async function deadEditor(c, name) {
     const tls = readTls(); if (tls) body.tls = tls;
     return body;
   });
+  wireCloneButton('dead', o);
 }
 
 // DNS-01 providers with a built-in solver (mirrors model.KnownDNSProviders).
@@ -1711,9 +2002,10 @@ const DNS_PROVIDERS = [
 // ---------- DNS PROVIDER EDITOR ----------
 async function dnsEditor(c, name) {
   const meta = SECTION_META.dns; const isNew = !name;
-  const o = isNew ? { provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } } : ((await api('/api/dns-providers/' + encodeURIComponent(name))).data || {});
+  const seed = isNew ? takeCloneSeed('dns') : null;
+  const o = seed ? seed.data : (isNew ? { provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } } : ((await api('/api/dns-providers/' + encodeURIComponent(name))).data || {}));
   c.innerHTML = editorHead('dns', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Provider</p>
       <div class="field-group"><label>Provider</label>
         <select class="field mono" id="ed-provider">
@@ -1745,18 +2037,20 @@ async function dnsEditor(c, name) {
     if (!cfg.apiToken) { toast('API token required', 'Every DNS provider needs a config.apiToken credential.', 'err'); return null; }
     return body;
   });
+  wireCloneButton('dns', o);
 }
 
 // ---------- ACCESS LIST EDITOR ----------
 async function accessEditor(c, name) {
   const meta = SECTION_META.access; const isNew = !name;
-  const o = isNew ? {} : ((await api('/api/access-lists/' + encodeURIComponent(name))).data || {});
+  const seed = isNew ? takeCloneSeed('access') : null;
+  const o = seed ? seed.data : (isNew ? {} : ((await api('/api/access-lists/' + encodeURIComponent(name))).data || {}));
   await loadCapabilities();
   const geoAvailable = hasCapability('geoip.dbLoaded');
   const geoReason = 'GeoIP database not loaded (set GPM_GEOIP_DB) - geo rules are unavailable.';
   const geo = o.geo || {};
   c.innerHTML = editorHead('access', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Policy</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Satisfy any</div><div class="ds">Pass if EITHER basic-auth or IP matches (off = require both)</div></div>${switchHtml('ed-satisfy', !!o.satisfyAny, 'Satisfy any')}</div>
       <div class="field-group" style="margin-top:12px"><label>Default action</label><select class="field mono" id="ed-default">
@@ -1846,16 +2140,18 @@ async function accessEditor(c, name) {
     if (Object.keys(geoBody).length) body.geo = geoBody;
     return body;
   });
+  wireCloneButton('access', o);
 }
 
 // ---------- IDENTITY PROVIDER EDITOR (polymorphic) ----------
 async function idpEditor(c, name) {
   const meta = SECTION_META.identity; const isNew = !name;
-  const o = isNew ? { type: 'oidc' } : ((await api('/api/identity-providers/' + encodeURIComponent(name))).data || {});
+  const seed = isNew ? takeCloneSeed('identity') : null;
+  const o = seed ? seed.data : (isNew ? { type: 'oidc' } : ((await api('/api/identity-providers/' + encodeURIComponent(name))).data || {}));
   const type = o.type || 'oidc';
   const oidc = o.oidc || {}; const fa = o.forwardAuth || {}; const ar = o.authRequest || {}; const rm = o.roleMapping || {};
   c.innerHTML = editorHead('identity', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Provider type</label><select class="field mono" id="ed-type">
         ${[['oidc', 'OIDC'], ['forward-auth', 'Forward-auth (trusted headers)'], ['auth-request', 'Auth-request (external)']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
@@ -1949,18 +2245,21 @@ async function idpEditor(c, name) {
     if (Object.keys(rmBody).length) body.roleMapping = rmBody;
     return body;
   });
+  wireCloneButton('identity', o);
 }
 
 // ---------- MIDDLEWARE EDITOR (polymorphic) ----------
 async function middlewareEditor(c, name) {
   const meta = SECTION_META.middleware; const isNew = !name;
+  const seed = isNew ? takeCloneSeed('middleware') : null;
   const [idpR, objR] = await Promise.all([
     api('/api/identity-providers').catch(() => ({ data: [] })),
     isNew ? Promise.resolve({ data: { type: 'headers' } }) : api('/api/middlewares/' + encodeURIComponent(name)),
   ]);
   const idps = arr(idpR.data);
-  const o = objR.data || {}; const type = o.type || 'headers';
+  const o = seed ? seed.data : (objR.data || {}); const type = o.type || 'headers';
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
+  const bo = o.bouncer || {};
   // Populate from either form: requests+window as-is, or migrate a legacy
   // requestsPerSecond into requests + a 1s window so saving upgrades it.
   const rlRequests = rl.requests != null ? rl.requests : (rl.requestsPerSecond != null ? rl.requestsPerSecond : '');
@@ -1975,10 +2274,10 @@ async function middlewareEditor(c, name) {
   // "2m") must render selected, not silently reset to "none" on save.
   if (!RL_BLOCKS.includes(rlBlockFor)) RL_BLOCKS.splice(1, 0, rlBlockFor);
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type">
-        ${[['auth', 'Auth'], ['headers', 'Headers'], ['guard', 'Guard'], ['rate-limit', 'Rate limit'], ['rewrite', 'Rewrite']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        ${[['auth', 'Auth'], ['headers', 'Headers'], ['guard', 'Guard'], ['rate-limit', 'Rate limit'], ['rewrite', 'Rewrite'], ['bouncer', 'Bouncer (deny hook)']].map(([v, l]) => `<option value="${v}"${type === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
       </select></div>
     </div>
 
@@ -2030,6 +2329,29 @@ async function middlewareEditor(c, name) {
       <div class="hint">Block for: once a client exceeds the limit, further requests from it are rejected for this long, regardless of token refill. Fixed - not extended by repeat requests during the block.</div>
     </div>
 
+    <div class="card form-section ed-sub" data-type="bouncer" style="${type === 'bouncer' ? '' : 'display:none'}"><p class="section-label">Bouncer (deny hook)</p>
+      <div class="hint">Asks an operator-run bouncer whether the client IP is banned. gpm ships no rules and no WAF engine - the verdict is entirely the external service's. Runs after the access list (an allow-list still wins) and before auth (a banned IP never reaches the IdP).</div>
+      <div class="inline-fields" style="margin-top:12px">
+        <div class="field-group"><label>Provider</label><select class="field mono" id="bo-provider">
+          ${[['crowdsec', 'crowdsec (LAPI)'], ['http', 'http (generic hook)']].map(([v, l]) => `<option value="${v}"${(bo.provider || 'crowdsec') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        </select></div>
+        <div class="field-group"><label>On error</label><select class="field mono" id="bo-onerror">
+          ${[['fail-open', 'fail-open (allow)'], ['fail-closed', 'fail-closed (deny)']].map(([v, l]) => `<option value="${v}"${(bo.onError || 'fail-open') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="field-group"><label>URL</label><input class="field mono" id="bo-url" value="${esc(bo.url || '')}" placeholder="http://crowdsec:8080" /><div class="hint">crowdsec: the LAPI base URL. http: the full endpoint to GET.</div></div>
+      <div class="field-group"><label>API key</label><input class="field mono" id="bo-apikey" value="${esc(bo.apiKey || '')}" placeholder="\${ENV:CROWDSEC_BOUNCER_KEY}" /><div class="hint">Sent as <span class="mono">X-Api-Key</span>. Required for crowdsec - register one with <span class="mono">cscli bouncers add gpm</span>. Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder; a masked secret reads <span class="mono">***</span>.</div></div>
+      <div class="inline-fields">
+        <div class="field-group"><label>Timeout</label><input class="field mono" id="bo-timeout" value="${esc(bo.timeout || '')}" placeholder="2s" /></div>
+        <div class="field-group"><label>Cache TTL</label><input class="field mono" id="bo-cachettl" value="${esc(bo.cacheTTL || '')}" placeholder="60s" /></div>
+        <div class="field-group"><label>Cache max entries</label><input class="field mono" id="bo-cachemax" type="number" value="${esc(bo.cacheMaxEntries != null ? bo.cacheMaxEntries : '')}" placeholder="10000" /></div>
+        <div class="field-group"><label>Deny status</label><input class="field mono" id="bo-denystatus" type="number" value="${esc(bo.denyStatus != null ? bo.denyStatus : '')}" placeholder="403" /></div>
+      </div>
+      <div class="field-group"><label>Deny with</label><select class="field mono" id="bo-denywith">
+        ${[['error-page', 'error-page'], ['plain', 'plain']].map(([v, l]) => `<option value="${v}"${(bo.denyWith || 'error-page') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></div>
+      <div class="toggle-line" id="bo-stream-line"><div class="tl-text"><div class="nm">Stream mode (crowdsec only)</div><div class="ds">Pull the whole decision set once, then deltas every cache TTL, so the request path is a local lookup with no per-request LAPI call</div></div>${switchHtml('bo-stream', !!bo.stream, 'Stream mode')}</div>
+    </div>
     <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
       <div class="field-group"><label>Replace path</label><div id="rw-replacepath"></div><button class="btn ghost sm" id="rw-add" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>
       <div class="hint">Exact request path -> replacement (both absolute, e.g. /application/o/token -> /application/o/token/).</div>
@@ -2054,6 +2376,16 @@ async function middlewareEditor(c, name) {
   const rwCtl = makeKVRows($('#rw-replacepath'), rewrite.replacePath || {}, 'Path', 'replacement', false);
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
   $('#rw-add').addEventListener('click', () => rwCtl.addRow('', ''));
+
+  // Stream mode is a CrowdSec LAPI protocol feature; grey it out (rather than
+  // accept it and let the server reject it) while another provider is selected.
+  function syncBouncerProvider() {
+    const crowdsec = $('#bo-provider').value === 'crowdsec';
+    if (!crowdsec) $('#bo-stream').setAttribute('aria-checked', 'false');
+    gateControl($('#bo-stream'), crowdsec, 'Stream mode is only supported by the crowdsec provider.');
+  }
+  $('#bo-provider').addEventListener('change', syncBouncerProvider);
+  syncBouncerProvider();
 
   const trigWrap = $('#guard-triggers'); const trigCtls = [];
   function trigRow(t) {
@@ -2123,6 +2455,23 @@ async function middlewareEditor(c, name) {
       const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       const blockFor = $('#rl-block').value; if (blockFor) spec.blockFor = blockFor;
       body.rateLimit = spec;
+    } else if (t === 'bouncer') {
+      const provider = $('#bo-provider').value;
+      const url = $('#bo-url').value.trim();
+      if (!url) { toast('URL required', 'Enter the bouncer URL.', 'err'); return null; }
+      const apiKey = $('#bo-apikey').value.trim();
+      if (apiKey === '***') { toast('Secret masked', 'The API key is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', 'err'); return null; }
+      if (provider === 'crowdsec' && !apiKey) { toast('API key required', 'The crowdsec provider needs an API key (cscli bouncers add gpm).', 'err'); return null; }
+      const spec = { provider, url };
+      if (apiKey) spec.apiKey = apiKey;
+      const timeout = $('#bo-timeout').value.trim(); if (timeout) spec.timeout = timeout;
+      const cacheTTL = $('#bo-cachettl').value.trim(); if (cacheTTL) spec.cacheTTL = cacheTTL;
+      const cacheMax = parseInt($('#bo-cachemax').value, 10); if (!isNaN(cacheMax)) spec.cacheMaxEntries = cacheMax;
+      const onError = $('#bo-onerror').value; if (onError) spec.onError = onError;
+      const denyStatus = parseInt($('#bo-denystatus').value, 10); if (!isNaN(denyStatus)) spec.denyStatus = denyStatus;
+      const denyWith = $('#bo-denywith').value; if (denyWith) spec.denyWith = denyWith;
+      if (provider === 'crowdsec' && isOn('bo-stream')) spec.stream = true;
+      body.bouncer = spec;
     } else if (t === 'rewrite') {
       const rp = rwCtl.get();
       const entries = Object.entries(rp);
@@ -2136,6 +2485,7 @@ async function middlewareEditor(c, name) {
     }
     return body;
   });
+  wireCloneButton('middleware', o);
 }
 
 // section -> editor dispatch for the typed object editors
@@ -2146,10 +2496,11 @@ async function middlewareEditor(c, name) {
 // inline PEM.
 async function clientCAEditor(c, name) {
   const meta = SECTION_META.clientcas; const isNew = !name;
-  const o = isNew ? {} : ((await api('/api/client-cas/' + encodeURIComponent(name))).data || {});
+  const seed = isNew ? takeCloneSeed('clientcas') : null;
+  const o = seed ? seed.data : (isNew ? {} : ((await api('/api/client-cas/' + encodeURIComponent(name))).data || {}));
   const hasCRL = !!(o.crlFile || o.crlPEM);
   c.innerHTML = editorHead('clientcas', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Trust anchor</p>
       <div class="field-group"><label>CA certificate (PEM)</label>
         <textarea class="field mono" id="ed-capem" rows="10" placeholder="-----BEGIN CERTIFICATE-----">${esc(o.caPEM || '')}</textarea>
@@ -2190,16 +2541,18 @@ async function clientCAEditor(c, name) {
     if (policy && (file || inline)) body.crlPolicy = policy;
     return body;
   });
+  wireCloneButton('clientcas', o);
 }
 
 // ---------- UPSTREAM GROUP EDITOR ----------
 async function upstreamGroupEditor(c, name) {
   const meta = SECTION_META.upstreams; const isNew = !name;
+  const seed = isNew ? takeCloneSeed('upstreams') : null;
   const [objR, healthR] = await Promise.all([
     isNew ? Promise.resolve({ data: {} }) : api('/api/upstream-groups/' + encodeURIComponent(name)),
     isNew ? Promise.resolve({ data: {} }) : api('/api/upstream-health').catch(() => ({ data: {} })),
   ]);
-  const o = objR.data || {};
+  const o = seed ? seed.data : (objR.data || {});
   const hc = o.healthCheck || {};
   const health = {};
   arr((healthR.data || {})[name]).forEach((u) => { health[u.upstream] = u.healthy; });
@@ -2219,7 +2572,7 @@ async function upstreamGroupEditor(c, name) {
     { v: 'ip-hash', label: 'ip-hash (sticky per client IP)' },
   ];
   c.innerHTML = editorHead('upstreams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew)}
+    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Upstreams</p>
       <div id="ed-ups"></div>
       <button class="btn ghost sm" id="ed-addup" type="button" style="margin-top:6px">${ICON.plus}Add upstream</button>
@@ -2310,6 +2663,7 @@ async function upstreamGroupEditor(c, name) {
     if (Object.keys(hcOut).length) body.healthCheck = hcOut;
     return body;
   });
+  wireCloneButton('upstreams', o);
 }
 
 const EDITORS = {
@@ -2638,9 +2992,11 @@ async function viewSettings(c) {
   const s = (await api('/api/settings')).data || {};
   const admin = s.adminAuth || {};
   const bg = admin.breakGlass || {};
+  const ep = s.errorPages || {};
   const ds = Object.assign({ pihole: {}, cloudflare: {} }, s.dnsSync || {});
   ds.pihole = ds.pihole || {};
   ds.cloudflare = ds.cloudflare || {};
+  const pp = s.proxyProtocol || {};
   await loadCapabilities();
   const idc = Object.assign({ template: {} }, s.ingressDiscovery || {});
   const idt = Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {});
@@ -2678,6 +3034,19 @@ async function viewSettings(c) {
       <p class="muted" style="font-size:11.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
       <div id="set-webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">PROXY protocol (inbound)</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. The parsed address becomes the client IP everywhere: access lists, geo, rate limits, the basic-auth lockout, <span class="mono">X-Forwarded-For</span>, the access log and metrics. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below; from anyone else the bytes are treated as ordinary payload and the peer address stands. UDP stream listeners are unaffected.</p>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Accept PROXY headers</div><div class="ds">From the trusted peers below only</div></div>${switchHtml('set-pp-on', !!pp.enabled, 'Accept PROXY headers')}</div>
+      <div class="grid-2" style="margin-top:10px">
+        <div class="field-group"><label>Trusted peers</label><div class="chip-input" id="set-pp-cidrs"></div>
+          <div class="hint">CIDRs or bare IPs of your load balancers, e.g. <span class="mono">10.0.0.0/8</span>. Required when enabled - there is no "trust everyone" mode.</div>
+        </div>
+        <div class="field-group"><label>Header timeout</label><input class="field mono" id="set-pp-timeout" value="${esc(pp.timeout || '')}" placeholder="5s" />
+          <div class="hint">How long a trusted peer has to deliver a complete header before the connection is closed. Blank = 5s, maximum 1m.</div>
+        </div>
+      </div>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
@@ -2798,6 +3167,30 @@ async function viewSettings(c) {
       <p class="muted" style="font-size:11.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request.</p>
       <button class="btn danger sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
     </div>
+    <div class="card form-section" id="set-metrics" style="margin-bottom:16px">
+      <p class="section-label">Prometheus metrics</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Opt-in scrape endpoint on this admin listener, enabled with <span class="mono">GPM_METRICS=1</span> (a flag, not a saved setting - it needs a restart). An API token with the <span class="mono">metrics:read</span> scope can scrape it; your admin session can open it directly.</p>
+      <a class="btn ghost sm" id="set-metrics-link" href="/metrics" target="_blank" rel="noopener">Open /metrics</a>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Error pages</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Default custom HTML pages for errors gpm itself generates - upstream unreachable, access denied, rate limited, a dead host, a dangling middleware reference. A proxy host's own Error pages card (in its editor) overrides this per host. Blank leaves gpm's built-in plain-text output in effect, exactly as before this was configurable.</p>
+      <div class="field-group">
+        <label>Templates directory</label>
+        <input class="field mono" id="set-errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages" />
+        <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <label>Inline templates (JSON)</label>
+        <textarea class="field mono" id="set-errp-inline" rows="4" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
+        <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <label>Also replace upstream errors for</label>
+        <input class="field mono" id="set-errp-intercept" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
+        <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
+      </div>
+    </div>
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
@@ -2805,7 +3198,15 @@ async function viewSettings(c) {
       </div>
     </div>`;
 
+  // Metrics endpoint: greyed out (with the reason) unless the daemon reports it
+  // mounted, rather than linking at a route that answers 404.
+  const metricsAvailable = hasCapability('metrics.enabled');
+  gateControl($('#set-metrics-link'), metricsAvailable,
+    'Metrics are turned off on this instance. Start gpm with GPM_METRICS=1 (or -metrics) and restart.');
+  if (!metricsAvailable) $('#set-metrics-link').removeAttribute('href');
+
   const provCtl = makeChipInput($('#set-providers'), arr(admin.providers), 'add provider...');
+  const ppCtl = makeChipInput($('#set-pp-cidrs'), arr(pp.trustedCIDRs), 'add CIDR...');
 
   // webhook rows
   const whWrap = $('#set-webhooks');
@@ -3139,6 +3540,20 @@ async function viewSettings(c) {
     });
     if (webhooks.length) body.webhooks = webhooks;
 
+    const ppCidrs = ppCtl.get();
+    const ppTimeout = $('#set-pp-timeout').value.trim();
+    if (isOn('set-pp-on') && !ppCidrs.length) {
+      toast('Trusted peers required', 'A PROXY header from an untrusted peer would let any client spoof its source IP. Add the CIDRs of your load balancers.', 'err');
+      return;
+    }
+    if (isOn('set-pp-on') || ppCidrs.length || ppTimeout) {
+      const proxyProtocol = {};
+      if (isOn('set-pp-on')) proxyProtocol.enabled = true;
+      if (ppCidrs.length) proxyProtocol.trustedCIDRs = ppCidrs;
+      if (ppTimeout) proxyProtocol.timeout = ppTimeout;
+      body.proxyProtocol = proxyProtocol;
+    }
+
     const dnsSync = { pihole: {}, cloudflare: {} };
     const phPw = $('#set-ph-pw').value.trim();
     if (phPw === '***') {
@@ -3156,6 +3571,21 @@ async function viewSettings(c) {
     dnsSync.cloudflare.apexTarget = $('#set-cf-apex').value.trim();
     if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
     body.dnsSync = dnsSync;
+
+    const errpDir = $('#set-errp-dir').value.trim();
+    const errpInlineRaw = $('#set-errp-inline').value.trim();
+    const errpIntercept = $('#set-errp-intercept').value.split(',').map((s) => s.trim()).filter(Boolean)
+      .map((s) => parseInt(s, 10)).filter((n) => !isNaN(n));
+    if (errpDir || errpInlineRaw || errpIntercept.length) {
+      const errp = {};
+      if (errpDir) errp.dir = errpDir;
+      if (errpInlineRaw) {
+        try { errp.inline = JSON.parse(errpInlineRaw); }
+        catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
+      }
+      if (errpIntercept.length) errp.interceptUpstream = errpIntercept;
+      body.errorPages = errp;
+    }
 
     const ingressDiscovery = {
       apiURL: $('#set-id-url').value.trim(),
@@ -3311,6 +3741,7 @@ function applyNavGating() {
 
 // ---------- boot ----------
 async function boot() {
+  applyTheme(getTheme());
   buildShell();
   await loadTopbar();
   applyNavGating();
