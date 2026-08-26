@@ -56,12 +56,29 @@ builds it with a narrower, more focused design:
 - External Account Binding for CAs that require it (ZeroSSL, Google Public CA)
 - Automatic renewal (30 days before expiry), ECDSA P-256
 - Bring-your-own custom certificates
+- **mTLS client certificates** - per-host `tls.clientAuth` against a `ClientCA`
+  trust anchor (`require` or `optional`), CRL revocation, and identity
+  passthrough headers
+- **Client-certificate issuance** - give a `ClientCA` a signing key and mint
+  client certificates from the UI or `POST /api/client-cas/{name}/issue`,
+  downloaded as a password-protected PKCS#12 bundle. The private key is never
+  stored or logged; it exists only in the download
+- **Client-certificate expiry warnings and renewal** - gpm records what each CA
+  issued (subject, serial, validity, never key material), warns before a
+  certificate expires, and renews one in place with a new key and serial. There is
+  no client-side renewal: every device has to import the new `.p12` by hand, and
+  the UI says so before you start
 
 **Access control & auth**
 - IP access lists (allow/deny CIDR rules, default-deny, HTTP basic-auth)
 - **OIDC** admin login (authorization code + PKCE, group→role mapping)
 - **Forward-auth** (trust upstream-asserted identity headers from trusted peers)
 - **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)
+- **Client-certificate auth** (`client-cert` middleware mode: require a verified
+  mTLS certificate, optionally mapped to a role, with an `allowFrom` CIDR
+  exemption so a trusted network skips the certificate requirement - read
+  [the note on which IP that compares](docs/configuration.md#which-ip-allowfrom-actually-compares)
+  if gpm is not your internet-facing edge)
 - Request **guards** (deny by path/method/query, with CIDR exemptions)
 - Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
 - **Bouncer** deny hook (CrowdSec LAPI or any generic HTTP endpoint) — hook-only, no bundled WAF

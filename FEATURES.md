@@ -71,7 +71,9 @@ the Go version (gap we want to close).
 - `[NPM+]` **OIDC admin login** for the panel: `OIDC_ISSUER_URL`,
   `OIDC_CLIENT_ID/SECRET`, `OIDC_REDIRECT_DOMAIN`, `OIDC_REQUIRE_VERIFIED_EMAIL`,
   **`OIDC_DISABLE_PASSWORD`** (disables local login entirely).
-- `[NPM+]` **mTLS** - custom CA cert upload for client-cert validation.
+- `[NPM+]` **mTLS** - custom CA cert upload for client-cert validation. gpm goes
+  further and can also *issue* client certificates from an operator-supplied CA
+  key, as a downloadable PKCS#12 bundle.
 
 ### Protocols / performance
 - `[NPM+]` **HTTP/3 (QUIC)** (optional BPF), **Brotli + zstd** compression,
@@ -297,7 +299,19 @@ earlier tiers or duplicating work (see "Architecture for extension").
   verified chain, `421` on mismatch, plus CRL revocation
   (`internal/dataplane/crl.go`, watched/hot-reloaded) and identity-passthrough
   headers (`X-Client-Cert-{SAN,Serial,Fingerprint,Subject}`); OCSP was never
-  implemented and is not currently planned).
+  implemented and is not currently planned). **Phase 3** also shipped: a
+  `client-cert` auth middleware honours `allowFrom` exactly as `auth-request`
+  does (a trusted network skips the certificate requirement entirely), and a
+  `ClientCA` with an optional signing key (`caKeyFile` / `caKeyPEM`) can **issue**
+  client certificates - `POST /api/client-cas/{name}/issue` and a UI card mint an
+  RSA-2048 client certificate and return a password-protected PKCS#12 bundle
+  (`internal/clientcert`; RSA and the legacy PKCS#12 encoder are deliberate iOS /
+  Android keychain compatibility choices, and the private key is never stored).
+  Issuances are recorded as runtime state under `<certDir>/client-certs/`, which
+  drives an `ok`/`expiring`/`expired` status (per-CA `expiryWarningDays`, default
+  30), a pre-expiry UI banner and a per-certificate renew action. Renewal is
+  deliberately manual end to end: a client certificate lives in a device keychain,
+  so gpm cannot install it - and renewing does not revoke, which stays CRL-only.
 - **Inbound PROXY protocol** ★ (shipped): `settings.proxyProtocol`
   (`enabled`, `trustedCIDRs`, `timeout: 5s`) applies a hand-written v1 (text) and
   v2 (binary) parser - stdlib only, TLVs consumed and ignored - as a listener
@@ -434,6 +448,8 @@ earlier tiers or duplicating work (see "Architecture for extension").
 | Always-on security headers | no | yes |
 | HSTS | configurable | enforced |
 | mTLS CA upload | no | yes |
+| mTLS client-certificate issuance (PKCS#12 download) | no | no |  <!-- gpm: shipped, POST /api/client-cas/{name}/issue -->
+| mTLS client-certificate expiry warning + renew | no | no |  <!-- gpm: shipped, records under certDir/client-certs -->
 | Geoblocking (GeoIP2) | no | yes |
 | GoAccess analytics | no | yes |
 | Log rotation to disk | no | yes |
