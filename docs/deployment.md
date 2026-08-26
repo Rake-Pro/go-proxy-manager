@@ -107,21 +107,31 @@ A single volume mounted at `/data`:
 ```
 /data/config       git-backed config repo (see docs/configuration.md)
 /data/certs        certificate store (custom certs + ACME-issued artifacts,
-                   client-CA CRLs, optional client-CA signing keys, and the
-                   client-certificate issuance records under client-certs/)
+                   client-CA CRLs, client-CA signing keys under client-cas/,
+                   and client-certificate issuance records under client-certs/)
 /data/session.db   SQLite session store (pure-Go, no CGO)
 ```
 
 The container runs as a non-root user; make sure the mounted volume is writable by
 it (the image's `gpm` user).
 
-A `ClientCA` signing key placed here (`caKeyFile`) is a CA private key: give it
-`0600` and owner `gpm`, back it up with the rest of `/data/certs`, and remember it
-is *not* in the git config repo, so a config-only backup does not carry it. The
-alternative is `caKeyPEM` with a `${FILE:/run/secrets/...}` placeholder, which
-keeps the key in the secret mount instead. Certificate issuance and renewal are
-`POST`s, so an HA **follower** refuses them with `503` like every other write -
-issue on the leader.
+`client-cas/<name>.key` is where a **generated** ClientCA's signing key lands
+(`POST /api/client-cas/{name}/generate`, or "Generate new CA" in the UI): gpm
+writes it at `0600` itself, so nothing has to be provisioned externally to get a
+working mTLS setup. A key you place here yourself (`caKeyFile` pointing anywhere
+under the cert store, for a bring-your-own CA) is the same thing by hand - give it
+`0600` and owner `gpm`. The alternative is `caKeyPEM` with a
+`${FILE:/run/secrets/...}` placeholder, which keeps the key in the secret mount
+instead.
+
+Either way it is a **CA private key**: back it up with the rest of `/data/certs`,
+and remember it is *not* in the git config repo, so a config-only backup does not
+carry it - restoring config alone gives you a ClientCA object pointing at a key
+that is not there. Deleting a ClientCA does **not** delete its key file (see
+[configuration.md](configuration.md#clientca-configclient-cas)), so removing a CA
+for good is a config delete plus an `rm` here. CA generation, certificate issuance
+and renewal are all `POST`s, so an HA **follower** refuses them with `503` like
+every other write - do them on the leader.
 
 `client-certs/<ca>.json` holds the issuance records that drive the expiry warning
 and the renew action. They are runtime state, not config, so a config-only backup

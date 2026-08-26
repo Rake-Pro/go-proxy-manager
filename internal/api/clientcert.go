@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -255,6 +257,181 @@ func issueStatus(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, model.ErrNoSigningKey):
 		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// generateRequest is the POST /client-cas/{name}/generate body.
+type generateRequest struct {
+	CommonName   string `json:"commonName,omitempty"`
+	ValidityDays int    `json:"validityDays,omitempty"`
+	Organization string `json:"organization,omitempty"`
+}
+
+// handleGenerateClientCA creates a brand-new, self-signed, issuance-capable
+// ClientCA from nothing: it generates the key pair, writes the private key into
+// the managed certificate store, and saves the ClientCA object pointing at it.
+//
+// Unlike issue and renew this IS a config mutation, so it goes through the normal
+// store save path - validated against the whole object graph, committed, and
+// visible in history exactly like a UI PUT of the same object. The response is
+// the created object, again like a PUT.
+//
+// The generated private key is never in a response and never in a log line. It
+// exists only as a 0600 file in the cert store, which is also why it is never
+// overwritten: that file may still be the signing key behind certificates already
+// deployed to devices.
+func (d Deps) handleGenerateClientCA(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := model.ValidateName(name); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	body, err := readBody(w, r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req generateRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+
+	// Validate the request BEFORE anything below touches the certificate store.
+	// The reclaim further down is a deletion, so a request that was going to be
+	// refused anyway must never reach it: a rejected generate leaves the store
+	// byte-for-byte untouched. GenerateCA re-runs this itself, so the invariant
+	// does not rest on this call being remembered.
+	plan, err := clientcert.ValidatePlan(name, clientcert.GenerateRequest{
+		CommonName:   req.CommonName,
+		ValidityDays: req.ValidityDays,
+		Organization: req.Organization,
+	})
+	if err != nil {
+		writeErr(w, generateStatus(err), err)
+		return
+	}
+
+	// Refuse before generating anything: a name collision is the common mistake
+	// and RSA-4096 keygen is expensive, but more importantly a refusal here
+	// leaves nothing on disk to roll back.
+	//
+	// This snapshot is also what the orphan-key referrer scan below reads. It is
+	// taken before the reclaim, so a PUT that starts referencing the orphan in
+	// that window would not be seen - accepted: config writes are single-leader
+	// admin actions, and the window is one config load.
+	cfg, _, err := d.Store.Load(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, ca := range cfg.ClientCAs {
+		if ca.Name == name {
+			writeErr(w, http.StatusConflict, fmt.Errorf(
+				"%w: %s (edit it, or choose another name - generating would replace a trust anchor that hosts may already reference)",
+				clientcert.ErrCAExists, name))
+			return
+		}
+	}
+
+	// A key file with no object behind it is the residue of a crash between the
+	// key write and the config save (or of a ClientCA someone deleted, since a
+	// delete deliberately keeps the key). Refusing it forever would make the name
+	// permanently unusable from the UI with no way to fix it, so reclaim it - but
+	// only once it is provably referenced by nothing, because that same file may
+	// still be the signing key behind certificates already on devices.
+	orphan, err := clientcert.KeyFileExists(name, d.CertDir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if orphan {
+		keyRel := clientcert.KeyFileFor(name)
+		if ref := clientCAReferencing(cfg, keyRel); ref != "" {
+			writeErr(w, http.StatusConflict, fmt.Errorf(
+				"%w: %s is the signing key of client CA %q - generating would replace a key that CA is still issuing and signing CRLs with",
+				clientcert.ErrKeyFileExists, keyRel, ref))
+			return
+		}
+		if err := clientcert.RemoveGeneratedKey(name, d.CertDir); err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf(
+				"an orphaned key file at %s could not be removed: %w", keyRel, err))
+			return
+		}
+		log.Warn().Str("clientCA", name).Str("keyFile", keyRel).
+			Msg("reclaimed an orphaned client CA signing key: no ClientCA object referenced it")
+	}
+
+	res, err := clientcert.GenerateCA(name, d.CertDir, plan)
+	if err != nil {
+		writeErr(w, generateStatus(err), err)
+		return
+	}
+
+	obj := model.ClientCA{
+		ObjectMeta: model.ObjectMeta{Name: name},
+		CAPEM:      res.CertPEM,
+		CAKeyFile:  res.KeyFile,
+	}
+	sha, err := d.Store.Save(r.Context(), obj, d.author(r))
+	if err != nil {
+		// The key file landed but the object did not. Remove it, or the
+		// no-overwrite rule would block every retry of this same name and leave
+		// the operator stuck with no way to fix it from the UI.
+		if rmErr := clientcert.RemoveGeneratedKey(name, d.CertDir); rmErr != nil {
+			log.Error().Err(rmErr).Str("clientCA", name).Str("keyFile", res.KeyFile).
+				Msg("generated CA key could not be removed after a failed config save; remove it by hand before retrying")
+		}
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !d.applyChange(w, "save", "ClientCA", name, sha) {
+		return
+	}
+
+	log.Info().
+		Str("clientCA", name).
+		Str("subject", res.Subject).
+		Str("serial", res.Serial).
+		Str("keyFile", res.KeyFile).
+		Time("notBefore", res.NotBefore).
+		Time("notAfter", res.NotAfter).
+		Msg("generated client CA")
+
+	w.Header().Set(commitHeader, sha)
+	writeJSON(w, http.StatusOK, obj)
+}
+
+// clientCAReferencing returns the name of a ClientCA whose caKeyFile resolves to
+// keyRel, or "" when none does. Paths are compared cleaned and slash-normalised
+// so "client-cas/corp.key" and "./client-cas/corp.key" are recognised as the same
+// file rather than letting a cosmetic difference wave through a key that is
+// actually in use.
+func clientCAReferencing(cfg model.Config, keyRel string) string {
+	want := path.Clean(filepath.ToSlash(keyRel))
+	for _, ca := range cfg.ClientCAs {
+		if ca.CAKeyFile == "" {
+			continue
+		}
+		if path.Clean(filepath.ToSlash(ca.CAKeyFile)) == want {
+			return ca.Name
+		}
+	}
+	return ""
+}
+
+// generateStatus maps a generation failure: a bad request is 400, an occupied
+// name or key path is 409, anything else (keygen, disk) is a server fault.
+func generateStatus(err error) int {
+	switch {
+	case errors.Is(err, clientcert.ErrInvalidRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, clientcert.ErrCAExists), errors.Is(err, clientcert.ErrKeyFileExists):
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

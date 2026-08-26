@@ -2486,11 +2486,62 @@ async function middlewareEditor(c, name) {
 
 // section -> editor dispatch for the typed object editors
 // ---------- CLIENT CA EDITOR ----------
-// The trust anchor for per-host mTLS (tls.clientAuth.caRef), plus its optional
-// revocation list. The CA bundle is public, so it may be inline; the CRL may be
-// a cert-store-relative file (re-read on reload and on an mtime change) or an
-// inline PEM. With an optional signing key configured the same object can also
-// ISSUE client certificates, which is what the issuance card at the bottom does.
+// The trust anchor for per-host mTLS (tls.clientAuth.caRef). A CA is either
+// generated here (self-signed, key stored by gpm, issuance-ready) or brought from
+// outside by pasting its certificate. With a signing key present the same object
+// also ISSUES client certificates, which is the right-hand column on the edit
+// view. Revocation and the signing key are optional, so they collapse to a
+// one-line summary; the semantics behind every field live in
+// docs/configuration.md rather than in helper paragraphs on this page.
+
+// segHtml renders an either/or picker plus the panels it switches between, so a
+// mutually exclusive pair (CRL file vs inline, key file vs inline, generate vs
+// paste) is one control instead of two stacked ones the operator has to know
+// cannot both be set. opts is [{v, label, panel}].
+function segHtml(group, opts, current) {
+  const buttons = opts.map((o) =>
+    `<button type="button" class="seg-btn${o.v === current ? ' on' : ''}" data-seg="${esc(group)}" data-v="${esc(o.v)}">${esc(o.label)}</button>`).join('');
+  const panels = opts.map((o) =>
+    `<div data-seg-panel="${esc(group)}" data-v="${esc(o.v)}"${o.v === current ? '' : ' hidden'}>${o.panel}</div>`).join('');
+  return `<div class="seg">${buttons}</div>${panels}`;
+}
+// wireSegs makes every segmented picker on the page switch panels, and calls
+// onChange(group, value) so a caller can react to the choice.
+function wireSegs(onChange) {
+  $$('.seg-btn').forEach((b) => b.addEventListener('click', () => {
+    const g = b.dataset.seg;
+    $$(`.seg-btn[data-seg="${g}"]`).forEach((x) => x.classList.toggle('on', x === b));
+    $$(`[data-seg-panel="${g}"]`).forEach((p) => { p.hidden = p.dataset.v !== b.dataset.v; });
+    if (onChange) onChange(g, b.dataset.v);
+  }));
+}
+// resolvePair implements the save rule for one either/or pair: typed is the
+// selected side's current value, storedOther is what the OTHER side holds in the
+// saved object. It returns [selectedOut, otherOut].
+//
+// A non-empty selected control wins and clears the other side - that is a
+// deliberate switch. An EMPTY selected control preserves the other side
+// unchanged, which is what makes toggling the picker to look at the other option
+// and saving a byte-for-byte no-op. Clearing the visible field still removes the
+// value, because then both sides resolve empty.
+function resolvePair(typed, storedOther) {
+  return typed ? [typed, ''] : ['', storedOther];
+}
+// segValue is the currently selected option of a picker.
+function segValue(group) {
+  const on = $(`.seg-btn[data-seg="${group}"].on`);
+  return on ? on.dataset.v : '';
+}
+// foldHtml is an optional section collapsed to a one-line summary of what it
+// holds. It opens automatically when it holds something, so a configured section
+// is never hidden from someone scanning the page.
+function foldHtml(id, label, summary, open, body) {
+  return `<details class="card form-section fold" id="${esc(id)}"${open ? ' open' : ''}>
+    <summary><p class="section-label">${esc(label)}</p><span class="fold-sum">${esc(summary)}</span></summary>
+    ${body}
+  </details>`;
+}
+
 async function clientCAEditor(c, name) {
   const meta = SECTION_META.clientcas; const isNew = !name;
   const seed = isNew ? takeCloneSeed('clientcas') : null;
@@ -2500,88 +2551,114 @@ async function clientCAEditor(c, name) {
   ]);
   const o = seed ? seed.data : (objR.data || {});
   const issued = arr((issuedR.data || {}).certificates);
-  const hasCRL = !!(o.crlFile || o.crlPEM);
   // Issuance needs a signing key AND a saved object to POST against, so the card
   // is greyed out (never a button that 422s) until both hold.
   const hasKey = !!(o.caKeyFile || o.caKeyPEM);
-  c.innerHTML = editorHead('clientcas', meta, isNew, name) + expiryBanner(issued) + `<div class="form-grid"><div class="stack">
+  const hasCRL = !!(o.crlFile || o.crlPEM);
+
+  const pastePanel = `<div class="field-group"><label>CA certificate (PEM)</label>
+      <textarea class="field mono" id="ed-capem" rows="10" placeholder="-----BEGIN CERTIFICATE-----">${esc(o.caPEM || '')}</textarea>
+      <div class="hint">One or more certificates, or a <span class="mono">\${FILE:...}</span> placeholder. Public material only - never a private key.</div>
+    </div>`;
+  const generatePanel = `<div class="field-group"><label>Common name</label>
+      <input class="field mono" id="gen-cn" maxlength="64" placeholder="defaults to the CA name" />
+    </div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Validity (days)</label>
+        <input class="field mono" id="gen-days" type="number" min="1" max="7300" value="3650" /></div>
+      <div class="field-group"><label>Organization</label>
+        <input class="field" id="gen-org" maxlength="64" placeholder="optional" /></div>
+    </div>
+    <div class="field-group"><button class="btn primary" id="gen-btn" type="button">Generate CA</button>
+      <div class="hint">Creates a self-signed RSA-4096 CA and stores its key in the certificate store, ready to issue. Saves immediately - no external tooling needed.</div>
+    </div>`;
+
+  const anchorCard = `<div class="card form-section"><p class="section-label">Trust anchor</p>
+    ${isNew ? segHtml('anchor', [
+      { v: 'generate', label: 'Generate new CA', panel: generatePanel },
+      { v: 'paste', label: 'Paste existing CA', panel: pastePanel },
+      // A clone already HAS a certificate - the seed populated the paste field -
+      // so cloning lands on "Paste existing CA". Defaulting to generate would hide
+      // the cloned PEM behind the inactive panel and grey out Save, which is the
+      // clone flow silently doing nothing.
+    ], seed ? 'paste' : 'generate') : pastePanel}
+  </div>`;
+
+  const crlSummary = hasCRL
+    ? `${o.crlFile || 'inline PEM'}, ${o.crlPolicy || 'fail-closed'}`
+    : 'not configured - a revoked certificate passes until it expires';
+  const crlCard = foldHtml('crl-card', 'Revocation (CRL)', crlSummary, hasCRL,
+    segHtml('crl', [
+      { v: 'file', label: 'File', panel: `<div class="field-group"><label>CRL file</label>
+          <input class="field mono" id="ed-crlfile" value="${esc(o.crlFile || '')}" placeholder="corp.crl" />
+          <div class="hint">PEM or DER, relative to the certificate store.</div>
+        </div>` },
+      { v: 'inline', label: 'Inline PEM', panel: `<div class="field-group"><label>CRL (PEM)</label>
+          <textarea class="field mono" id="ed-crlpem" rows="5" placeholder="-----BEGIN X509 CRL-----">${esc(o.crlPEM || '')}</textarea>
+          <div class="hint">For a small list kept in git.</div>
+        </div>` },
+    ], o.crlPEM ? 'inline' : 'file') +
+    `<div class="field-group"><label>When the CRL is unusable</label>
+      <select class="field mono" id="ed-crlpolicy">
+        <option value=""${(o.crlPolicy || 'fail-closed') === 'fail-closed' ? ' selected' : ''}>fail-closed (default) - reject every client certificate</option>
+        <option value="fail-open"${o.crlPolicy === 'fail-open' ? ' selected' : ''}>fail-open - accept and log</option>
+      </select>
+      <div class="hint">Applies when the CRL is missing, unparseable, foreign-signed or stale.</div>
+    </div>`);
+
+  const keySummary = hasKey ? (o.caKeyFile || 'inline key') : 'not configured - issuance disabled';
+  const keyCard = foldHtml('cakey-card', 'Signing key', keySummary, hasKey,
+    segHtml('cakey', [
+      { v: 'file', label: 'File', panel: `<div class="field-group"><label>CA key file</label>
+          <input class="field mono" id="ed-cakeyfile" value="${esc(o.caKeyFile || '')}" placeholder="client-cas/corp.key" />
+          <div class="hint">Relative to the certificate store. Enables issuance.</div>
+        </div>` },
+      { v: 'inline', label: 'Inline', panel: `<div class="field-group"><label>CA key</label>
+          <input class="field mono" id="ed-cakeypem" value="${esc(o.caKeyPEM || '')}" placeholder="\${FILE:/run/secrets/corp_ca.key}" />
+          <div class="hint">Use a <span class="mono">\${FILE:...}</span> placeholder - a literal key is refused at commit.</div>
+        </div>` },
+    ], o.caKeyPEM ? 'inline' : 'file') +
+    `<div class="field-group"><label>Expiry warning (days)</label>
+      <input class="field mono" id="ed-warndays" type="number" min="0" max="3650" value="${esc(o.expiryWarningDays || '')}" placeholder="30" />
+      <div class="hint">Blank or 0 uses the 30-day default.</div>
+    </div>`);
+
+  const configStack = `<div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
-    <div class="card form-section"><p class="section-label">Trust anchor</p>
-      <div class="field-group"><label>CA certificate (PEM)</label>
-        <textarea class="field mono" id="ed-capem" rows="10" placeholder="-----BEGIN CERTIFICATE-----">${esc(o.caPEM || '')}</textarea>
-        <div class="hint">One or more PEM certificates, or a <span class="mono">\${FILE:/run/secrets/corp_ca.pem}</span> / <span class="mono">\${ENV:...}</span> placeholder resolved at load. Public material - no private key.</div>
-      </div>
-    </div>
-  </div><div class="stack">
-    <div class="card form-section"><p class="section-label">Revocation (CRL)</p>
-      <div class="field-group"><label>CRL file</label>
-        <input class="field mono" id="ed-crlfile" value="${esc(o.crlFile || '')}" placeholder="corp.crl" />
-        <div class="hint">PEM or DER, relative to the certificate store (no absolute or <span class="mono">..</span> paths). Re-read on every config reload and within 5 minutes of the file changing.</div>
-      </div>
-      <div class="field-group"><label>Inline CRL (PEM)</label>
-        <textarea class="field mono" id="ed-crlpem" rows="5" placeholder="-----BEGIN X509 CRL-----">${esc(o.crlPEM || '')}</textarea>
-        <div class="hint">Alternative to the file, for a small list kept in git. Set one or the other, not both.</div>
-      </div>
-      <div class="field-group"><label>When the CRL is unusable</label>
-        <select class="field mono" id="ed-crlpolicy">
-          <option value=""${(o.crlPolicy || 'fail-closed') === 'fail-closed' ? ' selected' : ''}>fail-closed (default) - reject every client certificate</option>
-          <option value="fail-open"${o.crlPolicy === 'fail-open' ? ' selected' : ''}>fail-open - accept and log</option>
-        </select>
-        <div class="hint">Applies when the CRL is missing, unparseable, not signed by this CA, or past its nextUpdate.</div>
-      </div>
-      ${hasCRL ? '' : '<div class="hint">No CRL configured: certificates are verified against the CA only, so a revoked-but-unexpired certificate still passes.</div>'}
-    </div>
-    <div class="card form-section"><p class="section-label">Signing key (optional)</p>
-      <div class="field-group"><label>CA key file</label>
-        <input class="field mono" id="ed-cakeyfile" value="${esc(o.caKeyFile || '')}" placeholder="corp-ca.key" />
-        <div class="hint">Private key of one certificate in the bundle, relative to the certificate store (no absolute or <span class="mono">..</span> paths). Set it to let this CA issue client certificates.</div>
-      </div>
-      <div class="field-group"><label>Inline CA key</label>
-        <input class="field mono" id="ed-cakeypem" value="${esc(o.caKeyPEM || '')}" placeholder="\${FILE:/run/secrets/corp_ca.key}" />
-        <div class="hint">Alternative to the file. A private key is a secret, so use a <span class="mono">\${FILE:...}</span> / <span class="mono">\${ENV:...}</span> placeholder - a literal key is refused at commit. Set one or the other, not both.</div>
-      </div>
-      <div class="field-group"><label>Expiry warning (days)</label>
-        <input class="field mono" id="ed-warndays" type="number" min="0" max="3650" value="${esc(o.expiryWarningDays || '')}" placeholder="30" />
-        <div class="hint">How far ahead a certificate issued by this CA is flagged as expiring. Blank or <span class="mono">0</span> uses the default of 30 days. Advisory only - nothing renews on its own.</div>
-      </div>
-      ${hasKey ? '' : '<div class="hint">No signing key: this CA verifies client certificates but cannot issue them.</div>'}
-    </div>
-    ${isNew ? '' : `<div class="card form-section" id="issue-card"><p class="section-label">Issue client certificate</p>
-      <div class="field-group"><label>Common name</label>
-        <input class="field mono" id="iss-cn" maxlength="64" placeholder="phone-01" />
-        <div class="hint">The certificate subject, and the download filename.</div>
-      </div>
-      <div class="inline-fields">
-        <div class="field-group"><label>Validity (days)</label>
-          <input class="field mono" id="iss-days" type="number" min="1" max="3650" value="365" />
-        </div>
-        <div class="field-group"><label>Bundle password</label>
-          <input class="field mono" id="iss-pw" type="password" minlength="12" placeholder="at least 12 characters" />
-        </div>
-      </div>
-      <div class="hint">The bundle uses the legacy PKCS#12 encoder so phones will import it, and that encoder barely stretches the password - it is the only thing protecting the key once the file leaves gpm. Use at least 12 characters, and send it separately from the file.</div>
-      <div class="field-group"><label>Subject alternative names</label>
-        <input class="field mono" id="iss-sans" placeholder="phone-01.example.com, ops@example.com, 10.1.2.3" />
-        <div class="hint">Optional, comma-separated. An IP becomes an IP SAN, a value with <span class="mono">@</span> an email SAN, anything else a DNS SAN.</div>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button class="btn primary" id="iss-btn" type="button">Download .p12</button>
-      </div>
-      <div class="hint">Signed with this CA's key and returned as a password-protected PKCS#12 bundle (RSA-2048, legacy encoding, for iOS/Android compatibility). The private key exists only in the download, so a lost bundle means issuing a new certificate - gpm records the subject, serial and validity, never the key. Save any change to the signing key above before issuing.</div>
-    </div>`}
-    ${isNew ? '' : issuedCertsCard(issued)}
-  </div></div>` + saveBar('clientcas', isNew, meta.addLabel);
+    ${anchorCard}
+    ${crlCard}
+    ${keyCard}
+  </div>`;
+  const actionStack = isNew ? '' : `<div class="stack">
+    ${issueCard()}
+    ${issuedCertsCard(issued)}
+  </div>`;
+
+  c.innerHTML = editorHead('clientcas', meta, isNew, name) + expiryBanner(issued)
+    + (isNew ? configStack : `<div class="form-grid">${configStack}${actionStack}</div>`)
+    + saveBar('clientcas', isNew, meta.addLabel);
 
   wireEditor('clientcas', 'client-cas', meta, isNew, name || o.name, () => {
     const caPEM = $('#ed-capem').value.trim();
-    if (!caPEM) { toast('CA required', 'Paste the CA certificate PEM or a ${FILE:...} placeholder.', 'err'); return null; }
-    const file = $('#ed-crlfile').value.trim();
-    const inline = $('#ed-crlpem').value.trim();
-    if (file && inline) { toast('One CRL source', 'Set the CRL file or the inline PEM, not both.', 'err'); return null; }
-    const keyFile = $('#ed-cakeyfile').value.trim();
-    const keyPEM = $('#ed-cakeypem').value.trim();
-    if (keyFile && keyPEM) { toast('One signing key', 'Set the CA key file or the inline key, not both.', 'err'); return null; }
-    if (keyPEM === '***') { toast('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} / ${ENV:...} placeholder or clear it.', 'err'); return null; }
+    if (!caPEM) { toast('CA required', 'Paste the CA certificate PEM, or switch to "Generate new CA".', 'err'); return null; }
+    // Each either/or pair resolves through resolvePair, so only one side is ever
+    // submitted AND merely toggling the picker to look at the other side is a
+    // no-op. Reading the selected control alone would silently wipe the stored
+    // value on the other side (revocation or issuance quietly switching off).
+    let file, inline, keyFile, keyPEM;
+    if (segValue('crl') === 'inline') {
+      [inline, file] = resolvePair($('#ed-crlpem').value.trim(), o.crlFile || '');
+    } else {
+      [file, inline] = resolvePair($('#ed-crlfile').value.trim(), o.crlPEM || '');
+    }
+    if (segValue('cakey') === 'inline') {
+      [keyPEM, keyFile] = resolvePair($('#ed-cakeypem').value.trim(), o.caKeyFile || '');
+    } else {
+      [keyFile, keyPEM] = resolvePair($('#ed-cakeyfile').value.trim(), o.caKeyPEM || '');
+    }
+    // Checked on the RESOLVED value, so the redaction guard still fires when the
+    // masked key is being carried over from the unselected side of the picker.
+    if (keyPEM === '***') { toast('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} placeholder or clear it.', 'err'); return null; }
     const body = { caPEM };
     if (file) body.crlFile = file;
     if (inline) body.crlPEM = inline;
@@ -2598,11 +2675,60 @@ async function clientCAEditor(c, name) {
     }
     return body;
   });
-  if (!isNew) {
+
+  // On the new-CA page the trust-anchor choice decides what the save bar means.
+  // With "Generate" selected there is no PEM to save, so #ed-save is greyed out
+  // with the reason and "Generate CA" is the action; with "Paste" selected the
+  // save bar is live again. Only #ed-save is gated - the Generate button lives
+  // inside its own panel, which is hidden whenever it is not the active choice.
+  // The same toggle hides the sections generate does not use (below), so no
+  // filled-in field is ever silently dropped. A follower has already had every
+  // write control gated and that gating is absolute, so this never re-enables
+  // anything there.
+  const readOnly = hasCapability('ha.readOnly');
+  const syncAnchorMode = (v) => {
+    // Revocation, the signing key and the expiry window are ordinary config
+    // fields that POST /generate does not accept, so they are hidden while
+    // generating rather than left on screen to be filled in and discarded. They
+    // come back with "Paste existing CA", and are always present when editing.
+    const generating = v === 'generate';
+    [$('#crl-card'), $('#cakey-card')].forEach((el) => { if (el) el.hidden = generating; });
+    if (readOnly) return;
+    gateControl($('#ed-save'), !generating, 'Use "Generate CA" to create this CA, or switch to "Paste existing CA".');
+  };
+  wireSegs((group, v) => { if (group === 'anchor') syncAnchorMode(v); });
+  if (isNew) {
+    syncAnchorMode(segValue('anchor'));
+    wireClientCAGenerate();
+  } else {
     wireClientCertIssue(name || o.name, hasKey);
     wireClientCertRenew(name || o.name, hasKey);
   }
   wireCloneButton('clientcas', o);
+}
+
+// wireClientCAGenerate wires the "Generate CA" button on the new-CA page. Unlike
+// issue and renew this is an ordinary config write, so it reports its commit like
+// any save and lands on the created object's edit page - where the issue card is
+// now live, because the CA it just made has a signing key.
+function wireClientCAGenerate() {
+  const btn = $('#gen-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const nm = $('#ed-name').value.trim();
+    if (!nm) { toast('Name required', 'Enter a name for the CA first.', 'err'); return; }
+    const days = parseInt($('#gen-days').value, 10);
+    if (isNaN(days) || days < 1 || days > 7300) { toast('Validity out of range', 'CA validity must be between 1 and 7300 days.', 'err'); return; }
+    const body = { validityDays: days };
+    const cn = $('#gen-cn').value.trim(); if (cn) body.commonName = cn;
+    const org = $('#gen-org').value.trim(); if (org) body.organization = org;
+    btn.disabled = true;
+    try {
+      const r = await api('/api/client-cas/' + encodeURIComponent(nm) + '/generate', { method: 'POST', body });
+      toastSaved(r.commit); refreshHeadSha();
+      location.hash = '#/clientcas/' + encodeURIComponent(nm);
+    } catch (e) { toastErr(e); btn.disabled = false; }
+  });
 }
 
 // P12_MIN_PASSWORD mirrors clientcert.MinPasswordLen. The server enforces it; this
@@ -2644,6 +2770,31 @@ function expiryBanner(issued) {
   </div>`;
 }
 
+// issueCard is the mint-a-certificate form. Every field carries at most one hint
+// line; the reasoning behind the password floor and the legacy bundle encoding
+// lives in docs/configuration.md.
+function issueCard() {
+  return `<div class="card form-section" id="issue-card"><p class="section-label">Issue client certificate</p>
+    <div class="field-group"><label>Common name</label>
+      <input class="field mono" id="iss-cn" maxlength="64" placeholder="phone-01" />
+      <div class="hint">The certificate subject, and the download filename.</div>
+    </div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Validity (days)</label>
+        <input class="field mono" id="iss-days" type="number" min="1" max="3650" value="365" /></div>
+      <div class="field-group"><label>Bundle password</label>
+        <input class="field mono" id="iss-pw" type="password" minlength="12" placeholder="at least 12 characters" /></div>
+    </div>
+    <div class="field-group"><label>Subject alternative names</label>
+      <input class="field mono" id="iss-sans" placeholder="phone-01.example.com, ops@example.com, 10.1.2.3" />
+      <div class="hint">Optional, comma-separated. An IP becomes an IP SAN, a value with <span class="mono">@</span> an email SAN, anything else DNS.</div>
+    </div>
+    <div class="field-group"><button class="btn primary" id="iss-btn" type="button">Download .p12</button>
+      <div class="hint">The private key exists only in the download - gpm records the subject, serial and validity, never the key.</div>
+    </div>
+  </div>`;
+}
+
 // issuedStatusChip colours the live expiry state. A superseded record is history:
 // its certificate is still valid on devices that have not re-imported, but it is
 // no longer the one to act on, so it gets a neutral chip and no warning colour.
@@ -2657,7 +2808,7 @@ function issuedStatusChip(r) {
 function issuedCertsCard(issued) {
   if (!issued.length) {
     return `<div class="card form-section"><p class="section-label">Issued certificates</p>
-      <div class="hint">None yet. Certificates issued above are listed here with their expiry, so you can see what is due for renewal.</div>
+      <div class="hint">None yet. Certificates issued above appear here with their expiry.</div>
     </div>`;
   }
   const rows = issued.map((r) => `<tr${r.supersededBy ? ' class="superseded"' : ''}>
@@ -2670,27 +2821,23 @@ function issuedCertsCard(issued) {
         : `<button class="btn sm ren-btn" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Renew</button>`}</td>
     </tr>
     ${r.supersededBy ? '' : `<tr class="ren-row" id="ren-${esc(r.serial)}" hidden><td colspan="5">
-      <div class="hint" style="margin-bottom:8px">Renewing issues a <b>new private key and certificate</b> for
-      <b>${esc(r.commonName)}</b> with the same subject and SANs. The download is the only copy - gpm keeps none.
-      It does <b>not</b> revoke the current certificate (revocation is CRL-based), so the old bundle keeps working
-      until it expires, and <b>every device must import the new .p12 by hand</b>.</div>
       <div class="inline-fields">
         <div class="field-group"><label>New bundle password</label>
           <input class="field mono ren-pw" type="password" minlength="12" placeholder="at least 12 characters" /></div>
         <div class="field-group"><label>Validity (days)</label>
           <input class="field mono ren-days" type="number" min="1" max="3650" value="365" /></div>
       </div>
-      <div style="display:flex;gap:10px;margin-top:8px">
+      <div style="display:flex;gap:10px;margin-top:10px">
         <button class="btn primary ren-go" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Confirm renewal</button>
         <button class="btn ghost ren-cancel" type="button" data-serial="${esc(r.serial)}">Cancel</button>
       </div>
+      <div class="hint" style="margin-top:8px">New key and serial, same subject. Does not revoke the current certificate - every device must import the new .p12.</div>
     </td></tr>`}`).join('');
   return `<div class="card form-section"><p class="section-label">Issued certificates</p>
     <table class="mini-table">
       <thead><tr><th>Common name</th><th>Serial</th><th>Expires</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="hint">Records of what this CA issued - subject, serial and validity only, never the key or the bundle. A superseded record stays listed because the certificate it names is still valid on any device that has not imported the replacement.</div>
   </div>`;
 }
 
@@ -2721,12 +2868,8 @@ function wireClientCertRenew(name, hasKey) {
       if (pw.length < P12_MIN_PASSWORD) { toast('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, 'err'); return; }
       const days = parseInt($('.ren-days', row).value, 10);
       if (isNaN(days) || days < 1 || days > 3650) { toast('Validity out of range', 'Validity must be between 1 and 3650 days.', 'err'); return; }
-      if (!confirm(`Renew "${b.dataset.cn}"?
-
-A NEW private key and certificate will be generated. `
-        + `The download is the only copy - it is never stored and cannot be recovered.
-
-`
+      if (!confirm(`Renew "${b.dataset.cn}"?\n\nA NEW private key and certificate will be generated. `
+        + `The download is the only copy - it is never stored and cannot be recovered.\n\n`
         + `The current certificate is NOT revoked and keeps working until it expires, and every device `
         + `using it must import the new .p12 by hand.`)) return;
       b.disabled = true;
@@ -2746,7 +2889,7 @@ A NEW private key and certificate will be generated. `
 function wireClientCertIssue(name, hasKey) {
   const card = $('#issue-card');
   if (!card) return;
-  gateControl(card, hasKey, 'No signing key configured on this client CA - set caKeyFile or caKeyPEM and save first.');
+  gateControl(card, hasKey, 'No signing key configured on this client CA - set one under "Signing key" and save first.');
   if (!hasKey) return;
   const btn = $('#iss-btn');
   btn.addEventListener('click', async () => {
