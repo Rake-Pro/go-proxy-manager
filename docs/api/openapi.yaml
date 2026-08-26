@@ -593,7 +593,9 @@ components:
       - name
       - caPEM
       description: Trust anchor for mTLS client-certificate verification. With a signing key it can also
-        issue client certificates (POST /api/client-cas/{name}/issue).
+        issue client certificates (POST /api/client-cas/{name}/issue). Either bring your own CA (paste
+        caPEM, optionally point caKeyFile at a key you placed in the certificate store) or have gpm
+        generate one (POST /api/client-cas/{name}/generate), which fills both fields in for you.
     ClientCertRequest:
       type: object
       properties:
@@ -629,6 +631,26 @@ components:
       - commonName
       - password
       description: One client-certificate issuance.
+    ClientCAGenerateRequest:
+      type: object
+      properties:
+        commonName:
+          type: string
+          maxLength: 64
+          description: Subject common name of the generated CA. Defaults to the ClientCA object name.
+        validityDays:
+          type: integer
+          minimum: 0
+          maximum: 7300
+          default: 3650
+          description: CA lifetime in days. Omit it, or send 0, for the ten-year default; any other
+            value must be 1-7300. A CA is a trust anchor pinned into device configuration, so rotating
+            it means re-provisioning every device - hence the long default.
+        organization:
+          type: string
+          maxLength: 64
+          description: Optional subject organization (O).
+      description: One CA generation. Every field is optional; an empty body is valid.
     ClientCertRenewRequest:
       type: object
       properties:
@@ -2633,6 +2655,65 @@ paths:
           description: The certificate was signed but could not be recorded (no certificate store is
             configured, or it is unwritable), so it was NOT issued and no bundle is returned. Also
             covers a signing key that is configured but unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+  /api/client-cas/{name}/generate:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Generate a new self-signed ClientCA
+      description: Creates a complete, issuance-capable client CA from nothing, so an mTLS setup needs
+        no openssl and no hand-placed key file. Generates an RSA-4096 self-signed CA (CA:TRUE with
+        pathlen:0, keyUsage certSign+cRLSign, random serial, small backdate), writes the private key
+        into the managed certificate store at "client-cas/{name}.key" with mode 0600, and saves the
+        ClientCA object with that path as caKeyFile and the certificate inline as caPEM. Unlike
+        POST /issue this DOES mutate config - it goes through the normal store save, so it commits and
+        appears in object history exactly like a PUT, and the response is the created object. The
+        private key is never returned and never logged. A key file another ClientCA still references is
+        never overwritten (409); an unreferenced one is reclaimed. A failed config save removes the key
+        it just wrote so the name can be retried. Deleting the ClientCA later does NOT delete the key
+        file - see docs/configuration.md.
+      tags:
+      - Client CAs
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientCAGenerateRequest'
+      responses:
+        '200':
+          description: The created ClientCA, exactly as PUT would return it. Carries the certificate and
+            the key path, never the key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientCA'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: A ClientCA of this name already exists, or a key file for it is already present in
+            the certificate store AND another ClientCA still names it as its caKeyFile (the error names
+            that CA). Nothing on disk changes. An UNREFERENCED key file is not a conflict - it is
+            reclaimed and replaced, since it can only be residue from a crash or from a deleted CA.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Key generation or the certificate-store write failed, or no certificate store is
+            configured. No ClientCA is created. Note a failure of the config-store save afterwards
+            surfaces as 400, per this API's convention for a rejected write, and the key just written is
+            removed so the name can be retried.
           content:
             application/json:
               schema:

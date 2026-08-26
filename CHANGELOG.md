@@ -7,6 +7,21 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Generate a client CA from the UI/API**: `POST /api/client-cas/{name}/generate`
+  ("Generate new CA" on the new-ClientCA page) creates a self-signed RSA-4096 CA
+  (`CA:TRUE, pathlen:0`, `certSign|cRLSign`, random serial), writes its private
+  key to `<certDir>/client-cas/{name}.key` at `0600`, and saves the ClientCA
+  object pointing at it - so a working mTLS setup needs no external tooling.
+  Optional `commonName` (defaults to the object name), `validityDays` (1-7300,
+  default 3650) and `organization`. Unlike issuance this is a config mutation: it
+  commits and appears in history like a `PUT`, and returns the created object. The
+  key is never returned or logged; an existing object name is a `409`, as is a key
+  file another ClientCA still references (the error names it), with nothing on
+  disk changed. An unreferenced key file at that path is reclaimed and logged - it
+  can only be residue from a crash or a deleted CA, and refusing it would burn the
+  name permanently. A failed config save removes the key it just wrote so the name
+  can be retried, and abandoned `.tmp-*` key files older than an hour are swept. Deleting a ClientCA does **not** delete its key file, the
+  same way a deleted Certificate keeps its ACME artifacts.
 - **Client-certificate issuance from a ClientCA**: an optional signing key
   (`caKeyFile`, cert-store-relative like `crlFile`, or an inline `caKeyPEM`
   secret) turns a verify-only trust anchor into an issuing CA, and
@@ -116,6 +131,24 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- **ClientCA screen rework.** The new/edit page was inconsistent - some fields
+  carried three-line explanations and some none, and each either/or pair (CRL
+  file vs inline, CA key file vs inline) rendered as two stacked controls the
+  operator had to know were mutually exclusive. Now: one field pattern
+  everywhere (label, control, at most one hint line), each either/or pair is a
+  single segmented picker over one control, and Revocation and Signing key are
+  collapsed sections showing a one-line summary of what is configured, opening
+  automatically when they hold values. The multi-sentence helper prose moved to
+  docs/configuration.md. Gating, the expiry banner, the superseded-row treatment
+  and follower read-only gating are unchanged, but the **save semantics of the
+  two either/or pairs did change**: a save now submits the selected side when it
+  holds a value and otherwise preserves whatever the unselected side already
+  held, so toggling a picker to look at the other option and saving is a
+  byte-for-byte no-op. Clearing the visible field still removes the value. On the
+  new-CA page the Revocation and Signing key sections are hidden while "Generate
+  new CA" is selected, since `POST /generate` does not accept them, and cloning a
+  ClientCA lands on "Paste existing CA" because the clone already carries a
+  certificate.
 - `auth.allowFrom` is now **refused at validation** in `oidc` and `forward-auth`
   mode, including when `mode` is unset and the referenced provider's `type`
   resolves to one of them (or cannot be resolved at all). Those gates have no
