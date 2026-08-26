@@ -8,14 +8,42 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
-// withGlobalSecurityHeaders installs m as the settings-level default security
-// headers for the duration of the test and restores the previous handle on
-// cleanup, so tests never leak state through the package-level pointer.
+// withGlobalSecurityHeaders installs m (a plain name->value map, all scope "all")
+// as the settings-level default security headers for the duration of the test
+// and restores the previous handle on cleanup, so tests never leak state through
+// the package-level pointer.
 func withGlobalSecurityHeaders(t *testing.T, m map[string]string) {
+	t.Helper()
+	withGlobalScopedSecurityHeaders(t, allScope(m))
+}
+
+// withGlobalScopedSecurityHeaders is withGlobalSecurityHeaders for a set that
+// carries explicit per-header scopes.
+func withGlobalScopedSecurityHeaders(t *testing.T, m map[string]model.SecurityHeaderValue) {
 	t.Helper()
 	prev := globalSecurityHeaders.Load()
 	SetSecurityHeaders(m)
 	t.Cleanup(func() { globalSecurityHeaders.Store(prev) })
+}
+
+// allScope lifts a plain name->value map to the scoped model type at the default
+// scope "all" (the legacy shape).
+func allScope(m map[string]string) map[string]model.SecurityHeaderValue {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]model.SecurityHeaderValue, len(m))
+	for k, v := range m {
+		out[k] = model.SecurityHeaderValue{Value: v}
+	}
+	return out
+}
+
+// scopedFor compiles a plain name->value map (all scope "all") into the split
+// header set the dispatch writer takes, for the handler-level tests that install
+// the writer directly.
+func scopedFor(m map[string]string) *scopedHeaders {
+	return partitionSecurityHeaders(compileSecurityHeaders(allScope(m)))
 }
 
 // defaultSecHeaders is a representative settings-level set used across the table.
@@ -153,7 +181,7 @@ func TestSecurityHeadersOnAuthGateRefusal(t *testing.T) {
 // tests above prove the writer is actually installed in the router.
 func TestSecurityHeadersOnGateHandlers(t *testing.T) {
 	withGlobalErrorPages(t, nil)
-	hdrs := compileSecurityHeaders(defaultSecHeaders)
+	hdrs := scopedFor(defaultSecHeaders)
 
 	t.Run("401 forward-auth refusal", func(t *testing.T) {
 		gate := forwardAuthGate(trustedFA(), nil, nil, "m", nil, okNext(t))
@@ -218,7 +246,7 @@ func TestSecurityHeadersPerHostOverride(t *testing.T) {
 			ObjectMeta:      model.ObjectMeta{Name: "over"},
 			Domains:         []string{"over.example"},
 			Upstream:        model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9},
-			SecurityHeaders: map[string]string{"X-Frame-Options": "SAMEORIGIN"},
+			SecurityHeaders: map[string]model.SecurityHeaderValue{"X-Frame-Options": {Value: "SAMEORIGIN"}},
 		},
 	}}
 	rt, err := buildRouter(cfg, "", nil)
@@ -334,9 +362,14 @@ func TestSecurityHeadersHSTSIndependent(t *testing.T) {
 	assertHasAll(t, rec.Header(), defaultSecHeaders)
 
 	// The compiled host set must never carry HSTS (the map rejects it, and compile
-	// drops it defensively).
-	if v := rt.hosts["app.example"].securityHeaders.Get("Strict-Transport-Security"); v != "" {
-		t.Fatalf("securityHeaders carried an HSTS header %q; hsts owns that header", v)
+	// drops it defensively) - in neither scope subset.
+	if hs := rt.hosts["app.example"].securityHeaders; hs != nil {
+		if v := hs.generated.Get("Strict-Transport-Security"); v != "" {
+			t.Fatalf("generated securityHeaders carried an HSTS header %q; hsts owns that header", v)
+		}
+		if v := hs.proxied.Get("Strict-Transport-Security"); v != "" {
+			t.Fatalf("proxied securityHeaders carried an HSTS header %q; hsts owns that header", v)
+		}
 	}
 }
 

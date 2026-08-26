@@ -168,6 +168,12 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 			})
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// An actual upstream response reached us (the ErrorHandler path, which
+			// generates the 502/504, never runs ModifyResponse) - mark it so the
+			// dispatch writer injects the proxied header subset, not the generated one.
+			if resp.Request != nil {
+				markProxiedResponse(resp.Request.Context())
+			}
 			rewriteUpstreamRedirect(resp)
 			interceptUpstreamResponse(resp, ep, hostName)
 			return nil
@@ -303,11 +309,13 @@ type hostHandler struct {
 
 	// securityHeaders is this host's effective response-header set (the
 	// settings-level default merged with the host's own securityHeaders
-	// override), canonicalized. nil when neither configures anything. Injected
-	// set-if-absent at the router dispatch layer (see securityHeaderWriter), so
-	// it reaches every gpm-generated denial/redirect/error page for this host
-	// without clobbering an upstream's own security headers.
-	securityHeaders http.Header
+	// override), canonicalized and split by scope (generated vs proxied). nil when
+	// neither configures anything. Injected set-if-absent at the router dispatch
+	// layer (see securityHeaderWriter), so the generated subset reaches every
+	// gpm-generated denial/redirect/error page for this host, and the proxied
+	// subset reaches proxied upstream responses, without clobbering an upstream's
+	// own security headers.
+	securityHeaders *scopedHeaders
 
 	// identityHeaders are the provider-configured identity headers this host
 	// asserts; trustedNets are the peers this host trusts to set them. Both are

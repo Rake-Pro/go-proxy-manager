@@ -589,24 +589,29 @@ func TestSettingsErrorPagesValidate(t *testing.T) {
 }
 
 func TestValidateSecurityHeaders(t *testing.T) {
+	sh := func(v string) SecurityHeaderValue { return SecurityHeaderValue{Value: v} }
 	tests := []struct {
 		name    string
-		m       map[string]string
+		m       map[string]SecurityHeaderValue
 		wantErr string
 	}{
 		{name: "empty is valid"},
 		{name: "nil is valid", m: nil},
 		{name: "recommended set is valid", m: RecommendedSecurityHeaders},
-		{name: "simple set is valid", m: map[string]string{"X-Content-Type-Options": "nosniff"}},
-		{name: "value with tab is valid", m: map[string]string{"X-Foo": "a\tb"}},
-		{name: "invalid name (space)", m: map[string]string{"X Frame": "DENY"}, wantErr: "valid header name"},
-		{name: "invalid name (colon)", m: map[string]string{"X:Frame": "DENY"}, wantErr: "valid header name"},
-		{name: "CRLF in value rejected", m: map[string]string{"X-Foo": "bar\r\nSet-Cookie: x=1"}, wantErr: "invalid character"},
-		{name: "bare LF in value rejected", m: map[string]string{"X-Foo": "bar\nbaz"}, wantErr: "invalid character"},
-		{name: "HSTS key rejected", m: map[string]string{"Strict-Transport-Security": "max-age=1"}, wantErr: "hsts"},
-		{name: "HSTS key rejected case-insensitively", m: map[string]string{"strict-transport-security": "max-age=1"}, wantErr: "hsts"},
-		{name: "hop-by-hop Connection rejected", m: map[string]string{"Connection": "close"}, wantErr: "hop-by-hop"},
-		{name: "hop-by-hop Transfer-Encoding rejected", m: map[string]string{"transfer-encoding": "chunked"}, wantErr: "hop-by-hop"},
+		{name: "simple set is valid", m: map[string]SecurityHeaderValue{"X-Content-Type-Options": sh("nosniff")}},
+		{name: "value with tab is valid", m: map[string]SecurityHeaderValue{"X-Foo": sh("a\tb")}},
+		{name: "explicit all scope is valid", m: map[string]SecurityHeaderValue{"X-Foo": {Value: "1", Scope: SecurityScopeAll}}},
+		{name: "generated-only scope is valid", m: map[string]SecurityHeaderValue{"X-Foo": {Value: "1", Scope: SecurityScopeGenerated}}},
+		{name: "proxied-only scope is valid", m: map[string]SecurityHeaderValue{"X-Foo": {Value: "1", Scope: SecurityScopeProxied}}},
+		{name: "unknown scope rejected", m: map[string]SecurityHeaderValue{"X-Foo": {Value: "1", Scope: "everywhere"}}, wantErr: "unknown scope"},
+		{name: "invalid name (space)", m: map[string]SecurityHeaderValue{"X Frame": sh("DENY")}, wantErr: "valid header name"},
+		{name: "invalid name (colon)", m: map[string]SecurityHeaderValue{"X:Frame": sh("DENY")}, wantErr: "valid header name"},
+		{name: "CRLF in value rejected", m: map[string]SecurityHeaderValue{"X-Foo": sh("bar\r\nSet-Cookie: x=1")}, wantErr: "invalid character"},
+		{name: "bare LF in value rejected", m: map[string]SecurityHeaderValue{"X-Foo": sh("bar\nbaz")}, wantErr: "invalid character"},
+		{name: "HSTS key rejected", m: map[string]SecurityHeaderValue{"Strict-Transport-Security": sh("max-age=1")}, wantErr: "hsts"},
+		{name: "HSTS key rejected case-insensitively", m: map[string]SecurityHeaderValue{"strict-transport-security": sh("max-age=1")}, wantErr: "hsts"},
+		{name: "hop-by-hop Connection rejected", m: map[string]SecurityHeaderValue{"Connection": sh("close")}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Transfer-Encoding rejected", m: map[string]SecurityHeaderValue{"transfer-encoding": sh("chunked")}, wantErr: "hop-by-hop"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -622,9 +627,15 @@ func TestValidateSecurityHeaders(t *testing.T) {
 }
 
 // Case-insensitive de-duplication cannot be expressed with a Go map literal (two
-// keys differing only in case collapse to one), so it is checked on its own.
+// keys differing only in case collapse to one), so it is checked on its own. It
+// doubles as the duplicate-name-across-scopes guard: expressing the same header
+// at two scopes requires two case-variant keys, which this rejects - so a header
+// is declared exactly once, at one scope.
 func TestValidateSecurityHeadersRejectsCaseInsensitiveDuplicates(t *testing.T) {
-	err := validateSecurityHeaders(map[string]string{"X-Frame-Options": "DENY", "x-frame-options": "SAMEORIGIN"})
+	err := validateSecurityHeaders(map[string]SecurityHeaderValue{
+		"X-Frame-Options": {Value: "DENY", Scope: SecurityScopeGenerated},
+		"x-frame-options": {Value: "SAMEORIGIN", Scope: SecurityScopeProxied},
+	})
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected a case-insensitive duplicate error, got: %v", err)
 	}
@@ -632,7 +643,7 @@ func TestValidateSecurityHeadersRejectsCaseInsensitiveDuplicates(t *testing.T) {
 
 func TestSettingsSecurityHeadersValidate(t *testing.T) {
 	s := DefaultSettings()
-	s.SecurityHeaders = map[string]string{"Strict-Transport-Security": "max-age=1"}
+	s.SecurityHeaders = map[string]SecurityHeaderValue{"Strict-Transport-Security": {Value: "max-age=1"}}
 	if err := s.Validate(); err == nil {
 		t.Fatal("settings.securityHeaders must reject the HSTS key")
 	}
@@ -644,13 +655,13 @@ func TestSettingsSecurityHeadersValidate(t *testing.T) {
 
 func TestProxyHostSecurityHeadersValidate(t *testing.T) {
 	bad := proxyHost("app", func(h *ProxyHost) {
-		h.SecurityHeaders = map[string]string{"X-Foo": "bad\r\nInjected: 1"}
+		h.SecurityHeaders = map[string]SecurityHeaderValue{"X-Foo": {Value: "bad\r\nInjected: 1"}}
 	})
 	if err := bad.Validate(); err == nil {
 		t.Fatal("proxy host securityHeaders override must be validated")
 	}
 	good := proxyHost("app", func(h *ProxyHost) {
-		h.SecurityHeaders = map[string]string{"X-Frame-Options": "DENY"}
+		h.SecurityHeaders = map[string]SecurityHeaderValue{"X-Frame-Options": {Value: "DENY", Scope: SecurityScopeGenerated}}
 	})
 	if err := good.Validate(); err != nil {
 		t.Fatalf("valid securityHeaders override should pass, got %v", err)
