@@ -515,6 +515,34 @@ The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
 
+**Refusal rendering** (`internal/dataplane/errorpages.go`). Every tier that
+refuses a request writes its response through one seam, `serveErrorPage` - and,
+for the auth tier, the `refuse` wrapper over it - rather than calling
+`http.Error` directly. The seam resolves the host's own `errorPages` override
+first, then the settings-level pages, and renders the matching (or `default`)
+`html/template`; with nothing configured it calls the tier's own writer, so an
+unconfigured deployment's output stays byte-identical to what it was before
+error pages existed. That is why the compiled pages are threaded through
+`buildChain` into every gate constructor instead of being read from a global at
+write time: a host override is per-chain state, and the settings-level set is
+the fallback behind it.
+
+The auth gates joined that seam rather than keeping their own bare strings, so
+a `401` from forward-auth, a `403` from a client certificate, an
+`auth-request` `502`, an OIDC callback failure and the `503` a middleware that
+would not compile serves are all as brandable as an access-list denial. Two
+categories stay out on purpose. A **redirect into a sign-in flow** is not an
+error - the OIDC `302` to the IdP and the `auth-request` `302` into the outpost
+carry the user forward, and replacing them with a page would break login. And a
+response **proxied from the identity provider** is the IdP's to own: in
+`auth-request` mode gpm passes the outpost's sign-in, callback and sign-out
+endpoints through verbatim, so the IdP's response always wins there. Error
+pages apply exactly where gpm generates the body itself. Identity-header
+stripping is unaffected - it happens on the refusal path as before, and the
+render reads only the same template context an access-list denial gets
+(status, status text, host name, request id), so a refusal cannot leak request
+data that tier was not already exposing.
+
 The **bouncer** middleware (`internal/dataplane/bouncer.go`) is a WAF/CrowdSec
 **deny hook, not a bundled WAF**: gpm ships no rules, no signatures and no
 detection engine, it asks an operator-run bouncer whether the client IP is

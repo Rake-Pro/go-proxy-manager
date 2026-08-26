@@ -799,14 +799,43 @@ per-host list of actions (`created` / `updated` / `unchanged` / `deleted` /
 
 ### ErrorPagesConfig (`settings.errorPages` / `proxyHost.errorPages`)
 
+> In the admin UI these live in their own **Error pages** section (not under
+> Settings); a host's override stays in that host's editor. The config schema is
+> unchanged either way - the section edits `settings.errorPages`.
+
 Custom HTML pages for errors **gpm itself generates**: upstream unreachable
 (502 connect/handshake failure, 504 a timeout awaiting the upstream), access
 denied (403 from an access list, a guard middleware, or a geo rule), rate
-limited (429), a dangling middleware/access-list reference (503), and a dead
-host. The upstream's own error response (its own 500, its own 404 page) is left
+limited (429), a dangling middleware/access-list reference (503), a dead
+host, and every terminal refusal an [auth middleware](#middleware-configmiddlewares)
+writes. The upstream's own error response (its own 500, its own 404 page) is left
 untouched **unless** its status is also listed in `interceptUpstream`. A status
 with no matching template — and unconfigured settings/host entirely — falls
 back to gpm's historical plain-text output, unchanged from before this feature.
+
+**Auth-middleware refusals** covered, by gate:
+
+| Gate | Statuses |
+|------|----------|
+| `forward-auth` | `401` (untrusted peer or no identity asserted), `403` (role not permitted) |
+| `client-cert` | `401` (no handshake-verified certificate), `403` (subject unmapped or role not permitted) |
+| `auth-request` | `403` (auth server said forbidden), `502` (auth server unreachable or an unexpected status) |
+| `oidc` | `403` (role not permitted), `401` (IdP returned an error, or the code exchange failed), `400` (invalid login state), `404` (request Host is not a domain of this host), `502`/`500` (discovery or state generation failed) |
+| any auth middleware that cannot be compiled | `503` ("authentication not available") |
+
+The per-host override applies to these exactly as it does to an access-list
+denial: the host's own `errorPages` is resolved first, then the settings-level
+pages, then the plain-text default.
+
+Two things are deliberately **not** error pages:
+
+- **Redirects into a sign-in flow.** The OIDC gate's `302` to the IdP and the
+  `auth-request` gate's `302` into the outpost sign-in are flows, not errors.
+- **Anything the identity provider itself served.** In `auth-request` mode the
+  IdP owns its sign-in, callback and sign-out endpoints, and gpm proxies those
+  responses verbatim. **The IdP response always wins there** - gpm never
+  overwrites it with an error page, because that page would replace a working
+  login screen.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -871,6 +900,16 @@ HTTPS responses for the host (never over plain HTTP).
 
 **ClientAuth** (`tls.clientAuth`) opts the host into mTLS: client certificates
 are verified at the TLS handshake against a [ClientCA](#clientca-configclient-cas).
+It is editable from the host editor's TLS section ("Client certificates (mTLS)"):
+a toggle, a Client CA picker and the mode. Turning it **on** is greyed out with
+the reason until its preconditions hold - `forceSSL` on, and at least one enabled
+ClientCA to point at - while turning it **off** is always possible, so a host
+whose stored combination is already invalid is never trapped. Turning `forceSSL`
+off under a live mTLS host is refused rather than silently dropping the
+certificate requirement. A `caRef` the CA list does not contain is shown flagged
+and kept as-is on save rather than the picker quietly retargeting the trust
+anchor, and if the CA list cannot be loaded at all the page says so and leaves
+`caRef`/`mode` untouched instead of guessing.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|

@@ -22,16 +22,23 @@ import (
 //
 // domains are the gated host's configured domains; the OIDC gate validates the
 // request Host against them before caching a per-Host relying-party client.
-func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, domains []string, clientIP func(*http.Request) net.IP, next http.Handler) http.Handler {
+//
+// ep is the host's resolved error pages, threaded in exactly as the access-list,
+// guard, bouncer and rate-limit tiers already thread it (see buildChain). Every
+// TERMINAL refusal these gates write themselves - 401, 403, and the 4xx/5xx an
+// auth backend failure produces - renders through it, falling back to the same
+// plain-text body as before when nothing is configured. Redirects into a sign-in
+// flow and responses proxied from the IdP are deliberately untouched.
+func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, domains []string, clientIP func(*http.Request) net.IP, ep *compiledErrorPages, next http.Handler) http.Handler {
 	// client-cert takes its identity from the TLS handshake, so it is handled
 	// before the identity-provider lookup - it is the one mode with no IdP.
 	if mw.Auth.Mode == model.AuthModeClientCert {
-		return clientCertGate(*mw.Auth, clientIP, allowFromNets(mw.Auth.AllowFrom), next)
+		return clientCertGate(*mw.Auth, clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, ep, next)
 	}
 	idpName := mw.Auth.IdentityProvider
 	idp, ok := reg.idps[idpName]
 	if !ok {
-		return failClosed(hostName, "auth references unknown identity provider "+idpName)
+		return failClosed(hostName, "auth references unknown identity provider "+idpName, ep)
 	}
 
 	mode := mw.Auth.Mode
@@ -42,47 +49,51 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 	switch mode {
 	case model.AuthModeForwardAuth:
 		if idp.ForwardAuth == nil {
-			return failClosed(hostName, "forward-auth mode requires a forward-auth identity provider")
+			return failClosed(hostName, "forward-auth mode requires a forward-auth identity provider", ep)
 		}
 		fa := auth.CompileForwardAuth(*idp.ForwardAuth, idpName)
-		return forwardAuthGate(fa, idp.RoleMapping, mw.Auth.RequiredRoles, next)
+		return forwardAuthGate(fa, idp.RoleMapping, mw.Auth.RequiredRoles, hostName, ep, next)
 	case model.AuthModeAuthRequest:
 		if idp.AuthRequest == nil {
-			return failClosed(hostName, "auth-request mode requires an auth-request identity provider")
+			return failClosed(hostName, "auth-request mode requires an auth-request identity provider", ep)
 		}
 		arp, err := compileAuthRequest(*idp.AuthRequest)
 		if err != nil {
-			return failClosed(hostName, "auth-request: "+err.Error())
+			return failClosed(hostName, "auth-request: "+err.Error(), ep)
 		}
-		return arp.handler(clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, next)
+		return arp.handler(clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, ep, next)
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {
-			return failClosed(hostName, "oidc mode requires an oidc identity provider")
+			return failClosed(hostName, "oidc mode requires an oidc identity provider", ep)
 		}
 		gate, err := compileDataOIDC(idp, mw.Auth.RequiredRoles, hostName, domains)
 		if err != nil {
-			return failClosed(hostName, "oidc: "+err.Error())
+			return failClosed(hostName, "oidc: "+err.Error(), ep)
 		}
+		gate.ep = ep
 		return gate.handler(next)
 	default:
-		return failClosed(hostName, "unknown auth mode "+mode)
+		return failClosed(hostName, "unknown auth mode "+mode, ep)
 	}
 }
 
-// forwardAuthGate enforces a trusted forward-auth identity and role policy.
-func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []string, next http.Handler) http.Handler {
+// forwardAuthGate enforces a trusted forward-auth identity and role policy. host
+// and ep resolve the custom error page for either refusal (see refuse).
+func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []string, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := fa.Identity(r)
 		if !ok {
 			// Either the peer is untrusted or no identity was asserted. Strip any
 			// forged identity headers before refusing so nothing leaks upstream.
+			// The strip stays AHEAD of the refusal: rendering an error page must
+			// not change what this request carries onward.
 			fa.Strip(r)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
+			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
 			return
 		}
 		role := auth.MapRole(id.Groups, rm)
 		if !roleAllowed(role, required) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			refuse(w, http.StatusForbidden, ep, host, "forbidden")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -107,7 +118,7 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 // request necessarily reaches the upstream with no client-certificate identity
 // headers, because those are set only from a handshake-verified certificate (see
 // the identity-passthrough strip in router.go), and it has none.
-func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, next http.Handler) http.Handler {
+func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	roles := spec.ClientCertRoles
 	required := spec.RequiredRoles
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +131,7 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			}
 		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-			http.Error(w, "client certificate required", http.StatusUnauthorized)
+			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
 			return
 		}
 		if len(roles) == 0 {
@@ -133,7 +144,7 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			role, ok = roles[subj.CommonName]
 		}
 		if !ok || !roleAllowed(auth.Role(role), required) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			refuse(w, http.StatusForbidden, ep, host, "forbidden")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -170,9 +181,9 @@ func roleAllowed(role auth.Role, required []string) bool {
 	return false
 }
 
-func failClosed(host, msg string) http.Handler {
+func failClosed(host, msg string, ep *compiledErrorPages) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		log.Warn().Str("host", host).Msg(msg)
-		http.Error(w, "authentication not available", http.StatusServiceUnavailable)
+		refuse(w, http.StatusServiceUnavailable, ep, host, "authentication not available")
 	})
 }

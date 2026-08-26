@@ -65,7 +65,7 @@ func TestClientCertGateAllowFrom(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			clientCertGate(tc.spec, peerIP, allowFromNets(tc.spec.AllowFrom), ok).ServeHTTP(w, tc.req)
+			clientCertGate(tc.spec, peerIP, allowFromNets(tc.spec.AllowFrom), "m", nil, ok).ServeHTTP(w, tc.req)
 			if w.Code != tc.want {
 				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}
@@ -99,7 +99,7 @@ func TestClientCertGateAllowFromTrustedProxy(t *testing.T) {
 			r.RemoteAddr = tc.remote
 			r.Header.Set("X-Forwarded-For", tc.xff)
 			w := httptest.NewRecorder()
-			clientCertGate(spec, resolve, nets, ok).ServeHTTP(w, r)
+			clientCertGate(spec, resolve, nets, "m", nil, ok).ServeHTTP(w, r)
 			if w.Code != tc.want {
 				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}
@@ -125,7 +125,7 @@ func TestClientCertGateAllowFromCarriesNoIdentity(t *testing.T) {
 	// No r.TLS peer certificate: an exempt, certless client.
 	w := httptest.NewRecorder()
 	spec := model.AuthMiddleware{Mode: model.AuthModeClientCert, AllowFrom: []string{"10.0.0.0/8"}}
-	gate := clientCertGate(spec, peerIP, allowFromNets(spec.AllowFrom), http.HandlerFunc(rt.serveHTTPS))
+	gate := clientCertGate(spec, peerIP, allowFromNets(spec.AllowFrom), "m", nil, http.HandlerFunc(rt.serveHTTPS))
 	gate.ServeHTTP(w, r)
 
 	for _, h := range []string{
@@ -151,7 +151,7 @@ func TestClientCertGateAllowFromWiredFromMiddleware(t *testing.T) {
 		},
 	}
 	h := authMiddlewareHandler(mw, buildRegistry(model.Config{}), "m", []string{"m.example"},
-		clientIPResolver(nil),
+		clientIPResolver(nil), nil,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
 	for _, tc := range []struct {
