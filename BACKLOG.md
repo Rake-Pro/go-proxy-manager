@@ -79,15 +79,20 @@ All findings from that review are remediated in the same change (see CHANGELOG
 All three are **pre-existing** and predate routing auth refusals through the
 error-page system; none is a regression from that change.
 
-- [ ] **A rendered error page carries no `X-Content-Type-Options: nosniff`.**
+- [x] **A rendered error page carries no `X-Content-Type-Options: nosniff`.**
   `serveErrorPage` sets only `Content-Type` and `Content-Length`, while the
   plain-text fallback goes through `http.Error`, which sets `nosniff` itself. So
   configuring an error page silently *drops* a header the default response has -
   on every tier (access list, guard, bouncer, rate limit, proxy, parked host and
   now auth), not just auth. The bodies are `html/template`-escaped so this is
   defence in depth rather than a live hole, but the asymmetry is backwards.
-  Fix is one `w.Header().Set` in `serveErrorPage`; it changes the response of
-  every configured page, so it wants its own change and a CHANGELOG line.
+  *(Addressed by the configurable `securityHeaders` feature: setting
+  `securityHeaders: {X-Content-Type-Options: nosniff, ...}` restores `nosniff`
+  (and the rest of the recommended set) on rendered error pages and every other
+  gpm-generated response, injected set-if-absent at the dispatch layer above the
+  error-page renderer. It is opt-in, so an operator who wants the header back
+  configures it once at the settings level rather than gpm changing the default
+  body of every configured page. See CHANGELOG / `docs/configuration.md`.)*
 - [ ] **A broken template passes validation, survives reload, and then blocks the
   next restart.** `settings.errorPages` is not compiled at write time, so a
   syntactically-broken template commits cleanly. The reload path is fail-safe

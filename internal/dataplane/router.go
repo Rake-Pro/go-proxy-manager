@@ -42,6 +42,13 @@ type router struct {
 	// nets) for logging. Identity-header stripping is host-scoped on each
 	// hostHandler (see hostHandler.stripUntrustedIdentity).
 	clientIP func(*http.Request) net.IP
+
+	// securityHeaders is the settings-level default response-header set, applied
+	// set-if-absent to responses that have no proxy host to carry a per-host
+	// merge: the no-such-host 404, the mTLS 421, and redirect/parked hosts. A
+	// proxy host uses its own merged hostHandler.securityHeaders instead. nil
+	// when settings.securityHeaders is empty.
+	securityHeaders http.Header
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -81,6 +88,9 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		tlsConfigs: map[string]*tls.Config{},
 		clientAuth: map[string]*clientAuthReq{},
 		clientIP:   reg.clientIP,
+		// Settings-level default headers for host-less responses (404/421) and
+		// redirect/parked hosts. A proxy host composes its own merge below.
+		securityHeaders: currentSecurityHeaders(),
 	}
 	// pinTLS records the per-host TLS config (min-version pin and/or mTLS) for each
 	// domain. It composes both dimensions into one config, since a host with both a
@@ -143,6 +153,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		}
 		hh.hsts = hstsHeader(h.TLS.HSTS)
 		hh.robots = robotsHeader(h.RobotsNoIndex)
+		hh.securityHeaders = mergedSecurityHeaders(h.SecurityHeaders)
 		for _, d := range h.Domains {
 			rt.hosts[hostKey(d)] = hh
 		}
@@ -411,6 +422,16 @@ func (rt *router) tlsConfigForSNI(serverName string) *tls.Config {
 	return rt.tlsConfigs[hostKey(serverName)] // nil if not pinned
 }
 
+// securityHeadersFor returns the response-header set to inject for a request
+// keyed by host: a proxy host's own merged set, else the settings-level default
+// (used for redirect/parked hosts and the no-such-host / misdirected responses).
+func (rt *router) securityHeadersFor(name string) http.Header {
+	if hh, ok := rt.hosts[name]; ok {
+		return hh.securityHeaders
+	}
+	return rt.securityHeaders
+}
+
 // lookup returns the proxy-host handler for the request's Host (port stripped),
 // if any. Redirect and parked hosts are dispatched separately in serveHTTP(S).
 func (rt *router) lookup(hostHeader string) (*hostHandler, bool) {
@@ -496,6 +517,13 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 // proxy hosts run the middleware chain; redirect and parked hosts serve directly.
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	name := hostKey(r.Host)
+	// Configured security headers are injected set-if-absent at this dispatch
+	// layer - the same response layer HSTS rides - so they reach every response
+	// gpm generates below (the mTLS 421, the 400 bad path, the 404 no-such-host,
+	// every auth-gate denial and sign-in redirect in the chain, redirect/parked
+	// hosts) regardless of the auth outcome, while a proxied upstream response
+	// keeps its own headers untouched.
+	w = withSecurityHeaders(w, rt.securityHeadersFor(name))
 	// mTLS is enforced per REQUEST here, not only by the SNI-selected tls.Config:
 	// reject any request whose Host targets an mTLS host unless the handshake used
 	// that host's own config (SNI==Host) and, for require mode, actually verified a
@@ -513,14 +541,10 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		if hh.certID != nil {
 			hh.certID.apply(r)
 		}
-		if hh.hsts != "" {
-			// Set before serving so it rides the upstream's response; only on HTTPS
-			// (browsers ignore HSTS received over plain HTTP anyway).
-			w.Header().Set("Strict-Transport-Security", hh.hsts)
-		}
-		if hh.robots != "" {
-			w.Header().Set("X-Robots-Tag", hh.robots)
-		}
+		// HSTS (HTTPS-only) and X-Robots-Tag ride the dispatch writer, emitted at
+		// the FINAL WriteHeader, so an upstream 1xx interim response's header-map
+		// clear (httputil.ReverseProxy's Got1xxResponse) cannot drop them.
+		w = withHostResponseHeaders(w, hh.hsts, hh.robots)
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return
@@ -540,6 +564,10 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 // redirected to https, others are served in the clear.
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	name := hostKey(r.Host)
+	// Same set-if-absent injection as serveHTTPS (HSTS aside, which is HTTPS-only):
+	// gpm-generated plaintext responses (a non-forceSSL host's denial, a 400/404)
+	// carry the configured headers too.
+	w = withSecurityHeaders(w, rt.securityHeadersFor(name))
 	// An mTLS-required host must never be served in the clear: redirect to HTTPS so
 	// the client re-arrives on the TLS listener, where serveHTTPS enforces the
 	// per-request client-cert gate. Config validation forces forceSSL:true for any
@@ -559,9 +587,9 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hh.stripUntrustedIdentity(r)
-		if hh.robots != "" {
-			w.Header().Set("X-Robots-Tag", hh.robots)
-		}
+		// X-Robots-Tag rides the dispatch writer for the same 1xx-survival reason
+		// as HSTS on the HTTPS path; HSTS itself is never emitted over plain HTTP.
+		w = withHostResponseHeaders(w, "", hh.robots)
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return

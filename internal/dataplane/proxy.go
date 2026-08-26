@@ -301,6 +301,14 @@ type hostHandler struct {
 	// when this host should not discourage indexing. Emitted on HTTP and HTTPS.
 	robots string
 
+	// securityHeaders is this host's effective response-header set (the
+	// settings-level default merged with the host's own securityHeaders
+	// override), canonicalized. nil when neither configures anything. Injected
+	// set-if-absent at the router dispatch layer (see securityHeaderWriter), so
+	// it reaches every gpm-generated denial/redirect/error page for this host
+	// without clobbering an upstream's own security headers.
+	securityHeaders http.Header
+
 	// identityHeaders are the provider-configured identity headers this host
 	// asserts; trustedNets are the peers this host trusts to set them. Both are
 	// scoped to this host (see hostIdentityTrust); the baseline denylist is always
