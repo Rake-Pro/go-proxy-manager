@@ -463,7 +463,7 @@ func TestClientCertGateMiddleware(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			clientCertGate(tc.spec, peerIP, nil, ok).ServeHTTP(w, tc.req)
+			clientCertGate(tc.spec, peerIP, nil, "m", nil, ok).ServeHTTP(w, tc.req)
 			if w.Code != tc.want {
 				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}
@@ -480,7 +480,7 @@ func TestClientCertGateWiredFromMiddleware(t *testing.T) {
 		Auth:       &model.AuthMiddleware{Mode: model.AuthModeClientCert},
 	}
 	h := authMiddlewareHandler(mw, buildRegistry(model.Config{}), "m", []string{"m.example"},
-		func(*http.Request) net.IP { return nil },
+		func(*http.Request) net.IP { return nil }, nil,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "https://m.example/", nil))

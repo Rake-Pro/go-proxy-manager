@@ -409,6 +409,11 @@ type dataOIDC struct {
 	// IdP discovery it triggers can be driven by attacker-chosen names.
 	domains map[string]struct{}
 
+	// ep is the gated host's resolved error pages, used for every TERMINAL
+	// refusal this gate writes (403, and the callback's 4xx/5xx). Redirects into
+	// the IdP and back are flows, not errors, and never render a page.
+	ep *compiledErrorPages
+
 	mu      sync.Mutex
 	clients map[string]*oidcClientEntry // discovery result cached per configured domain
 }
@@ -530,7 +535,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		if _, ok := d.domains[hostKey(r.Host)]; !ok {
 			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).
 				Msg("oidc: request host is not a configured domain of this host")
-			http.Error(w, "no such host", http.StatusNotFound)
+			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}
 		if r.URL.Path == oidcCallbackPath {
@@ -541,7 +546,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		if readSignedCookie(r, oidcSessionCookie, macLabelSSOSession, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
 			sess.Iat >= ssoRevokedAt() {
 			if !d.authorized(sess.Groups) {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
 				return
 			}
 			injectSSOIdentity(r, sess)
@@ -557,16 +562,16 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, errOIDCHostNotConfigured) {
 			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).Msg("oidc: refusing login for an unconfigured request host")
-			http.Error(w, "no such host", http.StatusNotFound)
+			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}
 		log.Warn().Str("host", d.hostName).Err(err).Msg("oidc discovery failed")
-		http.Error(w, "authentication unavailable", http.StatusBadGateway)
+		refuse(w, http.StatusBadGateway, d.ep, d.hostName, "authentication unavailable")
 		return
 	}
 	state, err := oidc.NewState()
 	if err != nil {
-		http.Error(w, "authentication unavailable", http.StatusInternalServerError)
+		refuse(w, http.StatusInternalServerError, d.ep, d.hostName, "authentication unavailable")
 		return
 	}
 	nonce, _ := oidc.NewNonce()
@@ -582,7 +587,7 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
-		http.Error(w, "login error: "+e, http.StatusUnauthorized)
+		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "login error: "+e)
 		return
 	}
 	code, state := q.Get("code"), q.Get("state")
@@ -591,26 +596,26 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	clearSignedCookie(w, oidcStateCookie)
 	if !ok || st.Exp < time.Now().Unix() || state == "" ||
 		subtle.ConstantTimeCompare([]byte(st.State), []byte(state)) != 1 {
-		http.Error(w, "invalid login state", http.StatusBadRequest)
+		refuse(w, http.StatusBadRequest, d.ep, d.hostName, "invalid login state")
 		return
 	}
 	client, err := d.client(r.Context(), r.Host)
 	if err != nil {
 		if errors.Is(err, errOIDCHostNotConfigured) {
-			http.Error(w, "no such host", http.StatusNotFound)
+			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}
-		http.Error(w, "authentication unavailable", http.StatusBadGateway)
+		refuse(w, http.StatusBadGateway, d.ep, d.hostName, "authentication unavailable")
 		return
 	}
 	claims, err := client.Exchange(r.Context(), code, st.Verifier, st.Nonce)
 	if err != nil {
 		log.Warn().Str("host", d.hostName).Err(err).Msg("oidc exchange failed")
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "authentication failed")
 		return
 	}
 	if !d.authorized(claims.Groups) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
 		return
 	}
 	setSignedCookie(w, oidcSessionCookie, macLabelSSOSession, oidcSession{

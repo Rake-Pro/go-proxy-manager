@@ -322,3 +322,82 @@ func readHostEditorJS(t *testing.T) string {
 	}
 	return string(b)
 }
+
+// TestErrorPagesHasItsOwnSection covers the move of error pages out of the
+// Settings page into a top-level section. The nav entry, the title and the route
+// must all exist, or the section is unreachable.
+func TestErrorPagesHasItsOwnSection(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		"{ id: 'errorpages', label: 'Error pages', icon: ICON.headers },",
+		"errorpages: 'Error pages',",
+		"case 'errorpages': await viewErrorPages(c); break;",
+		"async function viewErrorPages(c) {",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the Error pages section is not wired: missing %q", want)
+		}
+	}
+	// Its save button joins the explicit HA-follower gating list, like the
+	// Settings save it was split out of.
+	if !strings.Contains(js, "'#errp-save'") {
+		t.Error("#errp-save is not in RO_WRITE_CONTROLS - a follower could start a write from this page")
+	}
+}
+
+// TestErrorPagesSectionEditsSettings pins the round-trip: the section reads and
+// writes settings.errorPages (the config schema is unchanged by the UI move),
+// and merges over the loaded settings so saving one field cannot strip the rest.
+func TestErrorPagesSectionEditsSettings(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		// reads settings.errorPages
+		"const s = (await api('/api/settings')).data || {};\n  const ep = s.errorPages || {};",
+		// the three fields round-trip
+		`id="errp-dir"`,
+		`id="errp-inline"`,
+		`id="errp-intercept"`,
+		"if (dir) errp.dir = dir;",
+		"errp.inline = JSON.parse(inlineRaw);",
+		"if (intercept.length) errp.interceptUpstream = intercept;",
+		// writes back through the settings endpoint
+		"const r = await api('/api/settings', { method: 'PUT', body });",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the Error pages section does not round-trip settings.errorPages: missing %q", want)
+		}
+	}
+	// A settings PUT replaces the whole object, so this page must merge over what
+	// it loaded rather than sending only its own field.
+	if !strings.Contains(js, "const body = Object.assign({}, s);") {
+		t.Error("the Error pages save does not merge over the loaded settings - it would strip adminAuth, dnsSync and everything else")
+	}
+	// Clearing every field removes errorPages rather than committing an empty object.
+	if !strings.Contains(js, "if (Object.keys(errp).length) body.errorPages = errp; else delete body.errorPages;") {
+		t.Error("clearing the Error pages form no longer removes settings.errorPages")
+	}
+}
+
+// TestSettingsPageDroppedErrorPagesBlock proves the block is gone from Settings
+// AND - the part that is easy to get wrong - that the Settings save still
+// carries settings.errorPages forward. A settings write is a whole-object
+// replacement, so a page that stopped rendering the field without carrying it
+// would wipe an operator's error pages on the next unrelated save.
+func TestSettingsPageDroppedErrorPagesBlock(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, gone := range []string{`id="set-errp-dir"`, `id="set-errp-inline"`, `id="set-errp-intercept"`} {
+		if strings.Contains(js, gone) {
+			t.Errorf("the Settings page still renders the error-pages control %q", gone)
+		}
+	}
+	if !strings.Contains(js, "if (s.errorPages && Object.keys(s.errorPages).length) body.errorPages = s.errorPages;") {
+		t.Fatal("the Settings save no longer carries settings.errorPages forward - saving Settings would wipe the operator's error pages")
+	}
+	// The pointer to where it went, using the app's in-app link convention.
+	if !strings.Contains(js, `<a href="#/errorpages">Error pages</a>`) {
+		t.Error("the Settings page does not point at the new Error pages section")
+	}
+}

@@ -101,7 +101,14 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 
 // handler gates next behind the external auth server. clientIP resolves the real
 // client address; allowNets (per-host) bypass auth entirely.
-func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, hostName string, next http.Handler) http.Handler {
+//
+// ep resolves the host's custom error pages for the TERMINAL refusals below (403
+// and the 502s). The two non-terminal branches are deliberately excluded: the
+// sign-in redirect is a flow, not an error, and the outpost passthrough proxies
+// the identity provider's OWN response verbatim - the IdP owns its sign-in,
+// callback and sign-out pages, and gpm must not overwrite them with an error
+// page. IdP response wins; error pages apply only where gpm generates the body.
+func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, hostName string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip any client-presented identity headers up front so a forged
 		// X-authentik-* can never reach the upstream, regardless of branch.
@@ -130,7 +137,7 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 		resp, err := p.authenticate(r)
 		if err != nil {
 			log.Warn().Str("host", hostName).Err(err).Msg("auth subrequest failed")
-			http.Error(w, "authentication backend unavailable", http.StatusBadGateway)
+			refuse(w, http.StatusBadGateway, ep, hostName, "authentication backend unavailable")
 			return
 		}
 		defer drainClose(resp.Body)
@@ -153,10 +160,10 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 			http.Redirect(w, r, dest, http.StatusFound)
 		case resp.StatusCode == http.StatusForbidden:
 			// Authenticated but not authorized for this application.
-			http.Error(w, "forbidden", http.StatusForbidden)
+			refuse(w, http.StatusForbidden, ep, hostName, "forbidden")
 		default:
 			log.Warn().Str("host", hostName).Int("status", resp.StatusCode).Msg("unexpected auth subrequest status")
-			http.Error(w, "authentication backend error", http.StatusBadGateway)
+			refuse(w, http.StatusBadGateway, ep, hostName, "authentication backend error")
 		}
 	})
 }
