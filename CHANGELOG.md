@@ -153,6 +153,11 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- **The client-cert auth gate's 401 body is now the generic "authentication
+  required"**, identical to the forward-auth gate, instead of "client certificate
+  required" - an external probe can no longer learn from the body that a client
+  certificate is what gates the host.
+
 - **ClientCA screen rework.** The new/edit page was inconsistent - some fields
   carried three-line explanations and some none, and each either/or pair (CRL
   file vs inline, CA key file vs inline) rendered as two stacked controls the
