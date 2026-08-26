@@ -74,6 +74,37 @@ All findings from that review are remediated in the same change (see CHANGELOG
 
 ## Functionality gaps
 
+### Error pages (observations from the auth-refusal review, no code changed)
+
+All three are **pre-existing** and predate routing auth refusals through the
+error-page system; none is a regression from that change.
+
+- [ ] **A rendered error page carries no `X-Content-Type-Options: nosniff`.**
+  `serveErrorPage` sets only `Content-Type` and `Content-Length`, while the
+  plain-text fallback goes through `http.Error`, which sets `nosniff` itself. So
+  configuring an error page silently *drops* a header the default response has -
+  on every tier (access list, guard, bouncer, rate limit, proxy, parked host and
+  now auth), not just auth. The bodies are `html/template`-escaped so this is
+  defence in depth rather than a live hole, but the asymmetry is backwards.
+  Fix is one `w.Header().Set` in `serveErrorPage`; it changes the response of
+  every configured page, so it wants its own change and a CHANGELOG line.
+- [ ] **A broken template passes validation, survives reload, and then blocks the
+  next restart.** `settings.errorPages` is not compiled at write time, so a
+  syntactically-broken template commits cleanly. The reload path is fail-safe
+  (`cmd/gpm/main.go` logs and returns the error, leaving the previous pages
+  installed), but startup calls `log.Fatal` on the same failure - so the running
+  instance is fine and the *next* restart dies. Now more reachable than before:
+  the new Error pages section makes inline templates easy to author from the UI.
+  Options: compile-check in `Settings.Validate` (best - refuses the commit), or
+  degrade the startup failure to a warning that starts with no custom pages.
+- [ ] **Auth-gate refusals do not increment the denial metrics.** The access
+  list, guard, bouncer and rate-limit tiers all call `countDenial(r, reason)`;
+  the auth gates never have, so a host behind SSO or mTLS shows no denials in
+  `/metrics` no matter how many 401/403s it serves. Threading a `countDenial(r,
+  "auth")` (or a per-mode reason) into the gates is small, but it adds new metric
+  series, so it belongs in its own change rather than riding along with the
+  error-page work.
+
 - [x] **HSTS emission.** The data plane now emits `Strict-Transport-Security` on
   HTTPS responses for hosts with `tls.hsts.enabled`.
 - [x] **Per-host OIDC relying-party gating** on the data plane: auth mode `oidc`

@@ -108,3 +108,296 @@ func TestHostSaveMergesLocations(t *testing.T) {
 		}
 	}
 }
+
+// TestHostEditorRendersMTLSControls guards the gap this feature closed: the host
+// editor used to render the "Client certificates (mTLS)" block ONLY when
+// tls.clientAuth already existed, and even then caRef/mode were display-only. A
+// host could not be put behind mTLS from the UI at all. The block must now always
+// render, with real controls.
+func TestHostEditorRendersMTLSControls(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	// The block is unconditional - no `${tls.clientAuth ? ...}` wrapper.
+	if strings.Contains(js, "${tls.clientAuth ? `") {
+		t.Error("the mTLS block is conditional on tls.clientAuth again - a host with no clientAuth cannot enable it")
+	}
+	// The old display-only wording must be gone with it.
+	if strings.Contains(js, "this page preserves them") {
+		t.Error("caRef/mode are display-only again")
+	}
+	for _, want := range []string{
+		// enable switch, CA picker, mode picker
+		`switchHtml('f-mtls', mtlsOn, 'Client certificates')`,
+		`id="f-mtls-ca"`,
+		`id="f-mtls-mode"`,
+		`<option value="require"`,
+		`<option value="optional"`,
+		// the picker is populated from the client-cas list, loaded like the other
+		// object pickers this editor already fetches (its three loading states are
+		// pinned by TestHostEditorClientCAPickerStates)
+		"caList.map((ca) =>",
+		// identity passthrough is nested inside the enabled state
+		`id="mtls-fields"`,
+		`switchHtml('f-certid', certIDOn, 'Identity passthrough')`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("host editor mTLS block missing %q", want)
+		}
+	}
+	// One hint line each, naming the two modes' semantics.
+	for _, want := range []string{
+		"the handshake rejects certless clients",
+		"certless clients still reach the chain",
+		"for LAN-exempt enforcement",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("mode control does not explain itself: missing %q", want)
+		}
+	}
+}
+
+// TestHostSaveRoundTripsMTLS pins the save path. Reading the controls is the
+// whole point of the feature; merging over the stored object is what keeps a
+// GitOps-authored field this form does not render from being stripped.
+func TestHostSaveRoundTripsMTLS(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	// The switch owns the object, and the merge happens BEFORE the pickers are
+	// read. Pinned as one contiguous block: reordering these so the stored values
+	// land on top of the picker values would make caRef/mode uneditable again
+	// while every substring assertion still passed.
+	const mergeFirst = `    if (isOn('f-mtls')) {
+      const ca = Object.assign({}, tls.clientAuth);
+      delete ca.identityHeaders;
+`
+	if !strings.Contains(js, mergeFirst) {
+		t.Error("the mTLS save no longer merges over the stored clientAuth (and clears identityHeaders) before reading the controls")
+	}
+	// Belt for the same ordering, in case the block above is reformatted: both
+	// picker reads must come after the merge.
+	base := strings.Index(js, "const ca = Object.assign({}, tls.clientAuth);")
+	for _, want := range []string{"ca.caRef = caRefSel;", "ca.mode = $('#f-mtls-mode').value;"} {
+		at := strings.Index(js, want)
+		if at < 0 {
+			t.Errorf("host save does not round-trip mTLS: missing %q", want)
+			continue
+		}
+		if base < 0 || at < base {
+			t.Errorf("%q is applied before the merge over the stored clientAuth, so the stored value would win", want)
+		}
+	}
+	if !strings.Contains(js, "tlsObj.clientAuth = ca;") {
+		t.Error("the built clientAuth is never attached to tls")
+	}
+	// The old preserve-only guard is gone.
+	if strings.Contains(js, "it is carried through verbatim; only its identity-passthrough block is edited") {
+		t.Error("the save path is preserve-only again - caRef/mode would not be editable")
+	}
+	// identityHeaders lives INSIDE clientAuth, so turning mTLS off drops it with
+	// the object. That is the model's shape, not an oversight - assert the code
+	// says so, so nobody "fixes" it by preserving orphaned identity headers.
+	if !strings.Contains(js, "which drops identityHeaders with it - correct, they are nested inside") {
+		t.Error("the deliberate drop of identityHeaders on mTLS-off is no longer documented at the save path")
+	}
+	// identityHeaders is merged too, then every rendered field is set explicitly -
+	// including the false ones, or a cleared switch could not clear a stored true.
+	for _, want := range []string{
+		"const ih = Object.assign({}, (tls.clientAuth || {}).identityHeaders);",
+		"if (sh) ih.subjectHeader = sh; else delete ih.subjectHeader;",
+		"ih.san = isOn('f-certid-san');",
+		"ih.serial = isOn('f-certid-serial');",
+		"ih.fingerprint = isOn('f-certid-fp');",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("identityHeaders is not merge-then-set-explicitly: missing %q", want)
+		}
+	}
+	// Refusing to save an enabled block with no CA gives a better message than
+	// the API's 400 would - but only when the list actually loaded.
+	if !strings.Contains(js, "if (!caRefSel) { toast('Client CA required'") {
+		t.Error("saving mTLS with no client CA selected is no longer refused client-side")
+	}
+	if !strings.Contains(js, "      if (caListOK) {\n        const caRefSel = $('#f-mtls-ca').value;") {
+		t.Error("caRef/mode are written even when the client CA list failed to load - a failed fetch must never retarget the trust anchor")
+	}
+}
+
+// TestHostEditorGatesMTLSPreconditions covers the ui-disable-unavailable rule for
+// the two things the model requires before tls.clientAuth can validate - forceSSL,
+// and a caRef resolving to an enabled ClientCA - plus the direction of the gate.
+func TestHostEditorGatesMTLSPreconditions(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		"function refreshMtls() {",
+		"const ssl = isOn('f-forcessl');",
+		"No enabled client CA defined yet",
+		"require Force SSL",
+		// turning forceSSL off under live mTLS is blocked, not silently applied
+		"if (!isOn('f-forcessl') && isOn('f-mtls')) {",
+		"$('#f-forcessl').setAttribute('aria-checked', 'true');",
+		"toast('Force SSL is required'",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("mTLS precondition gating missing %q", want)
+		}
+	}
+	// The gate is one-way. Gating both directions traps a host whose stored
+	// combination is already invalid: the toggle is the only way out of it.
+	if !strings.Contains(js, "gateControl($('#f-mtls'), !reason || isOn('f-mtls'), reason);") {
+		t.Error("the mTLS gate must never disable turning mTLS OFF - an invalid stored combination would be unrecoverable from this page")
+	}
+	// The on-load evaluation is a STANDALONE statement, not the one inside the
+	// Force SSL handler - matching "refreshMtls();" alone would pass with the
+	// load-time call deleted, leaving the gate unevaluated until something moves.
+	if !strings.Contains(js, "\n  refreshMtls();\n") {
+		t.Error("refreshMtls is no longer called on load, so the gate is unevaluated until a switch changes")
+	}
+	if !strings.Contains(js, "$('#f-mtls').addEventListener('switchchange', refreshMtls);") {
+		t.Error("the mTLS switch no longer re-evaluates the gate")
+	}
+}
+
+// TestHostEditorClientCAPickerStates covers the three states the client-CA list
+// can be in and the stale-reference case. Each one is a way to silently corrupt a
+// host's trust anchor if it is collapsed into another.
+func TestHostEditorClientCAPickerStates(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	// A failed fetch must NOT read as "no client CAs defined".
+	if !strings.Contains(js, "api('/api/client-cas').catch(() => null),") {
+		t.Error("a failed client-cas fetch is collapsed into an empty list again - the picker would state a falsehood and every mTLS save would bail")
+	}
+	for _, want := range []string{
+		"const clientCAs = ccaR === null ? null : arr(ccaR.data);",
+		"const caListOK = clientCAs !== null;",
+		"const caUsable = caList.some((ca) => !ca.disabled);",
+		"Client CA list unavailable",
+		// the select itself is disabled in that state
+		`id="f-mtls-ca"${caListOK ? '' : ' disabled'}`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("client CA list state handling missing %q", want)
+		}
+	}
+	// Zero CAs still points at where to make one.
+	for _, want := range []string{"no client CAs defined", `<a href="#/clientcas">Client CAs</a>`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("zero-CA state missing %q", want)
+		}
+	}
+	// A caRef the list does not contain is rendered as itself, selected and
+	// flagged, so a save round-trips it instead of the select silently falling
+	// through to the first option and retargeting the host's trust anchor.
+	for _, want := range []string{
+		"const caKnown = caList.some((ca) => ca.name === caRef);",
+		"caRef && !caKnown ? `<option value=\"${esc(caRef)}\" selected>${esc(caRef)} (not found)</option>` : ''",
+		"is not in the client CA list. It is kept as-is on save",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("a stale caRef is not preserved: missing %q", want)
+		}
+	}
+	// Every interpolated CA name is escaped, in the attribute AND the text node.
+	for _, want := range []string{
+		`<option value="${esc(ca.name)}"`,
+		`>${esc(ca.name)}${ca.disabled ? ' (disabled)' : ''}</option>`,
+		`<option value="${esc(caRef)}" selected>${esc(caRef || '(unknown)')}</option>`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("client CA option template is not escaped: missing %q", want)
+		}
+	}
+	// A disabled CA cannot be selected.
+	if !strings.Contains(js, "${ca.disabled ? ' disabled' : ''}") {
+		t.Error("a disabled client CA is selectable again - the API refuses a host that references one")
+	}
+}
+
+func readHostEditorJS(t *testing.T) string {
+	t.Helper()
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	return string(b)
+}
+
+// TestErrorPagesHasItsOwnSection covers the move of error pages out of the
+// Settings page into a top-level section. The nav entry, the title and the route
+// must all exist, or the section is unreachable.
+func TestErrorPagesHasItsOwnSection(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		"{ id: 'errorpages', label: 'Error pages', icon: ICON.headers },",
+		"errorpages: 'Error pages',",
+		"case 'errorpages': await viewErrorPages(c); break;",
+		"async function viewErrorPages(c) {",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the Error pages section is not wired: missing %q", want)
+		}
+	}
+	// Its save button joins the explicit HA-follower gating list, like the
+	// Settings save it was split out of.
+	if !strings.Contains(js, "'#errp-save'") {
+		t.Error("#errp-save is not in RO_WRITE_CONTROLS - a follower could start a write from this page")
+	}
+}
+
+// TestErrorPagesSectionEditsSettings pins the round-trip: the section reads and
+// writes settings.errorPages (the config schema is unchanged by the UI move),
+// and merges over the loaded settings so saving one field cannot strip the rest.
+func TestErrorPagesSectionEditsSettings(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		// reads settings.errorPages
+		"const s = (await api('/api/settings')).data || {};\n  const ep = s.errorPages || {};",
+		// the three fields round-trip
+		`id="errp-dir"`,
+		`id="errp-inline"`,
+		`id="errp-intercept"`,
+		"if (dir) errp.dir = dir;",
+		"errp.inline = JSON.parse(inlineRaw);",
+		"if (intercept.length) errp.interceptUpstream = intercept;",
+		// writes back through the settings endpoint
+		"const r = await api('/api/settings', { method: 'PUT', body });",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the Error pages section does not round-trip settings.errorPages: missing %q", want)
+		}
+	}
+	// A settings PUT replaces the whole object, so this page must merge over what
+	// it loaded rather than sending only its own field.
+	if !strings.Contains(js, "const body = Object.assign({}, s);") {
+		t.Error("the Error pages save does not merge over the loaded settings - it would strip adminAuth, dnsSync and everything else")
+	}
+	// Clearing every field removes errorPages rather than committing an empty object.
+	if !strings.Contains(js, "if (Object.keys(errp).length) body.errorPages = errp; else delete body.errorPages;") {
+		t.Error("clearing the Error pages form no longer removes settings.errorPages")
+	}
+}
+
+// TestSettingsPageDroppedErrorPagesBlock proves the block is gone from Settings
+// AND - the part that is easy to get wrong - that the Settings save still
+// carries settings.errorPages forward. A settings write is a whole-object
+// replacement, so a page that stopped rendering the field without carrying it
+// would wipe an operator's error pages on the next unrelated save.
+func TestSettingsPageDroppedErrorPagesBlock(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, gone := range []string{`id="set-errp-dir"`, `id="set-errp-inline"`, `id="set-errp-intercept"`} {
+		if strings.Contains(js, gone) {
+			t.Errorf("the Settings page still renders the error-pages control %q", gone)
+		}
+	}
+	if !strings.Contains(js, "if (s.errorPages && Object.keys(s.errorPages).length) body.errorPages = s.errorPages;") {
+		t.Fatal("the Settings save no longer carries settings.errorPages forward - saving Settings would wipe the operator's error pages")
+	}
+	// The pointer to where it went, using the app's in-app link convention.
+	if !strings.Contains(js, `<a href="#/errorpages">Error pages</a>`) {
+		t.Error("the Settings page does not point at the new Error pages section")
+	}
+}

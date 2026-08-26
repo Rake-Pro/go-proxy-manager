@@ -7,6 +7,46 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Error pages get their own UI section.** Custom error pages moved out of the
+  Settings page into a top-level **Error pages** section, alongside the other
+  object sections, since they are content an operator iterates on rather than a
+  switch set once. The config schema is unchanged - the section edits
+  `settings.errorPages`, a host's override stays in the host editor, and a
+  git-authored `settings.yaml` is unaffected. Settings keeps a one-line pointer
+  to the new section and now carries `errorPages` forward untouched on save.
+- **Auth-gate refusals honour custom error pages.** Every terminal refusal an
+  auth middleware writes now renders through the same `errorPages` machinery the
+  access-list, guard, bouncer and rate-limit tiers already use, instead of a
+  hardcoded plain-text body: forward-auth `401`/`403`, client-cert `401`/`403`,
+  auth-request `403`/`502`, the OIDC gate's `403`/`401`/`400`/`404`/`502`/`500`,
+  and the `503` a middleware that cannot be compiled serves. The per-host
+  `errorPages` override applies exactly as it does elsewhere, and the default
+  bodies are unchanged - with nothing configured the output is byte-identical,
+  headers included. Redirects into a sign-in flow are untouched, and in
+  `auth-request` mode a response proxied from the identity provider always wins:
+  gpm never overwrites the IdP's own sign-in, callback or sign-out pages.
+- **Enable mTLS on a proxy host from the UI.** The host editor's TLS section now
+  always shows the "Client certificates (mTLS)" block with real controls - an
+  enable toggle, a Client CA picker populated from the client-cas list, and the
+  `require`/`optional` mode - instead of rendering a read-only summary only when
+  `tls.clientAuth` already existed. A host can finally be put behind mTLS without
+  hand-editing config. Preconditions follow the grey-out convention: the toggle is
+  disabled with the reason when `forceSSL` is off or no enabled ClientCA exists,
+  the picker shows a disabled state pointing at the Client CAs page when there are
+  none, a disabled CA cannot be selected, and turning `forceSSL` off under a live
+  mTLS host is blocked rather than silently dropping `clientAuth`. The gate is
+  one-way - turning mTLS *off* is always allowed, so an already-invalid stored
+  combination is recoverable from the page. A `caRef` missing from the CA list is
+  rendered flagged and round-tripped on save instead of the select silently
+  retargeting the trust anchor, and a failed client-cas fetch is a distinct state
+  from "no CAs defined": the picker says so, saves of other fields still work, and
+  `caRef`/`mode` are left exactly as stored. Identity
+  passthrough is unchanged and now nests inside the enabled state; turning the
+  toggle off omits `clientAuth` entirely, which drops `identityHeaders` with it -
+  they live inside `clientAuth` in the model and mean nothing without it. Both
+  `clientAuth` and its `identityHeaders` are merged over the stored object before
+  the rendered fields are set explicitly, so a field this form does not render -
+  GitOps-authored, or added to the model later - survives a save from this page.
 - **Generate a client CA from the UI/API**: `POST /api/client-cas/{name}/generate`
   ("Generate new CA" on the new-ClientCA page) creates a self-signed RSA-4096 CA
   (`CA:TRUE, pathlen:0`, `certSign|cRLSign`, random serial), writes its private
@@ -130,6 +170,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
   image signature verification, and a "Users, roles and audit" stance section.
 
 ### Changed
+
+- **The client-cert auth gate's 401 body is now the generic "authentication
+  required"**, identical to the forward-auth gate, instead of "client certificate
+  required" - an external probe can no longer learn from the body that a client
+  certificate is what gates the host. A deployment that wants a specific,
+  operator-written message there (a private host where the hint is useful rather
+  than a disclosure) can now supply one as a `401` error page, per host - see the
+  auth-refusal entry under Added.
 
 - **ClientCA screen rework.** The new/edit page was inconsistent - some fields
   carried three-line explanations and some none, and each either/or pair (CRL

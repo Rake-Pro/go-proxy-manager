@@ -66,7 +66,7 @@ func TestAuthRequestAuthenticated(t *testing.T) {
 	defer srv.Close()
 
 	var seen http.Header
-	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", recordingBackend(&seen))
+	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", nil, recordingBackend(&seen))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/dashboard?x=1", nil)
@@ -105,7 +105,7 @@ func TestAuthRequestStripsForgedHeaderWhenAuthSilent(t *testing.T) {
 	defer srv.Close()
 
 	var seen http.Header
-	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", recordingBackend(&seen))
+	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", nil, recordingBackend(&seen))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/", nil)
@@ -123,7 +123,7 @@ func TestAuthRequestUnauthenticatedRedirects(t *testing.T) {
 	defer srv.Close()
 
 	backendHit := false
-	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
+	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/secret/page", nil)
@@ -151,7 +151,7 @@ func TestAuthRequestForbidden(t *testing.T) {
 	defer srv.Close()
 
 	backendHit := false
-	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
+	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/", nil)
@@ -171,7 +171,7 @@ func TestAuthRequestOutpostPassthrough(t *testing.T) {
 	defer srv.Close()
 
 	backendHit := false
-	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
+	h := newAuthReqProxy(t, srv.URL).handler(peerIP, nil, "app", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/outpost.goauthentik.io/start?rd=/", nil)
@@ -196,7 +196,7 @@ func TestAuthRequestAllowFromBypass(t *testing.T) {
 		t.Fatalf("compileAuthRequest: %v", err)
 	}
 	var seen http.Header
-	h := p.handler(peerIP, mustNets("10.0.0.0/8"), "app", recordingBackend(&seen))
+	h := p.handler(peerIP, mustNets("10.0.0.0/8"), "app", nil, recordingBackend(&seen))
 
 	// LAN client: bypasses auth, reaches backend, no auth subrequest, no identity.
 	rec := httptest.NewRecorder()
@@ -232,7 +232,7 @@ func TestAuthRequestBackendUnavailable(t *testing.T) {
 	srv.Close()
 
 	backendHit := false
-	h := newAuthReqProxy(t, url).handler(peerIP, nil, "app", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
+	h := newAuthReqProxy(t, url).handler(peerIP, nil, "app", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { backendHit = true }))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://app2.example.com/", nil)

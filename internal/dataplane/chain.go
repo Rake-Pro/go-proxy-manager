@@ -299,7 +299,7 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *com
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authMiddlewareHandler(mw, reg, host.Name, host.Domains, clientIP, h)
+		h = authMiddlewareHandler(mw, reg, host.Name, host.Domains, clientIP, ep, h)
 	}
 
 	// Bouncer deny hooks, just outside auth: an IP an operator-run bouncer
