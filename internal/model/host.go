@@ -298,6 +298,14 @@ type ProxyHost struct {
 	// settings-level pages, if any. POINTER for the same reason as DNS above: a
 	// struct value's omitempty is ignored by encoding/json.
 	ErrorPages *ErrorPagesConfig `json:"errorPages,omitempty" yaml:"errorPages,omitempty"`
+
+	// SecurityHeaders overrides/merges over settings.securityHeaders for this
+	// host. It is a per-key merge: a header this map names replaces the settings
+	// default value, and a header it omits still falls through to the settings
+	// default (matching how errorPages templates resolve). Same scope and
+	// set-if-absent-on-proxied rules as the settings-level default. nil (default)
+	// uses the settings-level headers unchanged.
+	SecurityHeaders map[string]string `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 }
 
 func (h ProxyHost) Kind() string { return "ProxyHost" }
@@ -329,6 +337,9 @@ func (h ProxyHost) Validate() error {
 		if err := h.ErrorPages.validate(); err != nil {
 			return fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
+	}
+	if err := validateSecurityHeaders(h.SecurityHeaders); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	for _, l := range h.Locations {
 		if l.Path == "" {

@@ -1327,6 +1327,11 @@ async function hostEditor(c, name) {
       obj.errorPages = errp;
     }
 
+    // securityHeaders has no per-host control on this form yet; a host PUT is a
+    // whole-object replacement, so carry the loaded map forward or an unrelated
+    // host save would silently drop a GitOps-authored override.
+    if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;
+
     const tlsObj = {};
     const cert = $('#f-cert').value;
     if (cert) tlsObj.certificateRef = cert;
@@ -4227,6 +4232,11 @@ async function viewSettings(c) {
     // from what was loaded. Without this, every save on this page would silently
     // wipe the operator's error pages.
     if (s.errorPages && Object.keys(s.errorPages).length) body.errorPages = s.errorPages;
+
+    // securityHeaders (the fleet default emitted on gpm-generated responses) has
+    // no editor on this page yet; carry it forward exactly like errorPages so a
+    // save here never silently wipes it (the PUT is a whole-object replacement).
+    if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;
 
     const ingressDiscovery = {
       apiURL: $('#set-id-url').value.trim(),

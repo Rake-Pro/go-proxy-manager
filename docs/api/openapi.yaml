@@ -302,6 +302,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Location'
+        securityHeaders:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            Per-host response headers gpm emits on the responses it generates,
+            merged per key over settings.securityHeaders (the host value wins for
+            a header it names; omitted headers fall through to the settings
+            default). Applied set-if-absent, so a proxied upstream's own header is
+            never clobbered. Strict-Transport-Security is not settable here (the
+            per-host tls.hsts setting owns it); hop-by-hop headers and CR/LF in
+            names/values are rejected.
       required:
       - name
       - domains
@@ -1482,6 +1494,20 @@ components:
           $ref: '#/components/schemas/ProxyProtocolSettings'
         ingressDiscovery:
           $ref: '#/components/schemas/IngressDiscoverySettings'
+        securityHeaders:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            Fleet-default response headers gpm emits on the responses it generates
+            (auth-gate denials, sign-in redirects, error pages, path-rejection
+            400s, the no-such-host 404, parked/redirect hosts), at the same layer
+            HSTS is emitted, so they land regardless of the auth outcome. A
+            ProxyHost's own securityHeaders merges over this per key. Applied
+            set-if-absent on proxied upstream responses, so an app's own headers
+            are never clobbered. Empty (default) ships nothing.
+            Strict-Transport-Security (owned by tls.hsts) and hop-by-hop headers
+            are rejected, as is CR/LF in a name or value.
       description: Singleton application configuration (config/settings.yaml).
     ProxyProtocolSettings:
       type: object

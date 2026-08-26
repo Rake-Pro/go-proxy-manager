@@ -543,6 +543,37 @@ render reads only the same template context an access-list denial gets
 (status, status text, host name, request id), so a refusal cannot leak request
 data that tier was not already exposing.
 
+**Security response headers** (`internal/dataplane/securityheaders.go`). A
+configurable header set (`settings.securityHeaders`, merged per key with a
+`ProxyHost`'s own override) is injected at the router's dispatch layer -
+`serveHTTPS`/`serveHTTP` wrap the `ResponseWriter` before dispatching, the same
+place and mechanism that emits per-host HSTS. This is deliberately **outside**
+the middleware chain, and therefore outside the auth gate: a headers middleware
+lives *inside* the chain and never runs when a gate refuses ahead of it, which
+is exactly why gpm's own denials (the `401`/`403`/`503`, the `302` sign-in
+redirects, rendered error pages, the `400` path-rejection, the `404`/`421`,
+parked and redirect hosts) previously carried nothing but HSTS. Wrapping at
+dispatch means one injection point covers every response gpm generates below it,
+so no denial path can be missed. Injection is **set-if-absent**: a gpm-generated
+response never set these headers, so they are added; a proxied upstream response
+has its own headers copied into the map before `WriteHeader`, so an app's own
+`X-Frame-Options`/`Referrer-Policy` is preserved and never clobbered or
+duplicated. `Strict-Transport-Security` is excluded from the set (the per-host
+`hsts` setting owns it); the feature is additive and leaves HSTS behaviour
+unchanged. Both injections happen at the FINAL `WriteHeader` (`>= 200`): an
+upstream `1xx` interim response (`103 Early Hints`, or `100 Continue`) is written
+and then has its header map cleared by `httputil.ReverseProxy`'s `Got1xxResponse`
+hook, so injecting on the interim status would seed headers the clear deletes -
+the writer skips `1xx` and injects only on the final status. The per-host HSTS
+and `X-Robots-Tag` emission was moved onto this same writer (previously `Set`
+into the map before proxying, where the `1xx` clear dropped them) - HSTS with
+override semantics, `X-Robots-Tag` set-if-absent so an explicit headers-middleware
+value still wins. The one path the dispatch writer does not reach is a
+`101` WebSocket upgrade: the stdlib hijacks the connection and writes the `101`
+without a `WriteHeader` the writer sees, so these headers (and HSTS/robots) are
+absent there - immaterial, since a `wss` upgrade rides an already-loaded `https`
+document that carried HSTS and robots on a socket is meaningless.
+
 The **bouncer** middleware (`internal/dataplane/bouncer.go`) is a WAF/CrowdSec
 **deny hook, not a bundled WAF**: gpm ships no rules, no signatures and no
 detection engine, it asks an operator-run bouncer whether the client IP is

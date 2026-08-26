@@ -147,6 +147,7 @@ Singleton application configuration.
 | `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
 | `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
+| `securityHeaders` | map[string]string | Fleet-default response headers gpm emits on the responses **it** generates (denials, sign-in redirects, error pages, path-rejection 400s, the no-such-host 404, parked/redirect hosts). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
@@ -869,6 +870,96 @@ errorPages:
 
 ---
 
+## SecurityHeaders (`settings.securityHeaders` / `proxyHost.securityHeaders`)
+
+A configurable set of response headers gpm emits on the responses **it**
+generates, at the same response layer HSTS is emitted. It closes an audit gap:
+gpm's own denial responses (the 401 from an auth gate, the 302 sign-in redirect,
+error pages, the 503 fail-closed, the 400 path-rejection, the 404 no-such-host)
+previously carried only HSTS, because the auth chain runs outside any headers
+middleware, so nothing but the per-host HSTS/robots emission could reach them.
+
+Both levels are a `map[string]string` of header name → value:
+
+- `settings.securityHeaders` is the fleet default.
+- A `ProxyHost`'s own `securityHeaders` **merges over** the settings default
+  **per key**: a header the host names replaces the settings value for that
+  header, and a header it omits still falls through to the settings default (the
+  same "host override wins per key" resolution `errorPages` templates use).
+
+### Scope of application
+
+The headers are applied at the data-plane dispatch layer, set-if-absent, so:
+
+- **On every gpm-generated response** — auth-gate refusals (401/403/503), the
+  OIDC / forward-auth sign-in redirects (302), rendered error pages, the
+  path-rejection 400, the no-such-host 404, the misdirected-request 421, and
+  parked / redirect hosts — the headers are present (gpm's own response never
+  set them, so set-if-absent adds them). This is the audit target.
+- **On a PROXIED upstream response** the headers are applied **set-if-absent**:
+  a header the upstream already set (Home Assistant and many apps set their own
+  `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, `X-Content-Type-Options`) is
+  **left untouched**; only a header the upstream omitted is added. gpm never
+  clobbers or duplicates an app's own security header.
+
+> Why set-if-absent rather than gpm-generated-only: a single injection point at
+> the dispatch layer cannot miss a denial path, and set-if-absent makes the
+> proxied case provably safe (an app's own value always wins). The one thing to
+> be careful with is `Content-Security-Policy`: `frame-ancestors 'none'` on a
+> gpm-generated page is safe, but a restrictive `default-src` in this map would
+> also be injected (set-if-absent) onto any proxied app that ships no CSP of its
+> own, which can break the app. Keep any CSP here limited to `frame-ancestors`,
+> or set a per-host `securityHeaders` that omits CSP for hosts you proxy.
+
+`Strict-Transport-Security` is **not** settable here — the per-host
+[`tls.hsts`](#proxyhost-configproxy-hosts) setting owns it, and this feature is
+additive: HSTS emission is unchanged on every path but one — a `101` WebSocket
+upgrade, where the stdlib hijacks the connection and writes the `101` without
+going through the dispatch writer, so HSTS/`X-Robots-Tag` (and these headers) are
+absent on that response. This is immaterial: a `wss://` upgrade is always
+preceded by the `https://` document load that already delivered HSTS, and an
+indexing directive on a WebSocket has no meaning.
+
+Interim responses are handled: an upstream `1xx` (a `103 Early Hints`, or a
+`100 Continue` when a client sends `Expect: 100-continue`) does **not** drop the
+configured headers — they are injected on the final response, after the reverse
+proxy has forwarded and cleared the interim one. (HSTS and `X-Robots-Tag` ride
+the same mechanism, for the same reason.)
+
+### Validation
+
+- Header names must be valid RFC 7230 field-name tokens (no CR/LF, no separator
+  characters); keys are de-duplicated case-insensitively.
+- `Strict-Transport-Security` is refused (HSTS owns it).
+- Hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Authenticate`,
+  `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) are
+  refused.
+- Values must contain no CR, LF or control bytes (only horizontal tab is
+  allowed), so a value cannot inject an extra response header.
+
+### Recommended set
+
+Ships **nothing** by default (empty map = today's behaviour, opt-in, so no
+existing deployment is surprised). A safe paste-ready set for gpm-generated
+pages:
+
+```yaml
+# settings.yaml
+securityHeaders:
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: "geolocation=(), camera=(), microphone=()"
+  X-Frame-Options: DENY
+  Content-Security-Policy: "frame-ancestors 'none'"
+```
+
+Do **not** add a restrictive `default-src` to the `Content-Security-Policy`
+value here if the same map is ever inherited by a host you proxy an app through
+(see the scope note above) — that is the one entry whose set-if-absent injection
+onto a CSP-less upstream page can break the app.
+
+---
+
 ## ProxyHost (`config/proxy-hosts/`)
 
 Terminates TLS for one or more domains and reverse-proxies to an upstream.
@@ -888,6 +979,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `locations` | []Location | no | Path-scoped overrides (below). |
 | `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
 | `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](#errorpagesconfig-settingserrorpages--proxyhosterrorpages) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. |
+| `securityHeaders` | map[string]string | no | Merges over [`settings.securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders) per key for this host. Unset uses the settings-level default unchanged. |
 
 **Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
 
