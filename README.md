@@ -85,6 +85,12 @@ builds it with a narrower, more focused design:
 - Request **guards** (deny by path/method/query, with CIDR exemptions)
 - Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
 - **Bouncer** deny hook (CrowdSec LAPI or any generic HTTP endpoint) — hook-only, no bundled WAF
+- **Security response headers on gpm's own responses** — `settings.securityHeaders`
+  (plus a per-host override) emitted on every response gpm generates itself
+  (auth-gate denials, sign-in redirects, error pages, `400`/`404`/`421`,
+  parked/redirect hosts), at the same layer as HSTS so denials get them too;
+  applied set-if-absent so a proxied app's own headers are never clobbered.
+  Opt-in (empty by default); HSTS stays separate
 - Composable, ordered middleware chain per host and per location
 
 **Automation & DNS**

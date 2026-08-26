@@ -7,6 +7,28 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Configurable security response headers on gpm's own responses.** A new
+  `settings.securityHeaders` map (with a per-`ProxyHost` `securityHeaders` that
+  merges over it per key) sets response headers gpm emits on the responses **it**
+  generates - auth-gate denials (`401`/`403`/`503`), the OIDC/forward-auth sign-in
+  redirects (`302`), rendered error pages, the path-rejection `400`, the
+  no-such-host `404`, the misdirected `421`, and parked/redirect hosts. They are
+  injected at the data-plane dispatch layer, the same place per-host HSTS is
+  emitted and deliberately **outside** the middleware chain, which is why these
+  denials previously carried only HSTS (a headers middleware sits inside the
+  chain and never runs when a gate refuses ahead of it). Injection is
+  **set-if-absent**, so a proxied upstream response keeps its own
+  `X-Frame-Options`/`Referrer-Policy`/etc. - gpm never clobbers or duplicates an
+  app's own security header. Ships **nothing** by default (opt-in; existing
+  deployments are unchanged); a recommended paste-ready set is documented in
+  `docs/configuration.md`. Names are validated (no CR/LF, no hop-by-hop headers,
+  de-duplicated case-insensitively) and `Strict-Transport-Security` is refused -
+  the per-host `tls.hsts` setting still owns HSTS, whose behaviour is unchanged.
+  The Settings and host editors carry the field forward untouched on save (no
+  dedicated editor yet), guarded by a test. An upstream `1xx` interim
+  response (`103 Early Hints` / `100 Continue`) does not drop the injected
+  headers - they land on the final response; the per-host HSTS and `X-Robots-Tag`
+  emission was moved onto the same writer so it survives a `1xx` too.
 - **Error pages get their own UI section.** Custom error pages moved out of the
   Settings page into a top-level **Error pages** section, alongside the other
   object sections, since they are content an operator iterates on rather than a

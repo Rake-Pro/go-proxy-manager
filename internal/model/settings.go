@@ -137,6 +137,79 @@ type ErrorPagesConfig struct {
 	InterceptUpstream []int `json:"interceptUpstream,omitempty" yaml:"interceptUpstream,omitempty"`
 }
 
+// RecommendedSecurityHeaders is a safe, paste-ready default set operators can
+// copy into settings.securityHeaders. It is documentation only: gpm ships
+// NOTHING by default (an empty map is today's behaviour), so an existing
+// deployment is never surprised by a new header. See docs/configuration.md for
+// the caveat on Content-Security-Policy when the same map is ever applied to a
+// proxied app.
+var RecommendedSecurityHeaders = map[string]string{
+	"X-Content-Type-Options":  "nosniff",
+	"Referrer-Policy":         "strict-origin-when-cross-origin",
+	"Permissions-Policy":      "geolocation=(), camera=(), microphone=()",
+	"X-Frame-Options":         "DENY",
+	"Content-Security-Policy": "frame-ancestors 'none'",
+}
+
+// hopByHopHeaders are the RFC 7230 connection-scoped headers. They are
+// meaningless (and dangerous) as a configured, per-response header, so
+// securityHeaders rejects them.
+var hopByHopHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailer":             true,
+	"transfer-encoding":   true,
+	"upgrade":             true,
+}
+
+// validHeaderValue reports whether v is a valid HTTP field value: no CR, LF or
+// NUL and no other control byte except horizontal tab. This is what blocks a
+// configured value from injecting an extra response header (CRLF injection).
+func validHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validateSecurityHeaders validates a settings- or host-level securityHeaders
+// map: every key must be a valid RFC 7230 field-name token, keys are
+// de-duplicated case-insensitively, Strict-Transport-Security is refused (the
+// per-host hsts setting owns it), hop-by-hop headers are refused, and every
+// value must be free of CR/LF/control bytes.
+func validateSecurityHeaders(m map[string]string) error {
+	seen := make(map[string]struct{}, len(m))
+	for k, v := range m {
+		if !validHeaderName(k) {
+			return fmt.Errorf("securityHeaders: %q is not a valid header name", k)
+		}
+		lk := strings.ToLower(k)
+		if lk == "strict-transport-security" {
+			return fmt.Errorf("securityHeaders: Strict-Transport-Security is managed by the per-host hsts setting, not securityHeaders")
+		}
+		if hopByHopHeaders[lk] {
+			return fmt.Errorf("securityHeaders: %q is a hop-by-hop header and cannot be set as a response header", k)
+		}
+		if _, dup := seen[lk]; dup {
+			return fmt.Errorf("securityHeaders: duplicate header %q (names are case-insensitive)", k)
+		}
+		seen[lk] = struct{}{}
+		if !validHeaderValue(v) {
+			return fmt.Errorf("securityHeaders[%q]: value contains an invalid character (CR/LF/control)", k)
+		}
+	}
+	return nil
+}
+
 func (e ErrorPagesConfig) validate() error {
 	if f := e.Dir; f != "" {
 		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
@@ -196,6 +269,18 @@ type Settings struct {
 	// ProxyHost's own errorPages overrides this. Zero value keeps today's plain
 	// gpm error output.
 	ErrorPages ErrorPagesConfig `json:"errorPages,omitempty" yaml:"errorPages,omitempty"`
+
+	// SecurityHeaders is the fleet-default set of response headers gpm emits on
+	// the responses IT generates - auth-gate denials, sign-in redirects, error
+	// pages, path-rejection 400s, the no-such-host 404, parked/redirect hosts.
+	// A ProxyHost's own securityHeaders merges over this per key (the host value
+	// wins for a header it names; keys it omits fall through to this default).
+	// Empty (the default) ships nothing, so an existing deployment is unchanged;
+	// see RecommendedSecurityHeaders for a paste-ready set. On a PROXIED upstream
+	// response these are applied set-if-absent, so an app's own X-Frame-Options
+	// / Referrer-Policy is never clobbered. Strict-Transport-Security is NOT
+	// settable here - the per-host hsts setting owns it.
+	SecurityHeaders map[string]string `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -241,6 +326,9 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := s.ErrorPages.validate(); err != nil {
+		return fmt.Errorf("settings: %w", err)
+	}
+	if err := validateSecurityHeaders(s.SecurityHeaders); err != nil {
 		return fmt.Errorf("settings: %w", err)
 	}
 	return nil
