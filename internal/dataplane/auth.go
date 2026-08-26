@@ -17,7 +17,8 @@ import (
 //     requests are redirected to the IdP and a signed SSO session cookie admits
 //     subsequent ones (see oidcgate.go).
 //   - client-cert: admit only requests whose TLS handshake verified a client
-//     certificate, optionally mapping its subject to a role (see clientCertGate).
+//     certificate, optionally mapping its subject to a role, with the same
+//     AllowFrom network exemption auth-request has (see clientCertGate).
 //
 // domains are the gated host's configured domains; the OIDC gate validates the
 // request Host against them before caching a per-Host relying-party client.
@@ -25,7 +26,7 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 	// client-cert takes its identity from the TLS handshake, so it is handled
 	// before the identity-provider lookup - it is the one mode with no IdP.
 	if mw.Auth.Mode == model.AuthModeClientCert {
-		return clientCertGate(*mw.Auth, next)
+		return clientCertGate(*mw.Auth, clientIP, allowFromNets(mw.Auth.AllowFrom), next)
 	}
 	idpName := mw.Auth.IdentityProvider
 	idp, ok := reg.idps[idpName]
@@ -53,13 +54,7 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		if err != nil {
 			return failClosed(hostName, "auth-request: "+err.Error())
 		}
-		var allowNets []*net.IPNet
-		for _, c := range mw.Auth.AllowFrom {
-			if n := parseNet(c); n != nil {
-				allowNets = append(allowNets, n)
-			}
-		}
-		return arp.handler(clientIP, allowNets, hostName, next)
+		return arp.handler(clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, next)
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {
 			return failClosed(hostName, "oidc mode requires an oidc identity provider")
@@ -104,10 +99,26 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 // With clientCertRoles set, the certificate subject (RFC 2253 form, or its bare
 // common name) must map to a role, and that role must satisfy requiredRoles; an
 // unmapped subject is refused. With no mapping, a verified certificate is enough.
-func clientCertGate(spec model.AuthMiddleware, next http.Handler) http.Handler {
+//
+// allowNets are the middleware's AllowFrom networks and carry exactly the meaning
+// they do in auth-request mode: a client on one of them is proxied straight
+// through with no certificate requirement and no role check at all - the pattern
+// for "the LAN does not need a client certificate, the internet does". Such a
+// request necessarily reaches the upstream with no client-certificate identity
+// headers, because those are set only from a handshake-verified certificate (see
+// the identity-passthrough strip in router.go), and it has none.
+func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, next http.Handler) http.Handler {
 	roles := spec.ClientCertRoles
 	required := spec.RequiredRoles
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The network exemption is decided first, so an exempt client is never
+		// asked for a certificate and never role-checked.
+		if len(allowNets) > 0 && clientIP != nil {
+			if ip := clientIP(r); ip != nil && ipInNets(ip, allowNets) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
 			http.Error(w, "client certificate required", http.StatusUnauthorized)
 			return
@@ -127,6 +138,19 @@ func clientCertGate(spec model.AuthMiddleware, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowFromNets parses a middleware's AllowFrom CIDR/IP list into networks,
+// dropping anything malformed (config validation already rejects those, so this
+// is the belt).
+func allowFromNets(cidrs []string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range cidrs {
+		if n := parseNet(c); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // roleAllowed denies RoleNone always; with no RequiredRoles any mapped role

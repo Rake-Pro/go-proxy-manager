@@ -68,11 +68,16 @@ func (c Config) Validate() error {
 		}
 		register("accessList", o.Name, als)
 	}
+	// idpTypes carries each provider's type as well as its existence: an auth
+	// middleware that leaves mode unset inherits it from the provider, so a
+	// mode-dependent rule can only be checked once every provider is known.
+	idpTypes := map[string]string{}
 	for _, o := range c.IdentityProviders {
 		if err := o.Validate(); err != nil {
 			errs = append(errs, err)
 		}
 		register("identityProvider", o.Name, idps)
+		idpTypes[o.Name] = o.Type
 	}
 	for _, o := range c.UpstreamGroups {
 		if err := o.Validate(); err != nil {
@@ -278,6 +283,7 @@ func (c Config) Validate() error {
 	for _, m := range c.Middlewares {
 		if m.Auth != nil {
 			checkRef(&errs, "middleware", m.Name, "identityProvider", m.Auth.IdentityProvider, idps)
+			checkAuthAllowFromMode(&errs, m, idpTypes)
 		}
 	}
 
@@ -306,5 +312,37 @@ func checkRef(errs *[]error, ownerKind, ownerName, refKind, ref string, set map[
 	}
 	if !set[ref] {
 		*errs = append(*errs, fmt.Errorf("%s %q references unknown %s %q", ownerKind, ownerName, refKind, ref))
+	}
+}
+
+// checkAuthAllowFromMode closes the gap the per-object validator cannot: an auth
+// middleware with allowFrom and NO explicit mode inherits its mode from the
+// referenced provider's type, which only the whole config knows. Middleware.Validate
+// already refuses allowFrom against an explicit oidc/forward-auth mode; without
+// this, the same middleware written with mode omitted passes validation and then
+// silently drops the exemption at runtime (internal/dataplane/auth.go resolves the
+// mode from idp.Type, and neither of those branches is handed the parsed networks).
+//
+// A silently ignored network exemption is the worst failure shape available here:
+// the operator believes the LAN is exempt, every LAN client is challenged instead,
+// and nothing anywhere says why. An unresolvable provider is refused for the same
+// reason - the effective mode cannot be established, so neither can the promise.
+func checkAuthAllowFromMode(errs *[]error, m Middleware, idpTypes map[string]string) {
+	if len(m.Auth.AllowFrom) == 0 || m.Auth.Mode != "" {
+		return // explicit modes are settled by Middleware.Validate
+	}
+	t, ok := idpTypes[m.Auth.IdentityProvider]
+	if !ok {
+		// The dangling-reference error above already names the missing provider;
+		// this adds why it matters for allowFrom specifically.
+		*errs = append(*errs, fmt.Errorf("middleware %q: auth.allowFrom needs a known auth mode, but auth.mode is unset and identityProvider %q does not resolve, so the effective mode cannot be determined - set auth.mode explicitly",
+			m.Name, m.Auth.IdentityProvider))
+		return
+	}
+	switch t {
+	case IdPTypeAuthRequest:
+	default:
+		*errs = append(*errs, fmt.Errorf("middleware %q: auth.allowFrom is only supported in auth-request and client-cert modes; auth.mode is unset, so it defaults to identityProvider %q's type (%q), where the exemption would be silently ignored - set auth.mode explicitly or remove auth.allowFrom",
+			m.Name, m.Auth.IdentityProvider, t))
 	}
 }

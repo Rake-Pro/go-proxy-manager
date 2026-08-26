@@ -2489,13 +2489,22 @@ async function middlewareEditor(c, name) {
 // The trust anchor for per-host mTLS (tls.clientAuth.caRef), plus its optional
 // revocation list. The CA bundle is public, so it may be inline; the CRL may be
 // a cert-store-relative file (re-read on reload and on an mtime change) or an
-// inline PEM.
+// inline PEM. With an optional signing key configured the same object can also
+// ISSUE client certificates, which is what the issuance card at the bottom does.
 async function clientCAEditor(c, name) {
   const meta = SECTION_META.clientcas; const isNew = !name;
   const seed = isNew ? takeCloneSeed('clientcas') : null;
-  const o = seed ? seed.data : (isNew ? {} : ((await api('/api/client-cas/' + encodeURIComponent(name))).data || {}));
+  const [objR, issuedR] = await Promise.all([
+    isNew ? Promise.resolve({ data: {} }) : api('/api/client-cas/' + encodeURIComponent(name)),
+    isNew ? Promise.resolve({ data: {} }) : api('/api/client-cas/' + encodeURIComponent(name) + '/certificates').catch(() => ({ data: {} })),
+  ]);
+  const o = seed ? seed.data : (objR.data || {});
+  const issued = arr((issuedR.data || {}).certificates);
   const hasCRL = !!(o.crlFile || o.crlPEM);
-  c.innerHTML = editorHead('clientcas', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+  // Issuance needs a signing key AND a saved object to POST against, so the card
+  // is greyed out (never a button that 422s) until both hold.
+  const hasKey = !!(o.caKeyFile || o.caKeyPEM);
+  c.innerHTML = editorHead('clientcas', meta, isNew, name) + expiryBanner(issued) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Trust anchor</p>
       <div class="field-group"><label>CA certificate (PEM)</label>
@@ -2522,6 +2531,45 @@ async function clientCAEditor(c, name) {
       </div>
       ${hasCRL ? '' : '<div class="hint">No CRL configured: certificates are verified against the CA only, so a revoked-but-unexpired certificate still passes.</div>'}
     </div>
+    <div class="card form-section"><p class="section-label">Signing key (optional)</p>
+      <div class="field-group"><label>CA key file</label>
+        <input class="field mono" id="ed-cakeyfile" value="${esc(o.caKeyFile || '')}" placeholder="corp-ca.key" />
+        <div class="hint">Private key of one certificate in the bundle, relative to the certificate store (no absolute or <span class="mono">..</span> paths). Set it to let this CA issue client certificates.</div>
+      </div>
+      <div class="field-group"><label>Inline CA key</label>
+        <input class="field mono" id="ed-cakeypem" value="${esc(o.caKeyPEM || '')}" placeholder="\${FILE:/run/secrets/corp_ca.key}" />
+        <div class="hint">Alternative to the file. A private key is a secret, so use a <span class="mono">\${FILE:...}</span> / <span class="mono">\${ENV:...}</span> placeholder - a literal key is refused at commit. Set one or the other, not both.</div>
+      </div>
+      <div class="field-group"><label>Expiry warning (days)</label>
+        <input class="field mono" id="ed-warndays" type="number" min="0" max="3650" value="${esc(o.expiryWarningDays || '')}" placeholder="30" />
+        <div class="hint">How far ahead a certificate issued by this CA is flagged as expiring. Blank or <span class="mono">0</span> uses the default of 30 days. Advisory only - nothing renews on its own.</div>
+      </div>
+      ${hasKey ? '' : '<div class="hint">No signing key: this CA verifies client certificates but cannot issue them.</div>'}
+    </div>
+    ${isNew ? '' : `<div class="card form-section" id="issue-card"><p class="section-label">Issue client certificate</p>
+      <div class="field-group"><label>Common name</label>
+        <input class="field mono" id="iss-cn" maxlength="64" placeholder="phone-01" />
+        <div class="hint">The certificate subject, and the download filename.</div>
+      </div>
+      <div class="inline-fields">
+        <div class="field-group"><label>Validity (days)</label>
+          <input class="field mono" id="iss-days" type="number" min="1" max="3650" value="365" />
+        </div>
+        <div class="field-group"><label>Bundle password</label>
+          <input class="field mono" id="iss-pw" type="password" minlength="12" placeholder="at least 12 characters" />
+        </div>
+      </div>
+      <div class="hint">The bundle uses the legacy PKCS#12 encoder so phones will import it, and that encoder barely stretches the password - it is the only thing protecting the key once the file leaves gpm. Use at least 12 characters, and send it separately from the file.</div>
+      <div class="field-group"><label>Subject alternative names</label>
+        <input class="field mono" id="iss-sans" placeholder="phone-01.example.com, ops@example.com, 10.1.2.3" />
+        <div class="hint">Optional, comma-separated. An IP becomes an IP SAN, a value with <span class="mono">@</span> an email SAN, anything else a DNS SAN.</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn primary" id="iss-btn" type="button">Download .p12</button>
+      </div>
+      <div class="hint">Signed with this CA's key and returned as a password-protected PKCS#12 bundle (RSA-2048, legacy encoding, for iOS/Android compatibility). The private key exists only in the download, so a lost bundle means issuing a new certificate - gpm records the subject, serial and validity, never the key. Save any change to the signing key above before issuing.</div>
+    </div>`}
+    ${isNew ? '' : issuedCertsCard(issued)}
   </div></div>` + saveBar('clientcas', isNew, meta.addLabel);
 
   wireEditor('clientcas', 'client-cas', meta, isNew, name || o.name, () => {
@@ -2530,14 +2578,236 @@ async function clientCAEditor(c, name) {
     const file = $('#ed-crlfile').value.trim();
     const inline = $('#ed-crlpem').value.trim();
     if (file && inline) { toast('One CRL source', 'Set the CRL file or the inline PEM, not both.', 'err'); return null; }
+    const keyFile = $('#ed-cakeyfile').value.trim();
+    const keyPEM = $('#ed-cakeypem').value.trim();
+    if (keyFile && keyPEM) { toast('One signing key', 'Set the CA key file or the inline key, not both.', 'err'); return null; }
+    if (keyPEM === '***') { toast('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} / ${ENV:...} placeholder or clear it.', 'err'); return null; }
     const body = { caPEM };
     if (file) body.crlFile = file;
     if (inline) body.crlPEM = inline;
     const policy = $('#ed-crlpolicy').value;
     if (policy && (file || inline)) body.crlPolicy = policy;
+    if (keyFile) body.caKeyFile = keyFile;
+    if (keyPEM) body.caKeyPEM = keyPEM;
+    // The API PUT is a whole-object replace, so every field the editor knows
+    // about has to be sent back or a UI save silently resets it to the default.
+    const warnDays = parseInt($('#ed-warndays').value, 10);
+    if (!isNaN(warnDays) && warnDays !== 0) {
+      if (warnDays < 0 || warnDays > 3650) { toast('Warning window out of range', 'Expiry warning must be between 0 (default 30) and 3650 days.', 'err'); return null; }
+      body.expiryWarningDays = warnDays;
+    }
     return body;
   });
+  if (!isNew) {
+    wireClientCertIssue(name || o.name, hasKey);
+    wireClientCertRenew(name || o.name, hasKey);
+  }
   wireCloneButton('clientcas', o);
+}
+
+// P12_MIN_PASSWORD mirrors clientcert.MinPasswordLen. The server enforces it; this
+// is only so the operator is told before a round trip.
+const P12_MIN_PASSWORD = 12;
+
+// ---------- issued client certificates ----------
+// gpm remembers what each ClientCA issued (subject, serial, validity - never key
+// material) so an operator can see what is about to expire. Nothing renews on its
+// own and nothing can: the certificate lives in a keychain on someone's device,
+// so every renewal ends in a human importing a new .p12 there. The UI says so
+// wherever it offers the action.
+
+// currentIssued drops superseded records: those were already renewed, so warning
+// about them again is noise. They stay in the table so the operator remembers old
+// copies are still installed somewhere.
+function currentIssued(issued) { return issued.filter((r) => !r.supersededBy); }
+
+// expiryBanner renders the pre-expiry warning above the editor. It names each
+// certificate and its remaining days, and states the part that is easy to forget:
+// there is no client-side renewal, so every device holding the certificate has to
+// import the replacement by hand.
+function expiryBanner(issued) {
+  const bad = currentIssued(issued).filter((r) => r.status === 'expiring' || r.status === 'expired');
+  if (!bad.length) return '';
+  const anyExpired = bad.some((r) => r.status === 'expired');
+  const items = bad.map((r) => {
+    const when = r.status === 'expired'
+      ? `expired ${Math.abs(r.daysRemaining)} day${Math.abs(r.daysRemaining) === 1 ? '' : 's'} ago`
+      : `${r.daysRemaining} day${r.daysRemaining === 1 ? '' : 's'} left`;
+    return `<li><b>${esc(r.commonName)}</b> <span class="mono">${esc(r.serial)}</span> - ${esc(when)} (expires ${esc(fmtTime(r.notAfter))})</li>`;
+  }).join('');
+  return `<div class="ro-banner ${anyExpired ? 'err' : 'warn'}">
+    <b>${bad.length} issued client certificate${bad.length === 1 ? '' : 's'} ${anyExpired ? 'expired or expiring' : 'expiring soon'}.</b>
+    Renew each one below and re-issue the bundle. <b>There is no client-side renewal:</b> every device
+    using the certificate must import the new <span class="mono">.p12</span> by hand, so plan the
+    re-import before the date below, not after it.
+    <ul>${items}</ul>
+  </div>`;
+}
+
+// issuedStatusChip colours the live expiry state. A superseded record is history:
+// its certificate is still valid on devices that have not re-imported, but it is
+// no longer the one to act on, so it gets a neutral chip and no warning colour.
+function issuedStatusChip(r) {
+  if (r.supersededBy) return `<span class="chip">${esc(r.status)}</span>`;
+  const cls = r.status === 'expired' ? 'err' : (r.status === 'expiring' ? 'warn' : 'ok');
+  return `<span class="chip ${cls}"><span class="dot ${cls}"></span>${esc(r.status)}</span>`;
+}
+
+// issuedCertsCard lists this CA's issuance records with a per-row Renew action.
+function issuedCertsCard(issued) {
+  if (!issued.length) {
+    return `<div class="card form-section"><p class="section-label">Issued certificates</p>
+      <div class="hint">None yet. Certificates issued above are listed here with their expiry, so you can see what is due for renewal.</div>
+    </div>`;
+  }
+  const rows = issued.map((r) => `<tr${r.supersededBy ? ' class="superseded"' : ''}>
+      <td>${esc(r.commonName)}${r.supersededBy ? ` <span class="chip">superseded</span>` : ''}</td>
+      <td class="mono">${esc(r.serial)}</td>
+      <td>${esc(fmtTime(r.notAfter))}</td>
+      <td>${issuedStatusChip(r)}</td>
+      <td style="text-align:right">${r.supersededBy
+        ? `<span class="hint">renewed as <span class="mono">${esc(r.supersededBy)}</span></span>`
+        : `<button class="btn sm ren-btn" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Renew</button>`}</td>
+    </tr>
+    ${r.supersededBy ? '' : `<tr class="ren-row" id="ren-${esc(r.serial)}" hidden><td colspan="5">
+      <div class="hint" style="margin-bottom:8px">Renewing issues a <b>new private key and certificate</b> for
+      <b>${esc(r.commonName)}</b> with the same subject and SANs. The download is the only copy - gpm keeps none.
+      It does <b>not</b> revoke the current certificate (revocation is CRL-based), so the old bundle keeps working
+      until it expires, and <b>every device must import the new .p12 by hand</b>.</div>
+      <div class="inline-fields">
+        <div class="field-group"><label>New bundle password</label>
+          <input class="field mono ren-pw" type="password" minlength="12" placeholder="at least 12 characters" /></div>
+        <div class="field-group"><label>Validity (days)</label>
+          <input class="field mono ren-days" type="number" min="1" max="3650" value="365" /></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <button class="btn primary ren-go" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Confirm renewal</button>
+        <button class="btn ghost ren-cancel" type="button" data-serial="${esc(r.serial)}">Cancel</button>
+      </div>
+    </td></tr>`}`).join('');
+  return `<div class="card form-section"><p class="section-label">Issued certificates</p>
+    <table class="mini-table">
+      <thead><tr><th>Common name</th><th>Serial</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="hint">Records of what this CA issued - subject, serial and validity only, never the key or the bundle. A superseded record stays listed because the certificate it names is still valid on any device that has not imported the replacement.</div>
+  </div>`;
+}
+
+// wireClientCertRenew wires the per-row Renew action. Clicking Renew only reveals
+// the form; the request is sent from "Confirm renewal", behind the same native
+// confirm() the delete flows use, with the consequences spelled out.
+function wireClientCertRenew(name, hasKey) {
+  $$('.ren-btn').forEach((b) => {
+    // Without a signing key the CA can no longer sign anything, so renewal is as
+    // impossible as issuance - grey it out rather than let it 422.
+    gateControl(b, hasKey, 'No signing key configured on this client CA - renewal needs the CA key.');
+    if (!hasKey) return;
+    b.addEventListener('click', () => {
+      const row = $('#ren-' + CSS.escape(b.dataset.serial));
+      if (row) row.hidden = !row.hidden;
+    });
+  });
+  $$('.ren-cancel').forEach((b) => b.addEventListener('click', () => {
+    const row = $('#ren-' + CSS.escape(b.dataset.serial));
+    if (row) row.hidden = true;
+  }));
+  $$('.ren-go').forEach((b) => {
+    if (!hasKey) { b.disabled = true; return; }
+    b.addEventListener('click', async () => {
+      const row = $('#ren-' + CSS.escape(b.dataset.serial));
+      const pw = $('.ren-pw', row).value;
+      if (!pw) { toast('Password required', 'The renewed PKCS#12 bundle must be password-protected.', 'err'); return; }
+      if (pw.length < P12_MIN_PASSWORD) { toast('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, 'err'); return; }
+      const days = parseInt($('.ren-days', row).value, 10);
+      if (isNaN(days) || days < 1 || days > 3650) { toast('Validity out of range', 'Validity must be between 1 and 3650 days.', 'err'); return; }
+      if (!confirm(`Renew "${b.dataset.cn}"?
+
+A NEW private key and certificate will be generated. `
+        + `The download is the only copy - it is never stored and cannot be recovered.
+
+`
+        + `The current certificate is NOT revoked and keeps working until it expires, and every device `
+        + `using it must import the new .p12 by hand.`)) return;
+      b.disabled = true;
+      try {
+        await downloadP12('/api/client-cas/' + encodeURIComponent(name) + '/certificates/'
+          + encodeURIComponent(b.dataset.serial) + '/renew', { password: pw, validityDays: days }, b.dataset.cn);
+        toast('Certificate renewed', 'Import the new .p12 on every device using this certificate - the old one is not revoked and still works until it expires.', 'ok');
+        route();
+      } catch (e) { toastErr(e); b.disabled = false; }
+    });
+  });
+}
+
+// Wires the "Issue client certificate" card. With no signing key on the CA the
+// whole card is greyed out with the reason, rather than offering a button whose
+// only outcome is a 422 from the API. The password never leaves this function.
+function wireClientCertIssue(name, hasKey) {
+  const card = $('#issue-card');
+  if (!card) return;
+  gateControl(card, hasKey, 'No signing key configured on this client CA - set caKeyFile or caKeyPEM and save first.');
+  if (!hasKey) return;
+  const btn = $('#iss-btn');
+  btn.addEventListener('click', async () => {
+    const cn = $('#iss-cn').value.trim();
+    if (!cn) { toast('Common name required', 'Enter the certificate common name.', 'err'); return; }
+    const pw = $('#iss-pw').value;
+    if (!pw) { toast('Password required', 'The PKCS#12 bundle must be password-protected.', 'err'); return; }
+    if (pw.length < P12_MIN_PASSWORD) { toast('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, 'err'); return; }
+    const days = parseInt($('#iss-days').value, 10);
+    if (isNaN(days) || days < 1 || days > 3650) { toast('Validity out of range', 'Validity must be between 1 and 3650 days.', 'err'); return; }
+    const sans = $('#iss-sans').value.split(',').map((v) => v.trim()).filter(Boolean);
+    const body = { commonName: cn, validityDays: days, password: pw };
+    if (sans.length) body.sans = sans;
+
+    btn.disabled = true;
+    try {
+      const file = await downloadP12('/api/client-cas/' + encodeURIComponent(name) + '/issue', body, cn);
+      $('#iss-pw').value = '';
+      toast('Certificate issued', `Downloaded ${file}. It is not stored - keep the file and its password.`, 'ok');
+      route();
+    } catch (e) { toastErr(e); } finally { btn.disabled = false; }
+  });
+}
+
+// downloadP12 POSTs an issuance/renewal request and saves the PKCS#12 response as
+// a file. The bundle is binary, so it cannot go through api() (which parses the
+// body as text/JSON); this carries the same CSRF token and credentials the helper
+// does. It returns the filename actually saved.
+async function downloadP12(path, body, cn) {
+  const res = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    location.href = '/auth/login?return=' + encodeURIComponent(location.pathname + location.hash);
+    throw new Error('Unauthorized');
+  }
+  if (!res.ok) {
+    let msg = `Request failed (${res.status})`;
+    try { const j = JSON.parse(await res.text()); if (j && j.error) msg = j.error; } catch (e) { /* keep the status message */ }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filenameFromDisposition(res.headers.get('Content-Disposition')) || (cn + '.p12');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return a.download;
+}
+
+// Pulls the filename out of a Content-Disposition header, or returns '' so the
+// caller can fall back. The server already sanitizes it; this only unquotes.
+function filenameFromDisposition(cd) {
+  const m = /filename="([^"]*)"/.exec(cd || '');
+  return m ? m[1] : '';
 }
 
 // ---------- UPSTREAM GROUP EDITOR ----------

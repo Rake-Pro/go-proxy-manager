@@ -285,6 +285,14 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .ro-banner { border:1px solid var(--border); background:var(--overlay-soft); color:var(--muted);
   border-radius:var(--r-card); padding:12px 16px; font-size:13px; margin-bottom:16px; }
 .ro-banner b { color:var(--text); }
+/* Same banner, raised to an actionable warning/error (e.g. issued client
+   certificates that are about to expire, or already have). */
+.ro-banner.warn { border-color:rgba(232,177,76,.4); background:rgba(232,177,76,.08); color:var(--text); }
+.ro-banner.err { border-color:rgba(229,104,122,.4); background:rgba(229,104,122,.08); color:var(--text); }
+.ro-banner ul { margin:8px 0 0; padding-left:18px; }
+/* A superseded issuance record is history, not something to act on. */
+.mini-table tr.superseded td { opacity:.55; }
+.ro-banner li { margin:2px 0; }
 
 /* ---------- signature flow ---------- */
 .flow-panel { padding:22px 20px 18px; margin-bottom:20px; position:relative; overflow:hidden; }

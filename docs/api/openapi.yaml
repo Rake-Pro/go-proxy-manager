@@ -572,10 +572,136 @@ components:
           - ''
           - fail-closed
           - fail-open
+        caKeyFile:
+          type: string
+          description: Optional signing key path, relative to the cert store (absolute and .. paths are
+            rejected). Set it to let this CA issue client certificates. Mutually exclusive with caKeyPEM.
+        caKeyPEM:
+          allOf:
+          - $ref: '#/components/schemas/Secret'
+          description: Optional inline signing key, as a ${FILE:...} / ${ENV:...} placeholder (a literal
+            key is refused at commit). Mutually exclusive with caKeyFile.
+        expiryWarningDays:
+          type: integer
+          minimum: 0
+          maximum: 3650
+          default: 30
+          description: How far ahead a certificate issued by this CA is reported as expiring. 0 or unset
+            uses the 30-day default. Advisory only - nothing renews on its own. Note PUT replaces the
+            whole object, so omitting it on a write resets it to the default.
       required:
       - name
       - caPEM
-      description: Trust anchor for mTLS client-certificate verification.
+      description: Trust anchor for mTLS client-certificate verification. With a signing key it can also
+        issue client certificates (POST /api/client-cas/{name}/issue).
+    ClientCertRequest:
+      type: object
+      properties:
+        commonName:
+          type: string
+          maxLength: 64
+          description: Subject common name of the issued certificate. Also the download filename stem,
+            sanitized.
+        validityDays:
+          type: integer
+          minimum: 0
+          maximum: 3650
+          default: 365
+          description: Certificate lifetime in days. Omit it, or send 0, for the 365-day default;
+            any other value must be 1-3650. A negative value is rejected.
+        password:
+          type: string
+          minLength: 12
+          description: Encrypts the returned PKCS#12 bundle. Required, at least 12 characters, never
+            stored or logged. The floor exists because the bundle uses the legacy PKCS#12 encoder for
+            device compatibility, which derives its integrity MAC with a single KDF iteration - the
+            password is effectively the only protection once the file leaves gpm.
+        sans:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+          description: Optional subject alternative names, printable ASCII only (a certificate stores
+            them as IA5String, so an internationalised domain must be supplied punycoded as "xn--...").
+            An entry that parses as an IP becomes an IP SAN, one containing "@" an email SAN, anything
+            else a DNS SAN.
+      required:
+      - commonName
+      - password
+      description: One client-certificate issuance.
+    ClientCertRenewRequest:
+      type: object
+      properties:
+        password:
+          type: string
+          minLength: 12
+          description: Encrypts the renewed PKCS#12 bundle. Required, at least 12 characters, never
+            stored or logged. Same floor and reasoning as issuance.
+        validityDays:
+          type: integer
+          minimum: 0
+          maximum: 3650
+          default: 365
+          description: Lifetime of the renewed certificate in days. Omit it, or send 0, for the 365-day
+            default; any other value must be 1-3650. A negative value is rejected.
+      required:
+      - password
+      description: One renewal. The common name and SANs come from the record, not the request.
+    IssuedClientCert:
+      type: object
+      properties:
+        ca:
+          type: string
+        commonName:
+          type: string
+        sans:
+          type: array
+          items:
+            type: string
+        serial:
+          type: string
+          description: Lower-case hex.
+        notBefore:
+          type: string
+          format: date-time
+        notAfter:
+          type: string
+          format: date-time
+        issuedAt:
+          type: string
+          format: date-time
+        supersededBy:
+          type: string
+          description: Serial of the renewal that replaced this certificate, if any. Superseding does
+            not revoke - the old certificate stays valid until it expires.
+        supersededAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          description: Derived at request time from notAfter and the CA's expiryWarningDays.
+          enum:
+          - ok
+          - expiring
+          - expired
+        daysRemaining:
+          type: integer
+          description: Whole days until expiry, floored; negative once expired.
+      description: One client certificate this CA issued. Carries no key material.
+    IssuedClientCertList:
+      type: object
+      properties:
+        expiryWarningDays:
+          type: integer
+          description: The CA's effective warning window, so a client need not re-derive the default.
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssuedClientCert'
+      required:
+      - expiryWarningDays
+      - certificates
+      description: Every client certificate this CA has issued, newest first.
     OIDCSpec:
       type: object
       properties:
@@ -888,7 +1014,14 @@ components:
           type: array
           items:
             type: string
-          description: CIDRs that bypass authentication entirely (auth-request mode).
+          description: CIDRs that bypass authentication entirely - no auth subrequest, no client-certificate
+            requirement, no identity headers. Supported in auth-request and client-cert modes; refused
+            in oidc and forward-auth mode, and refused when mode is unset and the referenced provider's
+            type resolves to one of those (set mode explicitly). Matched against the client IP the HOST
+            resolves, which honours X-Forwarded-For only from that host's trusted proxies - and a
+            client-cert middleware contributes none, so on a pure client-cert host this compares the raw
+            TCP peer. See docs/configuration.md before placing a proxy address inside one of these
+            networks.
         clientCertRoles:
           type: object
           properties: {}
@@ -2443,6 +2576,175 @@ paths:
                 $ref: '#/components/schemas/CommitResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+  /api/client-cas/{name}/issue:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Issue a client certificate from this ClientCA
+      description: Mints an RSA-2048 client certificate signed by the CA's configured signing key
+        (caKeyFile / caKeyPEM) and returns it as a password-protected PKCS#12 bundle. RSA and the
+        legacy PKCS#12 encoder are deliberate - iOS and some Android/Wear releases reject ECDSA client
+        certificates and PBES2 bundles. The generated private key is never persisted or logged; it
+        exists only in the response body, so a lost bundle means re-issuing. Nothing in the config
+        changes, so unlike every other write this route creates no revision and no history entry.
+      tags:
+      - Client CAs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientCertRequest'
+      responses:
+        '200':
+          description: The PKCS#12 bundle. Content-Disposition names it after the sanitized common name.
+          headers:
+            Content-Disposition:
+              description: attachment; filename="<sanitized-cn>.p12"
+              schema:
+                type: string
+            X-Client-Cert-Serial:
+              description: Serial number of the issued certificate, lower-case hex.
+              schema:
+                type: string
+          content:
+            application/x-pkcs12:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: This ClientCA is verify-only - it has no caKeyFile / caKeyPEM, so it cannot issue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The certificate was signed but could not be recorded (no certificate store is
+            configured, or it is unwritable), so it was NOT issued and no bundle is returned. Also
+            covers a signing key that is configured but unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
+  /api/client-cas/{name}/certificates:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    get:
+      summary: List the client certificates this ClientCA has issued
+      description: Runtime state, not config - it records what gpm issued, never what the operator
+        declared, so it lives in the certificate store rather than the git-backed config repo and
+        appears in no revision. Each record carries the subject, SANs, serial and validity window plus
+        a status derived from the CA's expiryWarningDays; it never carries key material, and gpm keeps
+        no copy of the certificate or its PKCS#12 bundle. A superseded record (renewed) stays listed
+        until it expires, because the certificate it names is still valid on every device holding it.
+      tags:
+      - Client CAs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssuedClientCertList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:read
+  /api/client-cas/{name}/certificates/{serial}/renew:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    - name: serial
+      in: path
+      required: true
+      description: Serial of the issued certificate to renew, lower-case hex, as reported by the list.
+      schema:
+        type: string
+    post:
+      summary: Renew one issued client certificate
+      description: Reissues the identity already on record - the same common name and SANs, which are
+        deliberately NOT accepted from the client - with a brand-new private key and serial, and marks
+        the old record superseded by the new one. The response is a PKCS#12 bundle exactly like
+        POST /issue. Renewing does NOT revoke the old certificate - revocation stays CRL-based
+        (ClientCA.crlFile / crlPEM) - so every device still holding the old bundle keeps working until
+        it expires. There is no client-side renewal - each device must import the new .p12 by hand.
+      tags:
+      - Client CAs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientCertRenewRequest'
+      responses:
+        '200':
+          description: The renewed PKCS#12 bundle.
+          headers:
+            Content-Disposition:
+              description: attachment; filename="<sanitized-cn>.p12"
+              schema:
+                type: string
+            X-Client-Cert-Serial:
+              description: Serial number of the renewed certificate, lower-case hex.
+              schema:
+                type: string
+          content:
+            application/x-pkcs12:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No such ClientCA, or no issued certificate with that serial.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: This certificate was already renewed. The error names the serial that superseded
+            it - renew that certificate instead. Renewing a superseded record again would mint a second
+            live certificate for one identity and rewrite the supersede link.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: This ClientCA is verify-only - its signing key was removed since the certificate
+            was issued, so it cannot renew.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: The certificate was signed but could not be recorded (no certificate store is
+            configured, or it is unwritable), so it was NOT issued and no bundle is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           $ref: '#/components/responses/FollowerReadOnly'
         '401':

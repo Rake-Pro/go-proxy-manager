@@ -424,7 +424,8 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts shipped, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
 (HTTP/3, hardened TLS, proxy protocol, IPv6, multi-ACME EAB - GeoIP
-geoblocking and mTLS client certs phase 1 are now shipped, see FEATURES.md),
+geoblocking and mTLS client certs phases 1-3, issuance included, are now shipped,
+see FEATURES.md),
 P3 (local-admin passkeys + TOTP for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd, OCSP,
 WAF/CrowdSec, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM,
 MPTCP, Anubis, cosign signing).
@@ -444,6 +445,34 @@ MPTCP, Anubis, cosign signing).
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
   from the same document are now shipped - see FEATURES.md and
   CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
-  `client-cert` middleware mode) shipped 2026-08-22; OCSP deliberately not
-  implemented (CRL only), see
+  `client-cert` middleware mode) shipped 2026-08-22; **phase 3** (`allowFrom`
+  network exemption in `client-cert` mode, client-certificate issuance from a
+  `ClientCA` signing key as a PKCS#12 download, and the issuance-record ledger
+  behind expiry warnings and per-certificate renewal - `internal/clientcert`)
+  shipped after it; OCSP deliberately not implemented (CRL only), see
   [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) §1.
+
+  Follow-ups identified while shipping phase 3. (a) **A trusted-proxy source for
+  `client-cert` mode** - `hostIdentityTrust` builds a host's trusted-proxy set
+  only from the `forwardAuth.trustedProxies` of the IdPs its auth middlewares
+  reference, and a `client-cert` middleware has no IdP, so on a pure client-cert
+  host `allowFrom` compares the raw TCP peer and `X-Forwarded-For` is never
+  walked. That is fail-safe with gpm at the edge and a total mTLS bypass behind an
+  L7 proxy whose address lands inside an `allowFrom` network. Documented as a
+  warning in docs/configuration.md ("Which IP `allowFrom` actually compares") for
+  now; the fix is a per-middleware or per-host `trustedProxies` that client-cert
+  mode can declare without inventing a dummy IdP. Weigh against just telling
+  operators to use PROXY protocol or an AccessList, which already solve it.
+  The rest, none blocking: (b) **one-click
+  revoke** - the issuance ledger now knows every serial, so "revoke this
+  certificate" could append it to the CA's `crlFile` instead of the operator
+  editing the CRL by hand; today renewing deliberately does NOT revoke and the
+  CRL edit is manual; (c) issuance and renewal are `POST`s, so an HA follower
+  refuses them with the blanket method-based read-only gate even though issuance
+  writes no config - correct-by-default, revisit only if operators hit it; (d) a
+  `caKeyFile` is validated the first time it is used rather than at config
+  validation, because the store does not know the cert-store path; (e) issuance
+  records live in the cert dir, so an HA follower has its own copy unless the cert
+  dir is shared (which the HA recipe already calls for) - worth a line in ha.md if
+  anyone runs an unshared cert dir; (f) there is no delete-a-record action;
+  retention is a prune of records expired more than a year.
