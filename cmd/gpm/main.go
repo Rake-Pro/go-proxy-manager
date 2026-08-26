@@ -197,6 +197,12 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to compile settings-level error pages")
 	}
 
+	// Settings-level default security headers, installed before the first Reload
+	// for the same reason as the error pages above: buildRouter composes each
+	// host's effective set from this default, and host-less responses (404/421,
+	// redirect/parked hosts) read it directly.
+	dataplane.SetSecurityHeaders(settings.SecurityHeaders)
+
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
@@ -268,6 +274,9 @@ func main() {
 			log.Error().Err(err).Msg("reload: failed to compile settings-level error pages")
 			return err
 		}
+		// Settings-level default security headers, refreshed before the compile so
+		// buildRouter composes each host's set from the new default.
+		dataplane.SetSecurityHeaders(st2.SecurityHeaders)
 		// Reload the data plane FIRST: only reconfigure the auth layer once the
 		// data plane has accepted the new config, so a rejected reload never
 		// leaves auth and dataplane drifted against each other.

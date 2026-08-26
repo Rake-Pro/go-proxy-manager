@@ -78,6 +78,30 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 	}
 }
 
+// TestSaveCarriesSecurityHeadersForward guards the wipe-bug for the new
+// securityHeaders field: neither the Settings form nor the host editor renders a
+// control for it yet, but both PUTs are whole-object replacements, so a save that
+// did not send the loaded map back would silently drop a GitOps-authored set.
+// Both save handlers must carry it forward from what they loaded.
+func TestSaveCarriesSecurityHeadersForward(t *testing.T) {
+	b, err := staticFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(b)
+
+	for _, want := range []string{
+		// settings save carries settings.securityHeaders forward
+		"if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;",
+		// host save carries the host's securityHeaders override forward
+		"if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js no longer carries securityHeaders forward (%q not found); a save now silently wipes the configured response headers", want)
+		}
+	}
+}
+
 // The same failure mode again, one level down: the proxy-host editor rebuilds
 // its `locations` array from the DOM, one loc-row per Location. A Location
 // carries middlewares/accessLists (and any field added later) that a rebuild
