@@ -560,7 +560,25 @@ has its own headers copied into the map before `WriteHeader`, so an app's own
 `X-Frame-Options`/`Referrer-Policy` is preserved and never clobbered or
 duplicated. `Strict-Transport-Security` is excluded from the set (the per-host
 `hsts` setting owns it); the feature is additive and leaves HSTS behaviour
-unchanged. Both injections happen at the FINAL `WriteHeader` (`>= 200`): an
+unchanged.
+
+Each header carries a **scope** (`all` / `generated-only` / `proxied-only`) so
+an operator can place a header that is safe on gpm's own pages but breaks a
+backed app (`Content-Security-Policy: frame-ancestors 'none'`, `Permissions-Policy`)
+on gpm-generated responses **only**. The compiled set is split into two subsets
+at build time — `generated` (scope `all` + `generated-only`) and `proxied`
+(scope `all` + `proxied-only`) — and the dispatch writer picks the subset at
+inject time from a single bit: is this response proxied? The writer defaults to
+the generated subset; the reverse proxy flips it to proxied via `ModifyResponse`,
+which the stdlib runs **only** when an upstream actually answered. The
+upstream-unreachable `502`/`504` is written by the proxy's `ErrorHandler`, not
+`ModifyResponse`, so it correctly stays gpm-generated. The bit reaches
+`ModifyResponse` through the request context: `serveHTTP(S)` stashes the dispatch
+writer on the context after wrapping, and `ModifyResponse` reads it back off the
+(context-preserving) outbound request and sets the flag — so the choice does not
+depend on the wrapper's `Unwrap` chain surviving the middleware stack.
+Per-host merges happen on the scoped rule map before the split, so a host
+override replaces a header's value **and** its scope. Both injections happen at the FINAL `WriteHeader` (`>= 200`): an
 upstream `1xx` interim response (`103 Early Hints`, or `100 Continue`) is written
 and then has its header map cleared by `httputil.ReverseProxy`'s `Got1xxResponse`
 hook, so injecting on the interim status would seed headers the clear deletes -

@@ -43,12 +43,13 @@ type router struct {
 	// hostHandler (see hostHandler.stripUntrustedIdentity).
 	clientIP func(*http.Request) net.IP
 
-	// securityHeaders is the settings-level default response-header set, applied
-	// set-if-absent to responses that have no proxy host to carry a per-host
-	// merge: the no-such-host 404, the mTLS 421, and redirect/parked hosts. A
-	// proxy host uses its own merged hostHandler.securityHeaders instead. nil
-	// when settings.securityHeaders is empty.
-	securityHeaders http.Header
+	// securityHeaders is the settings-level default response-header set, split by
+	// scope and applied set-if-absent to responses that have no proxy host to
+	// carry a per-host merge: the no-such-host 404, the mTLS 421, and
+	// redirect/parked hosts (all gpm-generated, so only the generated subset can
+	// ever apply). A proxy host uses its own merged hostHandler.securityHeaders
+	// instead. nil when settings.securityHeaders is empty.
+	securityHeaders *scopedHeaders
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -90,7 +91,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		clientIP:   reg.clientIP,
 		// Settings-level default headers for host-less responses (404/421) and
 		// redirect/parked hosts. A proxy host composes its own merge below.
-		securityHeaders: currentSecurityHeaders(),
+		securityHeaders: partitionSecurityHeaders(currentSecurityHeaders()),
 	}
 	// pinTLS records the per-host TLS config (min-version pin and/or mTLS) for each
 	// domain. It composes both dimensions into one config, since a host with both a
@@ -153,7 +154,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		}
 		hh.hsts = hstsHeader(h.TLS.HSTS)
 		hh.robots = robotsHeader(h.RobotsNoIndex)
-		hh.securityHeaders = mergedSecurityHeaders(h.SecurityHeaders)
+		hh.securityHeaders = partitionSecurityHeaders(mergedSecurityHeaders(h.SecurityHeaders))
 		for _, d := range h.Domains {
 			rt.hosts[hostKey(d)] = hh
 		}
@@ -425,7 +426,7 @@ func (rt *router) tlsConfigForSNI(serverName string) *tls.Config {
 // securityHeadersFor returns the response-header set to inject for a request
 // keyed by host: a proxy host's own merged set, else the settings-level default
 // (used for redirect/parked hosts and the no-such-host / misdirected responses).
-func (rt *router) securityHeadersFor(name string) http.Header {
+func (rt *router) securityHeadersFor(name string) *scopedHeaders {
 	if hh, ok := rt.hosts[name]; ok {
 		return hh.securityHeaders
 	}
@@ -545,6 +546,10 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// the FINAL WriteHeader, so an upstream 1xx interim response's header-map
 		// clear (httputil.ReverseProxy's Got1xxResponse) cannot drop them.
 		w = withHostResponseHeaders(w, hh.hsts, hh.robots)
+		// Stash the dispatch writer so a proxied upstream response (detected in the
+		// reverse proxy's ModifyResponse) can select the proxied header subset; a
+		// gpm-generated response below never marks it and keeps the generated subset.
+		r = requestWithSecurityWriter(r, w)
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return
@@ -590,6 +595,7 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// X-Robots-Tag rides the dispatch writer for the same 1xx-survival reason
 		// as HSTS on the HTTPS path; HSTS itself is never emitted over plain HTTP.
 		w = withHostResponseHeaders(w, "", hh.robots)
+		r = requestWithSecurityWriter(r, w) // see serveHTTPS
 		handler, _ := hh.route(r.URL.Path)
 		handler.ServeHTTP(w, r)
 		return

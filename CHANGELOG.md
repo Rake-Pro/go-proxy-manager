@@ -7,6 +7,24 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Per-header scope for `securityHeaders`.** Each configured header now carries
+  a `scope`: `all` (default — both gpm-generated and proxied responses, today's
+  behaviour), `generated-only` (gpm's own responses only, **never** a proxied
+  upstream), or `proxied-only` (proxied responses only). This closes the gap
+  where a header safe on gpm's own pages breaks a backed app when injected onto
+  its proxied responses — e.g. `Content-Security-Policy: frame-ancestors 'none'`
+  and `Permissions-Policy` break Home Assistant (no CSP of its own; relies on
+  same-origin add-on iframes), so the recommended set now places those two at
+  `generated-only` and the rest at `all`. The value is **either** a bare string
+  (scope `all`) **or** a `{value, scope}` object; the legacy plain
+  `map[string]string` config and API payload keep working unchanged (bare string
+  ⇒ scope `all`), and an all-scope header still marshals back to a bare string.
+  A header is declared once, at one scope (a duplicate name across scopes is
+  rejected); an unknown scope is rejected. The data plane distinguishes
+  generated from proxied at inject time via the reverse proxy's `ModifyResponse`
+  (which fires only when an upstream actually answered), so the
+  upstream-unreachable `502`/`504` stays gpm-generated. HSTS/`X-Robots-Tag`,
+  set-if-absent, and `1xx` survival are all unchanged.
 - **Configurable security response headers on gpm's own responses.** A new
   `settings.securityHeaders` map (with a per-`ProxyHost` `securityHeaders` that
   merges over it per key) sets response headers gpm emits on the responses **it**

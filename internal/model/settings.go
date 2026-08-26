@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // AdminAuthSettings governs how operators authenticate to the admin panel.
@@ -137,18 +140,115 @@ type ErrorPagesConfig struct {
 	InterceptUpstream []int `json:"interceptUpstream,omitempty" yaml:"interceptUpstream,omitempty"`
 }
 
+// SecurityScope selects which responses a configured security header applies to.
+// The empty scope is normalised to SecurityScopeAll (today's behaviour), so an
+// old plain-string-map config keeps working unchanged.
+type SecurityScope string
+
+const (
+	// SecurityScopeAll applies the header to both gpm-generated and proxied
+	// upstream responses (set-if-absent on each). This is the default.
+	SecurityScopeAll SecurityScope = "all"
+	// SecurityScopeGenerated applies the header ONLY to responses gpm itself
+	// writes (auth-gate refusals, sign-in redirects, error pages, the
+	// path-rejection 400, the no-such-host 404, parked/redirect hosts) and NEVER
+	// to a proxied upstream response. This is the safe placement for headers like
+	// Content-Security-Policy frame-ancestors and Permissions-Policy, which can
+	// break a proxied app that ships none of its own.
+	SecurityScopeGenerated SecurityScope = "generated-only"
+	// SecurityScopeProxied applies the header ONLY to proxied upstream responses
+	// (still set-if-absent) and never to a gpm-generated response - for headers
+	// meaningful only alongside real app content.
+	SecurityScopeProxied SecurityScope = "proxied-only"
+)
+
+// SecurityHeaderValue is one configured response header: its value plus the
+// scope selecting which responses it lands on. It is the map value of both
+// settings.securityHeaders and proxyHost.securityHeaders.
+//
+// Backward compatibility: the config/API historically stored securityHeaders as
+// a plain map[string]string (name -> value, no scope). Both wire formats still
+// accept that form - a bare string unmarshals to this struct with an empty scope
+// (which the data plane treats as SecurityScopeAll), or an object
+// {value, scope} carries an explicit scope. The marshallers invert it: an
+// all-scope (or empty-scope) header marshals back to a bare string, so an
+// unchanged config round-trips byte-for-byte and existing API consumers keep
+// seeing plain strings; only a header carrying a non-default scope marshals as
+// the {value, scope} object.
+type SecurityHeaderValue struct {
+	Value string        `json:"value" yaml:"value"`
+	Scope SecurityScope `json:"scope,omitempty" yaml:"scope,omitempty"`
+}
+
+// securityHeaderObject is the object wire form, used by the (un)marshallers so
+// the struct's own methods can accept/emit either shape without recursing.
+type securityHeaderObject struct {
+	Value string        `json:"value" yaml:"value"`
+	Scope SecurityScope `json:"scope,omitempty" yaml:"scope,omitempty"`
+}
+
+// UnmarshalJSON accepts either the legacy bare string ("name": "value") or the
+// scoped object ("name": {"value": ..., "scope": ...}).
+func (v *SecurityHeaderValue) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		v.Value, v.Scope = s, ""
+		return nil
+	}
+	var o securityHeaderObject
+	if err := json.Unmarshal(b, &o); err != nil {
+		return err
+	}
+	v.Value, v.Scope = o.Value, o.Scope
+	return nil
+}
+
+// MarshalJSON emits a bare string for an all/empty-scope header (so old-form
+// config and API responses are unchanged) and the {value, scope} object only
+// when a non-default scope is set.
+func (v SecurityHeaderValue) MarshalJSON() ([]byte, error) {
+	if v.Scope == "" || v.Scope == SecurityScopeAll {
+		return json.Marshal(v.Value)
+	}
+	return json.Marshal(securityHeaderObject(v))
+}
+
+// UnmarshalYAML mirrors UnmarshalJSON: a scalar node is the legacy bare value; a
+// mapping node is the scoped object.
+func (v *SecurityHeaderValue) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		v.Value, v.Scope = n.Value, ""
+		return nil
+	}
+	var o securityHeaderObject
+	if err := n.Decode(&o); err != nil {
+		return err
+	}
+	v.Value, v.Scope = o.Value, o.Scope
+	return nil
+}
+
+// MarshalYAML mirrors MarshalJSON.
+func (v SecurityHeaderValue) MarshalYAML() (interface{}, error) {
+	if v.Scope == "" || v.Scope == SecurityScopeAll {
+		return v.Value, nil
+	}
+	return securityHeaderObject(v), nil
+}
+
 // RecommendedSecurityHeaders is a safe, paste-ready default set operators can
 // copy into settings.securityHeaders. It is documentation only: gpm ships
 // NOTHING by default (an empty map is today's behaviour), so an existing
-// deployment is never surprised by a new header. See docs/configuration.md for
-// the caveat on Content-Security-Policy when the same map is ever applied to a
-// proxied app.
-var RecommendedSecurityHeaders = map[string]string{
-	"X-Content-Type-Options":  "nosniff",
-	"Referrer-Policy":         "strict-origin-when-cross-origin",
-	"Permissions-Policy":      "geolocation=(), camera=(), microphone=()",
-	"X-Frame-Options":         "DENY",
-	"Content-Security-Policy": "frame-ancestors 'none'",
+// deployment is never surprised by a new header. Content-Security-Policy
+// (frame-ancestors) and Permissions-Policy are placed at scope generated-only:
+// safe on gpm's own pages but liable to break a proxied app that ships none of
+// its own (see docs/configuration.md). The rest are scope all.
+var RecommendedSecurityHeaders = map[string]SecurityHeaderValue{
+	"X-Content-Type-Options":  {Value: "nosniff", Scope: SecurityScopeAll},
+	"Referrer-Policy":         {Value: "strict-origin-when-cross-origin", Scope: SecurityScopeAll},
+	"X-Frame-Options":         {Value: "DENY", Scope: SecurityScopeAll},
+	"Permissions-Policy":      {Value: "geolocation=(), camera=(), microphone=()", Scope: SecurityScopeGenerated},
+	"Content-Security-Policy": {Value: "frame-ancestors 'none'", Scope: SecurityScopeGenerated},
 }
 
 // hopByHopHeaders are the RFC 7230 connection-scoped headers. They are
@@ -183,10 +283,12 @@ func validHeaderValue(v string) bool {
 
 // validateSecurityHeaders validates a settings- or host-level securityHeaders
 // map: every key must be a valid RFC 7230 field-name token, keys are
-// de-duplicated case-insensitively, Strict-Transport-Security is refused (the
-// per-host hsts setting owns it), hop-by-hop headers are refused, and every
-// value must be free of CR/LF/control bytes.
-func validateSecurityHeaders(m map[string]string) error {
+// de-duplicated case-insensitively (so a header is declared exactly once, at one
+// scope - it cannot appear at two different scopes), Strict-Transport-Security
+// is refused (the per-host hsts setting owns it), hop-by-hop headers are
+// refused, every value must be free of CR/LF/control bytes, and every scope must
+// be one of the three known values (the empty scope is allowed and means "all").
+func validateSecurityHeaders(m map[string]SecurityHeaderValue) error {
 	seen := make(map[string]struct{}, len(m))
 	for k, v := range m {
 		if !validHeaderName(k) {
@@ -200,11 +302,16 @@ func validateSecurityHeaders(m map[string]string) error {
 			return fmt.Errorf("securityHeaders: %q is a hop-by-hop header and cannot be set as a response header", k)
 		}
 		if _, dup := seen[lk]; dup {
-			return fmt.Errorf("securityHeaders: duplicate header %q (names are case-insensitive)", k)
+			return fmt.Errorf("securityHeaders: duplicate header %q (names are case-insensitive; a header is declared once, at one scope)", k)
 		}
 		seen[lk] = struct{}{}
-		if !validHeaderValue(v) {
+		if !validHeaderValue(v.Value) {
 			return fmt.Errorf("securityHeaders[%q]: value contains an invalid character (CR/LF/control)", k)
+		}
+		switch v.Scope {
+		case "", SecurityScopeAll, SecurityScopeGenerated, SecurityScopeProxied:
+		default:
+			return fmt.Errorf("securityHeaders[%q]: unknown scope %q (want %q, %q, or %q)", k, v.Scope, SecurityScopeAll, SecurityScopeGenerated, SecurityScopeProxied)
 		}
 	}
 	return nil
@@ -276,11 +383,13 @@ type Settings struct {
 	// A ProxyHost's own securityHeaders merges over this per key (the host value
 	// wins for a header it names; keys it omits fall through to this default).
 	// Empty (the default) ships nothing, so an existing deployment is unchanged;
-	// see RecommendedSecurityHeaders for a paste-ready set. On a PROXIED upstream
-	// response these are applied set-if-absent, so an app's own X-Frame-Options
-	// / Referrer-Policy is never clobbered. Strict-Transport-Security is NOT
+	// see RecommendedSecurityHeaders for a paste-ready set. Each header carries a
+	// per-header scope (all / generated-only / proxied-only); the default (and an
+	// old plain-string-map value) is "all". On a PROXIED upstream response an
+	// applicable header is set-if-absent, so an app's own X-Frame-Options /
+	// Referrer-Policy is never clobbered. Strict-Transport-Security is NOT
 	// settable here - the per-host hsts setting owns it.
-	SecurityHeaders map[string]string `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
+	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
