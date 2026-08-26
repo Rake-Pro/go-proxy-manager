@@ -93,6 +93,16 @@ error-page system; none is a regression from that change.
   error-page renderer. It is opt-in, so an operator who wants the header back
   configures it once at the settings level rather than gpm changing the default
   body of every configured page. See CHANGELOG / `docs/configuration.md`.)*
+- [x] **`securityHeaders` needs a per-header scope so app-breaking headers stay
+  off proxied apps.** A single set-if-absent map applied to both gpm-generated
+  and proxied responses cannot express "`Content-Security-Policy: frame-ancestors
+  'none'` / `Permissions-Policy` on gpm's own pages but never on a proxied app" -
+  set-if-absent is not enough, because the app legitimately sets none, so gpm's
+  value lands and breaks it (Home Assistant relies on same-origin add-on
+  iframes). *(Addressed: each header carries a `scope` of `all` (default),
+  `generated-only` or `proxied-only`; the recommended set now scopes CSP and
+  Permissions-Policy to `generated-only`. The legacy plain map stays valid
+  (bare string ⇒ scope `all`). See CHANGELOG / `docs/configuration.md`.)*
 - [ ] **A broken template passes validation, survives reload, and then blocks the
   next restart.** `settings.errorPages` is not compiled at write time, so a
   syntactically-broken template commits cleanly. The reload path is fail-safe

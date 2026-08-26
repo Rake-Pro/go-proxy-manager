@@ -147,7 +147,7 @@ Singleton application configuration.
 | `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
 | `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
-| `securityHeaders` | map[string]string | Fleet-default response headers gpm emits on the responses **it** generates (denials, sign-in redirects, error pages, path-rejection 400s, the no-such-host 404, parked/redirect hosts). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
+| `securityHeaders` | map[string]string \| map[string]{value,scope} | Fleet-default response headers, each with a per-header `scope` (`all` default / `generated-only` / `proxied-only`) selecting whether it lands on gpm-generated responses, proxied upstream responses, or both. Value is a bare string (scope `all`) or a `{value, scope}` object. A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
@@ -879,37 +879,65 @@ error pages, the 503 fail-closed, the 400 path-rejection, the 404 no-such-host)
 previously carried only HSTS, because the auth chain runs outside any headers
 middleware, so nothing but the per-host HSTS/robots emission could reach them.
 
-Both levels are a `map[string]string` of header name → value:
+Both levels are a map of header name → value. Each value is **either** a bare
+string (the legacy form, scope defaults to `all`) **or** an object carrying a
+`value` and a `scope`:
+
+```yaml
+securityHeaders:
+  X-Frame-Options: DENY                 # bare string  -> scope: all
+  Content-Security-Policy:
+    value: "frame-ancestors 'none'"
+    scope: generated-only               # object form  -> explicit scope
+```
 
 - `settings.securityHeaders` is the fleet default.
 - A `ProxyHost`'s own `securityHeaders` **merges over** the settings default
-  **per key**: a header the host names replaces the settings value for that
-  header, and a header it omits still falls through to the settings default (the
-  same "host override wins per key" resolution `errorPages` templates use).
+  **per key**: a header the host names replaces the settings value **and its
+  scope** for that header, and a header it omits still falls through to the
+  settings default (the same "host override wins per key" resolution `errorPages`
+  templates use).
 
-### Scope of application
+### Scope
 
-The headers are applied at the data-plane dispatch layer, set-if-absent, so:
+`scope` declares **where** a header is applied. It is the point of this feature:
+some headers are safe on gpm's own pages but break a backed app if injected onto
+its proxied responses. The three values:
 
-- **On every gpm-generated response** — auth-gate refusals (401/403/503), the
-  OIDC / forward-auth sign-in redirects (302), rendered error pages, the
-  path-rejection 400, the no-such-host 404, the misdirected-request 421, and
-  parked / redirect hosts — the headers are present (gpm's own response never
-  set them, so set-if-absent adds them). This is the audit target.
-- **On a PROXIED upstream response** the headers are applied **set-if-absent**:
-  a header the upstream already set (Home Assistant and many apps set their own
-  `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, `X-Content-Type-Options`) is
-  **left untouched**; only a header the upstream omitted is added. gpm never
-  clobbers or duplicates an app's own security header.
+| `scope` | Applies to gpm-generated responses | Applies to proxied upstream responses |
+|---------|:----------------------------------:|:-------------------------------------:|
+| `all` (default) | yes | yes |
+| `generated-only` | yes | **no** |
+| `proxied-only` | **no** | yes |
 
-> Why set-if-absent rather than gpm-generated-only: a single injection point at
-> the dispatch layer cannot miss a denial path, and set-if-absent makes the
-> proxied case provably safe (an app's own value always wins). The one thing to
-> be careful with is `Content-Security-Policy`: `frame-ancestors 'none'` on a
-> gpm-generated page is safe, but a restrictive `default-src` in this map would
-> also be injected (set-if-absent) onto any proxied app that ships no CSP of its
-> own, which can break the app. Keep any CSP here limited to `frame-ancestors`,
-> or set a per-host `securityHeaders` that omits CSP for hosts you proxy.
+Every scope is injected **set-if-absent** (a value already on the response
+always wins). A header is declared **once**, at one scope — the same name cannot
+appear at two scopes (it is a case-insensitive duplicate, which is rejected).
+
+- **gpm-generated responses** are the ones gpm writes itself: auth-gate refusals
+  (401/403/503), the OIDC / forward-auth sign-in redirects (302), rendered error
+  pages (including the 502/504 upstream-unreachable page), the path-rejection
+  400, the no-such-host 404, the misdirected-request 421, and parked / redirect
+  hosts. `generated-only` and `all` headers land here.
+- **proxied upstream responses** are the ones an upstream actually answered
+  (any status, including the app's own errors). `proxied-only` and `all` headers
+  land here — always set-if-absent, so an app that sets its own
+  `X-Frame-Options: SAMEORIGIN` / `Referrer-Policy` / `X-Content-Type-Options`
+  keeps it untouched.
+
+The data plane distinguishes the two at inject time: the reverse proxy marks the
+response as proxied only when an upstream actually responds (its `ModifyResponse`
+hook), so the upstream-unreachable 502/504 — written by the proxy's error handler,
+not the upstream — correctly counts as gpm-generated.
+
+> **Why the scope matters — the real case.** `Content-Security-Policy:
+> frame-ancestors 'none'` and a restrictive `Permissions-Policy` are exactly what
+> you want on gpm's own error/denial pages, but they **break** a proxied app that
+> ships none of its own: Home Assistant, for one, sets no CSP and relies on
+> same-origin iframes for add-on ingress, so a `frame-ancestors 'none'` injected
+> set-if-absent (the app set nothing, so gpm's value lands) breaks it. Declaring
+> those two at `scope: generated-only` keeps them on gpm's pages and off every
+> proxied app. That is the placement in the recommended set below.
 
 `Strict-Transport-Security` is **not** settable here — the per-host
 [`tls.hsts`](#proxyhost-configproxy-hosts) setting owns it, and this feature is
@@ -929,7 +957,10 @@ the same mechanism, for the same reason.)
 ### Validation
 
 - Header names must be valid RFC 7230 field-name tokens (no CR/LF, no separator
-  characters); keys are de-duplicated case-insensitively.
+  characters); keys are de-duplicated case-insensitively (so a header is declared
+  once, at one scope — it cannot be set at two scopes).
+- `scope`, when set, must be one of `all`, `generated-only` or `proxied-only`;
+  an unknown scope is rejected. An omitted scope means `all`.
 - `Strict-Transport-Security` is refused (HSTS owns it).
 - Hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Authenticate`,
   `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) are
@@ -940,23 +971,29 @@ the same mechanism, for the same reason.)
 ### Recommended set
 
 Ships **nothing** by default (empty map = today's behaviour, opt-in, so no
-existing deployment is surprised). A safe paste-ready set for gpm-generated
-pages:
+existing deployment is surprised). A safe paste-ready set, with the two
+app-breaking headers scoped to `generated-only`:
 
 ```yaml
 # settings.yaml
 securityHeaders:
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: strict-origin-when-cross-origin
-  Permissions-Policy: "geolocation=(), camera=(), microphone=()"
-  X-Frame-Options: DENY
-  Content-Security-Policy: "frame-ancestors 'none'"
+  X-Content-Type-Options: nosniff                 # scope all
+  Referrer-Policy: strict-origin-when-cross-origin # scope all
+  X-Frame-Options: DENY                            # scope all
+  Permissions-Policy:
+    value: "geolocation=(), camera=(), microphone=()"
+    scope: generated-only                          # unsafe on a proxied app
+  Content-Security-Policy:
+    value: "frame-ancestors 'none'"
+    scope: generated-only                          # unsafe on a proxied app
 ```
 
-Do **not** add a restrictive `default-src` to the `Content-Security-Policy`
-value here if the same map is ever inherited by a host you proxy an app through
-(see the scope note above) — that is the one entry whose set-if-absent injection
-onto a CSP-less upstream page can break the app.
+`X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` are safe at
+`all` — a proxied app that sets its own keeps it (set-if-absent), and gpm's
+value is a reasonable default for one that doesn't. `Content-Security-Policy`
+(`frame-ancestors`) and `Permissions-Policy` are at `generated-only` because
+injecting them onto a proxied app that ships none of its own can break it (see
+the scope note above) — this keeps them on gpm's own pages, where they are safe.
 
 ---
 
@@ -979,7 +1016,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `locations` | []Location | no | Path-scoped overrides (below). |
 | `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
 | `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](#errorpagesconfig-settingserrorpages--proxyhosterrorpages) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. |
-| `securityHeaders` | map[string]string | no | Merges over [`settings.securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders) per key for this host. Unset uses the settings-level default unchanged. |
+| `securityHeaders` | map[string]string \| map[string]{value,scope} | no | Merges over [`settings.securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders) per key for this host (replacing the settings value **and its scope** for a header it names). Unset uses the settings-level default unchanged. |
 
 **Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
 

@@ -406,18 +406,24 @@ earlier tiers or duplicating work (see "Architecture for extension").
   `{{.StatusText}}` `{{.Host}}` `{{.RequestID}}`; a host override wins over the
   settings-level pages; parse errors fail the config reload with a clear
   message; unconfigured behaviour is byte-identical to before this shipped.
-- **Security response headers** ★ (shipped): `settings.securityHeaders`
-  (`map[string]string`, fleet default) and a per-`ProxyHost` `securityHeaders`
-  that merges over it per key, emitted on the responses **gpm itself** generates
-  (auth-gate denials, sign-in redirects, error pages, path-rejection 400, the
-  no-such-host 404, misdirected 421, parked/redirect hosts) at the same data-plane
-  layer as HSTS - so denials get them even though the auth chain runs outside any
-  headers middleware. Applied **set-if-absent**, so a proxied upstream's own
-  `X-Frame-Options`/`Referrer-Policy`/etc. are never clobbered. Opt-in (empty by
-  default); names validated (no CR/LF, no hop-by-hop, case-insensitive dedup);
-  `Strict-Transport-Security` refused - HSTS is unchanged and separate. Resolves
-  the auth-refusal/error-page "no `nosniff` on rendered pages" observation from
-  BACKLOG.
+- **Security response headers** ★ (shipped): `settings.securityHeaders` (fleet
+  default) and a per-`ProxyHost` `securityHeaders` that merges over it per key.
+  Each header carries a **scope** - `all` (default), `generated-only` or
+  `proxied-only` - selecting whether it lands on the responses **gpm itself**
+  generates (auth-gate denials, sign-in redirects, error pages, path-rejection
+  400, the no-such-host 404, misdirected 421, parked/redirect hosts), on proxied
+  upstream responses, or both. Generated responses are injected at the same
+  data-plane layer as HSTS - so denials get them even though the auth chain runs
+  outside any headers middleware. Applied **set-if-absent**, so a proxied
+  upstream's own `X-Frame-Options`/`Referrer-Policy`/etc. are never clobbered;
+  `generated-only` additionally keeps app-breaking headers
+  (`Content-Security-Policy` frame-ancestors, `Permissions-Policy`) off proxied
+  apps entirely. The value is a bare string (scope `all`) or a `{value, scope}`
+  object, so the legacy plain map stays valid. Opt-in (empty by default); names
+  validated (no CR/LF, no hop-by-hop, case-insensitive dedup, unknown scope
+  rejected); `Strict-Transport-Security` refused - HSTS is unchanged and
+  separate. Resolves the auth-refusal/error-page "no `nosniff` on rendered pages"
+  observation from BACKLOG.
 
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth

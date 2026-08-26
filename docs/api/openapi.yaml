@@ -305,15 +305,18 @@ components:
         securityHeaders:
           type: object
           additionalProperties:
-            type: string
+            $ref: '#/components/schemas/SecurityHeaderValue'
           description: >-
-            Per-host response headers gpm emits on the responses it generates,
-            merged per key over settings.securityHeaders (the host value wins for
-            a header it names; omitted headers fall through to the settings
-            default). Applied set-if-absent, so a proxied upstream's own header is
-            never clobbered. Strict-Transport-Security is not settable here (the
-            per-host tls.hsts setting owns it); hop-by-hop headers and CR/LF in
-            names/values are rejected.
+            Per-host response headers, merged per key over
+            settings.securityHeaders (the host value - and its scope - wins for a
+            header it names; omitted headers fall through to the settings
+            default). Each header carries a scope (all / generated-only /
+            proxied-only) selecting which responses it lands on; the value is a
+            bare string (scope all) or a {value, scope} object. Applied
+            set-if-absent, so a proxied upstream's own header is never clobbered.
+            Strict-Transport-Security is not settable here (the per-host tls.hsts
+            setting owns it); hop-by-hop headers, CR/LF in names/values and an
+            unknown scope are rejected.
       required:
       - name
       - domains
@@ -1497,18 +1500,47 @@ components:
         securityHeaders:
           type: object
           additionalProperties:
-            type: string
+            $ref: '#/components/schemas/SecurityHeaderValue'
           description: >-
-            Fleet-default response headers gpm emits on the responses it generates
-            (auth-gate denials, sign-in redirects, error pages, path-rejection
-            400s, the no-such-host 404, parked/redirect hosts), at the same layer
-            HSTS is emitted, so they land regardless of the auth outcome. A
-            ProxyHost's own securityHeaders merges over this per key. Applied
-            set-if-absent on proxied upstream responses, so an app's own headers
-            are never clobbered. Empty (default) ships nothing.
-            Strict-Transport-Security (owned by tls.hsts) and hop-by-hop headers
-            are rejected, as is CR/LF in a name or value.
+            Fleet-default response headers. Each header carries a scope (all /
+            generated-only / proxied-only) selecting whether it lands on
+            gpm-generated responses (auth-gate denials, sign-in redirects, error
+            pages, path-rejection 400s, the no-such-host 404, parked/redirect
+            hosts), on proxied upstream responses, or both; the default (and the
+            legacy bare-string form) is all. A ProxyHost's own securityHeaders
+            merges over this per key. Applied set-if-absent, so an app's own
+            headers are never clobbered. Empty (default) ships nothing.
+            Strict-Transport-Security (owned by tls.hsts), hop-by-hop headers,
+            CR/LF in a name or value, and an unknown scope are rejected.
       description: Singleton application configuration (config/settings.yaml).
+    SecurityHeaderValue:
+      description: >-
+        One configured security response header value. Two accepted forms: a bare
+        string (the legacy form; scope defaults to "all"), or a {value, scope}
+        object carrying an explicit per-header scope. The API emits the bare
+        string for an all-scope header and the object only for a non-default
+        scope, so an unchanged config round-trips as plain strings.
+      oneOf:
+      - type: string
+        description: Header value at the default scope "all".
+      - type: object
+        required:
+        - value
+        properties:
+          value:
+            type: string
+          scope:
+            type: string
+            enum:
+            - all
+            - generated-only
+            - proxied-only
+            default: all
+            description: >-
+              Which responses the header applies to. "all" (default) both
+              gpm-generated and proxied upstream responses; "generated-only" only
+              responses gpm writes itself (never a proxied app); "proxied-only"
+              only proxied upstream responses.
     ProxyProtocolSettings:
       type: object
       description: 'Inbound HAProxy PROXY protocol (v1 and v2) on the data-plane HTTP/HTTPS

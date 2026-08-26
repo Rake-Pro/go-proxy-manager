@@ -16,7 +16,13 @@ import (
 // HSTS have to survive to the final response.
 func build1xxRouter(t *testing.T, up model.Upstream) *router {
 	t.Helper()
-	withGlobalSecurityHeaders(t, map[string]string{"X-Frame-Options": "DENY"})
+	// X-Frame-Options at the default "all" scope, plus X-Proxied-Scope at
+	// proxied-only, so the 1xx-survival regression also covers a scoped header on
+	// the (proxied) final response.
+	withGlobalScopedSecurityHeaders(t, map[string]model.SecurityHeaderValue{
+		"X-Frame-Options": {Value: "DENY"},
+		"X-Proxied-Scope": {Value: "1", Scope: model.SecurityScopeProxied},
+	})
 	withGlobalErrorPages(t, nil)
 	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
 		ObjectMeta:    model.ObjectMeta{Name: "front"},
@@ -130,5 +136,8 @@ func assert1xxHeaders(t *testing.T, resp *http.Response) {
 	}
 	if got := resp.Header.Get("X-Robots-Tag"); got != "noindex, nofollow" {
 		t.Fatalf("X-Robots-Tag = %q, want it to survive the 1xx", got)
+	}
+	if got := resp.Header.Get("X-Proxied-Scope"); got != "1" {
+		t.Fatalf("X-Proxied-Scope = %q, want the proxied-only scoped header to survive the 1xx", got)
 	}
 }
