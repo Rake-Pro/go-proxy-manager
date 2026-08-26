@@ -301,11 +301,12 @@ type ProxyHost struct {
 
 	// SecurityHeaders overrides/merges over settings.securityHeaders for this
 	// host. It is a per-key merge: a header this map names replaces the settings
-	// default value, and a header it omits still falls through to the settings
-	// default (matching how errorPages templates resolve). Same scope and
-	// set-if-absent-on-proxied rules as the settings-level default. nil (default)
-	// uses the settings-level headers unchanged.
-	SecurityHeaders map[string]string `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
+	// default value (including its scope), and a header it omits still falls
+	// through to the settings default (matching how errorPages templates resolve).
+	// Same per-header scope and set-if-absent-on-proxied rules as the
+	// settings-level default. nil (default) uses the settings-level headers
+	// unchanged.
+	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 }
 
 func (h ProxyHost) Kind() string { return "ProxyHost" }
