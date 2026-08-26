@@ -315,6 +315,77 @@ and Ingress reconcilers' run/success timestamps and counts) are read at scrape
 time through pull collectors wired in `cmd/gpm`, so nothing is mirrored into a
 second source of truth and no package gains a metrics import.
 
+**Client-certificate issuance** (`internal/clientcert`). A `ClientCA` that carries
+an optional signing key (`caKeyFile`, confined to the cert store exactly like
+`crlFile`, or an inline `caKeyPEM` secret) stops being only a verification anchor
+and becomes an issuing CA: `POST /api/client-cas/{name}/issue` mints a client
+certificate signed by it and returns a password-protected PKCS#12 bundle. The key
+is resolved by `model.ClientCA.SigningKey`, which matches it against the
+certificates in `caPEM` - the one it belongs to *is* the issuer, so a bundle
+holding an intermediate and its root resolves to whichever the operator actually
+holds the key for. A key that matches nothing, or matches a non-CA certificate, is
+refused; an inline key is checked at config validation, a `caKeyFile` the first
+time it is used, since only the data plane knows the cert store path.
+
+Three properties define the subsystem. **It is stateless and write-free**: the
+generated private key is never written to the config store, the cert store, or a
+log line - it exists only in the response body, so the endpoint creates no config
+revision, no history entry and no lifecycle event, and a lost bundle means
+re-issuing rather than recovering. Issuance is logged with the CA name, subject,
+serial and validity window and nothing else. **The crypto choices are
+compatibility-driven, not modernity-driven**: RSA-2048 because iOS refuses ECDSA
+client certificates during the handshake, and `pkcs12.Legacy` (SHA-1/3DES) because
+modern PBES2 bundles fail to import into the iOS keychain and into several
+Android/Wear OS releases. That trade has a cost worth naming: the legacy encoder
+derives the bundle's integrity MAC with a *single* KDF iteration, so there is
+almost no work factor between the password and the key inside, and the file itself
+ends up on phones and in shared folders. The encoder cannot be hardened without
+losing the imports the feature exists for, so the password carries the whole load
+and a 12-character floor (`clientcert.MinPasswordLen`) is enforced on issue and
+renew alike. SANs are likewise constrained to printable ASCII, because a
+certificate stores them as `IA5String` and anything else fails inside ASN.1
+marshalling rather than at the door. **It is gated as a mutation** even though it mutates nothing: the same
+`client-cas:write` scope, admin session, CSRF and same-origin guard that editing
+the CA takes, because minting a credential from the CA's key is at least as
+privileged - and the HA follower's method-based read-only gate refuses it like any
+other POST.
+
+**Issuance records** (`internal/clientcert/records.go`). "Stateless" above is
+about *secrets*: gpm keeps no key, no certificate and no bundle. It does keep a
+record of each issuance - CA, common name, SANs, serial, validity window, issued-at
+- because an operator who cannot see what a CA issued cannot see what is about to
+expire. The records are **runtime state, not configuration**: they describe what
+gpm did rather than what the operator declared, so they live in the certificate
+store (`<certDir>/client-certs/<ca>.json`) and never in the git-backed config repo.
+The storage shape is deliberately the ACME issued-certificate metadata's
+(`internal/acme/store.go`): one JSON file per object, written temp-file-plus-rename
+at `0600` so a crash mid-write cannot leave a truncated file, read back on demand
+rather than cached. A single `Ledger` value is shared by the handlers and its mutex
+serializes the read-modify-write that appending and superseding both need. The
+record is written *before* the bundle is streamed, so a bundle that gpm has no
+memory of cannot exist.
+
+From the records the API derives a per-certificate `ok` / `expiring` / `expired`
+status against the CA's `expiryWarningDays` (default 30), which drives the UI's
+pre-expiry banner, and `POST
+/api/client-cas/{name}/certificates/{serial}/renew` reissues the recorded identity
+- same subject and SANs, taken from the record rather than the request - with a new
+key and serial, marking the predecessor superseded in the same atomic write. That
+write refuses rather than no-ops when its target is absent, and the handler refuses
+with `409` when the target is already superseded: either would otherwise leave two
+records that both look current, which is the exact state the supersede link exists
+to prevent.
+
+Two properties are load-bearing here and are stated in the UI as well as the docs.
+**Renewal is not automatic and cannot be**: unlike an ACME server certificate,
+which gpm both installs and serves, a client certificate lives in a keychain on
+someone's device, so every renewal ends in a human importing a `.p12` - the banner
+warns *before* expiry precisely because the fix has a human in it. And **renewing
+does not revoke**: the superseded certificate stays valid until its own `notAfter`
+on every device that has not re-imported, which is why superseded records stay
+listed rather than being deleted. Killing an old certificate early is a CRL edit,
+the same mechanism that revokes any other client certificate.
+
 ## Data plane
 
 **Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+ by default, a
@@ -470,6 +541,34 @@ own address are rewritten to the public scheme/host.
   stripped from any untrusted peer before the request reaches a backend, so a
   direct client cannot forge an identity. Forward-auth and auth-request handlers
   re-strip their own header sets as a second layer.
+- **Network exemptions are explicit and IP-rooted, and only as good as the
+  host's trusted-proxy set.** A middleware's `allowFrom` (rate limit, guard,
+  bouncer, `auth-request` and `client-cert` auth) is evaluated against the client
+  IP that host resolves, which is the peer address unless the peer is one of that
+  host's trusted proxies. That set has exactly one source: the
+  `forwardAuth.trustedProxies` of the identity providers the host's auth
+  middlewares reference (`hostIdentityTrust`, internal/dataplane/chain.go). A
+  `client-cert` middleware has no identity provider by construction, so **it
+  contributes nothing to that set**: on a host whose only auth middleware is
+  `client-cert`, `allowFrom` compares the raw TCP peer and `X-Forwarded-For` is
+  never read. That is fail-safe when gpm is the edge - a client cannot forge a
+  header it is not trusted to send - and dangerous when it is not: if an L7 proxy
+  in front of gpm has an address inside an `allowFrom` network, every request
+  through it is exempt, which is a total mTLS bypass for the host. Conversely a
+  host that *also* carries a forward-auth middleware gets the normal
+  `X-Forwarded-For` walk for the client-cert exemption too, which is usually what
+  is wanted but widens what those trusted proxies can do from "assert an identity
+  header" to "place a client inside the mTLS exemption". Both cases are spelled
+  out in docs/configuration.md; a trusted-proxy source that a client-cert
+  middleware can declare for itself is a tracked follow-up.
+  In `client-cert` mode the exemption is decided before the certificate check, so
+  an exempt client is never asked for one and never role-checked - and because
+  identity-passthrough headers are set only from a handshake-verified certificate,
+  such a request reaches the upstream carrying no certificate identity at all. It
+  is refused in `oidc` and `forward-auth` mode rather than silently ignored, and
+  because an unset `mode` inherits the provider's type, `Config.Validate` resolves
+  the effective mode and refuses that case too rather than accepting an exemption
+  the runtime would drop.
 - **Fail-closed.** Misconfigured or unknown auth modes deny rather than pass; a
   nil/unparseable client IP is denied; an access list with no matching rule falls
   through to its `defaultAction` (deny by default).
@@ -525,5 +624,14 @@ A deliberately small, vetted set (Go 1.26, CGO disabled):
 | `rs/zerolog` | structured logging |
 | `gopkg.in/yaml.v3` | config (de)serialization |
 | `modernc.org/sqlite` | pure-Go session store (no CGO) |
+| `software.sslmate.com/src/go-pkcs12` | PKCS#12 (`.p12`) encoding for issued client certificates |
 
 Everything else is the Go standard library.
+
+`go-pkcs12` is the one place the standard library genuinely cannot do the job:
+`crypto/x509` has no PKCS#12 encoder at all, and `golang.org/x/crypto/pkcs12` is
+frozen and decode-only. It is a single pure-Go package (its only module
+requirement is `golang.org/x/crypto`, which is already a direct dependency here),
+it adds no transitive tree, and it is the maintained fork of the frozen `x/crypto`
+package. Hand-rolling the ASN.1 for a format whose whole point is
+interoperability with iOS and Android keychains would have been the larger risk.

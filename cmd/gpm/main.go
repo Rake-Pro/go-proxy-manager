@@ -478,6 +478,10 @@ func main() {
 		// A follower serves the admin API read-only: writes are refused with a
 		// 503 naming the leader, and the SPA greys the controls out.
 		Role: role,
+
+		// Resolves a ClientCA's cert-store-relative caKeyFile when issuing a
+		// client certificate.
+		CertDir: *certDir,
 	})
 
 	uiHandler, err := ui.Handler()

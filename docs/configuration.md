@@ -1341,6 +1341,9 @@ carries a private key.
 | `crlFile` | string | no | Certificate revocation list, PEM or DER, **relative to the cert store** (absolute paths and `..` are rejected, like a custom certificate's files). Re-read on every config reload and within 5 minutes of the file's mtime changing. |
 | `crlPEM` | string | no | Inline PEM CRL, for a small list kept in git. Mutually exclusive with `crlFile`; changes only on a config reload. |
 | `crlPolicy` | string | no | `fail-closed` (default) or `fail-open` — what happens when a configured CRL is unusable. Only valid alongside `crlFile`/`crlPEM`. |
+| `caKeyFile` | string | no | Signing key for one certificate in `caPEM`, **relative to the cert store** (absolute paths and `..` are rejected, exactly like `crlFile`). Set it to let this CA **issue** client certificates. Mutually exclusive with `caKeyPEM`. |
+| `caKeyPEM` | Secret | no | The same signing key inline. A CA private key is a secret, so it must be a `${FILE:...}` / `${ENV:...}` placeholder - a literal value is refused at commit. Mutually exclusive with `caKeyFile`. |
+| `expiryWarningDays` | int | no | How far ahead a certificate issued by this CA is reported as **expiring** (0-3650; `0` or unset uses the default `30`). Advisory only - nothing renews on its own. |
 
 With no CRL configured, certificates are verified against the CA only: a revoked
 but unexpired certificate still passes (the Go standard library's chain
@@ -1357,11 +1360,118 @@ logs a warning, for a host where availability outranks revocation. Either way an
 unusable CRL never fails the config reload: unrelated hosts keep serving, exactly
 like the GeoIP database's live fail-closed evaluation.
 
+### Issuing client certificates
+
+A ClientCA with **no** signing key is a complete, normal object: it verifies
+presented certificates and nothing else. Adding `caKeyFile` or `caKeyPEM` turns it
+into an **issuing** CA, and the UI (ClientCA editor -> "Issue client certificate")
+and `POST /api/client-cas/{name}/issue` can then mint client certificates from it.
+Without a key the UI control is greyed out with the reason and the API answers
+`422`; the button is never offered in a state where it can only fail.
+
+The key must be the private key of one certificate in `caPEM` - that certificate
+becomes the issuer. A key that parses but matches nothing in the bundle, or matches
+a certificate that is not a CA, is **refused at config validation** (for an inline
+`caKeyPEM`; a `caKeyFile` is checked the first time it is used, since only the data
+plane knows the cert store path).
+
+Issuance mints an **RSA-2048** key and a certificate with `ExtKeyUsage: clientAuth`,
+`KeyUsage: digitalSignature`, `CA:false`, a 128-bit `crypto/rand` serial and a small
+backdate for clock skew, then returns it as a **password-protected PKCS#12**
+(`.p12`) download. RSA rather than ECDSA is deliberate: iOS rejects ECDSA client
+certificates during the handshake, and RSA-2048 is the one key type the whole client
+fleet handles. The bundle uses the **legacy** PKCS#12 encoder (SHA-1/3DES) rather
+than modern PBES2 for the same reason - PBES2 bundles fail to import into the iOS
+keychain and into several Android/Wear OS releases.
+
+Request body: `commonName` (required, at most 64 characters), `password` (required,
+**at least 12 characters** - it encrypts the bundle), `validityDays` (optional,
+omit or `0` for the default `365`, otherwise 1-3650), and `sans` (optional list, at
+most 32; an entry that parses as an IP becomes an IP SAN, one containing `@` an
+email SAN, anything else a DNS SAN).
+
+SANs must be **printable ASCII**: a certificate stores them as `IA5String`, so an
+internationalised domain has to be supplied already punycoded (`xn--...`). A
+non-ASCII or control character is refused with `400` rather than failing inside
+ASN.1 encoding.
+
+> **The bundle's at-rest protection is only as strong as its password.** The legacy
+> PKCS#12 encoder gpm uses for device compatibility derives the bundle's integrity
+> MAC with a *single* KDF iteration - there is essentially no work factor between
+> the password and the key inside. A `.p12` travels by email, chat and shared
+> folder and then lives on a phone, so anyone who obtains the file can attack a
+> short password offline at line rate. The encoder cannot be hardened without
+> breaking the iOS and Android imports this feature exists for, which is why gpm
+> enforces a 12-character floor and why the password should be sent over a
+> different channel than the file.
+
+The issued **private key is never persisted, logged or recoverable** - it exists
+only inside the response body. gpm logs the CA name, subject, serial and validity
+window of every issuance and nothing else. The endpoint changes no config object, so
+unlike every other write it creates **no revision and no history entry**; it is
+gated by the same `client-cas:write` scope (and admin session, CSRF and same-origin
+guard) as editing the CA, because minting a credential with the CA's key is at least
+as privileged. An HA **follower** refuses it like every other POST - issue on the
+leader.
+
+### Issuance records, expiry warnings and renewal
+
+Every issuance is remembered: `GET /api/client-cas/{name}/certificates` lists what
+this CA has issued, newest first, and the ClientCA page in the UI shows the same
+list. A record carries the CA name, common name, SANs, serial, `notBefore`,
+`notAfter` and `issuedAt` - and **never** key material, the bundle, or its
+password. gpm keeps no copy of the issued certificate either; the download was the
+only one.
+
+These records are **runtime state, not configuration**. They live in the
+certificate store (`<certDir>/client-certs/<ca>.json`, written atomically at
+`0600`, the same shape as the ACME issued-certificate metadata beside it), never in
+the git-backed config repo, so they survive a restart but produce no config
+revision and appear in no history. A record whose certificate expired more than a
+year ago is pruned on the next issuance for that CA; nothing else is dropped.
+
+Each record carries a derived `status`:
+
+| `status` | Meaning |
+|----------|---------|
+| `ok` | More than `expiryWarningDays` of life left. |
+| `expiring` | At or below `expiryWarningDays` days remaining (30 days by default, so exactly 30 days left is `expiring` and 31 is `ok`). |
+| `expired` | Past `notAfter`. |
+
+While any current record is `expiring` or `expired`, the ClientCA page shows a
+banner naming each certificate and its remaining days. It says the thing that is
+easy to forget: **there is no client-side renewal.** A client certificate lives in
+a keychain on someone's device, so every renewal ends with a human importing the
+new `.p12` there - plan the re-import before the expiry date, not after it.
+
+`POST /api/client-cas/{name}/certificates/{serial}/renew` (the per-row **Renew**
+button, behind an explicit confirmation) reissues the identity already on record -
+the **same** common name and SANs, which are deliberately not accepted from the
+request - with a **new private key and a new serial**, and returns a new PKCS#12
+bundle exactly like issuance. Body: `password` (required) and optional
+`validityDays` (same bounds and default as issuance). The old record is marked
+`supersededBy` the new serial and stays listed.
+
+Renewing an **already superseded** record is refused with `409`, naming the
+certificate that replaced it. A second renewal of the same record would mint a
+second live certificate for one identity and rewrite the supersede link, leaving
+the first renewal current with nothing pointing at it - renew the current
+certificate instead. The UI shows superseded rows as historical, with no renew
+action.
+
+> **Renewing does not revoke.** The superseded certificate remains valid until its
+> own `notAfter`, and every device still holding it keeps working. Revocation is
+> CRL-only: to actually kill the old certificate, add its serial to this CA's
+> `crlFile` / `crlPEM`. That is exactly why the superseded record stays visible -
+> it is the reminder that old copies are still installed somewhere.
+
 ```yaml
 name: corp
 caPEM: ${FILE:/run/secrets/corp_client_ca.pem}
 crlFile: corp.crl          # <certDir>/corp.crl, PEM or DER
 crlPolicy: fail-closed     # default; fail-open accepts when the CRL is unusable
+caKeyFile: corp-ca.key     # <certDir>/corp-ca.key; optional, enables issuance
+expiryWarningDays: 30      # default; warn this far ahead of an issued cert expiring
 ```
 
 ---
@@ -1511,7 +1621,11 @@ defaultAction: deny
 `mode` (`oidc`|`forward-auth`|`auth-request`|`client-cert`, defaults from the IdP
 type), `requiredRoles` (forbidden in `auth-request` mode — the IdP application
 binding does authorization), `allowFrom` (CIDRs that bypass auth; `auth-request`
-mode only — e.g. let a LAN skip SSO), `clientCertRoles` (`client-cert` mode only).
+and `client-cert` modes - e.g. let a LAN skip SSO or mTLS; refused in `oidc` and
+`forward-auth` mode, where the gate has no bypass to honour. With `mode` unset the
+effective mode is the provider's `type`, so `allowFrom` against an `oidc` or
+`forward-auth` provider is refused too - set `mode` explicitly rather than relying
+on the default), `clientCertRoles` (`client-cert` mode only).
 
 In `client-cert` mode the identity comes from the TLS handshake, so no
 `identityProvider` is named (setting one is an error). The gate admits a request
@@ -1527,6 +1641,66 @@ mapping is refused at validation (it could never match).
 Pair it with `tls.clientAuth.mode: optional` so certless clients still reach the
 chain and this middleware is what refuses them, leaving an SSO middleware free to
 cover other hosts or locations.
+
+`allowFrom` works here exactly as it does in `auth-request` mode: a client whose
+resolved IP falls in one of the listed CIDRs is proxied **straight through** - no
+certificate requirement and no `clientCertRoles` check at all. That is the "the LAN
+does not need a client certificate, the internet does" shape: run
+`tls.clientAuth.mode: optional`, list the LAN in `allowFrom`, and every other client
+gets `401` without a verified certificate. An exempt, certless request necessarily
+reaches the upstream with **no** client-certificate identity headers: those are set
+only from a handshake-verified certificate, and it has none.
+
+```yaml
+name: cert-or-lan
+type: auth
+auth:
+  mode: client-cert
+  allowFrom: [10.0.0.0/8]   # LAN skips the certificate requirement
+```
+
+#### Which IP `allowFrom` actually compares
+
+Read this before putting a CIDR in `allowFrom` on a client-cert middleware.
+
+gpm resolves the client IP **per host**, and honours `X-Forwarded-For` only from
+the proxies *that host* trusts. A host's trusted-proxy set comes from one place
+only: the `forwardAuth.trustedProxies` of the identity providers referenced by the
+auth middlewares on that host and its locations. A `client-cert` middleware has
+**no** identity provider - setting one is an error - so it contributes **nothing**
+to that set.
+
+The consequence:
+
+- On a host whose only auth middleware is `client-cert`, the trusted-proxy set is
+  **empty**, so `allowFrom` is matched against the **raw TCP peer address** and
+  `X-Forwarded-For` is never read. `allowFrom` therefore means "the machine that
+  opened this connection", not "the machine the request originally came from".
+- On a host that **also** carries a forward-auth middleware (host-wide or on a
+  location), that provider's `trustedProxies` apply to the whole host, so the
+  usual `X-Forwarded-For` walk is used for the client-cert exemption too. That is
+  usually what you want - but note the blast radius has grown: those trusted
+  proxies can now place a client inside the mTLS exemption, not just assert an
+  identity header.
+
+> **Warning - gpm must be the internet-facing edge for `allowFrom` to mean "LAN".**
+> If any L7 proxy or load balancer sits in front of gpm and its own address falls
+> inside an `allowFrom` network, then on a pure client-cert host **every** request
+> arriving through it is exempt, from the internet as much as from the LAN. That is
+> a total mTLS bypass for the host, and nothing logs it as unusual - the requests
+> simply succeed. Same trap with a Docker/Kubernetes bridge address, a sidecar, or
+> a `10.0.0.0/8` that happens to contain the pod network.
+>
+> If gpm is not the edge, either (a) give the host a forward-auth middleware whose
+> provider names the real proxies in `trustedProxies`, so the exemption is matched
+> against the forwarded client, or (b) do not use `allowFrom` here at all and put
+> the network rule in an [AccessList](#accesslist-configaccess-lists) instead, or
+> (c) terminate the LAN on a separate host name with its own policy.
+
+The [PROXY protocol](#proxyprotocolsettings-settingsproxyprotocol) is the other
+honest answer when gpm sits behind an L4 balancer: it replaces the connection's
+source address before any of this runs, so the peer *is* the real client and
+`allowFrom` is meaningful again with no trusted-header configuration.
 
 In `oidc` mode gpm is itself the OIDC relying party for the host: an
 unauthenticated request is redirected to the IdP, the reserved callback path

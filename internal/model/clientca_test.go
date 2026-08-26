@@ -231,10 +231,123 @@ func TestClientCertAuthModeValidation(t *testing.T) {
 		{"mapping in another mode", mw(AuthMiddleware{Mode: AuthModeForwardAuth, IdentityProvider: "authentik",
 			ClientCertRoles: map[string]string{"ops": "admin"}}), "only used in client-cert mode"},
 		{"no provider in another mode", mw(AuthMiddleware{Mode: AuthModeOIDC}), "auth.identityProvider is required"},
+		// allowFrom is the LAN-bypass exemption. It is honoured in client-cert
+		// mode (certless clients on those networks skip the certificate
+		// requirement) and in auth-request mode, and refused where the gate has
+		// no bypass to honour.
+		{"allowFrom in client-cert mode", mw(AuthMiddleware{Mode: AuthModeClientCert,
+			AllowFrom: []string{"10.0.0.0/8"}}), ""},
+		{"allowFrom in auth-request mode", mw(AuthMiddleware{Mode: AuthModeAuthRequest,
+			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}), ""},
+		{"allowFrom in oidc mode", mw(AuthMiddleware{Mode: AuthModeOIDC,
+			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}),
+			"only supported in auth-request and client-cert modes"},
+		{"allowFrom in forward-auth mode", mw(AuthMiddleware{Mode: AuthModeForwardAuth,
+			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}),
+			"only supported in auth-request and client-cert modes"},
+		{"bad allowFrom CIDR in client-cert mode", mw(AuthMiddleware{Mode: AuthModeClientCert,
+			AllowFrom: []string{"10.0.0.0/33"}}), "invalid CIDR/IP"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.mw.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestAuthAllowFromEffectiveMode covers the mode-defaulting gap that
+// Middleware.Validate alone cannot see: with auth.mode unset, the effective mode
+// comes from the referenced provider's TYPE, so an allowFrom on a middleware
+// pointing at an oidc or forward-auth provider would be accepted at validation
+// and then silently ignored at runtime. Config.Validate resolves the provider and
+// refuses it.
+func TestAuthAllowFromEffectiveMode(t *testing.T) {
+	idp := func(name, typ string) IdentityProvider {
+		p := IdentityProvider{ObjectMeta: ObjectMeta{Name: name}, Type: typ}
+		switch typ {
+		case IdPTypeOIDC:
+			p.OIDC = &OIDCSpec{IssuerURL: "https://idp.example", ClientID: "gpm"}
+		case IdPTypeForwardAuth:
+			p.ForwardAuth = &ForwardAuthSpec{TrustedProxies: []string{"10.0.0.0/8"}, UserHeader: "X-User"}
+		case IdPTypeAuthRequest:
+			p.AuthRequest = &AuthRequestSpec{OutpostURL: "https://idp.example"}
+		}
+		return p
+	}
+	mw := func(provider string, allowFrom []string) Middleware {
+		return Middleware{ObjectMeta: ObjectMeta{Name: "gate"}, Type: MWTypeAuth,
+			Auth: &AuthMiddleware{IdentityProvider: provider, AllowFrom: allowFrom}}
+	}
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "unset mode defaulting to auth-request accepts allowFrom",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{idp("outpost", IdPTypeAuthRequest)},
+				Middlewares:       []Middleware{mw("outpost", []string{"10.0.0.0/8"})},
+			},
+		},
+		{
+			name: "unset mode with no allowFrom is unaffected",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{idp("sso", IdPTypeOIDC)},
+				Middlewares:       []Middleware{mw("sso", nil)},
+			},
+		},
+		{
+			name: "unset mode defaulting to oidc refuses allowFrom",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{idp("sso", IdPTypeOIDC)},
+				Middlewares:       []Middleware{mw("sso", []string{"10.0.0.0/8"})},
+			},
+			wantErr: "auth.mode is unset, so it defaults to identityProvider",
+		},
+		{
+			name: "unset mode defaulting to forward-auth refuses allowFrom",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{idp("fa", IdPTypeForwardAuth)},
+				Middlewares:       []Middleware{mw("fa", []string{"10.0.0.0/8"})},
+			},
+			wantErr: "auth.mode is unset, so it defaults to identityProvider",
+		},
+		{
+			name: "unset mode with an unresolvable provider refuses allowFrom",
+			cfg: Config{
+				Middlewares: []Middleware{mw("missing", []string{"10.0.0.0/8"})},
+			},
+			wantErr: "the effective mode cannot be determined",
+		},
+		{
+			name: "explicit auth-request mode is still accepted",
+			cfg: Config{
+				IdentityProviders: []IdentityProvider{idp("outpost", IdPTypeAuthRequest)},
+				Middlewares: []Middleware{{ObjectMeta: ObjectMeta{Name: "gate"}, Type: MWTypeAuth,
+					Auth: &AuthMiddleware{IdentityProvider: "outpost", Mode: AuthModeAuthRequest,
+						AllowFrom: []string{"10.0.0.0/8"}}}},
+			},
+		},
+		{
+			name: "client-cert mode needs no provider and keeps allowFrom",
+			cfg: Config{Middlewares: []Middleware{{ObjectMeta: ObjectMeta{Name: "gate"}, Type: MWTypeAuth,
+				Auth: &AuthMiddleware{Mode: AuthModeClientCert, AllowFrom: []string{"10.0.0.0/8"}}}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected success, got: %v", err)

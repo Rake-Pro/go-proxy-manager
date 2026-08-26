@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/clientcert"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
@@ -104,6 +105,10 @@ type Deps struct {
 	// read-only in the capability probe; reads are unaffected. The zero value is
 	// the leader, i.e. today's single-node behaviour.
 	Role ha.Role
+	// CertDir is the managed certificate store. The API needs it only to resolve
+	// a ClientCA's cert-store-relative caKeyFile when issuing a client
+	// certificate; every other path in this package is store-relative.
+	CertDir string
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -231,6 +236,10 @@ func (d Deps) applyChange(w http.ResponseWriter, action, kind, name, sha string)
 func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
+	// One shared ledger for the client-certificate issuance records: its mutex is
+	// what serializes the read-modify-write that appending and superseding do.
+	clientCertLedger := clientcert.NewLedger(d.CertDir)
+
 	register(mux, d, "proxy-hosts", resource[model.ProxyHost]{
 		kind: "ProxyHost",
 		list: func(c model.Config) []model.ProxyHost { return c.ProxyHosts },
@@ -291,6 +300,22 @@ func New(d Deps) http.Handler {
 			return v, err
 		},
 	})
+	// Client-certificate issuance. It is a POST under the client-cas subtree and
+	// is gated exactly like that resource's other mutating routes (PUT, DELETE,
+	// scoped revert): "client-cas:write" for a token principal, the admin session
+	// gate + CSRF + same-origin guard for everyone else. Using the CA's private
+	// key to mint a credential is at least as privileged as editing the object.
+	//
+	// It changes nothing in the config, so unlike every other write here it makes
+	// no commit and produces no history entry - the response IS the artifact.
+	mux.HandleFunc("POST /client-cas/{name}/issue", d.scoped("client-cas:write", d.handleIssueClientCert(clientCertLedger)))
+
+	// Issued-certificate records (runtime state, never config): what this CA has
+	// issued, each with a derived ok/expiring/expired status, and the renewal that
+	// reissues one of them under the same identity with a new key and serial.
+	mux.HandleFunc("GET /client-cas/{name}/certificates", d.scoped("client-cas:read", d.handleListClientCerts(clientCertLedger)))
+	mux.HandleFunc("POST /client-cas/{name}/certificates/{serial}/renew", d.scoped("client-cas:write", d.handleRenewClientCert(clientCertLedger)))
+
 	register(mux, d, "dns-providers", resource[model.DNSProvider]{
 		kind: "DNSProvider",
 		list: func(c model.Config) []model.DNSProvider { return c.DNSProviders },
