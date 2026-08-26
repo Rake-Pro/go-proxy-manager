@@ -7,6 +7,24 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Error pages get their own UI section.** Custom error pages moved out of the
+  Settings page into a top-level **Error pages** section, alongside the other
+  object sections, since they are content an operator iterates on rather than a
+  switch set once. The config schema is unchanged - the section edits
+  `settings.errorPages`, a host's override stays in the host editor, and a
+  git-authored `settings.yaml` is unaffected. Settings keeps a one-line pointer
+  to the new section and now carries `errorPages` forward untouched on save.
+- **Auth-gate refusals honour custom error pages.** Every terminal refusal an
+  auth middleware writes now renders through the same `errorPages` machinery the
+  access-list, guard, bouncer and rate-limit tiers already use, instead of a
+  hardcoded plain-text body: forward-auth `401`/`403`, client-cert `401`/`403`,
+  auth-request `403`/`502`, the OIDC gate's `403`/`401`/`400`/`404`/`502`/`500`,
+  and the `503` a middleware that cannot be compiled serves. The per-host
+  `errorPages` override applies exactly as it does elsewhere, and the default
+  bodies are unchanged - with nothing configured the output is byte-identical,
+  headers included. Redirects into a sign-in flow are untouched, and in
+  `auth-request` mode a response proxied from the identity provider always wins:
+  gpm never overwrites the IdP's own sign-in, callback or sign-out pages.
 - **Enable mTLS on a proxy host from the UI.** The host editor's TLS section now
   always shows the "Client certificates (mTLS)" block with real controls - an
   enable toggle, a Client CA picker populated from the client-cas list, and the
@@ -156,7 +174,10 @@ All notable changes to go-proxy-manager are documented here. The format follows
 - **The client-cert auth gate's 401 body is now the generic "authentication
   required"**, identical to the forward-auth gate, instead of "client certificate
   required" - an external probe can no longer learn from the body that a client
-  certificate is what gates the host.
+  certificate is what gates the host. A deployment that wants a specific,
+  operator-written message there (a private host where the hint is useful rather
+  than a disclosure) can now supply one as a `401` error page, per host - see the
+  auth-refusal entry under Added.
 
 - **ClientCA screen rework.** The new/edit page was inconsistent - some fields
   carried three-line explanations and some none, and each either/or pair (CRL

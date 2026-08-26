@@ -43,6 +43,7 @@ const NAV = [
   { id: 'middleware', label: 'Middleware', icon: ICON.layers },
   { id: 'upstreams', label: 'Upstream Groups', icon: ICON.server },
   { id: 'dns', label: 'DNS Providers', icon: ICON.globe },
+  { id: 'errorpages', label: 'Error pages', icon: ICON.headers },
   { id: 'tokens', label: 'API Tokens', icon: ICON.lock },
   { id: 'logs', label: 'Access Logs', icon: ICON.history },
   { id: 'history', label: 'History', icon: ICON.history },
@@ -53,6 +54,7 @@ const TITLES = {
   overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
   parked: 'Parked hosts', certs: 'Certificates', clientcas: 'Client CAs', identity: 'Identity', access: 'Access Lists',
   middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
+  errorpages: 'Error pages',
   tokens: 'API Tokens', logs: 'Access Logs', history: 'History', settings: 'Settings',
 };
 
@@ -364,7 +366,7 @@ function gateControl(el, available, reason) {
 // this independently.
 const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '[data-revert]', '[data-revert-obj]',
-  '.tok-rotate', '#restoreBtn', '#set-save', '#set-sso-revoke', '#set-dns-run', '#set-id-run',
+  '.tok-rotate', '#restoreBtn', '#set-save', '#errp-save', '#set-sso-revoke', '#set-dns-run', '#set-id-run',
 ].join(', ');
 function applyReadOnlyGating(container) {
   if (!container || !hasCapability('ha.readOnly')) return;
@@ -532,6 +534,7 @@ async function route() {
       case 'redirects': await genericSection(c, 'redirects', sub); break;
       case 'streams': await genericSection(c, 'streams', sub); break;
       case 'parked': await genericSection(c, 'parked', sub); break;
+      case 'errorpages': await viewErrorPages(c); break;
       case 'tokens': await viewTokens(c); break;
       case 'logs': await viewLogs(c); break;
       case 'history': await viewHistory(c); break;
@@ -1005,7 +1008,7 @@ async function hostEditor(c, name) {
 
         <div class="card form-section">
           <p class="section-label">Error pages</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
           <div class="field-group">
             <label>Templates directory</label>
             <input class="field mono" id="f-errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
@@ -3578,6 +3581,77 @@ async function viewHistory(c) {
   });
 }
 
+// ---------- ERROR PAGES ----------
+// A top-level section of its own, because error pages are a body of content an
+// operator iterates on (write a template, reload, look at it) rather than a
+// switch they set once - the Settings page is for the latter. It still edits
+// `settings.errorPages`: the config schema is unchanged, so a git-authored
+// settings.yaml and this page are the same field. A ProxyHost's own errorPages
+// override stays in the host editor, next to the rest of that host's config.
+async function viewErrorPages(c) {
+  const s = (await api('/api/settings')).data || {};
+  const ep = s.errorPages || {};
+
+  c.innerHTML = viewHead('Error pages',
+    'Custom HTML for the errors gpm generates itself. Applies to every host unless the host overrides it.')
+    + `<div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">What these replace</p>
+      <p class="muted" style="font-size:11.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), an auth-middleware refusal (401/403, and the 502/503 an unavailable auth backend or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Templates</p>
+      <div class="field-group">
+        <label>Templates directory</label>
+        <input class="field mono" id="errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages" />
+        <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <label>Inline templates (JSON)</label>
+        <textarea class="field mono" id="errp-inline" rows="6" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
+        <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <label>Also replace upstream errors for</label>
+        <input class="field mono" id="errp-intercept" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
+        <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
+      </div>
+      <div class="hint" style="margin-top:12px">Leave everything blank for gpm's built-in plain-text output. A parse error fails the config reload with a message naming the template. Per-host overrides live in each host's editor, under Error pages.</div>
+    </div>
+    <div class="panel save-bar">
+      <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+      <div style="display:flex;gap:10px">
+        <button class="btn primary" id="errp-save" type="button">Save changes</button>
+      </div>
+    </div>`;
+
+  $('#errp-save').addEventListener('click', async () => {
+    const dir = $('#errp-dir').value.trim();
+    const inlineRaw = $('#errp-inline').value.trim();
+    const intercept = $('#errp-intercept').value.split(',').map((v) => v.trim()).filter(Boolean)
+      .map((v) => parseInt(v, 10)).filter((n) => !isNaN(n));
+    const errp = {};
+    if (dir) errp.dir = dir;
+    if (inlineRaw) {
+      try { errp.inline = JSON.parse(inlineRaw); }
+      catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
+    }
+    if (intercept.length) errp.interceptUpstream = intercept;
+
+    // PUT /api/settings is a whole-object replacement, and this page renders one
+    // field of it. Merge over the settings as loaded so saving here cannot strip
+    // adminAuth, dnsSync, ingressDiscovery or anything else it does not show.
+    const body = Object.assign({}, s);
+    if (Object.keys(errp).length) body.errorPages = errp; else delete body.errorPages;
+
+    const btn = $('#errp-save'); btn.disabled = true;
+    try {
+      const r = await api('/api/settings', { method: 'PUT', body });
+      toastSaved(r.commit); refreshHeadSha();
+      route();
+    } catch (e) { toastErr(e); btn.disabled = false; }
+  });
+}
+
 // ---------- SETTINGS ----------
 async function viewSettings(c) {
   const s = (await api('/api/settings')).data || {};
@@ -3765,22 +3839,7 @@ async function viewSettings(c) {
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Error pages</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Default custom HTML pages for errors gpm itself generates - upstream unreachable, access denied, rate limited, a parked host, a dangling middleware reference. A proxy host's own Error pages card (in its editor) overrides this per host. Blank leaves gpm's built-in plain-text output in effect, exactly as before this was configurable.</p>
-      <div class="field-group">
-        <label>Templates directory</label>
-        <input class="field mono" id="set-errp-dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages" />
-        <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
-      </div>
-      <div class="field-group" style="margin-top:10px">
-        <label>Inline templates (JSON)</label>
-        <textarea class="field mono" id="set-errp-inline" rows="4" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
-        <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
-      </div>
-      <div class="field-group" style="margin-top:10px">
-        <label>Also replace upstream errors for</label>
-        <input class="field mono" id="set-errp-intercept" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
-        <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
-      </div>
+      <p class="muted" style="font-size:11.5px;margin:0">Custom HTML for gpm-generated errors now has its own section: <a href="#/errorpages">Error pages</a>. It edits the same <span class="mono">settings.errorPages</span> config.</p>
     </div>
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
@@ -4163,20 +4222,11 @@ async function viewSettings(c) {
     if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
     body.dnsSync = dnsSync;
 
-    const errpDir = $('#set-errp-dir').value.trim();
-    const errpInlineRaw = $('#set-errp-inline').value.trim();
-    const errpIntercept = $('#set-errp-intercept').value.split(',').map((s) => s.trim()).filter(Boolean)
-      .map((s) => parseInt(s, 10)).filter((n) => !isNaN(n));
-    if (errpDir || errpInlineRaw || errpIntercept.length) {
-      const errp = {};
-      if (errpDir) errp.dir = errpDir;
-      if (errpInlineRaw) {
-        try { errp.inline = JSON.parse(errpInlineRaw); }
-        catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
-      }
-      if (errpIntercept.length) errp.interceptUpstream = errpIntercept;
-      body.errorPages = errp;
-    }
+    // errorPages moved to its own section and is NOT rendered here any more, but
+    // a settings write is a whole-object replacement - so it is carried forward
+    // from what was loaded. Without this, every save on this page would silently
+    // wipe the operator's error pages.
+    if (s.errorPages && Object.keys(s.errorPages).length) body.errorPages = s.errorPages;
 
     const ingressDiscovery = {
       apiURL: $('#set-id-url').value.trim(),

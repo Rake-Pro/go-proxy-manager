@@ -396,9 +396,13 @@ earlier tiers or duplicating work (see "Architecture for extension").
   `default.html` templates, and/or `inline` status->HTML), `html/template`
   (contextually escaped), rendered for errors **gpm itself** generates -
   upstream unreachable (502/504), access denied (access-list/guard/geo, 403),
-  rate-limited (429), a dangling middleware/access-list reference (503), and a
-  parked host - never for the upstream's own error response unless its status is
-  also listed in `interceptUpstream`. Templates see `{{.Status}}`
+  rate-limited (429), a dangling middleware/access-list reference (503), a
+  parked host, and every terminal **auth-gate refusal** (forward-auth and
+  client-cert 401/403, auth-request 403/502, the OIDC gate's callback failures,
+  and the 503 an uncompilable auth middleware serves) - never for the upstream's
+  own error response unless its status is also listed in `interceptUpstream`,
+  and never for a sign-in redirect or a page the identity provider itself served
+  (the IdP response wins). Templates see `{{.Status}}`
   `{{.StatusText}}` `{{.Host}}` `{{.RequestID}}`; a host override wins over the
   settings-level pages; parse errors fail the config reload with a clear
   message; unconfigured behaviour is byte-identical to before this shipped.
