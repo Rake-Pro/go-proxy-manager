@@ -315,6 +315,41 @@ and Ingress reconcilers' run/success timestamps and counts) are read at scrape
 time through pull collectors wired in `cmd/gpm`, so nothing is mirrored into a
 second source of truth and no package gains a metrics import.
 
+**Client-CA generation** (`internal/clientcert/generate.go`). The paste-a-PEM
+path assumes an operator who already has a CA; `POST /api/client-cas/{name}/generate`
+removes that assumption, producing a self-signed RSA-4096 CA (`CA:TRUE, pathlen:0`,
+`certSign|cRLSign`, random serial), writing its private key into the certificate
+store at `client-cas/{name}.key`, and saving the ClientCA object that points at
+it - so a working mTLS setup needs no external tooling and no hand-placed file.
+The key size is doubled relative to an issued leaf because this key is dated for
+a decade and cannot be rotated without re-provisioning every device that trusts
+it; `pathlen:0` keeps it from ever minting a subordinate CA.
+
+Three properties shape the implementation. **Everything is checked before
+anything is generated** - the object name, the request, the confinement of the
+derived key path, the absence of a config object, and what any existing key file
+at the derived path means - so a refusal leaves nothing on disk to roll back (and
+RSA-4096 keygen is never spent on a request that was always going to fail). **A
+key file in use is never overwritten**: it is placed with a
+temp-file-plus-`os.Link`, the one primitive that is both atomic and
+`ErrExist`-on-collision, because that file may still be the signing key behind
+certificates already on devices - `os.Rename` would clobber it silently. The
+"in use" test is ownership, not mere existence: the handler asks whether any
+ClientCA names that exact `caKeyFile`, refuses with the referrer's name if one
+does, and otherwise reclaims the file, because an unreferenced key can only be
+residue from a crash or from a deleted CA and refusing it forever would burn the
+name permanently. The same reasoning drives an age-bounded sweep of abandoned
+`.tmp-*` files in that directory, each of which holds a raw private key from an
+interrupted generate. And **unlike issuance this is a config mutation**: the
+object goes through the ordinary `Store.Save`, so it is graph-validated,
+committed and in history exactly like a UI `PUT`, and the response is the created
+object. If that save fails after the key landed, the handler removes the key it
+just wrote - otherwise the no-overwrite rule would permanently block retrying the
+same name, leaving an operator stuck with no fix available from the UI. Deleting
+a ClientCA deliberately does *not* delete its key file, matching how a deleted
+Certificate leaves its ACME artifacts: a delete is revertible from git, and a
+restored object pointing at a deleted key would be a silent breakage.
+
 **Client-certificate issuance** (`internal/clientcert`). A `ClientCA` that carries
 an optional signing key (`caKeyFile`, confined to the cert store exactly like
 `crlFile`, or an inline `caKeyPEM` secret) stops being only a verification anchor

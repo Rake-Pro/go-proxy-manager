@@ -310,6 +310,12 @@ func New(d Deps) http.Handler {
 	// no commit and produces no history entry - the response IS the artifact.
 	mux.HandleFunc("POST /client-cas/{name}/issue", d.scoped("client-cas:write", d.handleIssueClientCert(clientCertLedger)))
 
+	// Create a self-signed, issuance-capable ClientCA from nothing, so a working
+	// mTLS setup needs no openssl and no hand-placed key file. Unlike issue and
+	// renew this DOES mutate config: it saves the ClientCA object through the
+	// normal store path, so it commits and shows up in history like a PUT.
+	mux.HandleFunc("POST /client-cas/{name}/generate", d.scoped("client-cas:write", d.handleGenerateClientCA))
+
 	// Issued-certificate records (runtime state, never config): what this CA has
 	// issued, each with a derived ok/expiring/expired status, and the renewal that
 	// reissues one of them under the same identity with a new key and serial.

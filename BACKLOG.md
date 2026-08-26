@@ -447,9 +447,11 @@ MPTCP, Anubis, cosign signing).
   CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
   `client-cert` middleware mode) shipped 2026-08-22; **phase 3** (`allowFrom`
   network exemption in `client-cert` mode, client-certificate issuance from a
-  `ClientCA` signing key as a PKCS#12 download, and the issuance-record ledger
-  behind expiry warnings and per-certificate renewal - `internal/clientcert`)
-  shipped after it; OCSP deliberately not implemented (CRL only), see
+  `ClientCA` signing key as a PKCS#12 download, the issuance-record ledger behind
+  expiry warnings and per-certificate renewal, and UI CA generation
+  (`POST /api/client-cas/{name}/generate`) so the whole mTLS path needs no
+  external tooling - `internal/clientcert`) shipped after it; OCSP deliberately
+  not implemented (CRL only), see
   [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) §1.
 
   Follow-ups identified while shipping phase 3. (a) **A trusted-proxy source for
@@ -474,5 +476,14 @@ MPTCP, Anubis, cosign signing).
   validation, because the store does not know the cert-store path; (e) issuance
   records live in the cert dir, so an HA follower has its own copy unless the cert
   dir is shared (which the HA recipe already calls for) - worth a line in ha.md if
-  anyone runs an unshared cert dir; (f) there is no delete-a-record action;
+  anyone runs an unshared cert dir; (f) deleting a ClientCA leaves its generated
+  key file behind by design (see configuration.md for why) - there is no
+  "delete the CA and its key" affordance, and an orphan key blocks re-generating
+  the same name - it is reclaimed on the next generate - but it does linger on
+  disk holding a private key, so a UI action to clean one up is the obvious
+  follow-up; (g) **no rate limit on CA generation** - each call burns an RSA-4096
+  keygen, so a scripted caller with `client-cas:write` could tie up CPU. Declined
+  for now to stay consistent with the rest of the API, which rate-limits nothing
+  and relies on the admin-role + scope gate; revisit if the API ever grows a
+  general limiter; (h) there is no delete-a-record action;
   retention is a prune of records expired more than a year.

@@ -1332,8 +1332,16 @@ yet is simply skipped until the manager issues it.
 The trust anchor for per-host mTLS: the CA bundle presented client certificates
 are verified against (referenced by `tls.clientAuth.caRef`), plus its optional
 revocation list. It is kept distinct from [Certificate](#certificate-configcertificates)
-because it verifies peers rather than identifying this server, and it never
-carries a private key.
+because it verifies peers rather than identifying this server.
+
+There are two ways to get one, and the UI presents them as the either/or they are:
+
+- **Generate** (`POST /api/client-cas/{name}/generate`, or "Generate new CA" on
+  the new-ClientCA page) - gpm creates a self-signed CA, stores its private key,
+  and saves the object ready to issue. No openssl, no files to place by hand.
+- **Bring your own** - paste an existing CA certificate into `caPEM`. Add
+  `caKeyFile`/`caKeyPEM` only if you also want to issue from it; a verify-only CA
+  needs no key at all.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -1359,6 +1367,73 @@ configured revocation asked for it to be enforced; `fail-open` accepts them and
 logs a warning, for a host where availability outranks revocation. Either way an
 unusable CRL never fails the config reload: unrelated hosts keep serving, exactly
 like the GeoIP database's live fail-closed evaluation.
+
+### Generating a CA
+
+`POST /api/client-cas/{name}/generate` creates a complete, issuance-capable CA
+from nothing. Body (every field optional, an empty body is valid):
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `commonName` | the ClientCA name | Subject CN of the generated CA, at most 64 characters. |
+| `validityDays` | `3650` | 1-7300 (`0` means the default). Ten years by default because a CA is a trust anchor pinned into device configuration - rotating it means re-provisioning every device that trusts it. |
+| `organization` | none | Optional subject `O`, at most 64 characters. |
+
+It produces an **RSA-4096** self-signed certificate with `CA:TRUE, pathlen:0`,
+`keyUsage certSign, cRLSign`, a 128-bit random serial and the same small backdate
+issuance uses. RSA (not ECDSA) for the same reason the leaves are RSA - see the
+issuance section below - and 4096 rather than 2048 because this key outlives the
+certificates it signs by a decade. `pathlen:0` means it can never mint a
+subordinate CA: it exists to sign client leaves, and a device trusting it should
+not be trusting a tree underneath it.
+
+The private key is written to **`<certDir>/client-cas/{name}.key`** at mode
+`0600`. The path is derived from the object name, never supplied by the caller,
+and is confined to the certificate store like any other `caKeyFile`. The key is
+**never returned in any response and never logged**; the response is the created
+ClientCA object, exactly as a `PUT` would return it.
+
+Unlike issuance, this **is** a config mutation: the object goes through the normal
+store save, so it is validated against the whole config graph, committed, and
+appears in object history like any other write. An HA follower refuses it with
+`503`, like every other write.
+
+Two things it will not do:
+
+- **It never replaces an existing ClientCA.** A name already in the config is a
+  `409`; nothing is generated.
+- **It never overwrites a key file that is still in use.** If
+  `<certDir>/client-cas/{name}.key` exists *and* any ClientCA names that path as
+  its `caKeyFile`, the request is a `409` naming that CA, and the file is left
+  byte-for-byte alone. It may still be the signing key behind certificates already
+  deployed to devices, so replacing it would invalidate every one of them.
+
+An **unreferenced** key file at that path is different: no object points at it, so
+it can only be residue - from a crash between writing the key and saving the
+object, or from a ClientCA someone deleted (a delete deliberately keeps the key).
+gpm reclaims it, logging a warning, and generates over it. Refusing forever would
+otherwise make that name permanently unusable from the UI with no way to fix it.
+If the config save fails after the key was written, gpm removes the key it just
+wrote for the same reason.
+
+A leftover `.tmp-*` file in `client-cas/` is swept on the next generate once it is
+over an hour old. Those hold a raw private key from an interrupted generate; the
+hour is there so a sweep can never delete the temp file of a generate running at
+that moment.
+
+> **Deleting a ClientCA does not delete its key file.** The object goes; the file
+> at `<certDir>/client-cas/{name}.key` stays. This is deliberate and matches how
+> a deleted [Certificate](#certificate-configcertificates) leaves its ACME
+> artifacts in the cert store. A delete is a *config* action and is revertible
+> from git history - if the key were deleted with it, restoring the object would
+> resurrect a CA pointing at a missing key, silently breaking issuance and CRL
+> verification with no way back. Meanwhile every certificate already issued from
+> that CA stays valid on the devices holding it, and keeping the key is what lets
+> you sign a CRL for them after a mistaken delete. The cost is an orphan file: if
+> you genuinely want the CA gone, remove it yourself after deleting the object.
+> Until you do, re-generating under the same name **reclaims** that orphan (it is
+> referenced by nothing) rather than refusing, so a deleted CA never blocks its
+> own name.
 
 ### Issuing client certificates
 
@@ -1470,7 +1545,7 @@ name: corp
 caPEM: ${FILE:/run/secrets/corp_client_ca.pem}
 crlFile: corp.crl          # <certDir>/corp.crl, PEM or DER
 crlPolicy: fail-closed     # default; fail-open accepts when the CRL is unusable
-caKeyFile: corp-ca.key     # <certDir>/corp-ca.key; optional, enables issuance
+caKeyFile: client-cas/corp.key  # optional, enables issuance; what generate writes
 expiryWarningDays: 30      # default; warn this far ahead of an issued cert expiring
 ```
 

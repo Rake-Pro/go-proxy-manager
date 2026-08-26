@@ -59,6 +59,9 @@ builds it with a narrower, more focused design:
 - **mTLS client certificates** - per-host `tls.clientAuth` against a `ClientCA`
   trust anchor (`require` or `optional`), CRL revocation, and identity
   passthrough headers
+- **One-click client CA** - generate a self-signed, issuance-ready CA from the UI
+  (RSA-4096, `pathlen:0`, key stored at `0600` in the cert store). No openssl, no
+  files to place by hand; pasting an existing CA stays fully supported
 - **Client-certificate issuance** - give a `ClientCA` a signing key and mint
   client certificates from the UI or `POST /api/client-cas/{name}/issue`,
   downloaded as a password-protected PKCS#12 bundle. The private key is never

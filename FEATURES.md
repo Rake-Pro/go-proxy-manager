@@ -307,6 +307,10 @@ earlier tiers or duplicating work (see "Architecture for extension").
   RSA-2048 client certificate and return a password-protected PKCS#12 bundle
   (`internal/clientcert`; RSA and the legacy PKCS#12 encoder are deliberate iOS /
   Android keychain compatibility choices, and the private key is never stored).
+  A CA itself can be **generated** from the UI (`POST /api/client-cas/{name}/generate`:
+  self-signed RSA-4096, `pathlen:0`, key stored by gpm at `0600`), so the whole
+  mTLS path - CA, client certificates, revocation - is reachable with no external
+  tooling; pasting a bring-your-own CA remains fully supported.
   Issuances are recorded as runtime state under `<certDir>/client-certs/`, which
   drives an `ok`/`expiring`/`expired` status (per-CA `expiryWarningDays`, default
   30), a pre-expiry UI banner and a per-certificate renew action. Renewal is
@@ -448,6 +452,7 @@ earlier tiers or duplicating work (see "Architecture for extension").
 | Always-on security headers | no | yes |
 | HSTS | configurable | enforced |
 | mTLS CA upload | no | yes |
+| mTLS CA generation from the UI | no | no |  <!-- gpm: shipped, POST /api/client-cas/{name}/generate -->
 | mTLS client-certificate issuance (PKCS#12 download) | no | no |  <!-- gpm: shipped, POST /api/client-cas/{name}/issue -->
 | mTLS client-certificate expiry warning + renew | no | no |  <!-- gpm: shipped, records under certDir/client-certs -->
 | Geoblocking (GeoIP2) | no | yes |
