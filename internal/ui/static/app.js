@@ -806,14 +806,18 @@ function renderHostFlow(rootEl, ctx) {
 async function hostEditor(c, name) {
   const isNew = !name;
   const seed = isNew ? takeCloneSeed('hosts') : null;
-  const [certsR, mwR, alR, ugR, hostR] = await Promise.all([
+  const [certsR, mwR, alR, ugR, ccaR, hostR] = await Promise.all([
     api('/api/certificates').catch(() => ({ data: [] })),
     api('/api/middlewares').catch(() => ({ data: [] })),
     api('/api/access-lists').catch(() => ({ data: [] })),
     api('/api/upstream-groups').catch(() => ({ data: [] })),
+    // null, not an empty list: a failed fetch must stay distinguishable from
+    // "there are no client CAs" (see caListOK below).
+    api('/api/client-cas').catch(() => null),
     isNew ? Promise.resolve({ data: {} }) : api('/api/proxy-hosts/' + encodeURIComponent(name)),
   ]);
   const certs = arr(certsR.data);
+  const clientCAs = ccaR === null ? null : arr(ccaR.data);
   const middlewares = arr(mwR.data);
   const accessLists = arr(alR.data);
   const upstreamGroups = arr(ugR.data);
@@ -823,9 +827,39 @@ async function hostEditor(c, name) {
   const up = h.upstream || {};
   const tls = h.tls || {};
   const hsts = tls.hsts || {};
-  // Client-certificate identity passthrough, when this host runs mTLS.
+  // Per-host mTLS, and the identity passthrough nested inside it.
+  const mtlsOn = !!tls.clientAuth;
+  const caRef = (tls.clientAuth && tls.clientAuth.caRef) || '';
+  const caMode = (tls.clientAuth && tls.clientAuth.mode) || 'require';
   const certIDOn = !!(tls.clientAuth && tls.clientAuth.identityHeaders);
   const certID = (tls.clientAuth && tls.clientAuth.identityHeaders) || {};
+  // The Client CA picker has THREE states and they must stay distinguishable:
+  // the list loaded with CAs, the list loaded and empty, or the list failed to
+  // load. Collapsing the last two into "no client CAs defined" would state a
+  // falsehood, gate the toggle for the wrong reason, and - worst - make every
+  // save of an mTLS host bail on a CA it can see perfectly well in its own
+  // config. When the list is unavailable this page reports that, changes
+  // nothing about the stored trust anchor, and stays out of the way.
+  const caListOK = clientCAs !== null;
+  const caList = caListOK ? clientCAs : [];
+  const caKnown = caList.some((ca) => ca.name === caRef);
+  const caUsable = caList.some((ca) => !ca.disabled);
+  // A caRef the list does not contain is shown as itself, flagged and selected,
+  // so saving round-trips it. Silently letting the select fall through to the
+  // first option would retarget the host's trust anchor without a word.
+  const caOptions = !caListOK
+    ? `<option value="${esc(caRef)}" selected>${esc(caRef || '(unknown)')}</option>`
+    : (caList.length
+      ? (caRef && !caKnown ? `<option value="${esc(caRef)}" selected>${esc(caRef)} (not found)</option>` : '')
+        + caList.map((ca) => `<option value="${esc(ca.name)}"${caRef === ca.name ? ' selected' : ''}${ca.disabled ? ' disabled' : ''}>${esc(ca.name)}${ca.disabled ? ' (disabled)' : ''}</option>`).join('')
+      : '<option value="">no client CAs defined</option>');
+  const caHint = !caListOK
+    ? 'Client CA list unavailable - reload the page. Saving leaves this host\'s trust anchor exactly as it is.'
+    : (!caList.length
+      ? 'Create one under <a href="#/clientcas">Client CAs</a> first - it is the trust anchor client certificates are verified against.'
+      : (caRef && !caKnown
+        ? `<b>${esc(caRef)}</b> is not in the client CA list. It is kept as-is on save - fix it under <a href="#/clientcas">Client CAs</a>.`
+        : 'The trust anchor presented certificates are verified against.'));
 
   const comp = h.compression || {};
   const ep = h.errorPages || {};
@@ -1035,10 +1069,24 @@ async function hostEditor(c, name) {
             <div class="toggle-line"><div class="tl-text"><div class="nm">Include subdomains</div></div>${switchHtml('f-hsts-sub', !!hsts.includeSubdomains, 'Include subdomains')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Preload</div></div>${switchHtml('f-hsts-preload', !!hsts.preload, 'Preload')}</div>
           </div>
-          ${tls.clientAuth ? `
           <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
             <p class="section-label">Client certificates (mTLS)</p>
-            <div class="hint" style="margin-bottom:8px">Verified against client CA <span class="mono">${esc(tls.clientAuth.caRef || '')}</span>, mode <span class="mono">${esc(tls.clientAuth.mode || 'require')}</span>. Those two are edited in the config; this page preserves them.</div>
+            <div class="toggle-line"><div class="tl-text"><div class="nm">Client certificates</div><div class="ds">Verify the client's certificate at the handshake against a Client CA</div></div>${switchHtml('f-mtls', mtlsOn, 'Client certificates')}</div>
+            <div class="hint" id="f-mtls-hint" style="display:none"></div>
+            <div id="mtls-fields" style="margin-top:10px;${mtlsOn ? '' : 'display:none'}">
+            <div class="field-group"><label>Client CA</label>
+              <select class="field mono" id="f-mtls-ca"${caListOK ? '' : ' disabled'}>
+                ${caOptions}
+              </select>
+              <div class="hint">${caHint}</div>
+            </div>
+            <div class="field-group"><label>Mode</label>
+              <select class="field mono" id="f-mtls-mode">
+                <option value="require"${caMode !== 'optional' ? ' selected' : ''}>require - the handshake rejects certless clients</option>
+                <option value="optional"${caMode === 'optional' ? ' selected' : ''}>optional - certless clients still reach the chain</option>
+              </select>
+              <div class="hint">Pair <span class="mono">optional</span> with a client-cert auth middleware for LAN-exempt enforcement.</div>
+            </div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Identity passthrough</div><div class="ds">Send the verified certificate's subject upstream</div></div>${switchHtml('f-certid', certIDOn, 'Identity passthrough')}</div>
             <div id="certid-fields" style="${certIDOn ? '' : 'display:none'}">
               <div class="toggle-line"><div class="tl-text"><div class="nm">SAN</div><div class="ds"><span class="mono">X-Client-Cert-SAN</span></div></div>${switchHtml('f-certid-san', !!certID.san, 'SAN header')}</div>
@@ -1049,7 +1097,8 @@ async function hostEditor(c, name) {
                 <div class="hint">These headers are always stripped from untrusted peers; only gpm asserts them.</div>
               </div>
             </div>
-          </div>` : ''}
+            </div>
+          </div>
         </div>
 
         <div class="card form-section">
@@ -1149,12 +1198,45 @@ async function hostEditor(c, name) {
     $('#gzip-fields').style.display = isOn('f-gzip') ? '' : 'none';
   });
 
-  // Client-certificate identity passthrough show/hide (only rendered for an
-  // mTLS host).
+  // Client-certificate identity passthrough show/hide. It lives inside the mTLS
+  // block, so it is only reachable while mTLS is on.
   const certIdSw = $('#f-certid');
   if (certIdSw) certIdSw.addEventListener('switchchange', () => {
     $('#certid-fields').style.display = isOn('f-certid') ? '' : 'none';
   });
+
+  // mTLS preconditions. The model refuses tls.clientAuth without forceSSL and
+  // without a caRef that resolves to an ENABLED ClientCA, so the enable switch is
+  // greyed with the reason instead of accepting a host the API will reject.
+  function refreshMtls() {
+    const ssl = isOn('f-forcessl');
+    let reason = '';
+    if (!caListOK) reason = 'Client CA list unavailable - reload the page before turning client certificates on.';
+    else if (!caUsable) reason = 'No enabled client CA defined yet - create one under Client CAs first.';
+    else if (!ssl) reason = 'Client certificates require Force SSL: mTLS must never be servable in the clear.';
+    // The gate blocks turning mTLS ON, never turning it OFF. A host whose stored
+    // combination is already invalid (git-authored clientAuth with forceSSL
+    // false, or a CA since removed) would otherwise be trapped in the broken
+    // state with the only exit - the toggle - greyed out.
+    gateControl($('#f-mtls'), !reason || isOn('f-mtls'), reason);
+    const hint = $('#f-mtls-hint');
+    hint.style.display = reason ? '' : 'none';
+    hint.textContent = reason;
+    $('#mtls-fields').style.display = isOn('f-mtls') ? '' : 'none';
+  }
+  $('#f-mtls').addEventListener('switchchange', refreshMtls);
+  // Turning Force SSL off under a live mTLS host is blocked rather than silently
+  // dropping clientAuth: the combination cannot be saved, and quietly disabling
+  // the host's client-certificate requirement is the wrong way to resolve that.
+  $('#f-forcessl').addEventListener('switchchange', () => {
+    if (!isOn('f-forcessl') && isOn('f-mtls')) {
+      $('#f-forcessl').setAttribute('aria-checked', 'true');
+      toast('Force SSL is required', 'Turn client certificates off first - mTLS must never be servable in the clear.', 'err');
+      return;
+    }
+    refreshMtls();
+  });
+  refreshMtls();
 
   // upstream group vs single upstream: a selected group replaces (and greys
   // out) the single-upstream fields.
@@ -1257,17 +1339,39 @@ async function hostEditor(c, name) {
         preload: isOn('f-hsts-preload'),
       };
     }
-    // clientAuth (caRef/mode) has no control here and is often GitOps-authored, so
-    // it is carried through verbatim; only its identity-passthrough block is edited.
-    if (tls.clientAuth) {
+    // mTLS. The enable switch owns tls.clientAuth: off omits the object entirely,
+    // which drops identityHeaders with it - correct, they are nested inside
+    // clientAuth in the model and mean nothing without a verified certificate.
+    //
+    // INVARIANT, two levels and they are NOT the same:
+    //   - clientAuth itself is merged over the stored object and only the fields
+    //     this form renders are overwritten, so an unrendered ClientAuth field
+    //     (a GitOps-authored one, or one added to the API later) survives.
+    //   - identityHeaders is ALSO merged over the stored block, and then all four
+    //     fields this form renders are set explicitly - including the false ones,
+    //     since a cleared switch has to be able to clear the stored value. Any
+    //     ClientCertHeaders field added to the model later therefore survives too,
+    //     but a NEW control added to this form must be added to that explicit set
+    //     or it will read as unchangeable.
+    // When the client-CA list could not be loaded, caRef/mode are left exactly as
+    // stored: the controls are showing placeholder state, so writing them back
+    // would retarget the trust anchor on the strength of a failed request.
+    if (isOn('f-mtls')) {
       const ca = Object.assign({}, tls.clientAuth);
       delete ca.identityHeaders;
+      if (caListOK) {
+        const caRefSel = $('#f-mtls-ca').value;
+        if (!caRefSel) { toast('Client CA required', 'Select the client CA to verify certificates against, or turn client certificates off.', 'err'); return; }
+        ca.caRef = caRefSel;
+        ca.mode = $('#f-mtls-mode').value;
+      }
       if (isOn('f-certid')) {
-        const ih = {};
-        const sh = $('#f-certid-subject').value.trim(); if (sh) ih.subjectHeader = sh;
-        if (isOn('f-certid-san')) ih.san = true;
-        if (isOn('f-certid-serial')) ih.serial = true;
-        if (isOn('f-certid-fp')) ih.fingerprint = true;
+        const ih = Object.assign({}, (tls.clientAuth || {}).identityHeaders);
+        const sh = $('#f-certid-subject').value.trim();
+        if (sh) ih.subjectHeader = sh; else delete ih.subjectHeader;
+        ih.san = isOn('f-certid-san');
+        ih.serial = isOn('f-certid-serial');
+        ih.fingerprint = isOn('f-certid-fp');
         ca.identityHeaders = ih;
       }
       tlsObj.clientAuth = ca;
@@ -1298,7 +1402,7 @@ async function hostEditor(c, name) {
       }
       loc.middlewares = Array.from(row.querySelector('.loc-mw').selectedOptions).map((o) => o.value);
       loc.accessLists = Array.from(row.querySelector('.loc-al').selectedOptions).map((o) => o.value);
-      // INVARIANT (same as tls.clientAuth above): merge over the original
+      // INVARIANT (same merge-over-stored rule as tls.clientAuth above): merge over the original
       // location instead of sending only what this form renders, or any
       // Location field this editor doesn't expose (present or future) would be
       // silently dropped on every save. upstream/upstreamGroupRef are mutually

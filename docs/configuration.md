@@ -871,6 +871,16 @@ HTTPS responses for the host (never over plain HTTP).
 
 **ClientAuth** (`tls.clientAuth`) opts the host into mTLS: client certificates
 are verified at the TLS handshake against a [ClientCA](#clientca-configclient-cas).
+It is editable from the host editor's TLS section ("Client certificates (mTLS)"):
+a toggle, a Client CA picker and the mode. Turning it **on** is greyed out with
+the reason until its preconditions hold - `forceSSL` on, and at least one enabled
+ClientCA to point at - while turning it **off** is always possible, so a host
+whose stored combination is already invalid is never trapped. Turning `forceSSL`
+off under a live mTLS host is refused rather than silently dropping the
+certificate requirement. A `caRef` the CA list does not contain is shown flagged
+and kept as-is on save rather than the picker quietly retargeting the trust
+anchor, and if the CA list cannot be loaded at all the page says so and leaves
+`caRef`/`mode` untouched instead of guessing.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|

@@ -7,6 +7,28 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Enable mTLS on a proxy host from the UI.** The host editor's TLS section now
+  always shows the "Client certificates (mTLS)" block with real controls - an
+  enable toggle, a Client CA picker populated from the client-cas list, and the
+  `require`/`optional` mode - instead of rendering a read-only summary only when
+  `tls.clientAuth` already existed. A host can finally be put behind mTLS without
+  hand-editing config. Preconditions follow the grey-out convention: the toggle is
+  disabled with the reason when `forceSSL` is off or no enabled ClientCA exists,
+  the picker shows a disabled state pointing at the Client CAs page when there are
+  none, a disabled CA cannot be selected, and turning `forceSSL` off under a live
+  mTLS host is blocked rather than silently dropping `clientAuth`. The gate is
+  one-way - turning mTLS *off* is always allowed, so an already-invalid stored
+  combination is recoverable from the page. A `caRef` missing from the CA list is
+  rendered flagged and round-tripped on save instead of the select silently
+  retargeting the trust anchor, and a failed client-cas fetch is a distinct state
+  from "no CAs defined": the picker says so, saves of other fields still work, and
+  `caRef`/`mode` are left exactly as stored. Identity
+  passthrough is unchanged and now nests inside the enabled state; turning the
+  toggle off omits `clientAuth` entirely, which drops `identityHeaders` with it -
+  they live inside `clientAuth` in the model and mean nothing without it. Both
+  `clientAuth` and its `identityHeaders` are merged over the stored object before
+  the rendered fields are set explicitly, so a field this form does not render -
+  GitOps-authored, or added to the model later - survives a save from this page.
 - **Generate a client CA from the UI/API**: `POST /api/client-cas/{name}/generate`
   ("Generate new CA" on the new-ClientCA page) creates a self-signed RSA-4096 CA
   (`CA:TRUE, pathlen:0`, `certSign|cRLSign`, random serial), writes its private
