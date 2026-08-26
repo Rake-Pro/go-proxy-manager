@@ -120,7 +120,7 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			}
 		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-			http.Error(w, "client certificate required", http.StatusUnauthorized)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
 		if len(roles) == 0 {
