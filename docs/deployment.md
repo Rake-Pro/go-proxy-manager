@@ -106,12 +106,30 @@ A single volume mounted at `/data`:
 
 ```
 /data/config       git-backed config repo (see docs/configuration.md)
-/data/certs        certificate store (custom certs + ACME-issued artifacts)
+/data/certs        certificate store (custom certs + ACME-issued artifacts,
+                   client-CA CRLs, optional client-CA signing keys, and the
+                   client-certificate issuance records under client-certs/)
 /data/session.db   SQLite session store (pure-Go, no CGO)
 ```
 
 The container runs as a non-root user; make sure the mounted volume is writable by
 it (the image's `gpm` user).
+
+A `ClientCA` signing key placed here (`caKeyFile`) is a CA private key: give it
+`0600` and owner `gpm`, back it up with the rest of `/data/certs`, and remember it
+is *not* in the git config repo, so a config-only backup does not carry it. The
+alternative is `caKeyPEM` with a `${FILE:/run/secrets/...}` placeholder, which
+keeps the key in the secret mount instead. Certificate issuance and renewal are
+`POST`s, so an HA **follower** refuses them with `503` like every other write -
+issue on the leader.
+
+`client-certs/<ca>.json` holds the issuance records that drive the expiry warning
+and the renew action. They are runtime state, not config, so a config-only backup
+does not carry them - back them up with the rest of `/data/certs`, and share the
+cert dir between HA peers (which the [HA recipe](ha.md) already calls for) if you
+want the follower to show the same list. Losing them loses only gpm's *memory* of
+what was issued: the certificates themselves keep working, and the CA keeps
+verifying them.
 
 ## Configuration: flags & environment
 

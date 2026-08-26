@@ -79,9 +79,20 @@ type AuthMiddleware struct {
 	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth | auth-request (defaults from IdP type)
 	RequiredRoles    []string `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
 	// AllowFrom lists client CIDRs that bypass authentication entirely and are
-	// proxied straight through (no auth subrequest, no identity headers). An
-	// any-of, network-exempt bypass so trusted networks (e.g. LAN) can skip SSO.
-	// Applies to auth-request mode.
+	// proxied straight through (no auth subrequest, no certificate requirement,
+	// no identity headers). An any-of, network-exempt bypass so trusted networks
+	// (e.g. the LAN) can skip SSO or mTLS. Applies to auth-request and
+	// client-cert modes; it is refused in oidc and forward-auth mode, where the
+	// gate has no bypass to honour and a silently ignored exemption would read
+	// like a security control that is not there. With Mode unset the effective
+	// mode comes from the referenced provider's type, so that case is settled by
+	// checkAuthAllowFromMode in Config.Validate, which has the provider set.
+	//
+	// The exemption is matched against the client IP the HOST resolves, which
+	// honours X-Forwarded-For only from that host's own trusted proxies - and a
+	// client-cert middleware contributes none, because it has no identity
+	// provider. See the allowFrom notes in docs/configuration.md before putting
+	// a proxy address inside one of these networks.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 	// ClientCertRoles maps a verified client certificate to a role in client-cert
 	// mode: the key is the certificate subject (RFC 2253 form, e.g.
@@ -319,7 +330,16 @@ func (m Middleware) Validate() error {
 			return fmt.Errorf("middleware %q: auth.identityProvider is required", m.Name)
 		}
 		switch mode := m.Auth.Mode; mode {
-		case "", AuthModeOIDC, AuthModeForwardAuth:
+		case AuthModeOIDC, AuthModeForwardAuth:
+			// The oidc and forward-auth gates have no network bypass, so an
+			// allowFrom here would be silently ignored - refuse it rather than
+			// let a config claim an exemption that does not exist. Mode "" is
+			// left alone: it defaults from the IdP type, which is not resolvable
+			// here, and it may resolve to auth-request.
+			if len(m.Auth.AllowFrom) > 0 {
+				return fmt.Errorf("middleware %q: auth.allowFrom is only supported in auth-request and client-cert modes, not %q", m.Name, mode)
+			}
+		case "":
 		case AuthModeClientCert:
 			if m.Auth.IdentityProvider != "" {
 				return fmt.Errorf("middleware %q: auth.identityProvider is not used in client-cert mode (the TLS handshake is the identity source)", m.Name)

@@ -463,7 +463,7 @@ func TestClientCertGateMiddleware(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			clientCertGate(tc.spec, ok).ServeHTTP(w, tc.req)
+			clientCertGate(tc.spec, peerIP, nil, ok).ServeHTTP(w, tc.req)
 			if w.Code != tc.want {
 				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}

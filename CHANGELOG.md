@@ -7,6 +7,47 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Client-certificate issuance from a ClientCA**: an optional signing key
+  (`caKeyFile`, cert-store-relative like `crlFile`, or an inline `caKeyPEM`
+  secret) turns a verify-only trust anchor into an issuing CA, and
+  `POST /api/client-cas/{name}/issue` mints a client certificate signed by it,
+  returned as a password-protected PKCS#12 download (`commonName`, `password`,
+  optional `validityDays` 1-3650 default 365, optional `sans`). RSA-2048 and the
+  legacy PKCS#12 encoder are deliberate: iOS rejects ECDSA client certificates
+  and PBES2 bundles, as do several Android/Wear OS releases. The generated
+  private key is never persisted or logged - it exists only in the response - and
+  the route creates no config revision or history entry. Gated by
+  `client-cas:write` like the CA's other writes. New UI card on the ClientCA
+  editor, greyed out with the reason when no signing key is configured. New
+  dependency: `software.sslmate.com/src/go-pkcs12` (pure Go, no transitive tree
+  beyond `golang.org/x/crypto`, which was already direct).
+- **Client-certificate expiry warnings and renewal**: every issuance is now
+  recorded (CA, common name, SANs, serial, validity - never key material) as
+  runtime state under `<certDir>/client-certs/<ca>.json`, written atomically at
+  `0600` like the ACME issued-certificate metadata, so records survive a restart
+  without entering the git-backed config or creating a revision.
+  `GET /api/client-cas/{name}/certificates` lists them with a derived
+  `ok`/`expiring`/`expired` status against the CA's new `expiryWarningDays`
+  (0-3650, default 30), and the ClientCA page shows a banner before expiry naming
+  each certificate and its remaining days.
+  `POST /api/client-cas/{name}/certificates/{serial}/renew` reissues the recorded
+  identity (same common name and SANs, not accepted from the request) with a new
+  key and serial and marks the old record superseded; the UI action is behind an
+  explicit confirmation. **Renewing does not revoke** - the old certificate stays
+  valid until it expires (revocation is CRL-only), and there is no client-side
+  renewal, so every device must import the new `.p12` by hand.
+- **`allowFrom` in `client-cert` auth mode**: the same network exemption
+  `auth-request` mode has. A client whose resolved IP (trusted-proxy-aware
+  `X-Forwarded-For` walk) matches a listed CIDR is proxied straight through with
+  no certificate requirement and no `clientCertRoles` check, so a host can run
+  `tls.clientAuth.mode: optional` and require certificates from everyone except
+  the LAN. Such a request carries no client-certificate identity headers upstream.
+  The exemption is matched against the client IP the *host* resolves; a
+  client-cert middleware has no identity provider, so it contributes no trusted
+  proxies and on a pure client-cert host the comparison is against the raw TCP
+  peer. docs/configuration.md carries the warning: gpm must be the edge, or an L7
+  proxy whose address falls inside an `allowFrom` network exempts all traffic
+  through it.
 - **Prometheus metrics** (opt-in): `GET /metrics` on the admin listener,
   enabled with `-metrics` / `GPM_METRICS=1` (404 when off), gated by admin
   role plus a dedicated `metrics:read` API-token scope. Text exposition from a
@@ -75,6 +116,21 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- `auth.allowFrom` is now **refused at validation** in `oidc` and `forward-auth`
+  mode, including when `mode` is unset and the referenced provider's `type`
+  resolves to one of them (or cannot be resolved at all). Those gates have no
+  network bypass, so the value was silently ignored; it was already documented as
+  unsupported there. `auth-request` and `client-cert` are unaffected.
+- Client-certificate issuance now enforces a **12-character minimum bundle
+  password** on both issue and renew, and refuses non-ASCII or control characters
+  in `sans` with `400` instead of failing inside ASN.1 encoding. The password floor
+  exists because the legacy PKCS#12 encoder (kept for iOS/Android import) derives
+  its integrity MAC with a single KDF iteration, so the password is effectively the
+  bundle's only at-rest protection.
+- Renewing an already-superseded certificate record is refused with `409` naming
+  the superseding serial, and the ledger's supersede write now errors instead of
+  silently appending when its target is absent. Either would otherwise leave two
+  records looking current.
 - API Tokens page: the scope table no longer scrolls inside the card, and
   checking write simply auto-selects read instead of greying it out.
 - **BREAKING - two renames, neither migrated automatically.** `DeadHost` is now
