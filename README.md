@@ -58,7 +58,7 @@ builds it with a narrower, more focused design:
 - Bring-your-own custom certificates
 - **mTLS client certificates** - per-host `tls.clientAuth` against a `ClientCA`
   trust anchor (`require` or `optional`), CRL revocation, and identity
-  passthrough headers
+  passthrough headers, all switchable from the host editor
 - **One-click client CA** - generate a self-signed, issuance-ready CA from the UI
   (RSA-4096, `pathlen:0`, key stored at `0600` in the cert store). No openssl, no
   files to place by hand; pasting an existing CA stays fully supported

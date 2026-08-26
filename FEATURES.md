@@ -307,6 +307,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
   RSA-2048 client certificate and return a password-protected PKCS#12 bundle
   (`internal/clientcert`; RSA and the legacy PKCS#12 encoder are deliberate iOS /
   Android keychain compatibility choices, and the private key is never stored).
+  The whole per-host switch-on is UI-driven too: the host editor's TLS section
+  toggles `tls.clientAuth`, picks the ClientCA and the require/optional mode, with
+  the forceSSL and enabled-CA preconditions greyed out rather than left to fail.
   A CA itself can be **generated** from the UI (`POST /api/client-cas/{name}/generate`:
   self-signed RSA-4096, `pathlen:0`, key stored by gpm at `0600`), so the whole
   mTLS path - CA, client certificates, revocation - is reachable with no external
