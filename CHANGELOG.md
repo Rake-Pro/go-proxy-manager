@@ -5,8 +5,41 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Container base packages upgraded at build time.** The final image now runs
+  `apk upgrade` against the Alpine 3.24 repositories before installing runtime
+  deps: the digest-pinned base image lags security patches that ship to the
+  repos without a new base release (openssl CVE-2026-14456, fixed in 3.5.8-r0,
+  failed the v1.0.27 release's image scan gate this way).
+
 ### Added
 
+- **UI editor for `securityHeaders`.** The field was config- and API-only; both
+  places it exists now have a real editor. The Settings page gains a "Response
+  security headers" section for the fleet default, and the proxy-host editor
+  gains the same section for that host's per-key override, each a list of rows:
+  header name, value, and a scope select (`all` / `generated-only` /
+  `proxied-only`), with add and remove controls.
+
+  Serialization is chosen to keep git diffs empty rather than to mirror the
+  editor's internal shape: a header at scope `all` is written back as a **bare
+  string**, exactly as the Go marshaller emits it, so an untouched map
+  round-trips byte-for-byte through a save; only a non-default scope is written
+  as `{value, scope}`. A hand-written `{value, scope: all}` object is normalized
+  to the bare string on the first save through the editor (the two spellings mean
+  the same thing, and the API already renders that header as a bare string). A
+  value shape this build does not understand - for instance a scope added to the
+  API later - is shown read-only and emitted **verbatim**, so a newer config
+  survives an older UI. An empty editor leaves the field **absent** rather than
+  committing an empty map, and rows with a blank header name are ignored.
+
+  Both saves are whole-object replacements, so the editor now owns the field and
+  the previous carry-forward guards (which copied the loaded map onto every save)
+  are removed with it; the "a save never drops `securityHeaders`" invariant is
+  pinned by the editor's serialization tests instead. Duplicate header names
+  (case-insensitive) and names that are not valid tokens are refused client-side
+  with the usual toast; everything else is left to the API's `400`.
 - **Edge response-header stripping.** A new `settings.stripResponseHeaders` list
   (with a per-`ProxyHost` `stripResponseHeaders` that is **unioned** with it, and
   an `ingressDiscovery` template/profile field so discovery-managed hosts inherit

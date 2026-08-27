@@ -236,15 +236,22 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   `internal/k8s/discovery.go`, and cover it with the
   `TestDerivedHostInherits...` pair. Pre-existing; deliberately left out of the
   stripping change to keep that diff to one feature.
-- [ ] **No editors for `securityHeaders` / `stripResponseHeaders`.** Both fields
-  are config- and API-only: the Settings page and the host editor render no
-  control for either, and only carry the loaded value forward on save (guarded by
-  `TestSaveCarriesSecurityHeadersForward` and
+- [x] **No editor for `securityHeaders`.** Both the Settings page ("Response
+  security headers") and the host editor now render a row editor - header name,
+  value, and a scope select (`all` / `generated-only` / `proxied-only`) - backed
+  by the shared `makeSecurityHeaderRows` in `internal/ui/static/app.js`. The
+  editor owns the field in both whole-object PUTs, so the old carry-forward
+  guards are gone; `TestSecurityHeadersEditorRenders` and
+  `TestSecurityHeadersEditorSerialization` in
+  `internal/ui/settingsmerge_test.go` pin the wiring and the serialization
+  (all-scope stays a bare string, a non-default scope is `{value, scope}`, an
+  unrecognized shape is emitted verbatim, absent stays absent).
+- [ ] **No editor for `stripResponseHeaders`.** The field is still config- and
+  API-only: the Settings page and the host editor render no control for it and
+  only carry the loaded value forward on save (guarded by
   `TestSaveCarriesStripResponseHeadersForward` in
-  `internal/ui/settingsmerge_test.go`). A map editor with a scope select for
-  `securityHeaders`, and a chip list for `stripResponseHeaders` (the
-  `#hdr-rmresp` chip input in the headers-middleware editor is the pattern),
-  would make both authorable from the UI.
+  `internal/ui/settingsmerge_test.go`). A chip list is the fit (the
+  `#hdr-rmresp` chip input in the headers-middleware editor is the pattern).
 - [x] **UI middleware editor: support the `rewrite` type.** The middleware-type
   `<select>` in `internal/ui/static/app.js` now offers `rewrite` with a
   `replacePath` key/value row editor (mirroring the headers map editor),

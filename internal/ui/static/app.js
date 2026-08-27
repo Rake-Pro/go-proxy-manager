@@ -1026,6 +1026,14 @@ async function hostEditor(c, name) {
           </div>
         </div>
 
+        <div class="card form-section">
+          <p class="section-label">Response security headers</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Overrides the fleet defaults (Settings) for this host, per header name - a name listed here replaces the settings value <b>and</b> its scope. Names not listed keep the settings-level header. Applied set-if-absent, so an upstream's own header is never clobbered.</p>
+          <div id="f-secheaders"></div>
+          <button class="btn ghost sm" id="f-secheaders-add" type="button" style="margin-top:6px">${ICON.plus}Add header</button>
+          <div class="hint" style="margin-top:6px">Scope: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Strict-Transport-Security is not settable here; HSTS lives in the TLS section.</div>
+        </div>
+
         <div class="card form-section" id="f-dns-card">
           <p class="section-label">DNS sync</p>
           <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
@@ -1138,6 +1146,9 @@ async function hostEditor(c, name) {
   // domains chip input
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...');
   const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
+
+  const secHdrCtl = makeSecurityHeaderRows($('#f-secheaders'), h.securityHeaders);
+  $('#f-secheaders-add').addEventListener('click', () => secHdrCtl.addRow('', ''));
 
   // These two DNS toggles stay USABLE when their backend is not configured, and
   // say so inline instead. Deliberately unlike every other capability-gated
@@ -1327,13 +1338,20 @@ async function hostEditor(c, name) {
       obj.errorPages = errp;
     }
 
-    // securityHeaders has no per-host control on this form yet; a host PUT is a
-    // whole-object replacement, so carry the loaded map forward or an unrelated
-    // host save would silently drop a GitOps-authored override.
-    if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;
+    // securityHeaders: this host's per-key override of settings.securityHeaders,
+    // owned by the row editor above (which replaced the old carry-forward guard).
+    // A host PUT is a whole-object replacement, so the editor's output IS the
+    // field: it emits an untouched map byte-equivalently, keeps a shape it does
+    // not understand verbatim, and returns null when there are no rows - which
+    // leaves the key off the body entirely rather than committing an empty map.
+    const secHdrErr = secHdrCtl.error();
+    if (secHdrErr) { toast('Invalid security header', secHdrErr, 'err'); return; }
+    const secHdrs = secHdrCtl.get();
+    if (secHdrs) obj.securityHeaders = secHdrs;
 
     // stripResponseHeaders (this host's additions to the fleet strip list) has no
-    // control on this form yet either - carried forward for the same reason.
+    // control on this form yet: a host PUT is a whole-object replacement, so the
+    // loaded list is carried forward or an unrelated save would silently drop it.
     if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;
 
     const tlsObj = {};
@@ -1893,6 +1911,114 @@ function makeKVRows(wrap, initial, kPlace, vPlace, secret) {
       let m = false;
       wrap.querySelectorAll(':scope > .loc-row').forEach((r) => { if (secret && r.querySelector('.kv-v').value === '***') m = true; });
       return m;
+    },
+  };
+}
+
+// Security-headers map editor: header name -> value, plus the per-header scope
+// selecting which responses it lands on. Shared by the Settings page
+// (settings.securityHeaders, the fleet default) and the host editor
+// (proxyHost.securityHeaders, which merges over it per key) - the two fields
+// have the same shape, so they get the same control.
+//
+// SERIALIZATION, deliberately not a mirror of what it loaded:
+//   - scope "all" is written back as a BARE STRING ("X-Frame-Options": "DENY"),
+//     never as {value, scope: "all"}. That is exactly what the Go marshaller
+//     emits for an all/empty scope, so a header nobody touched round-trips
+//     byte-for-byte and the GitOps YAML diff stays empty. A hand-written
+//     {value, scope: "all"} object is therefore NORMALIZED to the bare string on
+//     the first save through this editor: the two spellings mean the same thing,
+//     the API already renders that header as a bare string, and picking one
+//     keeps the diff stable from then on.
+//   - a non-default scope is written as {value, scope}.
+//   - a value this build does not understand - anything that is neither a string
+//     nor a {value, scope} object with a known scope, e.g. a scope added to the
+//     API after this UI was built - is NOT edited. Its row is read-only and the
+//     loaded value is emitted VERBATIM, so a newer config survives an older UI
+//     instead of being flattened into a string or silently dropped.
+//   - no rows means get() returns null and the caller omits the field entirely.
+//     Both saves are whole-object replacements, so writing {} instead would
+//     commit an empty map where the config had none.
+const SECURITY_SCOPES = ['all', 'generated-only', 'proxied-only'];
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+function makeSecurityHeaderRows(wrap, initial) {
+  function addRow(name, raw) {
+    const isStr = typeof raw === 'string';
+    const isObj = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+      && typeof raw.value === 'string'
+      && (raw.scope == null || raw.scope === '' || SECURITY_SCOPES.indexOf(raw.scope) !== -1);
+    const known = raw === undefined || isStr || isObj;
+    const value = isStr ? raw : (isObj ? raw.value : '');
+    const scope = (isObj && raw.scope) ? raw.scope : 'all';
+    const div = document.createElement('div');
+    div.className = 'loc-row';
+    if (known) {
+      div.innerHTML = `<input class="field mono sh-name" style="flex:1 1 160px" value="${esc(name || '')}" placeholder="X-Frame-Options" aria-label="Header name" />
+        <input class="field mono sh-value" style="flex:2 1 190px" value="${esc(value)}" placeholder="DENY" aria-label="Header value" />
+        <select class="field mono sh-scope" style="flex:0 0 150px" aria-label="Scope">${SECURITY_SCOPES.map((sc) => `<option value="${sc}"${scope === sc ? ' selected' : ''}>${sc}</option>`).join('')}</select>
+        <button class="icon-btn sh-del" type="button" aria-label="Remove header">${ICON.x}</button>`;
+    } else {
+      div._raw = raw;
+      div.innerHTML = `<input class="field mono sh-name" style="flex:1 1 160px" value="${esc(name || '')}" aria-label="Header name" disabled />
+        <input class="field mono" style="flex:2 1 190px" value="${esc(JSON.stringify(raw))}" aria-label="Header value" disabled />
+        <span class="hint" style="flex:0 0 150px;margin:0">not editable here - saved as-is</span>
+        <button class="icon-btn sh-del" type="button" aria-label="Remove header">${ICON.x}</button>`;
+    }
+    div.querySelector('.sh-del').addEventListener('click', () => div.remove());
+    wrap.appendChild(div);
+    return div;
+  }
+  const init = (initial && typeof initial === 'object') ? initial : {};
+  Object.keys(init).forEach((k) => addRow(k, init[k]));
+  return {
+    addRow,
+    get() {
+      // Null-prototype: the keys are operator-typed, and a name like __proto__
+      // on a plain object would set the prototype instead of a key, silently
+      // dropping the header (and, if it were the only one, the whole map).
+      // Here it becomes a normal key the server rejects by name.
+      const out = Object.create(null);
+      wrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+        const name = r.querySelector('.sh-name').value.trim();
+        if (!name) return;
+        if ('_raw' in r) { out[name] = r._raw; return; }
+        const scope = r.querySelector('.sh-scope').value;
+        const value = r.querySelector('.sh-value').value;
+        out[name] = scope === 'all' ? value : { value: value, scope: scope };
+      });
+      return Object.keys(out).length ? out : null;
+    },
+    // Minimal client-side checks - the server validates authoritatively (and its
+    // 400 surfaces through toastErr like every other save). These two are worth
+    // catching here: a name with a space is an obvious typo the API would only
+    // reject after a round trip, and a duplicate name would be silently collapsed
+    // by the object build above before the API ever saw it.
+    error() {
+      const seen = Object.create(null);
+      let err = '';
+      wrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+        if (err) return;
+        const name = r.querySelector('.sh-name').value.trim();
+        if (!name) {
+          // A nameless row with a value would be silently discarded by get() -
+          // surface it instead of losing what the operator typed. (Read-only
+          // _raw rows have no .sh-value input and keep their loaded name.)
+          const val = r.querySelector('.sh-value');
+          if (val && val.value) err = 'a header row has a value but no name: name it or remove the row.';
+          return;
+        }
+        if (!HEADER_NAME_RE.test(name)) {
+          err = `"${name}" is not a valid header name: use a token like X-Frame-Options, with no spaces, colons or control characters.`;
+          return;
+        }
+        const lk = name.toLowerCase();
+        if (seen[lk]) {
+          err = `"${name}" is listed more than once. A header is declared once, at one scope (names are case-insensitive).`;
+          return;
+        }
+        seen[lk] = true;
+      });
+      return err;
     },
   };
 }
@@ -3847,6 +3973,13 @@ async function viewSettings(c) {
       <a class="btn ghost sm" id="set-metrics-link" href="/metrics" target="_blank" rel="noopener">Open /metrics</a>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Response security headers</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Fleet-default response headers, applied set-if-absent so an app's own header is never clobbered. Scope selects which responses each one lands on: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Any proxy host can override a header (value and scope) in its own editor. Empty ships nothing.</p>
+      <div id="set-secheaders"></div>
+      <button class="btn ghost sm" id="set-secheaders-add" type="button" style="margin-top:6px">${ICON.plus}Add header</button>
+      <div class="hint" style="margin-top:6px">Put app-breaking headers - Content-Security-Policy frame-ancestors, Permissions-Policy - at <span class="mono">generated-only</span>: they are safe on gpm's own pages and break a proxied app that ships none of its own. Strict-Transport-Security is refused here; HSTS is a per-host TLS setting.</div>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Error pages</p>
       <p class="muted" style="font-size:11.5px;margin:0">Custom HTML for gpm-generated errors now has its own section: <a href="#/errorpages">Error pages</a>. It edits the same <span class="mono">settings.errorPages</span> config.</p>
     </div>
@@ -3866,6 +3999,9 @@ async function viewSettings(c) {
 
   const provCtl = makeChipInput($('#set-providers'), arr(admin.providers), 'add provider...');
   const ppCtl = makeChipInput($('#set-pp-cidrs'), arr(pp.trustedCIDRs), 'add CIDR...');
+
+  const secHdrCtl = makeSecurityHeaderRows($('#set-secheaders'), s.securityHeaders);
+  $('#set-secheaders-add').addEventListener('click', () => secHdrCtl.addRow('', ''));
 
   // webhook rows
   const whWrap = $('#set-webhooks');
@@ -4237,14 +4373,20 @@ async function viewSettings(c) {
     // wipe the operator's error pages.
     if (s.errorPages && Object.keys(s.errorPages).length) body.errorPages = s.errorPages;
 
-    // securityHeaders (the fleet default emitted on gpm-generated responses) has
-    // no editor on this page yet; carry it forward exactly like errorPages so a
-    // save here never silently wipes it (the PUT is a whole-object replacement).
-    if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;
+    // securityHeaders (the fleet default) is edited on this page by the row
+    // editor above, which replaced the old carry-forward guard. A settings PUT is
+    // a whole-object replacement, so the editor's output IS the field: it emits
+    // an untouched map byte-equivalently, keeps a shape it does not understand
+    // verbatim, and returns null when there are no rows - which leaves the key
+    // off the body entirely rather than committing an empty map.
+    const secHdrErr = secHdrCtl.error();
+    if (secHdrErr) { toast('Invalid security header', secHdrErr, 'err'); return; }
+    const secHdrs = secHdrCtl.get();
+    if (secHdrs) body.securityHeaders = secHdrs;
 
     // stripResponseHeaders (the fleet default list of headers removed from
     // proxied upstream responses) has no editor on this page yet; carry it
-    // forward exactly like securityHeaders above.
+    // forward exactly like errorPages above so a save here never wipes it.
     if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;
 
     const ingressDiscovery = {
