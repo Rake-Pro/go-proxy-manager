@@ -15,6 +15,16 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **UI editor for `stripResponseHeaders`.** The last of the API-first response
+  header fields gains its editor: the Settings page ("Strip response headers")
+  edits the fleet-default list and the proxy-host editor edits that host's
+  additions (unioned on the data plane), both as chip lists, replacing the
+  save-time carry-forward. An emptied list leaves the field off the save body
+  rather than committing an empty array. Client-side validation covers token
+  syntax and case-insensitive duplicates; hop-by-hop and response-semantic
+  refusals stay server-side, where the 400 names the exact header, so the two
+  policies cannot drift.
+
 - **Live access-log toggle.** Request capture no longer needs a restart:
   `PUT /api/logs {"enabled": true|false}` (admin scope) flips it at runtime,
   and the Access Logs page gains an Enable/Disable capture button. The toggle
