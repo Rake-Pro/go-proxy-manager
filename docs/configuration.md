@@ -148,6 +148,7 @@ Singleton application configuration.
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
 | `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
 | `securityHeaders` | map[string]string \| map[string]{value,scope} | Fleet-default response headers, each with a per-header `scope` (`all` default / `generated-only` / `proxied-only`) selecting whether it lands on gpm-generated responses, proxied upstream responses, or both. Value is a bare string (scope `all`) or a `{value, scope}` object. A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
+| `stripResponseHeaders` | []string | Fleet-default list of response headers removed from what an upstream sends (`Server`, `X-Powered-By`, ...). Case-insensitive; a [ProxyHost](#proxyhost-configproxy-hosts)'s own list is the **union** with this one. Empty (default) strips nothing. See [StripResponseHeaders](#stripresponseheaders-settingsstripresponseheaders--proxyhoststripresponseheaders). |
 
 **WebhookConfig**: `name` (required, name-safe identifier), `url` (required,
 absolute http/https), optional `secret` (placeholder-resolved, sent as the
@@ -423,6 +424,7 @@ rationale is in [docs/design/ingress-discovery.md](design/ingress-discovery.md).
 | `template.middlewares` | []string | Applied to every derived host, in order. |
 | `template.accessLists` | []string | Applied to every derived host. |
 | `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No data-plane effect. |
+| `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](#stripresponseheaders-settingsstripresponseheaders--proxyhoststripresponseheaders). |
 | `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
 | `template.allowedDomainSuffixes` | []string | Optional. **Narrows** the top-level `allowedDomainSuffixes` for hosts derived from the template. Must be a **subset** of the global list (checked at settings-write time); empty means no narrowing. |
 
@@ -484,7 +486,7 @@ host keeps serving, with a chain nobody chose.
 shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
 required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
 `websocketsUpgrade`, `robotsNoIndex`, range-checked `timeouts`, `tags`,
-`defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
+validated `stripResponseHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
 
 **The annotation carries a name and nothing else — that is the security model.**
 An Ingress author is untrusted: in a shared cluster a tenant may be able to
@@ -997,6 +999,129 @@ the scope note above) — this keeps them on gpm's own pages, where they are saf
 
 ---
 
+## StripResponseHeaders (`settings.stripResponseHeaders` / `proxyHost.stripResponseHeaders`)
+
+The removal half of the same mechanism: a list of response headers gpm **deletes
+from what an upstream sends**, so a backend's `Server: Apache/2.4.1 (Unix)`,
+`X-Powered-By: PHP/8.1.0` or `X-AspNet-Version: 4.0.30319` never reaches a
+client. It is applied in the data plane's reverse proxy, on the upstream's own
+response, so it covers **every** response that upstream returns for the host
+regardless of which middlewares that host wires up.
+
+```yaml
+# settings.yaml
+stripResponseHeaders:
+  - Server
+  - X-Powered-By
+  - X-AspNet-Version
+```
+
+```yaml
+# config/proxy-hosts/app.yaml - adds to the fleet list for this host
+stripResponseHeaders:
+  - X-Drupal-Cache
+```
+
+### Settings vs per-host: union, not replacement
+
+- `settings.stripResponseHeaders` is the fleet baseline.
+- A `ProxyHost`'s own `stripResponseHeaders` is the **union** with that baseline:
+  the host's names are stripped **in addition to** the fleet's.
+
+This differs deliberately from `securityHeaders`, which merges per key with the
+host value winning. A map has a per-key *value* for a host to override; a list
+does not, so the only two possible semantics are "host replaces the fleet
+baseline" and "host adds to it". Union is the safe one: a strip list is a
+hardening baseline, and a host must not be able to silently re-expose a header
+the fleet strips just by naming an unrelated one. **A host cannot opt out of a
+fleet-level strip** - remove the name from `settings.stripResponseHeaders` if a
+host needs the header through.
+
+### What it can and cannot reach
+
+Stripping operates on the **upstream's own response headers**, before they are
+copied onto the response the client sees. That is a structural boundary, not an
+ordering convention:
+
+- **Reached**: the headers the backend sent on its final response, whatever the
+  status - including a `101 Switching Protocols` WebSocket handshake, so an
+  upgrade does not leak the fingerprint an ordinary response hides. The one
+  exception is an **interim `1xx`** (a `103 Early Hints`, or a `100 Continue`):
+  those are forwarded on a separate path that the strip does not sit on, so
+  their headers pass through unstripped. In practice this leaks nothing an
+  operator is hiding - an upstream's early-hints headers are `Link` preloads,
+  and the stdlib clears the interim header map before the final response is
+  written - but a backend that sets `Server` on a `103` would send it there.
+- **Never reached**: anything **gpm** adds. Injected
+  [`securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders),
+  HSTS, `X-Robots-Tag`, the `Set-Cookie` forward-auth copies back when the IdP
+  refreshes a session, the `Content-Encoding`/`Vary` the gzip handler sets, and a
+  headers middleware's `setResponse` values all survive regardless of the strip
+  list.
+- **Nothing to reach**: gpm's own generated responses (auth-gate denials, sign-in
+  redirects, error pages, the path-rejection 400, the no-such-host 404,
+  parked/redirect hosts, and the upstream-unreachable 502/504) never involve an
+  upstream response, so no stripping happens on them at all.
+
+A header named in **both** the strip list and `securityHeaders` therefore ends up
+**present with gpm's configured value**: the upstream's copy is removed on the way
+in, and gpm's is injected on the way out. Listing `X-Frame-Options`,
+`Strict-Transport-Security` or `X-Robots-Tag` is safe and does exactly that -
+replace the backend's value with gpm's.
+
+### Sharp edges
+
+Two allowed names deserve care. Both are permitted because they only ever remove
+what the **backend** sent, which is a legitimate operator choice - but both change
+application behaviour:
+
+- `Set-Cookie` - removes the backend's own cookies, which breaks that app's
+  sessions. (gpm's forward-auth session cookie is unaffected; it is not an
+  upstream header.)
+- `WWW-Authenticate` - suppresses the backend's auth challenge, so a browser
+  never prompts for its basic-auth credentials.
+
+### Relationship to the headers middleware
+
+The [headers middleware](#middleware-configmiddlewares)'s `removeResponse` does
+the same removal, but inside the **auth tier of a host's middleware chain**: it
+only applies where the middleware is attached, and responses generated by the
+auth layer itself (denials, sign-in redirects) never pass through it.
+`stripResponseHeaders` is the recommended edge-wide mechanism - one fleet list,
+applied in the reverse proxy on the upstream's own response, with no per-host
+wiring to forget.
+`removeResponse` remains for per-middleware, per-location removal (a rule that
+should apply to one path prefix, or only alongside that middleware's other
+mutations).
+
+### Validation
+
+- Names must be valid RFC 7230 field-name tokens; an empty or malformed name is
+  rejected at config write (`400`) rather than silently ignored at runtime.
+- Names are de-duplicated case-insensitively (a header is listed once; matching
+  against a response is case-insensitive regardless).
+- Hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Authenticate`,
+  `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) are
+  refused: they carry the response's own connection and framing semantics, so
+  removing them breaks the response instead of hiding a backend detail. (This is
+  also what keeps a `101` handshake intact while its `Server`/`X-Powered-By` are
+  stripped.)
+- `Content-Type`, `Content-Length`, `Content-Encoding`, `Vary` and `Location` are
+  refused for the same reason - they are the response's own semantics.
+  `Content-Type` is the sharpest: with no `Content-Type`, Go falls back to
+  content sniffing, so a JSON or text body whose first bytes look like markup
+  would be re-labelled `text/html` - turning a config typo into stored XSS.
+  `Content-Encoding`/`Vary` are body encoding and the cache key, and `Location`
+  is the entire meaning of a 3xx.
+- `Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions`
+  are refused for the same reason, and matter because `101` responses **are** in
+  scope: `Sec-WebSocket-Accept` is the server's proof it understood the
+  handshake, and a browser aborts the connection without it, so stripping one
+  would break WebSockets on the host outright.
+- Empty (the default) strips nothing, so an existing deployment is unchanged.
+
+---
+
 ## ProxyHost (`config/proxy-hosts/`)
 
 Terminates TLS for one or more domains and reverse-proxies to an upstream.
@@ -1017,6 +1142,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
 | `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](#errorpagesconfig-settingserrorpages--proxyhosterrorpages) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. |
 | `securityHeaders` | map[string]string \| map[string]{value,scope} | no | Merges over [`settings.securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders) per key for this host (replacing the settings value **and its scope** for a header it names). Unset uses the settings-level default unchanged. |
+| `stripResponseHeaders` | []string | no | Response headers removed from what this host's upstream sends, **in addition to** [`settings.stripResponseHeaders`](#stripresponseheaders-settingsstripresponseheaders--proxyhoststripresponseheaders) (union, not replacement - a host cannot opt out of a fleet-level strip). |
 
 **Upstream**: `scheme` (`http`|`https`), `host`, `port` (1–65535) — all required.
 
@@ -1957,7 +2083,12 @@ without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
 own key (useful when rotating or sharing a key across instances).
 
 **HeadersMiddleware**: `setRequest`, `setResponse` (maps), `removeRequest`,
-`removeResponse` (lists).
+`removeResponse` (lists). `removeResponse` strips response headers only where
+this middleware is attached, from inside the chain; for edge-wide removal of
+leaked backend headers prefer
+[`stripResponseHeaders`](#stripresponseheaders-settingsstripresponseheaders--proxyhoststripresponseheaders),
+which is applied in the reverse proxy, on the upstream's own response, for every
+response that upstream returns.
 
 **GuardMiddleware**: `triggers` (≥1; each has `paths`, `methods`, `queryEquals`
 and matches when all set fields match), `allowFrom` (exempt CIDRs), `denyStatus`

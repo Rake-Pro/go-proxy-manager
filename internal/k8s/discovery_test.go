@@ -2563,3 +2563,64 @@ func TestAnnotationPrefixMigrateRelabelsOnFailClosedDisable(t *testing.T) {
 		t.Fatalf("labels = %v, want only the new prefix's pair", got.Labels)
 	}
 }
+
+// A per-host stripResponseHeaders list on a discovery-managed host is rebuilt
+// from the template on every reconcile, so without a template field the
+// operator's list is reverted - with a git commit - on every poll. It must be
+// inherited verbatim, from the default template and from a named profile
+// (profiles ARE IngressHostTemplate, proven rather than assumed).
+func TestDerivedHostInheritsStripResponseHeaders(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := baseSettings(f)
+	s.Template.StripResponseHeaders = []string{"Server", "X-Powered-By"}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if strings.Join(h.StripResponseHeaders, ",") != "Server,X-Powered-By" {
+		t.Fatalf("stripResponseHeaders = %v, want the template's in order", h.StripResponseHeaders)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
+func TestDerivedHostInheritsStripResponseHeadersFromAProfile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.example.com"),
+		}, "")
+	}
+	s := profileSettings(f)
+	prof := s.Profiles["sso-internal"]
+	prof.StripResponseHeaders = []string{"X-AspNet-Version"}
+	s.Profiles["sso-internal"] = prof
+	// A default that would be WRONG for this host, so inheriting it shows up.
+	s.Template.StripResponseHeaders = []string{"X-Default-Only"}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	h := rec.upserts[0]
+	if strings.Join(h.StripResponseHeaders, ",") != "X-AspNet-Version" {
+		t.Fatalf("stripResponseHeaders = %v, want the profile's, not the default template's", h.StripResponseHeaders)
+	}
+}
