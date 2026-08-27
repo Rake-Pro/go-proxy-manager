@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -114,10 +115,51 @@ func (o *responseObserver) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Unwrap lets http.ResponseController (Go 1.20+) find the base writer.
 func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }
 
+// handlerSwitch serves whichever of two prebuilt handler chains is active,
+// chosen by one atomic pointer load per request. It exists so access logging
+// can be toggled live without a permanently installed observer: while every
+// observability toggle is off the plain chain serves - no wrapper, no
+// allocations, no clock reads - and a toggle swaps the observed chain in for
+// subsequent requests. An in-flight request finishes on the chain it started
+// with, so it logs (or doesn't) consistently.
+type handlerSwitch struct {
+	plain    http.Handler
+	observed http.Handler
+	active   atomic.Pointer[http.Handler]
+}
+
+func newHandlerSwitch(plain, observed http.Handler, observe bool) *handlerSwitch {
+	hs := &handlerSwitch{plain: plain, observed: observed}
+	hs.set(observe)
+	return hs
+}
+
+// set routes future requests through the observed (true) or plain (false) chain.
+func (hs *handlerSwitch) set(observed bool) {
+	h := &hs.plain
+	if observed {
+		h = &hs.observed
+	}
+	hs.active.Store(h)
+}
+
+func (hs *handlerSwitch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*hs.active.Load()).ServeHTTP(w, r)
+}
+
+// dataHandler builds one listener's swappable chain: the plain dispatch handler
+// and its observed wrapper are constructed once, and SetAccessLog picks the
+// active side at runtime.
+func (s *Server) dataHandler(dispatch http.HandlerFunc) *handlerSwitch {
+	return newHandlerSwitch(dispatch, s.observe(dispatch), s.observeActive())
+}
+
 // observe wraps next with request access logging, slow-request warnings, debug
-// headers, and the /metrics counters, per the Server's toggles. When all of them
-// are off it returns next unwrapped so there is zero per-request overhead in the
-// default configuration.
+// headers, and the /metrics counters, per the Server's toggles. It always
+// wraps; whether a request pays for the observer at all is decided by the
+// handlerSwitch each listener serves through, which keeps the plain chain
+// active while every toggle is off - so the default configuration still has
+// zero per-request overhead.
 //
 // It is also where a request is tagged with the ProxyHost NAME it matched, which
 // the access-control tiers read back for their denial counters (see
@@ -125,11 +167,11 @@ func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWrite
 // keeps every middleware constructor's signature unchanged.
 func (s *Server) observe(next http.Handler) http.Handler {
 	mh := metricsHook()
-	if !s.accessLog && s.slowThreshold <= 0 && !s.debugHeaders && mh == nil {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// One snapshot per request: the toggle can flip mid-flight, and the ring
+		// capture, log line, and slow-warn decision below must agree.
+		accessLog := s.accessLog.Load()
 
 		// The matched proxy host, resolved once: the debug headers and the metric
 		// labels want the same answer, and lookup is a map hit.
@@ -194,7 +236,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 
 		slow := s.slowThreshold > 0 && dur >= s.slowThreshold
-		if !s.accessLog && !slow {
+		if !accessLog && !slow {
 			return
 		}
 		status := obs.status
@@ -209,7 +251,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 
 		// Capture into the in-memory ring for the /api/logs viewer. Only when access
 		// logging is on, so the default (off) path stays allocation-free.
-		if s.accessLog && s.logBuf != nil {
+		if accessLog && s.logBuf != nil {
 			s.logBuf.add(AccessEntry{
 				Time:   start,
 				Method: r.Method,
@@ -223,7 +265,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 
 		ev := log.Info()
-		if slow && !s.accessLog {
+		if slow && !accessLog {
 			ev = log.Warn()
 		}
 		ev = ev.Str("component", "access").

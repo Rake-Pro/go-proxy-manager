@@ -161,7 +161,7 @@ container deployments).
 | (env only) | `GPM_SSO_SIGNING_KEY` | (auto-persisted) | HMAC key signing data-plane per-host OIDC session cookies; auto-generated on first use and saved to `<cert-dir>/sso_signing.key` (0600) so sessions survive restarts; set explicitly to supply your own key or share one across instances |
 | `-log-level` | `GPM_LOG_LEVEL` | `info` | trace/debug/info/warn/error |
 | `-log-console` | `GPM_LOG_CONSOLE` | `false` | Human-readable console logs |
-| `-access-log` | `GPM_ACCESS_LOG` | `false` | Log every data-plane request |
+| `-access-log` | `GPM_ACCESS_LOG` | `false` | Log every data-plane request. Startup default only: capture can be flipped live from the Access Logs page or `PUT /api/logs` (admin scope); the runtime toggle is never persisted, so a restart reverts to this flag |
 | `-slow-request-ms` | `GPM_SLOW_REQUEST_MS` | `0` (off) | Warn on requests slower than N ms |
 | `-debug-headers` | `GPM_DEBUG_HEADERS` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info — keep off in production) |
 | `-upstream-response-header-timeout` | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `0` (unbounded) | Cap time-to-first-byte from an upstream |

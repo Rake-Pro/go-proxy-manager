@@ -267,7 +267,8 @@ earlier tiers or duplicating work (see "Architecture for extension").
   server-enforced TTL, active TCP/HTTP health probes + passive connect-failure
   detection, `GET /api/upstream-health`, typed UI editor),
   access-log viewer (shipped: in-memory ring + `GET /api/logs` + "Access Logs"
-  view, gated on the access-log toggle) or metrics (shipped: opt-in
+  view, gated on the access-log toggle, flippable live via `PUT /api/logs`
+  since the handler-switch change) or metrics (shipped: opt-in
   Prometheus `/metrics`, see P2).
 - Per-host OIDC relying-party gating on the data plane (shipped: redirect →
   callback → signed SSO session cookie) and HSTS emission (shipped).

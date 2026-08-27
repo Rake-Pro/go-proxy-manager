@@ -157,7 +157,8 @@ error-page system; none is a regression from that change.
 - [x] **Per-host upstream timeouts** (`timeouts.connectSeconds`/`readSeconds`):
   isolated per-host transport so an override never affects the shared pool.
 - [x] **Access-log viewer**: in-memory ring + `GET /api/logs` + "Access Logs"
-  view, gated on the access-log toggle (zero overhead when off).
+  view, gated on the access-log toggle (zero overhead when off; toggleable
+  live via `PUT /api/logs` since the handler-switch change).
 - [x] **Lifecycle webhooks** (`settings.webhooks`): async, best-effort POST per
   config change; optional placeholder-resolved `X-GPM-Webhook-Secret`.
 - [x] **Domain-group filter chips on the Proxy Hosts list.** Hosts are grouped

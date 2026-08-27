@@ -3552,6 +3552,40 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
+    put:
+      summary: Toggle data-plane request capture live
+      description: Runtime-only - never persisted, so a restart reverts to the `-access-log` flag /
+        `GPM_ACCESS_LOG`. Admin scope because it changes global logging output, not one resource.
+      tags:
+      - Meta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - enabled
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
   /api/me:
     get:
       summary: Current authenticated principal
