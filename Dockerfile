@@ -34,7 +34,11 @@ RUN go build \
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # Runtime deps: app shells out to git; certs/tz for TLS and timestamps.
-RUN apk add --no-cache git ca-certificates tzdata
+# apk upgrade first: the base image is digest-pinned and its packages lag
+# security patches published to the 3.24 repos (e.g. openssl CVE-2026-14456
+# fixed in 3.5.8-r0 with no new base image release), and the release gate
+# fails on known HIGH/CRITICAL CVEs in the final image.
+RUN apk upgrade --no-cache && apk add --no-cache git ca-certificates tzdata
 
 # Non-root user.
 RUN addgroup -S gpm && adduser -S -G gpm -H -h /data gpm

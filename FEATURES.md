@@ -423,7 +423,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
   validated (no CR/LF, no hop-by-hop, case-insensitive dedup, unknown scope
   rejected); `Strict-Transport-Security` refused - HSTS is unchanged and
   separate. Resolves the auth-refusal/error-page "no `nosniff` on rendered pages"
-  observation from BACKLOG.
+  observation from BACKLOG. Authorable from the UI as well as from git: the
+  Settings page ("Response security headers") edits the fleet default and the
+  host editor edits that host's per-key override, both as name/value/scope rows.
 - **Response-header stripping** (shipped): `settings.stripResponseHeaders`
   (fleet default) plus a per-`ProxyHost` `stripResponseHeaders` **unioned** with
   it, and an `ingressDiscovery` template/profile field so managed hosts inherit

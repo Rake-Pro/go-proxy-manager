@@ -84,27 +84,112 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 	}
 }
 
-// TestSaveCarriesSecurityHeadersForward guards the wipe-bug for the new
-// securityHeaders field: neither the Settings form nor the host editor renders a
-// control for it yet, but both PUTs are whole-object replacements, so a save that
-// did not send the loaded map back would silently drop a GitOps-authored set.
-// Both save handlers must carry it forward from what they loaded.
-func TestSaveCarriesSecurityHeadersForward(t *testing.T) {
-	b, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(b)
+// TestSecurityHeadersEditorRenders covers the editor that closed the "config- and
+// API-only" gap on securityHeaders: a row of name/value/scope in BOTH places the
+// field exists - the Settings page (the fleet default) and the host editor (the
+// per-key override) - fed by the one shared control.
+func TestSecurityHeadersEditorRenders(t *testing.T) {
+	js := readHostEditorJS(t)
 
 	for _, want := range []string{
-		// settings save carries settings.securityHeaders forward
-		"if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;",
-		// host save carries the host's securityHeaders override forward
-		"if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;",
+		// the shared row editor, its three scopes and the name check
+		"function makeSecurityHeaderRows(wrap, initial) {",
+		"const SECURITY_SCOPES = ['all', 'generated-only', 'proxied-only'];",
+		"const HEADER_NAME_RE = ",
+		// name / value / scope controls per row
+		`class="field mono sh-name"`,
+		`class="field mono sh-value"`,
+		`class="field mono sh-scope"`,
+		`class="icon-btn sh-del"`,
+		// Settings page: container, add button, wiring
+		`<div id="set-secheaders"></div>`,
+		`id="set-secheaders-add"`,
+		"const secHdrCtl = makeSecurityHeaderRows($('#set-secheaders'), s.securityHeaders);",
+		// host editor: container, add button, wiring
+		`<div id="f-secheaders"></div>`,
+		`id="f-secheaders-add"`,
+		"const secHdrCtl = makeSecurityHeaderRows($('#f-secheaders'), h.securityHeaders);",
 	} {
 		if !strings.Contains(js, want) {
-			t.Fatalf("app.js no longer carries securityHeaders forward (%q not found); a save now silently wipes the configured response headers", want)
+			t.Errorf("the securityHeaders editor is not wired: missing %q", want)
 		}
+	}
+}
+
+// TestSecurityHeadersEditorSerialization is the guard the old carry-forward test
+// became. The editor now OWNS the field in both whole-object PUTs, so the
+// invariant "a save never drops securityHeaders" is carried by its serialization
+// instead of by a copy of the loaded map. Three shapes have to survive a save
+// through an untouched form:
+//
+//	bare string          -> bare string (scope "all" is never gratuitously
+//	                        objectified, so a GitOps YAML diff stays empty)
+//	{value, scope: ...}  -> {value, scope} for a non-default scope
+//	absent               -> absent (never {})
+//
+// plus a fourth the editor deliberately does not understand: an unrecognized
+// shape (a scope this build has never heard of) is emitted verbatim rather than
+// flattened or dropped.
+func TestSecurityHeadersEditorSerialization(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	// scope "all" serializes as a bare string; anything else as {value, scope}.
+	if !strings.Contains(js, "out[name] = scope === 'all' ? value : { value: value, scope: scope };") {
+		t.Fatal("the securityHeaders editor no longer round-trips an all-scope header as a bare string; every save would rewrite the config into object form")
+	}
+	// An unrecognized shape is stashed on the row and emitted untouched.
+	for _, want := range []string{
+		"div._raw = raw;",
+		"if ('_raw' in r) { out[name] = r._raw; return; }",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("an unrecognized securityHeaders value is no longer preserved verbatim: missing %q", want)
+		}
+	}
+	// Empty-name rows are skipped, and no rows at all yields null (not {}).
+	for _, want := range []string{
+		"const name = r.querySelector('.sh-name').value.trim();\n        if (!name) return;",
+		"return Object.keys(out).length ? out : null;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the securityHeaders editor no longer distinguishes empty from absent: missing %q", want)
+		}
+	}
+	// Both saves attach the editor's output ONLY when there is one, so an absent
+	// field stays absent instead of becoming an empty map.
+	for _, want := range []string{
+		"if (secHdrs) body.securityHeaders = secHdrs;",
+		"if (secHdrs) obj.securityHeaders = secHdrs;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("a save no longer sends the securityHeaders editor's output (%q not found); the configured response headers would be wiped", want)
+		}
+	}
+	// The old carry-forward guards must be GONE - keeping one alongside the editor
+	// would resurrect a deleted header on the next save.
+	for _, gone := range []string{
+		"if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;",
+		"if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;",
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("the securityHeaders carry-forward guard %q still runs alongside the editor; a header removed in the UI would come back on save", gone)
+		}
+	}
+	// Client-side validation of the two mistakes the object build itself would
+	// otherwise swallow or bounce off the API.
+	for _, want := range []string{
+		"if (!HEADER_NAME_RE.test(name)) {",
+		"is listed more than once",
+		"toast('Invalid security header', secHdrErr, 'err'); return;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the securityHeaders editor no longer validates its rows: missing %q", want)
+		}
+	}
+	// The validation guard's literal is byte-identical in the host and settings
+	// save handlers, so Contains alone cannot tell one save losing it: count.
+	if got := strings.Count(js, "const secHdrErr = secHdrCtl.error();"); got != 2 {
+		t.Errorf("expected the securityHeaders validation guard in BOTH save handlers (host + settings), found %d", got)
 	}
 }
 
