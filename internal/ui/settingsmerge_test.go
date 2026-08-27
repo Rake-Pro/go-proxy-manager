@@ -193,22 +193,70 @@ func TestSecurityHeadersEditorSerialization(t *testing.T) {
 	}
 }
 
-// TestSaveCarriesStripResponseHeadersForward is the same guard for
-// stripResponseHeaders: neither editor renders a control for it, and both PUTs
-// are whole-object replacements, so a save that did not send the loaded list back
-// would silently re-expose the backend headers an operator configured away.
-func TestSaveCarriesStripResponseHeadersForward(t *testing.T) {
+// TestStripResponseHeadersEditorRenders covers the chip-list editor that closed
+// the "config- and API-only" gap on stripResponseHeaders, in BOTH places the
+// field exists: the Settings page (the fleet default) and the host editor (the
+// host's additions, unioned with it).
+func TestStripResponseHeadersEditorRenders(t *testing.T) {
 	js := readHostEditorJS(t)
 
 	for _, want := range []string{
-		// settings save carries settings.stripResponseHeaders forward
-		"if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;",
-		// host save carries the host's own additions forward
-		"if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;",
+		// Settings page: chip container + wiring
+		`<div class="chip-input" id="set-striphdrs"></div>`,
+		"const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');",
+		// host editor: chip container + wiring
+		`<div class="chip-input" id="f-striphdrs"></div>`,
+		"const stripCtl = makeChipInput($('#f-striphdrs'), arr(h.stripResponseHeaders), 'add header...');",
 	} {
 		if !strings.Contains(js, want) {
-			t.Fatalf("app.js no longer carries stripResponseHeaders forward (%q not found); a save now silently restores the stripped backend headers", want)
+			t.Errorf("the stripResponseHeaders editor is not wired: missing %q", want)
 		}
+	}
+}
+
+// TestStripResponseHeadersEditorSerialization is the guard the old carry-forward
+// test became. The chip editor now OWNS the field in both whole-object PUTs, so
+// the invariant "a save never drops stripResponseHeaders" is carried by its
+// serialization instead of by a copy of the loaded list - and an emptied list
+// leaves the key off the body rather than committing an empty array.
+func TestStripResponseHeadersEditorSerialization(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		"if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;",
+		"if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("a save no longer sends the strip editor's output (%q not found); the configured strip list would be wiped", want)
+		}
+	}
+	// The old carry-forward guards must be GONE - keeping one alongside the
+	// editor would resurrect a deleted name on the next save.
+	for _, gone := range []string{
+		"if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;",
+		"if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;",
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("the stripResponseHeaders carry-forward guard %q still runs alongside the editor; a name removed in the UI would come back on save", gone)
+		}
+	}
+	// Client-side validation: token syntax and case-insensitive duplicates (the
+	// chip input only dedupes exact matches). The refused-name policy stays
+	// server-side so the two lists cannot drift.
+	for _, want := range []string{
+		"function stripHeaderListError(names) {",
+		"if (!HEADER_NAME_RE.test(n)) return",
+		"is listed more than once (names are case-insensitive).",
+		"toast('Invalid strip header', stripErr, 'err'); return;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the stripResponseHeaders editor no longer validates its chips: missing %q", want)
+		}
+	}
+	// The validation guard's literal is byte-identical in the host and settings
+	// save handlers, so Contains alone cannot tell one save losing it: count.
+	if got := strings.Count(js, "const stripErr = stripHeaderListError(stripHdrs);"); got != 2 {
+		t.Errorf("expected the strip validation guard in BOTH save handlers (host + settings), found %d", got)
 	}
 }
 

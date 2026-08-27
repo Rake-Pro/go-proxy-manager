@@ -317,6 +317,10 @@ func TestScopeEnforcement(t *testing.T) {
 
 		{"logs need wildcard read", []string{"proxy-hosts:read"}, "GET", "/logs", "", http.StatusForbidden},
 		{"wildcard read reaches logs", []string{"*:read"}, "GET", "/logs", "", http.StatusOK},
+		// The live capture toggle is admin-equivalent: it changes global logging
+		// output, not one resource. 501 past the gate = the dep is unwired here.
+		{"logs toggle needs admin", []string{"*:write"}, "PUT", "/logs", `{"enabled":true}`, http.StatusForbidden},
+		{"admin reaches logs toggle", []string{model.ScopeAdmin}, "PUT", "/logs", `{"enabled":true}`, http.StatusNotImplemented},
 		{"upstream health needs wildcard read", []string{"proxy-hosts:read"}, "GET", "/upstream-health", "", http.StatusForbidden},
 		{"wildcard read reaches upstream health", []string{"*:read"}, "GET", "/upstream-health", "", http.StatusOK},
 

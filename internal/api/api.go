@@ -42,6 +42,9 @@ type Deps struct {
 	// OnEvent, if set, is fired after every successful write with the change
 	// details (action/kind/name/commit), for lifecycle webhooks. May be nil.
 	OnEvent func(action, kind, name, commit string)
+	// SetAccessLog, if set, flips data-plane request capture live. The change
+	// is runtime-only: the -access-log flag decides the state after a restart.
+	SetAccessLog func(enabled bool)
 	// RecentLogs, if set, returns the data-plane access-log viewer payload
 	// (marshalled as-is) for GET /logs. May be nil.
 	RecentLogs func() any
@@ -608,6 +611,30 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.RecentLogs())
+	}))
+
+	// Flip data-plane request capture live. Runtime-only - never persisted, so
+	// a restart reverts to the -access-log flag. Admin scope: it changes global
+	// logging output (volume, captured client IPs and paths), not one resource.
+	mux.HandleFunc("PUT /logs", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		if d.SetAccessLog == nil {
+			writeErr(w, http.StatusNotImplemented, errors.New("access-log toggle is not wired"))
+			return
+		}
+		body, err := readBody(w, r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil || req.Enabled == nil {
+			writeErr(w, http.StatusBadRequest, errors.New(`body must be {"enabled": true|false}`))
+			return
+		}
+		d.SetAccessLog(*req.Enabled)
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": *req.Enabled})
 	}))
 
 	// Download a portable archive of the entire config. Admin scope, not "*:read":

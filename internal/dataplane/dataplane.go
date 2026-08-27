@@ -66,7 +66,10 @@ type Server struct {
 	certDir   string
 
 	// Observability toggles (all off by default; zero overhead when unset).
-	accessLog     bool
+	// slowThreshold and debugHeaders are fixed at startup; accessLog can be
+	// flipped live (SetAccessLog), which swaps each listener's handlerSwitch
+	// between the plain and observed chains.
+	accessLog     atomic.Bool
 	slowThreshold time.Duration
 	debugHeaders  bool
 
@@ -90,6 +93,12 @@ type Server struct {
 	httpsSrv *http.Server
 	httpSrv  *http.Server
 
+	// httpSwitch/httpsSwitch are the listeners' swappable handler chains: plain
+	// dispatch while every observability toggle is off, the observed wrapper
+	// otherwise. nil until Start; SetAccessLog swaps them live.
+	httpSwitch  *handlerSwitch
+	httpsSwitch *handlerSwitch
+
 	// acmeChallenge serves in-flight ACME HTTP-01 tokens on the plaintext
 	// listener. Wired once at startup (SetACMEChallengeStore); atomic so a late
 	// or replaced wiring races nothing.
@@ -109,6 +118,7 @@ type Config struct {
 	CertDir   string
 
 	// AccessLog logs every request (method, host, path, status, bytes, duration).
+	// This is the initial state; SetAccessLog flips it live at runtime.
 	AccessLog bool
 	// SlowRequestThreshold, if >0, warn-logs any request at or above this duration
 	// even when AccessLog is off - a low-noise way to surface only slow requests.
@@ -137,13 +147,13 @@ func New(c Config) *Server {
 		httpsAddr:     c.HTTPSAddr,
 		httpAddr:      c.HTTPAddr,
 		certDir:       c.CertDir,
-		accessLog:     c.AccessLog,
 		slowThreshold: c.SlowRequestThreshold,
 		debugHeaders:  c.DebugHeaders,
 		logBuf:        newLogRing(bufSize),
 		streams:       newStreamManager(),
 		health:        newHealthManager(),
 	}
+	s.accessLog.Store(c.AccessLog)
 	// Stream listeners read the PROXY protocol config through this accessor, so a
 	// listener opened before the setting arrives (or while it is off) still picks
 	// the change up on its next connection instead of needing a rebind.
@@ -153,7 +163,31 @@ func New(c Config) *Server {
 
 // AccessLogEnabled reports whether request capture is on. When false the /api/logs
 // viewer has nothing to show and the UI surfaces how to enable it.
-func (s *Server) AccessLogEnabled() bool { return s.accessLog }
+func (s *Server) AccessLogEnabled() bool { return s.accessLog.Load() }
+
+// SetAccessLog flips request capture live (admin PUT /api/logs). The change is
+// runtime-only: the -access-log flag decides the state after a restart. Each
+// listener's switch is re-derived from the stored value, so concurrent toggles
+// converge on the last write without extra locking. An in-flight request
+// finishes on the chain it started with.
+func (s *Server) SetAccessLog(enabled bool) {
+	s.accessLog.Store(enabled)
+	active := s.observeActive()
+	if s.httpSwitch != nil {
+		s.httpSwitch.set(active)
+	}
+	if s.httpsSwitch != nil {
+		s.httpsSwitch.set(active)
+	}
+	log.Info().Bool("enabled", enabled).Msg("access logging toggled")
+}
+
+// observeActive reports whether requests must run through the observed chain
+// right now: the live access-log toggle, or any startup toggle that always
+// needs the wrapper.
+func (s *Server) observeActive() bool {
+	return s.accessLog.Load() || s.slowThreshold > 0 || s.debugHeaders || metricsHook() != nil
+}
 
 // UpstreamHealth returns the live health of every upstream group's upstreams,
 // keyed by group name, for the admin status API.
@@ -203,8 +237,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("data plane: Reload must be called before Start")
 	}
 
-	s.httpSrv = newListenerServer(s.httpAddr, s.observe(http.HandlerFunc(s.dispatchHTTP)))
-	s.httpsSrv = newListenerServer(s.httpsAddr, s.observe(http.HandlerFunc(s.dispatchHTTPS)))
+	s.httpSwitch = s.dataHandler(s.dispatchHTTP)
+	s.httpsSwitch = s.dataHandler(s.dispatchHTTPS)
+	s.httpSrv = newListenerServer(s.httpAddr, s.httpSwitch)
+	s.httpsSrv = newListenerServer(s.httpsAddr, s.httpsSwitch)
 	// GetCertificate reads the live router so cert changes apply on reload.
 	// GetConfigForClient lets a host pin a higher minimum TLS version than the
 	// 1.2 floor: it returns that host's config (by SNI) or nil for the default.
