@@ -1034,6 +1034,13 @@ async function hostEditor(c, name) {
           <div class="hint" style="margin-top:6px">Scope: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Strict-Transport-Security is not settable here; HSTS lives in the TLS section.</div>
         </div>
 
+        <div class="card form-section">
+          <p class="section-label">Strip response headers</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">This host's additions to the fleet strip list (Settings) - header names removed from proxied upstream responses before they reach the client. Only what the upstream sent is touched, never a header gpm adds.</p>
+          <div class="field-group"><label>Header names</label><div class="chip-input" id="f-striphdrs"></div></div>
+          <div class="hint">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save.</div>
+        </div>
+
         <div class="card form-section" id="f-dns-card">
           <p class="section-label">DNS sync</p>
           <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
@@ -1149,6 +1156,7 @@ async function hostEditor(c, name) {
 
   const secHdrCtl = makeSecurityHeaderRows($('#f-secheaders'), h.securityHeaders);
   $('#f-secheaders-add').addEventListener('click', () => secHdrCtl.addRow('', ''));
+  const stripCtl = makeChipInput($('#f-striphdrs'), arr(h.stripResponseHeaders), 'add header...');
 
   // These two DNS toggles stay USABLE when their backend is not configured, and
   // say so inline instead. Deliberately unlike every other capability-gated
@@ -1349,10 +1357,14 @@ async function hostEditor(c, name) {
     const secHdrs = secHdrCtl.get();
     if (secHdrs) obj.securityHeaders = secHdrs;
 
-    // stripResponseHeaders (this host's additions to the fleet strip list) has no
-    // control on this form yet: a host PUT is a whole-object replacement, so the
-    // loaded list is carried forward or an unrelated save would silently drop it.
-    if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;
+    // stripResponseHeaders (this host's additions to the fleet strip list) is
+    // owned by the chip editor above, which replaced the old carry-forward
+    // guard. An empty list leaves the key off the body entirely rather than
+    // committing an empty array.
+    const stripHdrs = stripCtl.get();
+    const stripErr = stripHeaderListError(stripHdrs);
+    if (stripErr) { toast('Invalid strip header', stripErr, 'err'); return; }
+    if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;
 
     const tlsObj = {};
     const cert = $('#f-cert').value;
@@ -1941,6 +1953,23 @@ function makeKVRows(wrap, initial, kPlace, vPlace, secret) {
 //     commit an empty map where the config had none.
 const SECURITY_SCOPES = ['all', 'generated-only', 'proxied-only'];
 const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+// stripHeaderListError validates a stripResponseHeaders chip list client-side:
+// token syntax and case-insensitive duplicates (the chip input only dedupes
+// exact matches). The refused-name policy (hop-by-hop, response-semantic)
+// stays server-side only - the API's 400 names the exact header and the reason
+// - so the two lists cannot drift.
+function stripHeaderListError(names) {
+  const seen = {};
+  for (const n of names) {
+    if (!HEADER_NAME_RE.test(n)) return `"${n}" is not a valid header name.`;
+    const lk = n.toLowerCase();
+    if (seen[lk]) return `"${n}" is listed more than once (names are case-insensitive).`;
+    seen[lk] = true;
+  }
+  return '';
+}
+
 function makeSecurityHeaderRows(wrap, initial) {
   function addRow(name, raw) {
     const isStr = typeof raw === 'string';
@@ -3992,6 +4021,12 @@ async function viewSettings(c) {
       <div class="hint" style="margin-top:6px">Put app-breaking headers - Content-Security-Policy frame-ancestors, Permissions-Policy - at <span class="mono">generated-only</span>: they are safe on gpm's own pages and break a proxied app that ships none of its own. Strict-Transport-Security is refused here; HSTS is a per-host TLS setting.</div>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Strip response headers</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Fleet-default list of header names removed from proxied upstream responses (<span class="mono">Server</span>, <span class="mono">X-Powered-By</span>, ...). Only what the upstream sent is touched - never a header gpm adds. Any proxy host can add its own names in its editor; the lists are unioned.</p>
+      <div class="chip-input" id="set-striphdrs"></div>
+      <div class="hint" style="margin-top:6px">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save. Set-Cookie and WWW-Authenticate are allowed but sharp: stripping them breaks the app's own sessions or its basic-auth challenge.</div>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Error pages</p>
       <p class="muted" style="font-size:11.5px;margin:0">Custom HTML for gpm-generated errors now has its own section: <a href="#/errorpages">Error pages</a>. It edits the same <span class="mono">settings.errorPages</span> config.</p>
     </div>
@@ -4014,6 +4049,7 @@ async function viewSettings(c) {
 
   const secHdrCtl = makeSecurityHeaderRows($('#set-secheaders'), s.securityHeaders);
   $('#set-secheaders-add').addEventListener('click', () => secHdrCtl.addRow('', ''));
+  const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');
 
   // webhook rows
   const whWrap = $('#set-webhooks');
@@ -4397,9 +4433,13 @@ async function viewSettings(c) {
     if (secHdrs) body.securityHeaders = secHdrs;
 
     // stripResponseHeaders (the fleet default list of headers removed from
-    // proxied upstream responses) has no editor on this page yet; carry it
-    // forward exactly like errorPages above so a save here never wipes it.
-    if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;
+    // proxied upstream responses) is owned by the chip editor above, which
+    // replaced the old carry-forward guard. An empty list leaves the key off
+    // the body entirely rather than committing an empty array.
+    const stripHdrs = stripCtl.get();
+    const stripErr = stripHeaderListError(stripHdrs);
+    if (stripErr) { toast('Invalid strip header', stripErr, 'err'); return; }
+    if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;
 
     const ingressDiscovery = {
       apiURL: $('#set-id-url').value.trim(),

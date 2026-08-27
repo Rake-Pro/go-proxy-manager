@@ -443,7 +443,9 @@ earlier tiers or duplicating work (see "Architecture for extension").
   headers (`Content-Type`/`-Length`/`-Encoding`, `Vary`, `Location`,
   `Sec-WebSocket-*`) rejected.
   The headers middleware's `removeResponse` stays for per-middleware/per-location
-  removal; this is the edge-wide mechanism.
+  removal; this is the edge-wide mechanism. Authorable from the UI as well as
+  from git: the Settings page ("Strip response headers") edits the fleet default
+  and the host editor edits that host's additions, both as chip lists.
 
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth

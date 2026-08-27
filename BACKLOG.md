@@ -247,12 +247,16 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   `internal/ui/settingsmerge_test.go` pin the wiring and the serialization
   (all-scope stays a bare string, a non-default scope is `{value, scope}`, an
   unrecognized shape is emitted verbatim, absent stays absent).
-- [ ] **No editor for `stripResponseHeaders`.** The field is still config- and
-  API-only: the Settings page and the host editor render no control for it and
-  only carry the loaded value forward on save (guarded by
-  `TestSaveCarriesStripResponseHeadersForward` in
-  `internal/ui/settingsmerge_test.go`). A chip list is the fit (the
-  `#hdr-rmresp` chip input in the headers-middleware editor is the pattern).
+- [x] **No editor for `stripResponseHeaders`.** Both the Settings page ("Strip
+  response headers", the fleet default) and the host editor (that host's
+  additions) now render a chip list (the `#hdr-rmresp` pattern), replacing the
+  save-time carry-forward. Client-side validation covers token syntax and
+  case-insensitive duplicates; the refused-name policy (hop-by-hop,
+  response-semantic) stays server-side so the lists cannot drift.
+  `TestStripResponseHeadersEditorRenders` and
+  `TestStripResponseHeadersEditorSerialization` in
+  `internal/ui/settingsmerge_test.go` pin the wiring, the empty-stays-absent
+  serialization, and that the old carry-forward guards are gone.
 - [x] **UI middleware editor: support the `rewrite` type.** The middleware-type
   `<select>` in `internal/ui/static/app.js` now offers `rewrite` with a
   `replacePath` key/value row editor (mirroring the headers map editor),
