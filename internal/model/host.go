@@ -307,6 +307,14 @@ type ProxyHost struct {
 	// settings-level default. nil (default) uses the settings-level headers
 	// unchanged.
 	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
+
+	// StripResponseHeaders adds to settings.stripResponseHeaders for this host:
+	// the effective set is the UNION of the two, so the fleet baseline always
+	// applies and a host can only strip MORE (see Settings.StripResponseHeaders
+	// for why a list unions rather than replaces, and for exactly which headers
+	// the removal can reach). Names are matched case-insensitively and removed
+	// from what the upstream sent, never from headers gpm adds.
+	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 }
 
 func (h ProxyHost) Kind() string { return "ProxyHost" }
@@ -340,6 +348,9 @@ func (h ProxyHost) Validate() error {
 		}
 	}
 	if err := validateSecurityHeaders(h.SecurityHeaders); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := validateStripResponseHeaders(h.StripResponseHeaders); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	for _, l := range h.Locations {

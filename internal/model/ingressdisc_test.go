@@ -93,6 +93,19 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 			d.Template.RobotsNoIndex = true
 			d.Template.Tags = []string{"cluster"}
 		}, ""},
+		{"template stripResponseHeaders accepted", func(d *IngressDiscoverySettings) {
+			d.Template.StripResponseHeaders = []string{"Server", "x-powered-by"}
+		}, ""},
+		{"template stripResponseHeaders validated", func(d *IngressDiscoverySettings) {
+			d.Template.StripResponseHeaders = []string{"Content-Type"}
+		}, "own semantics"},
+		{"profile stripResponseHeaders validated", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"p": {
+				Upstream:             Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:                  TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
+				StripResponseHeaders: []string{"Connection"},
+			}}
+		}, "hop-by-hop"},
 		{"template connect timeout out of range", func(d *IngressDiscoverySettings) {
 			d.Template.Timeouts = &HostTimeouts{ConnectSeconds: 3601}
 		}, "template: timeouts.connectSeconds 3601 out of range (0-3600)"},
@@ -615,7 +628,7 @@ func TestUnsetTemplateFieldsAreOmittedFromTheEncodedSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, key := range []string{"robotsNoIndex", "timeouts", "tags"} {
+	for _, key := range []string{"robotsNoIndex", "timeouts", "tags", "stripResponseHeaders"} {
 		if strings.Contains(string(b), key) {
 			t.Fatalf("a template that sets no %q still encodes the key:\n%s", key, b)
 		}

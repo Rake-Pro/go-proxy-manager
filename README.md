@@ -95,6 +95,11 @@ builds it with a narrower, more focused design:
   `generated-only` keeps app-breaking headers (`Content-Security-Policy`
   frame-ancestors, `Permissions-Policy`) off proxied apps entirely.
   Opt-in (empty by default); HSTS stays separate
+- **Response-header stripping** - `settings.stripResponseHeaders` (plus a
+  per-host list, unioned with it) removes leaked backend headers (`Server`,
+  `X-Powered-By`, `X-AspNet-Version`) from what an upstream sends,
+  case-insensitively, including on a `101` WebSocket handshake. It touches only
+  the backend's own headers, never anything gpm adds. Opt-in (empty by default)
 - Composable, ordered middleware chain per host and per location
 
 **Automation & DNS**

@@ -227,6 +227,24 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 ## UI polish
 
+- [ ] **`securityHeaders` is missing from the ingress-discovery template.** A
+  per-host `securityHeaders` override on a discovery-managed host is rebuilt away
+  (with a git commit) on every reconcile, exactly the gap
+  `stripResponseHeaders` closed by gaining an `IngressHostTemplate` field. The
+  fix is the same shape: add `SecurityHeaders` to `IngressHostTemplate`, validate
+  it with `validateSecurityHeaders`, thread it through `derive` in
+  `internal/k8s/discovery.go`, and cover it with the
+  `TestDerivedHostInherits...` pair. Pre-existing; deliberately left out of the
+  stripping change to keep that diff to one feature.
+- [ ] **No editors for `securityHeaders` / `stripResponseHeaders`.** Both fields
+  are config- and API-only: the Settings page and the host editor render no
+  control for either, and only carry the loaded value forward on save (guarded by
+  `TestSaveCarriesSecurityHeadersForward` and
+  `TestSaveCarriesStripResponseHeadersForward` in
+  `internal/ui/settingsmerge_test.go`). A map editor with a scope select for
+  `securityHeaders`, and a chip list for `stripResponseHeaders` (the
+  `#hdr-rmresp` chip input in the headers-middleware editor is the pattern),
+  would make both authorable from the UI.
 - [x] **UI middleware editor: support the `rewrite` type.** The middleware-type
   `<select>` in `internal/ui/static/app.js` now offers `rewrite` with a
   `replacePath` key/value row editor (mirroring the headers map editor),
