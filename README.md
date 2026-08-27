@@ -128,7 +128,8 @@ builds it with a narrower, more focused design:
 - Git-backed declarative config with full referential validation, per-commit
   history, and revert (whole-config or scoped to a single object)
 - One-time importer from an existing Nginx-Proxy-Manager/NPMplus data directory
-- Structured logging (zerolog), optional access log, slow-request warnings
+- Structured logging (zerolog), optional access log (toggleable live from the
+  Access Logs page, zero overhead while off), slow-request warnings
 - Opt-in Prometheus metrics at `/metrics` on the admin listener (`GPM_METRICS=1`),
   with no `client_golang` dependency and host labels bounded by config, not by
   client-supplied `Host` headers

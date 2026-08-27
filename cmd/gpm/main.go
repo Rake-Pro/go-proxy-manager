@@ -123,9 +123,10 @@ func main() {
 		Msg("config loaded")
 
 	// Prometheus metrics, opt-in. The registry is built before the data plane so
-	// SetMetricsHook lands before the first Reload and before Start: the listener
-	// wrapper decides once, at build time, whether to observe at all, so a run
-	// without -metrics carries no per-request cost.
+	// SetMetricsHook lands before the first Reload and before Start: the observe
+	// wrapper captures the hook when Start builds the handler chains, and the
+	// listeners' handler switch serves the plain chain while every observability
+	// toggle is off, so a run without -metrics carries no per-request cost.
 	var mx *metrics.Metrics
 	if *metricsOn {
 		bi := version.Get()
@@ -463,7 +464,8 @@ func main() {
 		RecentLogs: func() any {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
 		},
-		GeoDBLoaded: geoResolver.Loaded,
+		SetAccessLog: dp.SetAccessLog,
+		GeoDBLoaded:  geoResolver.Loaded,
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},

@@ -15,6 +15,23 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Live access-log toggle.** Request capture no longer needs a restart:
+  `PUT /api/logs {"enabled": true|false}` (admin scope) flips it at runtime,
+  and the Access Logs page gains an Enable/Disable capture button. The toggle
+  is runtime-only - never persisted - so a restart reverts to `-access-log` /
+  `GPM_ACCESS_LOG`.
+
+  The zero-overhead promise survives: instead of a permanently installed
+  observer checking a flag, each data-plane listener serves through a
+  two-position handler switch (plain dispatch chain vs observed chain) selected
+  by one atomic pointer load per request. While every observability toggle is
+  off the plain chain serves - no wrapper, no allocations, no clock reads - and
+  toggling swaps the observed chain in for subsequent requests; an in-flight
+  request finishes on the chain it started with, so it logs (or doesn't)
+  consistently. A startup toggle that always needs the wrapper (`-metrics`,
+  `-slow-request-ms`, `-debug-headers`) keeps the observed chain active, and
+  only the access-log work inside it is skipped.
+
 - **UI editor for `securityHeaders`.** The field was config- and API-only; both
   places it exists now have a real editor. The Settings page gains a "Response
   security headers" section for the fleet default, and the proxy-host editor

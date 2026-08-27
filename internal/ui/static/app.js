@@ -3629,9 +3629,12 @@ async function viewLogs(c) {
   c.innerHTML = `
     <div class="row-between view-head">
       <div><h2>Access Logs</h2><p>Most recent data-plane requests, newest first (in-memory buffer).</p></div>
-      <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
+      <div style="display:flex;gap:10px">
+        <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
+        <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
+      </div>
     </div>
-    ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b>. Start gpm with <span class="mono">--access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to populate this view. The default off-path adds zero per-request overhead.</div></div>`}
+    ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">--access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
     <div class="table-wrap">
       <table>
         <thead><tr><th>Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Duration</th><th>Client</th></tr></thead>
@@ -3640,6 +3643,15 @@ async function viewLogs(c) {
     </div>`;
 
   $('#logsRefresh').addEventListener('click', () => viewLogs(c));
+  $('#logsToggle').addEventListener('click', async () => {
+    const btn = $('#logsToggle');
+    btn.disabled = true;
+    try {
+      await api('/api/logs', { method: 'PUT', body: { enabled: !enabled } });
+      toast(enabled ? 'Capture disabled' : 'Capture enabled', 'runtime only - a restart reverts to the --access-log flag', 'ok');
+      await viewLogs(c);
+    } catch (e) { toastErr(e); btn.disabled = false; }
+  });
 }
 
 // ---------- HISTORY ----------

@@ -472,3 +472,53 @@ func TestStripResponseHeadersRoundTrip(t *testing.T) {
 		t.Fatalf("invalid host strip name want 400 got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// PUT /logs flips the wired live access-log toggle and is runtime-only: no
+// store write, no commit header, just the callback.
+func TestAccessLogToggle(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	var state bool
+	h := api.New(api.Deps{Store: st, SetAccessLog: func(v bool) { state = v }})
+
+	w := do(t, h, "PUT", "/logs", `{"enabled":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	if !state {
+		t.Fatal("SetAccessLog(true) was not called")
+	}
+	var resp struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || !resp.Enabled {
+		t.Fatalf("body = %s, want {\"enabled\":true}", w.Body.String())
+	}
+	if w.Header().Get("X-Config-Commit") != "" {
+		t.Fatal("runtime toggle must not report a config commit")
+	}
+
+	if w := do(t, h, "PUT", "/logs", `{"enabled":false}`); w.Code != http.StatusOK {
+		t.Fatalf("disable want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	if state {
+		t.Fatal("SetAccessLog(false) was not called")
+	}
+
+	// enabled is required; a body without it (or non-JSON) is a 400.
+	if w := do(t, h, "PUT", "/logs", `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing enabled want 400 got %d", w.Code)
+	}
+	if w := do(t, h, "PUT", "/logs", `nope`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad json want 400 got %d", w.Code)
+	}
+
+	// Unwired toggle -> 501, matching the other optional deps.
+	unwired, _ := newHandler(t)
+	if w := do(t, unwired, "PUT", "/logs", `{"enabled":true}`); w.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired want 501 got %d", w.Code)
+	}
+}

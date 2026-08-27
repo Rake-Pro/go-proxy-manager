@@ -308,8 +308,14 @@ rule. And **the data plane does not know about metrics**: it declares a
 `MetricsHook` interface (`internal/dataplane/metricshook.go`) that
 `internal/metrics` happens to satisfy structurally, exactly as the ACME manager
 reaches the plaintext listener through `ACMEChallengeStore`. With no hook
-installed the observe wrapper returns the handler unwrapped and every call site
-is one atomic load, so an instance without `-metrics` pays nothing. Subsystems
+installed (and every other observability toggle off) each listener's handler
+switch serves the plain dispatch chain - the observe wrapper is built but never
+on the hot path - so an instance without `-metrics` pays one atomic pointer
+load per request and nothing else. That switch is also what makes access
+logging a live toggle: `PUT /api/logs` (admin scope) swaps the observed chain
+in or out at runtime with no listener restart, in-flight requests finishing on
+the chain they started with; the toggle is never persisted, so a restart
+reverts to `-access-log`. Subsystems
 that already track their own state (ACME expiry and renewal failures, the DNS
 and Ingress reconcilers' run/success timestamps and counts) are read at scrape
 time through pull collectors wired in `cmd/gpm`, so nothing is mirrored into a
