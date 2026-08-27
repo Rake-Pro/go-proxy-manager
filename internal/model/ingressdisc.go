@@ -180,6 +180,13 @@ type IngressHostTemplate struct {
 	Middlewares []string `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 
+	// StripResponseHeaders is applied verbatim to every derived host, exactly as
+	// on a hand-written ProxyHost. Without it a per-host strip list on a
+	// discovery-managed host is reverted (with a git commit) on the next
+	// reconcile, since the reconciler rebuilds the whole object from this
+	// template.
+	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
+
 	// Tags are applied verbatim to every derived host's ObjectMeta, so the hosts
 	// a given profile produces can be grouped and filtered in the UI like any
 	// other host. They are free-form UI metadata with no validation rules and no
@@ -791,6 +798,12 @@ func (t IngressHostTemplate) validate(path string) error {
 		if err := ValidateName(a); err != nil {
 			return fmt.Errorf("settings: ingressDiscovery.%s.accessLists[%d]: %w", path, i, err)
 		}
+	}
+	// Same helper the ProxyHost and Settings paths use, for the same reason as
+	// Timeouts above: a template that would derive a host the config validator
+	// rejects must fail the settings write.
+	if err := validateStripResponseHeaders(t.StripResponseHeaders); err != nil {
+		return fmt.Errorf("settings: ingressDiscovery.%s: %w", path, err)
 	}
 	return nil
 }

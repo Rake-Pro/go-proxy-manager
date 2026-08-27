@@ -260,10 +260,15 @@ func normalizeLocationPrefix(p string) string {
 // replacement, so a rendered error page is itself eligible for compression.
 func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.Handler, string, error) {
 	ident := assertedIdentityHeaders(h, reg)
+	// The host's effective strip list (settings default unioned with its own),
+	// handed to the reverse proxy so ModifyResponse can remove those headers from
+	// the upstream's own response before the stdlib copies it out. A location
+	// inherits it, since buildLocations derives each location from this host.
+	strip := mergedStripResponseHeaders(h.StripResponseHeaders)
 	var proxy http.Handler
 	var label string
 	if h.UpstreamGroupRef == "" {
-		proxy, label = newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident, ep), upstreamLabel(h.Upstream)
+		proxy, label = newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident, ep, strip), upstreamLabel(h.Upstream)
 	} else {
 		var gh *groupHealth
 		if reg.health != nil {
@@ -272,7 +277,7 @@ func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.H
 		if gh == nil {
 			return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
 		}
-		proxy, label = newGroupReverseProxy(gh, h.Name, h.Timeouts, ident, ep), groupLabel(h.UpstreamGroupRef)
+		proxy, label = newGroupReverseProxy(gh, h.Name, h.Timeouts, ident, ep, strip), groupLabel(h.UpstreamGroupRef)
 	}
 	if h.Compression.Enabled {
 		proxy = compressionHandler(h.Compression, proxy)

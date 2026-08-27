@@ -912,6 +912,11 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
 	}
+	// Set out of the literal (like the dns policy below) so an unset template
+	// leaves the field nil rather than widening every other field's alignment.
+	if len(tmpl.StripResponseHeaders) > 0 {
+		host.StripResponseHeaders = append([]string(nil), tmpl.StripResponseHeaders...)
+	}
 	if pol := dnsPolicy(ing, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}

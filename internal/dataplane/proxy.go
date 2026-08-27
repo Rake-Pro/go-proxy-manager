@@ -99,22 +99,25 @@ func (p *bufferPool) Put(b []byte) {
 // is the host's compiled errorPages override (nil if it has none); it drives
 // the custom page for a 502/504 upstream-unreachable response and, when
 // configured, InterceptUpstream replacement of the upstream's own error body.
-func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages) http.Handler {
+// strip is the host's compiled stripResponseHeaders list, applied to the
+// upstream's own response headers in ModifyResponse (nil when nothing is
+// configured).
+func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 	}
-	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep)
+	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep, strip)
 }
 
 // newGroupReverseProxy builds the terminal handler for a host backed by an
 // upstream group. The Rewrite target is nominally the group's first upstream;
 // the groupTransport re-points each attempt at the healthiest candidate, so the
 // URL set here only seeds scheme/host for X-Forwarded computation.
-func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages) http.Handler {
+func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep)
+	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep, strip)
 }
 
 // reassertIdentity re-applies the identity headers gpm itself set on the inbound
@@ -143,7 +146,7 @@ func reassertIdentity(pr *httputil.ProxyRequest, names []string) {
 	}
 }
 
-func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string, ep *compiledErrorPages) http.Handler {
+func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
@@ -174,6 +177,13 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 			if resp.Request != nil {
 				markProxiedResponse(resp.Request.Context())
 			}
+			// Remove the configured leaked-backend headers from the upstream's own
+			// header map, while it is still only the upstream's: the stdlib has not
+			// yet copied it onto the client response, so nothing gpm adds later can
+			// be caught by it. The stdlib runs this hook for a 101 too, before
+			// handleUpgradeResponse writes the headers to the hijacked connection,
+			// so a WebSocket handshake is stripped like any other response.
+			stripUpstreamResponseHeaders(resp, strip)
 			rewriteUpstreamRedirect(resp)
 			interceptUpstreamResponse(resp, ep, hostName)
 			return nil

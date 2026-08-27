@@ -668,6 +668,94 @@ func TestProxyHostSecurityHeadersValidate(t *testing.T) {
 	}
 }
 
+func TestValidateStripResponseHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		wantErr string
+	}{
+		{name: "empty is valid"},
+		{name: "nil is valid", in: nil},
+		{name: "typical leaked headers", in: []string{"Server", "X-Powered-By", "X-AspNet-Version"}},
+		{name: "lower case is valid", in: []string{"x-powered-by"}},
+		{name: "empty name rejected", in: []string{""}, wantErr: "valid header name"},
+		{name: "invalid name (space)", in: []string{"X Powered By"}, wantErr: "valid header name"},
+		{name: "invalid name (colon)", in: []string{"X-Powered-By:"}, wantErr: "valid header name"},
+		{name: "CRLF in name rejected", in: []string{"X-Foo\r\nInjected"}, wantErr: "valid header name"},
+		{name: "case-insensitive duplicate rejected", in: []string{"Server", "SERVER"}, wantErr: "duplicate"},
+		// Every hop-by-hop name is refused: they carry the response's own
+		// connection semantics, so removing one breaks the response.
+		{name: "hop-by-hop Connection rejected", in: []string{"Connection"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Keep-Alive rejected", in: []string{"Keep-Alive"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Proxy-Authenticate rejected", in: []string{"Proxy-Authenticate"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Proxy-Authorization rejected", in: []string{"Proxy-Authorization"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop TE rejected", in: []string{"TE"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Trailer rejected", in: []string{"Trailer"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Transfer-Encoding rejected", in: []string{"transfer-encoding"}, wantErr: "hop-by-hop"},
+		{name: "hop-by-hop Upgrade rejected", in: []string{"Upgrade"}, wantErr: "hop-by-hop"},
+		// Response-semantic headers are refused too. Content-Type is the sharpest:
+		// stripping it hands the body to Go's content sniffing, which can re-label
+		// a JSON/text response as text/html - stored XSS from a config typo.
+		{name: "Content-Type rejected", in: []string{"Content-Type"}, wantErr: "own semantics"},
+		{name: "Content-Length rejected", in: []string{"content-length"}, wantErr: "own semantics"},
+		{name: "Content-Encoding rejected", in: []string{"Content-Encoding"}, wantErr: "own semantics"},
+		{name: "Vary rejected", in: []string{"Vary"}, wantErr: "own semantics"},
+		{name: "Location rejected", in: []string{"location"}, wantErr: "own semantics"},
+		// 101 responses are in scope for stripping, so the handshake's own
+		// headers are refused: without Sec-WebSocket-Accept every browser aborts
+		// the connection. Spelled here as a client sends it (capital S in
+		// "WebSocket"), which the case-insensitive check must still catch.
+		{name: "Sec-WebSocket-Accept rejected", in: []string{"Sec-WebSocket-Accept"}, wantErr: "own semantics"},
+		{name: "Sec-WebSocket-Protocol rejected", in: []string{"Sec-WebSocket-Protocol"}, wantErr: "own semantics"},
+		{name: "Sec-WebSocket-Extensions rejected", in: []string{"sec-websocket-extensions"}, wantErr: "own semantics"},
+		// Deliberately allowed. Stripping only ever reaches what the UPSTREAM
+		// sent, so these remove a backend's value and never one gpm added; they
+		// are sharp edges, documented as such, not config errors.
+		{name: "Set-Cookie is allowed", in: []string{"Set-Cookie"}},
+		{name: "WWW-Authenticate is allowed", in: []string{"WWW-Authenticate"}},
+		{name: "HSTS is allowed", in: []string{"Strict-Transport-Security"}},
+		{name: "a security header is allowed", in: []string{"X-Frame-Options"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStripResponseHeaders(tc.in)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("expected success, got: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.wantErr)) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestSettingsStripResponseHeadersValidate(t *testing.T) {
+	s := DefaultSettings()
+	s.StripResponseHeaders = []string{"X Powered By"}
+	if err := s.Validate(); err == nil {
+		t.Fatal("settings.stripResponseHeaders must reject an invalid header name")
+	}
+	s.StripResponseHeaders = []string{"Server", "X-Powered-By"}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("valid settings.stripResponseHeaders should pass, got %v", err)
+	}
+}
+
+func TestProxyHostStripResponseHeadersValidate(t *testing.T) {
+	bad := proxyHost("app", func(h *ProxyHost) {
+		h.StripResponseHeaders = []string{"Content-Type"}
+	})
+	if err := bad.Validate(); err == nil {
+		t.Fatal("proxy host stripResponseHeaders must be validated")
+	}
+	good := proxyHost("app", func(h *ProxyHost) {
+		h.StripResponseHeaders = []string{"x-powered-by"}
+	})
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid stripResponseHeaders should pass, got %v", err)
+	}
+}
+
 // Two enabled hosts claiming the same domain is a load-time error, whatever
 // wrote them. The data plane keys its per-domain maps by hostname and fills them
 // in config load order, so a duplicate is resolved by YAML filename rather than

@@ -592,6 +592,51 @@ without a `WriteHeader` the writer sees, so these headers (and HSTS/robots) are
 absent there - immaterial, since a `wss` upgrade rides an already-loaded `https`
 document that carried HSTS and robots on a socket is meaningless.
 
+**Response-header stripping** (`internal/dataplane/stripheaders.go`) is the
+removal half of the same subsystem: `settings.stripResponseHeaders`, unioned with
+a `ProxyHost`'s own list, names response headers deleted from what an upstream
+sends (`Server`, `X-Powered-By`, `X-AspNet-Version`, ...). Names are canonicalized
+to MIME header form at compile time, making the match case-insensitive.
+
+The deletion happens in the reverse proxy's `ModifyResponse` hook, on
+`resp.Header` - the upstream's own header map, before `httputil.ReverseProxy`
+copies it onto the client response. That placement is the whole design, and it is
+deliberately **not** the dispatch writer the injection half uses: by the time the
+writer runs there is ONE merged header map, so a name in the strip list would
+also delete headers **gpm itself** put there earlier - forward-auth's
+`copySetCookie` refresh of the IdP session cookie, the compression handler's
+`Content-Encoding`/`Vary`, a headers middleware's `setResponse` value, an
+injected security header. Stripping at `ModifyResponse` can only ever reach what
+the backend sent, so "never removes a header gpm added" is a structural property
+rather than an ordering convention.
+
+It also covers the one response the dispatch writer can never see: a `101`. The
+stdlib runs `modifyResponse` for a switching-protocols response **before**
+`handleUpgradeResponse` copies the headers to the hijacked connection, while the
+writer is bypassed entirely by the hijack - so a WebSocket handshake would
+otherwise leak the exact `Server`/`X-Powered-By` fingerprint every other response
+hides. Hop-by-hop names are refused at validation, so `Connection`/`Upgrade`
+survive and the handshake stays intact, and the `Sec-WebSocket-*` trio is refused
+alongside them (a browser aborts a handshake with no `Sec-WebSocket-Accept`). An
+interim `1xx` is the one response the strip does not sit on: the stdlib forwards
+it through `Got1xxResponse` and then clears the header map, so its headers are
+neither stripped nor carried into the final response.
+
+gpm-generated responses have no upstream response at all, so nothing runs on
+them - including the `ErrorHandler`'s `502`/`504`, which never reaches
+`ModifyResponse`. Validation also refuses the headers that carry a response's own
+semantics (`Content-Type`, `Content-Length`, `Content-Encoding`, `Vary`,
+`Location`) on top of the hop-by-hop set; `Content-Type` most of all, since
+removing it hands the body to `DetectContentType` and can re-label a JSON
+response as `text/html`. The compile step drops the same names again as defence
+in depth. The list merges as a **union** rather than per-key like
+`securityHeaders`, because a list has no per-name value for a host to override -
+so the only alternative would let a host silently re-expose a header the fleet
+strips. This is also not the headers middleware's `removeResponse`: that runs
+inside a host's chain, applies only where the middleware is attached, and is
+skipped entirely when an auth gate refuses ahead of it. `removeResponse` remains
+available for per-middleware, per-location removal.
+
 The **bouncer** middleware (`internal/dataplane/bouncer.go`) is a WAF/CrowdSec
 **deny hook, not a bundled WAF**: gpm ships no rules, no signatures and no
 detection engine, it asks an operator-run bouncer whether the client IP is

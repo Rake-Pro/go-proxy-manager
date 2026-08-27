@@ -66,11 +66,17 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 		"robotsNoIndex: isOn('set-id-robots')",
 		"$('#set-id-tags')",
 		"tags: idTagCtl.get()",
+		// stripResponseHeaders has no control on this form, so it is only
+		// carried forward - but the literal is a REBUILD, so leaving it out
+		// strips the template's list on every unrelated save and the next
+		// reconcile pushes that onto every derived host.
+		"stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,",
 		// each named profile row
 		"switchHtml('pf-robots-' + i",
 		"robotsNoIndex: isOn('pf-robots-' + uid)",
 		"div.querySelector('.pf-tags')",
 		"tags: row._tags.get()",
+		"stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js no longer round-trips a discovery template field (%q not found); a settings save now clears it", want)
@@ -98,6 +104,25 @@ func TestSaveCarriesSecurityHeadersForward(t *testing.T) {
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js no longer carries securityHeaders forward (%q not found); a save now silently wipes the configured response headers", want)
+		}
+	}
+}
+
+// TestSaveCarriesStripResponseHeadersForward is the same guard for
+// stripResponseHeaders: neither editor renders a control for it, and both PUTs
+// are whole-object replacements, so a save that did not send the loaded list back
+// would silently re-expose the backend headers an operator configured away.
+func TestSaveCarriesStripResponseHeadersForward(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		// settings save carries settings.stripResponseHeaders forward
+		"if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;",
+		// host save carries the host's own additions forward
+		"if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js no longer carries stripResponseHeaders forward (%q not found); a save now silently restores the stripped backend headers", want)
 		}
 	}
 }
