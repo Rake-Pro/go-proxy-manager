@@ -231,25 +231,22 @@ func TestMetricsHookCountsDenials(t *testing.T) {
 	}
 }
 
-// With no hook installed the observe wrapper must return the handler unwrapped,
-// so the default configuration pays nothing at all for metrics - the same
-// zero-overhead promise the access-log toggle makes.
+// With no hook installed (and every other toggle off) the handler switch must
+// serve the PLAIN chain, so the default configuration pays one atomic pointer
+// load and nothing else for metrics - the same zero-overhead promise the
+// access-log toggle makes. The observe wrapper itself always wraps now; the
+// switch is what keeps it off the hot path.
 func TestNoHookMeansNoWrapper(t *testing.T) {
 	SetMetricsHook(nil)
 	s := New(Config{})
-	var inner http.Handler = &sentinelHandler{}
-	if got := s.observe(inner); got != inner {
-		t.Fatal("with metrics (and every other toggle) off, observe must return the handler unwrapped")
+	inner := func(http.ResponseWriter, *http.Request) {}
+	if hs := s.dataHandler(inner); hs.active.Load() != &hs.plain {
+		t.Fatal("with metrics (and every other toggle) off, the switch must serve the plain chain")
 	}
 
 	SetMetricsHook(newFakeHook())
 	t.Cleanup(func() { SetMetricsHook(nil) })
-	if got := s.observe(inner); got == inner {
-		t.Fatal("with a metrics hook installed, observe must wrap the handler")
+	if hs := s.dataHandler(inner); hs.active.Load() != &hs.observed {
+		t.Fatal("with a metrics hook installed, the switch must serve the observed chain")
 	}
 }
-
-// sentinelHandler is comparable, so the identity check above can be an ==.
-type sentinelHandler struct{}
-
-func (*sentinelHandler) ServeHTTP(http.ResponseWriter, *http.Request) {}
