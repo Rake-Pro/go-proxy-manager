@@ -422,3 +422,53 @@ func TestCapabilitiesNilPredicate(t *testing.T) {
 		t.Fatalf("nil predicate should report dbLoaded=false, got %s", w.Body.String())
 	}
 }
+
+// TestStripResponseHeadersRoundTrip pins the API surface of the response-header
+// strip list: both the settings default and a per-host addition survive a
+// PUT/GET round trip unchanged, and an invalid header name is a 400 at config
+// write rather than a silent no-op at runtime.
+func TestStripResponseHeadersRoundTrip(t *testing.T) {
+	h, _ := newHandler(t)
+
+	settingsBody := `{"externalBaseURL":"https://proxy.example.com","adminAuth":{"localLoginEnabled":true},"stripResponseHeaders":["Server","X-Powered-By"]}`
+	if w := do(t, h, "PUT", "/settings", settingsBody); w.Code != http.StatusOK {
+		t.Fatalf("put settings want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, "GET", "/settings", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings want 200 got %d", w.Code)
+	}
+	var st model.Settings
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if len(st.StripResponseHeaders) != 2 || st.StripResponseHeaders[0] != "Server" || st.StripResponseHeaders[1] != "X-Powered-By" {
+		t.Fatalf("settings.stripResponseHeaders = %v, want the configured list round-tripped", st.StripResponseHeaders)
+	}
+
+	hostBody := `{"name":"app","domains":["app2.example.com"],"upstream":{"scheme":"http","host":"10.0.0.5","port":8080},"stripResponseHeaders":["x-aspnet-version"]}`
+	if w := do(t, h, "PUT", "/proxy-hosts/app", hostBody); w.Code != http.StatusOK {
+		t.Fatalf("put host want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	w = do(t, h, "GET", "/proxy-hosts/app", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get host want 200 got %d", w.Code)
+	}
+	var got model.ProxyHost
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode host: %v", err)
+	}
+	if len(got.StripResponseHeaders) != 1 || got.StripResponseHeaders[0] != "x-aspnet-version" {
+		t.Fatalf("host stripResponseHeaders = %v, want the configured list round-tripped verbatim", got.StripResponseHeaders)
+	}
+
+	// Invalid name -> 400, on both surfaces.
+	bad := `{"externalBaseURL":"https://proxy.example.com","adminAuth":{"localLoginEnabled":true},"stripResponseHeaders":["X Powered By"]}`
+	if w := do(t, h, "PUT", "/settings", bad); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid settings strip name want 400 got %d: %s", w.Code, w.Body.String())
+	}
+	badHost := `{"name":"app","domains":["app2.example.com"],"upstream":{"scheme":"http","host":"10.0.0.5","port":8080},"stripResponseHeaders":[""]}`
+	if w := do(t, h, "PUT", "/proxy-hosts/app", badHost); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid host strip name want 400 got %d: %s", w.Code, w.Body.String())
+	}
+}

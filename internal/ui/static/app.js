@@ -1332,6 +1332,10 @@ async function hostEditor(c, name) {
     // host save would silently drop a GitOps-authored override.
     if (h.securityHeaders && Object.keys(h.securityHeaders).length) obj.securityHeaders = h.securityHeaders;
 
+    // stripResponseHeaders (this host's additions to the fleet strip list) has no
+    // control on this form yet either - carried forward for the same reason.
+    if (arr(h.stripResponseHeaders).length) obj.stripResponseHeaders = h.stripResponseHeaders;
+
     const tlsObj = {};
     const cert = $('#f-cert').value;
     if (cert) tlsObj.certificateRef = cert;
@@ -4238,6 +4242,11 @@ async function viewSettings(c) {
     // save here never silently wipes it (the PUT is a whole-object replacement).
     if (s.securityHeaders && Object.keys(s.securityHeaders).length) body.securityHeaders = s.securityHeaders;
 
+    // stripResponseHeaders (the fleet default list of headers removed from
+    // proxied upstream responses) has no editor on this page yet; carry it
+    // forward exactly like securityHeaders above.
+    if (arr(s.stripResponseHeaders).length) body.stripResponseHeaders = s.stripResponseHeaders;
+
     const ingressDiscovery = {
       apiURL: $('#set-id-url').value.trim(),
       tokenFile: $('#set-id-token').value.trim(),
@@ -4275,6 +4284,11 @@ async function viewSettings(c) {
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
         tags: idTagCtl.get(),
+        // No control on this form yet, and this literal is a REBUILD - so the
+        // loaded value has to be sent back or an unrelated settings save strips
+        // the template's strip list and the next reconcile pushes that onto
+        // every derived host.
+        stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -4316,6 +4330,8 @@ async function viewSettings(c) {
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
         tags: row._tags.get(),
+        // Carried forward from the loaded profile, like the template's above.
+        stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {

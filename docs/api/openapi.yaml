@@ -317,6 +317,18 @@ components:
             Strict-Transport-Security is not settable here (the per-host tls.hsts
             setting owns it); hop-by-hop headers, CR/LF in names/values and an
             unknown scope are rejected.
+        stripResponseHeaders:
+          type: array
+          items:
+            type: string
+          description: >-
+            Response headers removed from what this host's upstream sends, in
+            addition to settings.stripResponseHeaders (the effective set is the
+            UNION of the two - a host can only strip more, never re-expose a
+            header the fleet strips). Matching is case-insensitive. Invalid
+            header names, hop-by-hop headers, the response-semantic headers
+            (Content-Type/-Length/-Encoding, Vary, Location, Sec-WebSocket-*)
+            and case-insensitive duplicates are rejected.
       required:
       - name
       - domains
@@ -1400,6 +1412,14 @@ components:
           type: array
           items:
             type: string
+        stripResponseHeaders:
+          type: array
+          items:
+            type: string
+          description: >-
+            Applied verbatim to every derived host (see ProxyHost's own field of
+            the same name). Validated by the same rules; without it a hand-set
+            list on a managed host is reverted on the next reconcile.
         defaultDNS:
           $ref: '#/components/schemas/DNSSyncPolicy'
         allowedDomainSuffixes:
@@ -1512,6 +1532,25 @@ components:
             headers are never clobbered. Empty (default) ships nothing.
             Strict-Transport-Security (owned by tls.hsts), hop-by-hop headers,
             CR/LF in a name or value, and an unknown scope are rejected.
+        stripResponseHeaders:
+          type: array
+          items:
+            type: string
+          description: >-
+            Fleet-default list of response headers removed from what an upstream
+            sends - the backend-identifying headers an app leaks (Server,
+            X-Powered-By, X-AspNet-Version). Matching is case-insensitive; a
+            ProxyHost's own stripResponseHeaders is the UNION with this list.
+            The removal happens on the upstream's own response (including a 101
+            Upgrade handshake), so it never reaches a header gpm adds -
+            securityHeaders, HSTS, X-Robots-Tag, a forward-auth Set-Cookie
+            refresh, gzip's Content-Encoding, a headers middleware's setResponse.
+            gpm-generated responses (denials, redirects, error pages, the 404,
+            the upstream-unreachable 502/504) have no upstream response and are
+            untouched. Empty (default) strips nothing. Invalid header names,
+            hop-by-hop headers, the response-semantic headers
+            (Content-Type/-Length/-Encoding, Vary, Location, Sec-WebSocket-*)
+            and case-insensitive duplicates are rejected.
       description: Singleton application configuration (config/settings.yaml).
     SecurityHeaderValue:
       description: >-

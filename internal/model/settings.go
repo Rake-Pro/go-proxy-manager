@@ -317,6 +317,88 @@ func validateSecurityHeaders(m map[string]SecurityHeaderValue) error {
 	return nil
 }
 
+// unstrippableHeaders are response headers that carry the response's own
+// semantics rather than a backend detail, so removing one corrupts the response
+// instead of hiding an implementation. They are refused alongside the hop-by-hop
+// set.
+//
+// Content-Type is the sharpest of them: net/http falls back to
+// DetectContentType when a handler sets no Content-Type, so stripping it hands
+// the body to content sniffing - a JSON or text response whose bytes happen to
+// look like markup would be re-labelled text/html, turning a config typo into
+// stored XSS. Content-Length and Content-Encoding are framing and body encoding
+// (dropping Content-Encoding leaves a gzip body labelled as plain), Vary is the
+// cache key (dropping it lets a shared cache serve one variant to every client),
+// and Location is the entire meaning of a 3xx.
+//
+// The Sec-Websocket-* trio is here for the same reason, and matters because 101
+// Upgrade responses ARE in scope for stripping: Sec-Websocket-Accept is the
+// server's proof it understood the handshake, and every browser aborts the
+// connection without it, so stripping one would break WebSockets on the host
+// entirely. Protocol and Extensions are the negotiated result the client must
+// see. (These are the canonical MIME forms - textproto lower-cases the "S" in
+// "WebSocket" - but the check is case-insensitive regardless.)
+//
+// Set-Cookie and WWW-Authenticate are deliberately NOT here. Both are sharp -
+// stripping the backend's Set-Cookie breaks that app's own sessions, and
+// stripping WWW-Authenticate suppresses its basic-auth challenge - but both are
+// legitimate operator choices, and stripping only ever touches what the upstream
+// sent (see the data plane's ModifyResponse hook), never a cookie gpm's own
+// forward-auth refresh added. They are documented as sharp edges instead of
+// refused.
+var unstrippableHeaders = map[string]bool{
+	"content-encoding":         true,
+	"content-length":           true,
+	"content-type":             true,
+	"location":                 true,
+	"vary":                     true,
+	"sec-websocket-accept":     true,
+	"sec-websocket-protocol":   true,
+	"sec-websocket-extensions": true,
+}
+
+// validateStripResponseHeaders validates a settings- or host-level
+// stripResponseHeaders list: every entry must be a valid RFC 7230 field-name
+// token (an empty or malformed name is a config error, not a silent no-op),
+// entries are de-duplicated case-insensitively (a header is named once; matching
+// is case-insensitive anyway), and hop-by-hop and response-semantic headers are
+// refused (see unstrippableHeaders).
+//
+// There is deliberately NO denylist for the headers gpm itself sets: stripping
+// happens on the UPSTREAM's response header map, before those headers are copied
+// onto the client response, so nothing gpm adds (securityHeaders, HSTS,
+// X-Robots-Tag, a forward-auth Set-Cookie refresh, gzip's Content-Encoding, a
+// headers middleware's setResponse) is reachable by it in the first place.
+func validateStripResponseHeaders(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, k := range names {
+		if !validHeaderName(k) {
+			return fmt.Errorf("stripResponseHeaders: %q is not a valid header name", k)
+		}
+		lk := strings.ToLower(k)
+		if hopByHopHeaders[lk] {
+			return fmt.Errorf("stripResponseHeaders: %q is a hop-by-hop header and cannot be stripped (it carries the response's own framing)", k)
+		}
+		if unstrippableHeaders[lk] {
+			return fmt.Errorf("stripResponseHeaders: %q carries the response's own semantics and cannot be stripped", k)
+		}
+		if _, dup := seen[lk]; dup {
+			return fmt.Errorf("stripResponseHeaders: duplicate header %q (names are case-insensitive)", k)
+		}
+		seen[lk] = struct{}{}
+	}
+	return nil
+}
+
+// StripResponseHeaderRefused reports whether a header name is refused by
+// stripResponseHeaders validation (hop-by-hop or response-semantic). It is
+// exported for the data plane's defence-in-depth compile step, which drops such
+// a name rather than trusting that every config reaching it passed validation.
+func StripResponseHeaderRefused(name string) bool {
+	lk := strings.ToLower(name)
+	return hopByHopHeaders[lk] || unstrippableHeaders[lk]
+}
+
 func (e ErrorPagesConfig) validate() error {
 	if f := e.Dir; f != "" {
 		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
@@ -390,6 +472,28 @@ type Settings struct {
 	// Referrer-Policy is never clobbered. Strict-Transport-Security is NOT
 	// settable here - the per-host hsts setting owns it.
 	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
+
+	// StripResponseHeaders is the fleet-default list of response headers removed
+	// from what an UPSTREAM sends - the backend-identifying headers an app leaks
+	// (Server, X-Powered-By, X-AspNet-Version, ...). Matching is
+	// case-insensitive.
+	//
+	// The removal happens on the upstream response's own header map before those
+	// headers are copied onto the client response, so it reaches exactly what the
+	// backend sent and nothing gpm adds (securityHeaders, HSTS, X-Robots-Tag, a
+	// forward-auth Set-Cookie refresh, gzip's Content-Encoding, a headers
+	// middleware's setResponse). It covers 101 Upgrade responses too, so a
+	// WebSocket handshake does not leak the fingerprint an ordinary response
+	// hides. gpm's own generated responses (denials, redirects, error pages, the
+	// 404, the upstream-unreachable 502/504) have no upstream response at all and
+	// are untouched.
+	//
+	// A ProxyHost's own stripResponseHeaders is the UNION with this default (a
+	// list has no per-key value to override, so a host can only ADD to the fleet
+	// baseline - it cannot re-expose a header the fleet strips).
+	//
+	// Empty (the default) strips nothing.
+	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 }
 
 func (s Settings) Kind() string { return "Settings" }
@@ -438,6 +542,9 @@ func (s Settings) Validate() error {
 		return fmt.Errorf("settings: %w", err)
 	}
 	if err := validateSecurityHeaders(s.SecurityHeaders); err != nil {
+		return fmt.Errorf("settings: %w", err)
+	}
+	if err := validateStripResponseHeaders(s.StripResponseHeaders); err != nil {
 		return fmt.Errorf("settings: %w", err)
 	}
 	return nil

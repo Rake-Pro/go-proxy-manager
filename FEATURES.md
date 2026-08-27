@@ -424,6 +424,23 @@ earlier tiers or duplicating work (see "Architecture for extension").
   rejected); `Strict-Transport-Security` refused - HSTS is unchanged and
   separate. Resolves the auth-refusal/error-page "no `nosniff` on rendered pages"
   observation from BACKLOG.
+- **Response-header stripping** (shipped): `settings.stripResponseHeaders`
+  (fleet default) plus a per-`ProxyHost` `stripResponseHeaders` **unioned** with
+  it, and an `ingressDiscovery` template/profile field so managed hosts inherit
+  it. Removes backend-identifying headers (`Server`, `X-Powered-By`,
+  `X-AspNet-Version`) from what an upstream sends. Applied in the reverse proxy's
+  `ModifyResponse`, on the upstream's own header map, so it reaches only what the
+  backend sent - never an injected `securityHeader`, HSTS, `X-Robots-Tag`, a
+  forward-auth `Set-Cookie` refresh, gzip's `Content-Encoding` or a headers
+  middleware's `setResponse` - and it covers a `101` WebSocket handshake, which
+  the response-writer layer cannot see. gpm-generated responses have no upstream
+  response and are untouched. Union (not per-key override) because a host must
+  not be able to re-expose a header the fleet strips. Case-insensitive; opt-in
+  (empty by default); invalid names, duplicates, hop-by-hop and response-semantic
+  headers (`Content-Type`/`-Length`/`-Encoding`, `Vary`, `Location`,
+  `Sec-WebSocket-*`) rejected.
+  The headers middleware's `removeResponse` stays for per-middleware/per-location
+  removal; this is the edge-wide mechanism.
 
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
