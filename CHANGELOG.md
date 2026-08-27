@@ -5,6 +5,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Container base packages upgraded at build time.** The final image now runs
+  `apk upgrade` against the Alpine 3.24 repositories before installing runtime
+  deps: the digest-pinned base image lags security patches that ship to the
+  repos without a new base release (openssl CVE-2026-14456, fixed in 3.5.8-r0,
+  failed the v1.0.27 release's image scan gate this way).
+
 ### Added
 
 - **UI editor for `securityHeaders`.** The field was config- and API-only; both
