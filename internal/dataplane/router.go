@@ -140,7 +140,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 		handler := buildChain(proxy, h, reg, hostEP)
-		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel, errorPages: hostEP}
+		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel, errorPages: hostEP, maintenance: h.Maintenance}
 		if hh.locations, err = buildLocations(h, reg, hostEP); err != nil {
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
@@ -539,6 +539,15 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hh, ok := rt.hosts[name]; ok {
+		// Maintenance short-circuits the whole chain: no path normalization, no
+		// auth work, no upstream dial - the host is deliberately out of service,
+		// so gpm answers for it. It sits INSIDE the mTLS gate above, so a host
+		// that requires a client certificate still refuses an uncertified request
+		// with a 421 rather than disclosing a maintenance window to it.
+		if maintenanceActive(hh.maintenance) {
+			serveMaintenance(w, r, hh.errorPages, hh.host)
+			return
+		}
 		if !normalizeRequestPath(r) {
 			http.Error(w, "bad request path", http.StatusBadRequest)
 			return
@@ -594,6 +603,14 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if hh.forceSSL {
 			redirectToHTTPS(w, r)
+			return
+		}
+		// Same short-circuit as serveHTTPS, placed after the force-SSL redirect so
+		// an HTTPS-only host still bounces the client to TLS and serves the
+		// maintenance page there. ACME HTTP-01 is answered before host routing
+		// (see dispatchHTTP), so certificates still renew during a window.
+		if maintenanceActive(hh.maintenance) {
+			serveMaintenance(w, r, hh.errorPages, hh.host)
 			return
 		}
 		hh.stripUntrustedIdentity(r)

@@ -447,6 +447,21 @@ earlier tiers or duplicating work (see "Architecture for extension").
   from git: the Settings page ("Strip response headers") edits the fleet default
   and the host editor edits that host's additions, both as chip lists.
 
+- [x] **Maintenance mode** - `proxyHost.maintenance` (per host) and
+  `settings.maintenance.enabled` (fleet-wide, wins over the per-host flag) take
+  hosts out of service for a downtime window: gpm answers `503` with a
+  `Retry-After` (`settings.maintenance.retryAfterSeconds`, default 300) and never
+  dials the upstream, while the host keeps its domains, certificate and DNS
+  records. Both apply with no restart - the fleet-wide switch is read live, so it
+  needs no router rebuild either. The page reuses the error-page seam (a custom
+  maintenance page is the `503` entry in `errorPages`); the built-in fallback
+  negotiates JSON / HTML / plain text on `Accept` and never sends an empty body.
+  Redirect, parked and stream hosts keep serving; ACME HTTP-01 still renews
+  certificates during a window. Ingress discovery preserves the flag as
+  operator-owned state, like `disabled`. Deliberately out of scope: scheduled
+  windows, per-path maintenance, and a per-host custom page editor beyond what
+  `errorPages` already gives.
+
 ### P3 - nice-to-have
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
   capped at TOTP + WebAuthn, not applicable with OIDC.

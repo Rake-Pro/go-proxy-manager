@@ -2624,3 +2624,63 @@ func TestDerivedHostInheritsStripResponseHeadersFromAProfile(t *testing.T) {
 		t.Fatalf("stripResponseHeaders = %v, want the profile's, not the default template's", h.StripResponseHeaders)
 	}
 }
+
+// maintenance is operator-owned runtime state, like disabled: no Ingress
+// annotation derives it, so a reconcile must carry the stored value forward
+// rather than reset it. Without that, the next poll would put a host back into
+// service while someone is still working on its backend.
+func TestMaintenanceFlagSurvivesReconcile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"},
+				"grafana.example.com", "metrics.example.com"),
+		}, "")
+	}
+	existing := managedHostFixture("ing-grafana.monitoring", "grafana.example.com")
+	existing.Maintenance = true
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want the domain change written", len(rec.upserts))
+	}
+	if !rec.upserts[0].Maintenance {
+		t.Fatal("a host in maintenance must stay in maintenance across a reconcile that rewrites it")
+	}
+}
+
+// A host in maintenance whose Ingress is otherwise unchanged must produce NO
+// write at all: if the carried-forward flag did not participate in the
+// steady-state comparison, every poll would commit a spurious revision.
+func TestMaintenanceFlagIsSteadyState(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("monitoring", "grafana", map[string]string{model.AnnotationManaged: "true"},
+				"grafana.example.com"),
+		}, "")
+	}
+	existing := managedHostFixture("ing-grafana.monitoring", "grafana.example.com")
+	existing.DisplayName = "monitoring/grafana"
+	existing.Maintenance = true
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("a host in maintenance with nothing else changed must write nothing, calls=%d", rec.calls)
+	}
+	if st := d.Status(); len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUnchanged {
+		t.Fatalf("hosts = %+v, want unchanged", st.Hosts)
+	}
+}

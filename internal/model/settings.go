@@ -140,6 +140,56 @@ type ErrorPagesConfig struct {
 	InterceptUpstream []int `json:"interceptUpstream,omitempty" yaml:"interceptUpstream,omitempty"`
 }
 
+// DefaultMaintenanceRetryAfter is the Retry-After (seconds) sent with every
+// maintenance 503 when MaintenanceSettings.RetryAfterSeconds is unset: five
+// minutes. It is short enough that a client re-checks within a typical
+// maintenance window and long enough that a fleet of retrying clients does not
+// hammer an edge that is deliberately down.
+const DefaultMaintenanceRetryAfter = 300
+
+// maxMaintenanceRetryAfter caps the configurable Retry-After at 24h. A larger
+// value is indistinguishable from "gone" to a crawler and would keep clients
+// away long after the window closed.
+const maxMaintenanceRetryAfter = 86400
+
+// MaintenanceSettings is the fleet-wide downtime switch. It is the global half
+// of maintenance mode; the per-host half is ProxyHost.Maintenance.
+//
+// While a host is in maintenance gpm answers every request to it itself, with a
+// 503 and a Retry-After, and never dials the upstream. The page served is the
+// configured errorPages template for 503 (host override first, then the
+// settings-level pages, exactly like every other gpm-generated error), or gpm's
+// built-in maintenance body when neither configures one.
+//
+// Only proxy hosts are affected. Redirect, parked and stream hosts proxy
+// nothing to take out of service, so they keep serving.
+type MaintenanceSettings struct {
+	// Enabled puts EVERY proxy host into maintenance, whatever its own
+	// maintenance flag says: the global toggle wins over a per-host false, so an
+	// operator can take the whole edge down (and bring it back) with one write.
+	// Off (the default) leaves each host to its own flag.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// RetryAfterSeconds is the Retry-After header value on every maintenance
+	// response. 0 (the default) selects DefaultMaintenanceRetryAfter.
+	RetryAfterSeconds int `json:"retryAfterSeconds,omitempty" yaml:"retryAfterSeconds,omitempty"`
+}
+
+// EffectiveRetryAfter returns RetryAfterSeconds, or DefaultMaintenanceRetryAfter
+// when unset.
+func (m MaintenanceSettings) EffectiveRetryAfter() int {
+	if m.RetryAfterSeconds > 0 {
+		return m.RetryAfterSeconds
+	}
+	return DefaultMaintenanceRetryAfter
+}
+
+func (m MaintenanceSettings) validate() error {
+	if m.RetryAfterSeconds < 0 || m.RetryAfterSeconds > maxMaintenanceRetryAfter {
+		return fmt.Errorf("maintenance.retryAfterSeconds %d out of range (0-%d)", m.RetryAfterSeconds, maxMaintenanceRetryAfter)
+	}
+	return nil
+}
+
 // SecurityScope selects which responses a configured security header applies to.
 // The empty scope is normalised to SecurityScopeAll (today's behaviour), so an
 // old plain-string-map config keeps working unchanged.
@@ -454,6 +504,11 @@ type Settings struct {
 	// Ingresses, which then feed DNSSync above.
 	IngressDiscovery IngressDiscoverySettings `json:"ingressDiscovery,omitempty" yaml:"ingressDiscovery,omitempty"`
 
+	// Maintenance is the fleet-wide downtime switch (see MaintenanceSettings)
+	// and the Retry-After every maintenance response carries. The zero value is
+	// off: each proxy host is governed by its own maintenance flag alone.
+	Maintenance MaintenanceSettings `json:"maintenance,omitempty" yaml:"maintenance,omitempty"`
+
 	// ErrorPages configures the default custom error pages for every host; a
 	// ProxyHost's own errorPages overrides this. Zero value keeps today's plain
 	// gpm error output.
@@ -539,6 +594,9 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := s.ErrorPages.validate(); err != nil {
+		return fmt.Errorf("settings: %w", err)
+	}
+	if err := s.Maintenance.validate(); err != nil {
 		return fmt.Errorf("settings: %w", err)
 	}
 	if err := validateSecurityHeaders(s.SecurityHeaders); err != nil {
