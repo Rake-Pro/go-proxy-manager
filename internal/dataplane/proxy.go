@@ -339,6 +339,12 @@ type hostHandler struct {
 	// in serveHTTPS, always after the identity strip.
 	certID *certIdentity
 
+	// maintenance is this host's own maintenance flag. The fleet-wide switch is
+	// read live on top of it (see maintenanceActive), so a global toggle applies
+	// without a router rebuild while this per-host bit is compiled in like every
+	// other host field.
+	maintenance bool
+
 	// errorPages is this host's own compiled errorPages override, or nil when it
 	// has none (the settings-level pages, if any, still apply - see
 	// serveErrorPage). Threaded into the middleware chain and the terminal proxy

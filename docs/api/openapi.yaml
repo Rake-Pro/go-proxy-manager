@@ -283,6 +283,18 @@ components:
         robotsNoIndex:
           type: boolean
           description: 'Emit X-Robots-Tag: noindex, nofollow.'
+        maintenance:
+          type: boolean
+          description: >-
+            Take this host out of service without removing or disabling it: gpm
+            answers every request itself with a 503 maintenance response (with a
+            Retry-After from settings.maintenance) and never dials the upstream.
+            The host keeps its domains, certificate and DNS records, so clearing
+            the flag restores service. settings.maintenance.enabled turns
+            maintenance on fleet-wide regardless of this flag - the global switch
+            wins over a per-host false. Operator-owned: Kubernetes Ingress
+            discovery carries this value forward across a reconcile instead of
+            deriving it, exactly as it does for disabled.
         timeouts:
           $ref: '#/components/schemas/HostTimeouts'
         tls:
@@ -1532,6 +1544,8 @@ components:
             headers are never clobbered. Empty (default) ships nothing.
             Strict-Transport-Security (owned by tls.hsts), hop-by-hop headers,
             CR/LF in a name or value, and an unknown scope are rejected.
+        maintenance:
+          $ref: '#/components/schemas/MaintenanceSettings'
         stripResponseHeaders:
           type: array
           items:
@@ -1552,6 +1566,32 @@ components:
             (Content-Type/-Length/-Encoding, Vary, Location, Sec-WebSocket-*)
             and case-insensitive duplicates are rejected.
       description: Singleton application configuration (config/settings.yaml).
+    MaintenanceSettings:
+      type: object
+      description: >-
+        Fleet-wide downtime switch. While a proxy host is in maintenance gpm
+        answers every request to it itself - HTTP 503 with a Retry-After - and
+        never dials the upstream. The body is the errorPages template configured
+        for 503 (the host's own override first, then the settings-level pages),
+        or gpm's built-in maintenance page when none is configured, negotiated on
+        Accept (JSON / HTML / plain text) and never empty. Only proxy hosts are
+        affected; redirect, parked and stream hosts keep serving, and ACME
+        HTTP-01 is still answered so certificates renew during a window.
+      properties:
+        enabled:
+          type: boolean
+          description: >-
+            Put EVERY proxy host into maintenance, whatever its own maintenance
+            flag says. The global switch wins over a per-host false; turning it
+            off returns each host to its own flag. Takes effect on the next
+            request, with no restart and no router rebuild.
+        retryAfterSeconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: >-
+            Retry-After header value on every maintenance response, per-host ones
+            included. 0 (the default) selects 300 seconds.
     SecurityHeaderValue:
       description: >-
         One configured security response header value. Two accepted forms: a bare
@@ -1779,6 +1819,15 @@ components:
               type: boolean
               description: True when GET /metrics is mounted (GPM_METRICS=1). The SPA greys the link
                 out when false rather than linking at a route that answers 404.
+        maintenance:
+          type: object
+          properties:
+            globalEnabled:
+              type: boolean
+              description: True when settings.maintenance.enabled is on, i.e. every proxy host is
+                currently serving the maintenance page whatever its own maintenance flag says. The
+                SPA says so on the host editor rather than showing a per-host toggle that reads off
+                while the host is in fact down.
         scopeSubjects:
           type: array
           items:

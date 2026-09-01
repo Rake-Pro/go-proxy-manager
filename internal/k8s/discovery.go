@@ -660,6 +660,12 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			claim(name, want.Domains)
 			// Carry the original creation timestamp so an update does not rewrite it.
 			want.CreatedAt = cur.CreatedAt
+			// maintenance is OPERATOR-owned runtime state, like disabled below. No
+			// Ingress annotation derives it, so derive() always produces false - and
+			// without carrying the stored value forward the next poll would quietly
+			// put a host back into service while someone is still working on its
+			// backend, which is the exact failure the flag exists to prevent.
+			want.Maintenance = cur.Maintenance
 			// disabled: true is OPERATOR-owned state once discovery did not set it
 			// itself: a hand-disabled host must not be re-enabled by the next poll
 			// just because its Ingress still derives cleanly. A host discovery

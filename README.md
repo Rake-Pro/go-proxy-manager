@@ -100,6 +100,14 @@ builds it with a narrower, more focused design:
   `X-Powered-By`, `X-AspNet-Version`) from what an upstream sends,
   case-insensitively, including on a `101` WebSocket handshake. It touches only
   the backend's own headers, never anything gpm adds. Opt-in (empty by default)
+- **Maintenance mode** - take one host or the whole edge out of service for a
+  downtime window: gpm answers `503` with a `Retry-After` and never dials the
+  upstream, while the host keeps its domains, certificate and DNS records. A
+  per-host `maintenance` flag plus a fleet-wide `settings.maintenance.enabled`
+  that wins over it; both apply with no restart. The page is just the `503`
+  entry in your error pages, and the built-in fallback answers JSON to a JSON
+  client and HTML to a browser - never an empty body. Ingress discovery
+  preserves the flag rather than reverting it
 - Composable, ordered middleware chain per host and per location
 
 **Automation & DNS**

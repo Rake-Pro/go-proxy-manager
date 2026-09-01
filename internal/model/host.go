@@ -308,6 +308,20 @@ type ProxyHost struct {
 	// unchanged.
 	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 
+	// Maintenance takes this host out of service without removing or disabling
+	// it: while true gpm answers every request itself with a 503 maintenance
+	// response (see settings.maintenance) and never dials the upstream. Unlike
+	// Disabled the host keeps its domains, its certificate and its routing, so
+	// flipping the flag back restores service on the next reload.
+	//
+	// It is OPERATOR-owned runtime state, exactly like Disabled: Kubernetes
+	// Ingress discovery carries it forward across a reconcile instead of
+	// deriving it from the Ingress, so a host put into maintenance stays there
+	// until an operator takes it out (see internal/k8s/discovery.go).
+	// settings.maintenance.enabled turns maintenance on FLEET-WIDE regardless of
+	// this flag; the global toggle wins over a per-host false.
+	Maintenance bool `json:"maintenance,omitempty" yaml:"maintenance,omitempty"`
+
 	// StripResponseHeaders adds to settings.stripResponseHeaders for this host:
 	// the effective set is the UNION of the two, so the fleet baseline always
 	// applies and a host can only strip MORE (see Settings.StripResponseHeaders
