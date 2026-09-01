@@ -689,7 +689,9 @@ async function listHosts(c) {
     const auth = authMw ? `<span class="chip brand">${esc(authMw)}</span>` : `<span class="chip">none</span>`;
     const status = h.disabled
       ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
-      : `<span class="chip ok"><span class="dot ok"></span>live</span>`;
+      : (h.maintenance
+        ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
+        : `<span class="chip ok"><span class="dot ok"></span>live</span>`);
     const tagChips = arr(h.tags).map((t) => `<span class="chip" style="font-size:10px;padding:1px 6px">${esc(t)}</span>`).join(' ');
     return `<tr class="clickable" data-name="${esc(h.name)}" data-zones="${esc(hostZones[i].join(','))}">
       <td><span class="host">${esc(primary)}${esc(extra)}</span>${h.displayName ? `<div class="faint" style="font-size:11px">${esc(h.displayName)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
@@ -867,6 +869,13 @@ async function hostEditor(c, name) {
   const comp = h.compression || {};
   const ep = h.errorPages || {};
 
+  // Fleet-wide maintenance overrides every per-host switch, so the probe is
+  // read BEFORE the form renders: showing a host's own toggle as "off" while
+  // settings.maintenance.enabled has it serving the maintenance page would be a
+  // lie the operator acts on.
+  await loadCapabilities();
+  const globalMaint = hasCapability('maintenance.globalEnabled');
+
   const selMw = arr(h.middlewares);
   const selAl = arr(h.accessLists);
   // Attached entries render first, in the host's stored (chain) order, so the
@@ -879,7 +888,9 @@ async function hostEditor(c, name) {
 
   const statusChip = h.disabled
     ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
-    : `<span class="chip ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`;
+    : ((h.maintenance || globalMaint) && !isNew
+      ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
+      : `<span class="chip ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`);
 
   c.innerHTML = `
     <div class="row-between view-head">
@@ -919,6 +930,12 @@ async function hostEditor(c, name) {
           <div class="toggle-line" style="margin-top:6px">
             <div class="tl-text"><div class="nm">Disabled</div><div class="ds">Stop serving this host</div></div>
             ${switchHtml('f-disabled', !!h.disabled, 'Disabled')}
+          </div>
+          <div class="toggle-line" style="margin-top:6px">
+            <div class="tl-text"><div class="nm">Maintenance</div><div class="ds">${globalMaint
+              ? 'Fleet-wide maintenance is on in <a href="#/settings">Settings</a>: every host serves the maintenance page regardless of this switch.'
+              : 'Serve a 503 maintenance page instead of proxying. The host keeps its domains and certificate.'}</div></div>
+            ${switchHtml('f-maintenance', !!h.maintenance, 'Maintenance')}
           </div>
         </div>
 
@@ -1309,6 +1326,7 @@ async function hostEditor(c, name) {
     if (display) obj.displayName = display;
     const tags = tagsCtl.get(); if (tags.length) obj.tags = tags;
     if (isOn('f-disabled')) obj.disabled = true;
+    if (isOn('f-maintenance')) obj.maintenance = true;
     if (isOn('f-ws')) obj.websocketsUpgrade = true;
     if (isOn('f-robots')) obj.robotsNoIndex = true;
     const dns = {};
@@ -3838,6 +3856,7 @@ async function viewSettings(c) {
   ds.pihole = ds.pihole || {};
   ds.cloudflare = ds.cloudflare || {};
   const pp = s.proxyProtocol || {};
+  const maint = s.maintenance || {};
   await loadCapabilities();
   const idc = Object.assign({ template: {} }, s.ingressDiscovery || {});
   const idt = Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {});
@@ -3868,6 +3887,16 @@ async function viewSettings(c) {
         <div class="toggle-line"><div class="tl-text"><div class="nm">Local login</div><div class="ds">Username/password fallback</div></div>${switchHtml('set-local', !!admin.localLoginEnabled, 'Local login')}</div>
         <div class="toggle-line"><div class="tl-text"><div class="nm">SSO-only mode</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'SSO-only mode')}</div>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Break-glass localhost only</div><div class="ds">Emergency local access from loopback only</div></div>${switchHtml('set-bg', !!bg.localhostOnly, 'Break-glass localhost only')}</div>
+      </div>
+    </div>
+    <div class="card form-section" style="margin-bottom:16px">
+      <p class="section-label">Maintenance mode</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Takes <b>every proxy host</b> out of service for a downtime window: gpm answers each request itself with a <span class="mono">503</span> and a <span class="mono">Retry-After</span> instead of dialling the upstream. It wins over each host's own Maintenance switch, so turning it off returns hosts to whatever they were individually set to. Redirect, parked and stream hosts proxy nothing and keep serving; ACME HTTP-01 is answered before host routing, so certificates still renew. The page served is the <a href="#/errorpages">error page</a> configured for <span class="mono">503</span> (a host's own override first), or gpm's built-in maintenance page when none is - which answers JSON to a JSON client and HTML to a browser, never an empty body.</p>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Fleet-wide maintenance</div><div class="ds">All proxy hosts serve the maintenance page</div></div>${switchHtml('set-maint-on', !!maint.enabled, 'Fleet-wide maintenance')}</div>
+      <div class="field-group" style="margin-top:10px;max-width:220px">
+        <label>Retry-After (seconds)</label>
+        <input class="field mono" id="set-maint-retry" type="number" min="0" max="86400" value="${esc(maint.retryAfterSeconds != null ? String(maint.retryAfterSeconds) : '')}" placeholder="300" />
+        <div class="hint">Sent on every maintenance response, per-host ones included. Blank = 300s, maximum 24h.</div>
       </div>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
@@ -4382,6 +4411,19 @@ async function viewSettings(c) {
       webhooks.push(wh);
     });
     if (webhooks.length) body.webhooks = webhooks;
+
+    // Maintenance. The key is left off the body entirely when the switch is off
+    // and no Retry-After is set, so an untouched settings.yaml round-trips
+    // without gaining a `maintenance: {}`.
+    const maintRetry = parseInt($('#set-maint-retry').value, 10);
+    if (!isNaN(maintRetry) && (maintRetry < 0 || maintRetry > 86400)) {
+      toast('Retry-After out of range', 'Maintenance Retry-After must be between 0 and 86400 seconds (24h). Leave it blank for the 300s default.', 'err');
+      return;
+    }
+    const maintenance = {};
+    if (isOn('set-maint-on')) maintenance.enabled = true;
+    if (!isNaN(maintRetry) && maintRetry > 0) maintenance.retryAfterSeconds = maintRetry;
+    if (Object.keys(maintenance).length) body.maintenance = maintenance;
 
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();

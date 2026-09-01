@@ -47,8 +47,8 @@ references it).
 > way to adopt a discovered host permanently; adding it is never the way to give
 > one away.
 
-> **A managed host is not editable by hand - every edit besides `disabled` is
-> reverted on the next poll.** Discovery derives the whole object from the
+> **A managed host is not editable by hand - every edit besides `disabled` and
+> `maintenance` is reverted on the next poll.** Discovery derives the whole object from the
 > template and the `Ingress` and writes it back whenever it differs from what is
 > stored, so an edited `displayName`, added `tags`, `timeouts`, `locations` or
 > `robotsNoIndex` all survive at most until the next reconcile (default 60s).
@@ -66,6 +66,14 @@ references it).
 > label `gpm.rake.pro/disabled-by: ingress-discovery` on the stored object is how
 > the two are told apart - never set or remove it by hand; it exists only for
 > discovery to recognise a hold it placed itself.
+>
+> **`maintenance: true` is operator-owned in exactly the same way.** No Ingress
+> annotation derives it, so discovery carries the stored value forward on every
+> reconcile instead of resetting it: a managed host put into maintenance (in the
+> UI or by editing `config/proxy-hosts/<name>.yaml`) stays in maintenance until
+> an operator takes it out, whatever the cluster does to the `Ingress` in the
+> meantime. Unlike `disabled` it keeps the host's domains, certificate and DNS
+> records - see [Maintenance mode](#maintenance-mode-settingsmaintenance--proxyhostmaintenance).
 >
 > With that, there is no longer only an "emergency" off-switch - disabling in the
 > UI now works - but the other two routes remain useful:
@@ -146,6 +154,7 @@ Singleton application configuration.
 | `dnsSync` | DNSSyncSettings | Optional DNS record reconcilers (below). |
 | `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
+| `maintenance` | MaintenanceSettings | Fleet-wide downtime switch and the `Retry-After` every maintenance response carries (below). Zero value is off: each proxy host is governed by its own `maintenance` flag alone. |
 | `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
 | `securityHeaders` | map[string]string \| map[string]{value,scope} | Fleet-default response headers, each with a per-header `scope` (`all` default / `generated-only` / `proxied-only`) selecting whether it lands on gpm-generated responses, proxied upstream responses, or both. Value is a bare string (scope `all`) or a `{value, scope}` object. A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
 | `stripResponseHeaders` | []string | Fleet-default list of response headers removed from what an upstream sends (`Server`, `X-Powered-By`, ...). Case-insensitive; a [ProxyHost](#proxyhost-configproxy-hosts)'s own list is the **union** with this one. Empty (default) strips nothing. See [StripResponseHeaders](#stripresponseheaders-settingsstripresponseheaders--proxyhoststripresponseheaders). |
@@ -800,6 +809,59 @@ per-host list of actions (`created` / `updated` / `unchanged` / `deleted` /
 `skipped`, with the resolved `profile` and a reason for each skip). The cluster-side RBAC to apply is
 [`deploy/k8s-ingress-discovery-rbac.yaml`](../deploy/k8s-ingress-discovery-rbac.yaml).
 
+### Maintenance mode (`settings.maintenance` / `proxyHost.maintenance`)
+
+Takes a proxy host (or the whole edge) out of service for a downtime window
+without deleting it, disabling it, or touching DNS. While a host is in
+maintenance gpm answers every request to it **itself** — HTTP 503 with a
+`Retry-After` header — and never dials the upstream. The host keeps its domains,
+its certificate and its DNS records, so flipping the switch back restores
+service with no other change.
+
+There are two switches:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `proxyHost.maintenance` | bool | Per host. Operator-owned state: Ingress discovery carries it forward across a reconcile instead of deriving it. |
+| `settings.maintenance.enabled` | bool | Fleet-wide. Puts **every** proxy host into maintenance whatever its own flag says — the global switch wins over a per-host `false`. Turning it off returns each host to its own flag. |
+| `settings.maintenance.retryAfterSeconds` | int | `Retry-After` on every maintenance response, per-host ones included. `0` (default) selects 300s. Range 0–86400. |
+
+```yaml
+# settings.yaml - the whole edge goes down
+maintenance:
+  enabled: true
+  retryAfterSeconds: 900
+```
+
+```yaml
+# config/proxy-hosts/grafana.yaml - just this one host
+maintenance: true
+```
+
+Both switches take effect **without a restart**. A settings write applies on the
+very next request (the switch is read live); a per-host write applies on the
+reload that every config write already triggers.
+
+**Status and the page served.** 503 is the correct code for a deliberate,
+temporary outage: it is what `Retry-After` is defined against, and it is the one
+5xx a search engine treats as "come back later" rather than as a broken or
+removed site. The body is the [error page](#errorpagesconfig-settingserrorpages--proxyhosterrorpages)
+configured for `503` — the host's own `errorPages` override first, then the
+settings-level pages, the same resolution every other gpm-generated error uses,
+so a custom maintenance page needs no second mechanism. With none configured,
+gpm's built-in maintenance page is served, negotiated on `Accept`: JSON to a
+client asking for `application/json`, HTML to a browser, plain text to anything
+else (including `*/*`). **Every** maintenance response carries a `Content-Type`
+and a body — a bodyless error response from this proxy has broken real API
+clients.
+
+**What is not affected.** Redirect, parked and stream hosts proxy nothing to
+take out of service and keep serving. ACME HTTP-01 challenges are answered
+before host routing, so certificates still renew during a window. A host that
+requires mTLS still refuses an uncertified request with a 421 rather than
+disclosing a maintenance window to it. There is no scheduling: a window opens
+and closes when an operator flips the switch.
+
 ### ErrorPagesConfig (`settings.errorPages` / `proxyHost.errorPages`)
 
 > In the admin UI these live in their own **Error pages** section (not under
@@ -1139,6 +1201,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
 | `accessLists` | []string | no | Host-wide access-list names. |
 | `locations` | []Location | no | Path-scoped overrides (below). |
+| `maintenance` | bool | no | Take this host out of service without removing it: gpm answers every request with a 503 maintenance page and never dials the upstream. The host keeps its domains, certificate and DNS records. Operator-owned - Ingress discovery preserves it. See [Maintenance mode](#maintenance-mode-settingsmaintenance--proxyhostmaintenance). |
 | `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
 | `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](#errorpagesconfig-settingserrorpages--proxyhosterrorpages) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. |
 | `securityHeaders` | map[string]string \| map[string]{value,scope} | no | Merges over [`settings.securityHeaders`](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders) per key for this host (replacing the settings value **and its scope** for a header it names). Unset uses the settings-level default unchanged. |

@@ -52,6 +52,10 @@ type Deps struct {
 	// read-only GET /capabilities probe the UI uses to enable/grey-out geo
 	// controls. May be nil (reported as not loaded).
 	GeoDBLoaded func() bool
+	// MaintenanceGlobal, if set, reports whether the fleet-wide maintenance
+	// switch (settings.maintenance.enabled) is currently on, for the capability
+	// probe. May be nil (reported off).
+	MaintenanceGlobal func() bool
 	// UpstreamHealth, if set, returns the live per-group upstream health payload
 	// (marshalled as-is) for GET /upstream-health. May be nil.
 	UpstreamHealth func() any
@@ -124,6 +128,7 @@ type capabilities struct {
 	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
 	HA               haCapability               `json:"ha"`
 	Metrics          metricsCapability          `json:"metrics"`
+	Maintenance      maintenanceCapability      `json:"maintenance"`
 	// ScopeSubjects is model.ScopePlurals, served so the SPA renders the token
 	// form from the authoritative list instead of a hand-maintained copy. The
 	// copy drifted the moment ingress-discovery was added, granting the UI no
@@ -161,6 +166,15 @@ type metricsCapability struct {
 	// (-metrics / GPM_METRICS=1). The SPA greys the settings-page link out when
 	// false rather than linking at a route that answers 404.
 	Enabled bool `json:"enabled"`
+}
+
+type maintenanceCapability struct {
+	// GlobalEnabled reports that settings.maintenance.enabled is on, i.e. EVERY
+	// proxy host is currently serving the maintenance page whatever its own
+	// maintenance flag says. The SPA uses it to say so on the host editor rather
+	// than showing a per-host toggle that appears to be off while the host is in
+	// fact down.
+	GlobalEnabled bool `json:"globalEnabled"`
 }
 
 type haCapability struct {
@@ -419,6 +433,7 @@ func New(d Deps) http.Handler {
 			},
 			HA:            haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
 			Metrics:       metricsCapability{Enabled: d.MetricsEnabled},
+			Maintenance:   maintenanceCapability{GlobalEnabled: d.MaintenanceGlobal != nil && d.MaintenanceGlobal()},
 			ScopeSubjects: model.ScopePlurals,
 		})
 	})

@@ -521,6 +521,34 @@ The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
 
+**Maintenance mode** (`internal/dataplane/maintenance.go`) sits in front of that
+chain, not inside it. A host in maintenance is answered at the router dispatch
+layer - before path normalization, before the identity strip, before any gate -
+so a downtime window costs no auth subrequest and no upstream dial. The switch
+has two halves that meet in one predicate: the per-host `maintenance` flag is
+compiled into its `hostHandler` like any other host field, while the fleet-wide
+`settings.maintenance.enabled` lives in a package-level atomic installed by
+`SetMaintenance`, alongside `SetErrorPages` and `SetSecurityHeaders`, and is read
+**live** on every request. That split is what makes the global toggle apply on
+the very next request instead of waiting on a router rebuild, and it is why the
+global switch wins over a per-host `false`: an operator taking the whole edge
+down must not have to walk every host to do it.
+
+The response reuses the refusal seam below rather than inventing a second one:
+maintenance renders as a `503` through `serveErrorPage`, so a custom maintenance
+page is just the `503` entry in `errorPages`. Only the built-in fallback is new,
+and it negotiates on `Accept` (JSON / HTML / plain text) because a maintenance
+window is exactly when non-browser clients hit the edge, and a bodyless
+`Content-Type`-less error from this proxy has crashed a real API client.
+
+The flag is deliberately stored on the `ProxyHost` (and in `Settings`) rather
+than in runtime-only state: a window has to survive a restart, and git-backed
+config is where every other durable host property already lives. That puts it in
+Ingress discovery's blast radius, which derives the whole object on every poll -
+so `planReconcile` carries `maintenance` forward from the stored host exactly as
+it does `disabled`. Without that the next poll would quietly put a host back into
+service while someone was still working on its backend.
+
 **Refusal rendering** (`internal/dataplane/errorpages.go`). Every tier that
 refuses a request writes its response through one seam, `serveErrorPage` - and,
 for the auth tier, the `refuse` wrapper over it - rather than calling

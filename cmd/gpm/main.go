@@ -208,6 +208,12 @@ func main() {
 	// reason: buildRouter unions it into each proxy host's effective list.
 	dataplane.SetStripResponseHeaders(settings.StripResponseHeaders)
 
+	// Fleet-wide maintenance switch, installed before the first request for the
+	// same reason as the error pages: it is read live on every request, so a
+	// deployment that boots with maintenance on must never serve a single request
+	// to an upstream first.
+	dataplane.SetMaintenance(settings.Maintenance)
+
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
@@ -283,6 +289,12 @@ func main() {
 		// buildRouter composes each host's set from the new default.
 		dataplane.SetSecurityHeaders(st2.SecurityHeaders)
 		dataplane.SetStripResponseHeaders(st2.StripResponseHeaders)
+		// Fleet-wide maintenance, applied BEFORE the compile like every other
+		// settings-level switch above: turning it on takes the edge out of service
+		// on the very next request rather than after the router build. If the
+		// compile then fails, the hosts still running the previous router honour
+		// the new switch - which is the reading an operator flipping it wants.
+		dataplane.SetMaintenance(st2.Maintenance)
 		// Reload the data plane FIRST: only reconfigure the auth layer once the
 		// data plane has accepted the new config, so a rejected reload never
 		// leaves auth and dataplane drifted against each other.
@@ -464,8 +476,9 @@ func main() {
 		RecentLogs: func() any {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
 		},
-		SetAccessLog: dp.SetAccessLog,
-		GeoDBLoaded:  geoResolver.Loaded,
+		SetAccessLog:      dp.SetAccessLog,
+		GeoDBLoaded:       geoResolver.Loaded,
+		MaintenanceGlobal: dataplane.MaintenanceGlobalEnabled,
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},
