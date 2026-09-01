@@ -15,6 +15,52 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Maintenance mode.** A proxy host can be taken out of service for a downtime
+  window without being deleted, disabled, or losing its DNS: while
+  `proxyHost.maintenance` is true gpm answers every request to that host itself
+  - HTTP `503` with a `Retry-After` - and never dials the upstream. The host
+  keeps its domains, its certificate and its DNS records, so clearing the flag
+  restores service with no other change. `settings.maintenance.enabled` is the
+  fleet-wide half: it puts **every** proxy host into maintenance whatever its own
+  flag says, so the whole edge goes down (and comes back) in one write.
+  `settings.maintenance.retryAfterSeconds` sets the header on both (default 300,
+  max 24h). Both switches are in the UI: a Maintenance toggle beside Disabled in
+  the host editor, a Maintenance mode card on the Settings page, and a
+  `maintenance` status chip in the host list.
+
+  Neither switch needs a restart. The fleet-wide one is a package-level atomic
+  installed alongside the settings-level error pages and security headers, read
+  live on every request, so it applies without even a router rebuild; the
+  per-host flag is compiled into the host handler by the reload every config
+  write already triggers. The check sits at the router dispatch layer, ahead of
+  path normalization, the identity strip and the whole middleware chain, so a
+  window costs no auth subrequest and no upstream dial - but *inside* the mTLS
+  gate, so a host requiring a client certificate still answers `421` rather than
+  disclosing a window to an uncertified caller.
+
+  The page is not a second mechanism: maintenance renders through the same
+  `serveErrorPage` seam as every other gpm-generated error, so a custom
+  maintenance page is simply the `503` entry in `errorPages` (host override
+  first, then the settings-level pages). The built-in fallback negotiates on
+  `Accept` - JSON for `application/json`, HTML for a browser, plain text for
+  anything else including `*/*` - and **always** sets `Content-Type` and a body:
+  a bodyless, type-less error response from this proxy has crashed a real API
+  client before.
+
+  Redirect, parked and stream hosts proxy nothing and keep serving. ACME
+  HTTP-01 is answered before host routing, so certificates still renew during a
+  window. There is no scheduling: a window opens and closes when an operator
+  flips a switch.
+
+- **Ingress discovery preserves `maintenance`.** Discovery derives the whole
+  managed host from the template and the `Ingress` on every poll, so a flag no
+  annotation expresses would be reset within a minute of being set. `maintenance`
+  is now carried forward from the stored host exactly as `disabled` is: it is
+  operator-owned state, and the next poll putting a host back into service while
+  someone is working on its backend is precisely the failure the flag exists to
+  prevent. Steady state is unaffected - a host in maintenance whose `Ingress` has
+  not changed still writes nothing.
+
 - **UI editor for `stripResponseHeaders`.** The last of the API-first response
   header fields gains its editor: the Settings page ("Strip response headers")
   edits the fleet-default list and the proxy-host editor edits that host's

@@ -166,6 +166,25 @@ error-page system; none is a regression from that change.
   of a regular domain) and shown as toggleable chips when 2+ zones exist;
   clicking excludes/includes a zone, composing with the existing text filter.
   Exclusions persist in `localStorage`.
+- [x] **Maintenance mode** (`proxyHost.maintenance` + `settings.maintenance`):
+  per-host and fleet-wide downtime switch serving a `503` with `Retry-After`
+  instead of proxying, rendered through the existing error-page seam and
+  preserved by Ingress discovery. Follow-ups identified while building it, none
+  blocking:
+  - [ ] **Metrics.** A maintenance response is invisible to the Prometheus
+    exposition: it is answered at the dispatch layer, so it counts as neither an
+    upstream error nor a proxied request. A `gpm_maintenance_responses_total`
+    (or a status label on the existing request counter) would let an alert
+    notice a window nobody closed.
+  - [ ] **Bulk toggle in the UI.** Putting a handful of related hosts (not the
+    whole fleet) into maintenance is one edit + save per host today. A
+    multi-select action on the Proxy Hosts list would be the natural home, and
+    is the same shape the eventual bulk enable/disable wants.
+  - [ ] **Scheduled windows** were deliberately left out: a window opens and
+    closes when an operator flips a switch. Revisit only if a real recurring
+    window shows up - a scheduler is a whole subsystem (timezones, overlap,
+    what happens to a hand-flip inside a scheduled window) for something a
+    deploy pipeline can already do with two API calls.
 
 ## Security & hardening (post-public follow-ups)
 
