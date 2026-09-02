@@ -56,7 +56,7 @@ host serves](certificate.md#which-certificate-a-host-serves); it does **not** se
 certificate for an L7 host), `forceSSL` (redirect HTTP->HTTPS), `hsts` (`enabled`,
 `maxAge` in seconds, default one year when unset, `includeSubdomains`, `preload`),
 `minTLSVersion` (`"1.2"` default | `"1.3"`), `clientAuth` (mTLS, below).
-When `hsts.enabled` is set, the data plane emits `Strict-Transport-Security` on
+When `hsts.enabled` is set, the proxy listeners emit `Strict-Transport-Security` on
 HTTPS responses for the host (never over plain HTTP).
 
 **ClientAuth** (`tls.clientAuth`) opts the host into mTLS: client certificates
@@ -100,6 +100,10 @@ edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
 set `"1.3"` only on hosts where every client supports it (drops 1.2: old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
 for public hosts to keep the widest client compatibility.
+
+| Fleet default | Per-host override |
+|---|---|
+| [`settings.tls.minVersion`](settings/tls.md#settings-tls-min-version) sets the floor for every host that leaves `minTLSVersion` unset, plus stream hosts and an unknown SNI. | `minTLSVersion` here wins in **either** direction: `"1.3"` under the default fleet floor, and `"1.2"` under a `"1.3"` fleet floor. |
 
 **DNSSyncPolicy** (`dns`): `lanDirect` publishes each of the host's domains as a
 local CNAME on the LAN resolver (Pi-hole), so internal clients reach the edge
@@ -200,7 +204,7 @@ locations:
 
 A proxy host or location may carry an `auth` or `rateLimit` block **directly**,
 with no `Middleware` object and no reference to attach. The block has the same
-shape, the same validation rules and compiles to the same data-plane handler as
+shape, the same validation rules and compiles to the same proxy-listener handler as
 the middleware of that kind, so behaviour, metrics and error pages are identical.
 
 - **Direct is for a handful of hosts.** Gating one host by SSO is one block on
@@ -220,8 +224,8 @@ the middleware of that kind, so behaviour, metrics and error pages are identical
 | `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
 
 Validation is the middleware's, verbatim: `identityProvider` must resolve to an
-existing IdentityProvider (a dangling name is a load-time error, and the data
-plane fails closed with `503` if one ever reaches it), `allowFrom` is refused in
+existing IdentityProvider (a dangling name is a load-time error, and the proxy
+listeners fail closed with `503` if one ever reaches it), `allowFrom` is refused in
 `oidc` and `forward-auth` mode, `clientCertRoles` is `client-cert` only, and a
 rate limit must set exactly one of the two rate forms.
 

@@ -82,8 +82,8 @@ Without a key the UI control is greyed out with the reason and the API answers
 The key must be the private key of one certificate in `caPEM`: that certificate
 becomes the issuer. A key that parses but matches nothing in the bundle, or matches
 a certificate that is not a CA, is **refused at config validation** (for an inline
-`caKeyPEM`; a `caKeyFile` is checked the first time it is used, since only the data
-plane knows the cert store path).
+`caKeyPEM`; a `caKeyFile` is checked the first time it is used, since only the
+running server knows the cert store path).
 
 Issuance mints an **RSA-2048** key and a certificate with `ExtKeyUsage: clientAuth`,
 `KeyUsage: digitalSignature`, `CA:false`, a 128-bit `crypto/rand` serial and a small

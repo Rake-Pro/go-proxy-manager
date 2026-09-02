@@ -322,7 +322,10 @@ func streamTerminateConfig(certRef string, all []model.Certificate, certs *certR
 		return nil, fmt.Errorf("certificate %q: %w (an ACME certificate is unavailable until it is issued)", certRef, err)
 	}
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
+		// The fleet floor (settings.tls.minVersion) applies here too: a stream
+		// host has no per-host minTLSVersion of its own, so hardening the edge
+		// has to reach the terminate listeners or it is not fleet-wide.
+		MinVersion:   currentTLSFleetFloor(),
 		CipherSuites: secureCipherSuites,
 		Certificates: []tls.Certificate{*crt},
 	}, nil

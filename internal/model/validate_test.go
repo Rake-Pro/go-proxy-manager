@@ -456,6 +456,41 @@ func TestSecretResolve(t *testing.T) {
 	}
 }
 
+// A broken inline template used to commit cleanly and only surface on the NEXT
+// restart, so it is refused at write time instead.
+func TestSettingsErrorPagesInlineTemplateMustParse(t *testing.T) {
+	base := func() Settings {
+		return Settings{SchemaVersion: SchemaVersion, AdminAuth: AdminAuthSettings{LocalLoginEnabled: true}}
+	}
+	s := base()
+	s.ErrorPages = ErrorPagesConfig{Inline: map[string]string{"502": "<h1>{{.Status}}</h1>"}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("a valid inline template must be accepted: %v", err)
+	}
+	s.ErrorPages = ErrorPagesConfig{Inline: map[string]string{"502": "<h1>{{.Status}</h1>"}}
+	if err := s.Validate(); err == nil {
+		t.Fatal("an unparseable inline error-page template must be rejected at write time")
+	}
+}
+
+func TestSettingsTLSMinVersion(t *testing.T) {
+	base := func() Settings {
+		return Settings{SchemaVersion: SchemaVersion, AdminAuth: AdminAuthSettings{LocalLoginEnabled: true}}
+	}
+	for _, v := range []string{"", "1.2", "1.3"} {
+		s := base()
+		s.TLS.MinVersion = v
+		if err := s.Validate(); err != nil {
+			t.Errorf("settings.tls.minVersion %q should be valid, got %v", v, err)
+		}
+	}
+	s := base()
+	s.TLS.MinVersion = "1.1"
+	if err := s.Validate(); err == nil {
+		t.Fatal("settings.tls.minVersion 1.1 must be rejected")
+	}
+}
+
 func TestProxyHostMinTLSVersion(t *testing.T) {
 	for _, v := range []string{"", "1.2", "1.3"} {
 		h := proxyHost("app", func(h *ProxyHost) { h.TLS.MinTLSVersion = v })
