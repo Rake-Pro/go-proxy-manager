@@ -260,8 +260,8 @@ func TestGatedAnchorsLeaveTheTabOrder(t *testing.T) {
 	}
 }
 
-// The shell and the view that follows it both want these three GETs; without a
-// memo a cold #/overview load fetched each of them twice.
+// The shell issues these three GETs on every route, and some views want one
+// of them again right after; without a memo a cold load fetched each twice.
 func TestPerRouteRequestMemo(t *testing.T) {
 	js := loadAppJS(t)
 	for _, want := range []string{
@@ -272,7 +272,6 @@ func TestPerRouteRequestMemo(t *testing.T) {
 		"    ok(memoGet('/api/settings')),",
 		"    const summary = (await memoGet('/api/config/summary')).data || {};",
 		"function routeSettings() {",
-		"function routeHistory() {",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("per-route request memo missing %q", want)

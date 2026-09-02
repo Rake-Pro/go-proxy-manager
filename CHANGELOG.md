@@ -5,7 +5,29 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Overview rewritten as a "needs attention" list.** The landing view now
+  leads with what is actually wrong: certificates failing to renew, expired or
+  expiring soon; upstream groups with unhealthy members; ingress/Docker
+  discovery failures and skipped hosts; and config warnings, each a severity
+  dot, a title, a detail line and a link (the certificate or group for object
+  rows, Integrations for discovery rows, History for config warnings), error
+  rows before warning rows. When there is nothing to report it shows a one-line
+  summary (hosts live, certificates valid and next expiry, upstream members
+  healthy) instead. A Refresh button re-runs the view without a full page
+  reload.
+
+### Removed
+
+- **The "About this page" boxes on every list view, the Overview get-started
+  checklist and the four stat tiles.** The per-field "?" hints and the glossary
+  underlines stay; the boxes only described the screen they sat on, which the
+  docs site already does. The stat tiles (proxy hosts, certificates, identity
+  providers, upstreams) and the "Recent config changes" / "Certificates" feed
+  cards are gone too: their normal, healthy state carried no information the
+  new attention list needs to show, and every list they linked to is one click
+  away in the sidebar.
 
 ## [1.3.0] - 2026-09-02
 
@@ -114,9 +136,9 @@ Nothing yet.
   - Every list page carries an **About this page** block: what the objects are,
     three to five things that decide how they behave, and a link to the page's
     reference.
-  - Terms from [terminology](docs/concepts/terminology.md) - upstream, location,
+  - Terms from [terminology](docs/concepts/terminology.md) (upstream, location,
     access list, identity provider, middleware, parked, maintenance, ledger,
-    reconcile, apex target, outpost - get a dotted underline in page intros and
+    reconcile, apex target, outpost) get a dotted underline in page intros and
     fold summaries, with the glossary definition on hover or focus.
   - `internal/ui/hints_test.go` enforces the coupling: every `data-hint` id
     resolves to a registry entry, every entry is used by the UI, every doc target
@@ -129,7 +151,7 @@ Nothing yet.
   mechanism, instead of inside an access list.
   - `auth.basic.users` is a list of `username` + `passwordHash` (bcrypt);
     `auth.basic.realm` sets the `WWW-Authenticate` realm (default: the host name).
-    No `identityProvider` is named - the credential set is the identity source.
+    No `identityProvider` is named: the credential set is the identity source.
   - Gates identically to the access-list basic auth it replaces: same `401` and
     challenge, same per-client-IP lockout (5 failures, 15 minutes, answered
     exactly like a wrong password), same process-wide bcrypt bound. One verifier
@@ -137,7 +159,7 @@ Nothing yet.
   - Adds what the access-list form never had: it sits at the auth position of the
     chain (a rate limit, an access list and a bouncer still run outside it), the
     host's custom error pages render the refusal, denials are counted, and
-    `allowFrom` exempts trusted networks - the same any-of bypass `auth-request`
+    `allowFrom` exempts trusted networks, the same any-of bypass `auth-request`
     and `client-cert` carry.
   - Works as an inline `auth:` block on a proxy host or location too, since both
     reuse `AuthMiddleware`.
@@ -161,7 +183,7 @@ Nothing yet.
   (opt-in) config changes.
   - Per-target `type` (`ntfy` | `discord` | `generic`), `url`, optional
     `secret` (bearer token for ntfy/generic; unused for discord), `disabled`,
-    and an `events` allowlist - empty selects the default set (every kind
+    and an `events` allowlist, where empty selects the default set (every kind
     except `config.changed`, which is opt-in per target).
   - `cert.expiring` and `cert.expired` are daily digests (one message listing
     every certificate in that state), not one message per certificate.
@@ -170,7 +192,7 @@ Nothing yet.
     changed (e.g. an upstream flip from healthy to unhealthy always alerts
     immediately even inside the window).
   - `GET /api/notifications/status` (`settings:read`), `POST
-    /api/notifications/{name}/test` (admin) - mirrors the existing webhook
+    /api/notifications/{name}/test` (admin), mirroring the existing webhook
     status/test endpoints and reuses their delivery-outcome shape.
   - Reuses `internal/webhook`'s SSRF-hardened HTTP client (redirects never
     followed, link-local destinations refused post-DNS) rather than a second
@@ -208,7 +230,7 @@ Nothing yet.
     `upstream.path` -> upstream**, all of it inside the security chain: rate
     limiting, access lists, the bouncer, auth and guards still evaluate the
     ORIGINAL client path. The query string is forwarded untouched and nothing
-    here is ever an HTTP redirect - method and body are preserved.
+    here is ever an HTTP redirect: method and body are preserved.
   - Additive and `omitempty`: existing configs are unchanged on disk and in the
     API, and behaviour is identical when the fields are unset.
 
@@ -224,13 +246,13 @@ Nothing yet.
   ```
 
 - **Inline `auth` and `rateLimit` on a proxy host and on a location.** Gating one
-  host by SSO took three objects across three pages - an `IdentityProvider`, an
+  host by SSO took three objects across three pages: an `IdentityProvider`, an
   `auth` `Middleware`, and the reference attaching it. A host (or a location) can
   now carry the `auth` / `rateLimit` block directly, so a five-host deployment
   needs only the identity provider.
   - The blocks carry the `AuthMiddleware` / `RateLimitMiddleware` shapes
     verbatim, share one validator per kind with the middleware, and compile
-    through the same data-plane builder into the same handler - identical
+    through the same data-plane builder into the same handler, with identical
     behaviour, metrics, error pages and denial counting.
   - `Middleware` objects remain the reuse path: one gate shared by a fleet is
     still one object every host references.
@@ -1468,7 +1490,7 @@ Nothing yet.
 
 ### Changed
 
-- Added `CLAUDE.md` documenting project conventions and doc-sync rules (no functional change).
+- Documentation-only release: project conventions written down, no functional change.
 
 ## [1.0.18] - 2026-08-22
 

@@ -98,16 +98,6 @@ const TITLES = {
   tokens: 'API Tokens', logs: 'Access Logs', history: 'History', settings: 'Settings',
 };
 
-// Registry id of the "About this page" block each section's list view renders.
-const PAGE_HINT = {
-  overview: 'page.overview', hosts: 'page.proxyHosts', redirects: 'page.redirects',
-  streams: 'page.streams', parked: 'page.parkedHosts', certs: 'page.certificates',
-  clientcas: 'page.clientCAs', identity: 'page.identityProviders', access: 'page.accessLists',
-  middleware: 'page.middleware', upstreams: 'page.upstreamGroups', dns: 'page.dnsProviders',
-  errorpages: 'page.errorPages', integrations: 'page.integrations', tokens: 'page.apiTokens',
-  logs: 'page.accessLogs', history: 'page.history', settings: 'page.settings',
-};
-
 // plural API paths per section
 const PLURAL = {
   hosts: 'proxy-hosts', redirects: 'redirect-hosts', streams: 'stream-hosts',
@@ -710,9 +700,6 @@ function memoGet(path) {
 function routeSettings() {
   return memoGet('/api/settings').catch(() => null).then((r) => ({ data: (r && r.data) || {} }));
 }
-function routeHistory() {
-  return memoGet('/api/history').catch(() => null).then((r) => arr(r && r.data));
-}
 
 // GET /api/runtime, cached like the capability probe. Read-only startup facts
 // (listeners, paths, HA role, whether a local admin credential exists), so a
@@ -726,10 +713,10 @@ async function loadRuntime() {
 
 // Object counts per kind, from GET /api/config/summary - a counts-only endpoint,
 // so the sidebar no longer pulls the whole config just to len() a dozen slices.
-// Only the sidebar and the Overview checklist read them, so a failed fetch
+// Only the sidebar and the Overview empty-state summary read them, so a failed fetch
 // degrades to "everything empty" rather than an error. The response keys are the
 // kebab-case API plurals; state.counts keeps its camelCase names because other
-// code (navGroupDefaultOpen, the get-started checklist) reads them.
+// code (navGroupDefaultOpen, the Overview summary) reads them.
 async function loadCounts() {
   try {
     const summary = (await memoGet('/api/config/summary')).data || {};
@@ -1231,18 +1218,6 @@ function hintHtml(id, label) {
   return `<button type="button" class="hint-btn" data-hint-id="${esc(id)}" aria-expanded="false"`
     + ` aria-label="Help for ${esc(label || id)}">?</button>`;
 }
-// A collapsible "About this page" block for a list view's intro.
-function aboutPageHtml(id) {
-  const e = HINTS[id];
-  if (!e) return '';
-  const bullets = Array.isArray(e.bullets) ? e.bullets : [];
-  return `<details class="about-page" data-hint="${esc(id)}">
-    <summary>About this page</summary>
-    <p>${glossaryize(esc(e.text))}</p>
-    ${bullets.length ? `<ul>${bullets.map((b) => `<li>${glossaryize(esc(b))}</li>`).join('')}</ul>` : ''}
-    <a class="about-more" href="${esc(docHref(e.doc))}" target="_blank" rel="noopener">Learn more</a>
-  </details>`;
-}
 // Where the "?" for one control goes: its field-group's label, or the name line
 // of a toggle row. A control that lives in a repeater row has no label of its
 // own - the row's columns are identified by aria-label - so it gets the hint as
@@ -1285,7 +1260,7 @@ function decorateHints(root) {
       const id = el.getAttribute('data-hint');
       const entry = HINTS[id];
       if (!entry) return;
-      if (el.classList.contains('gloss') || el.classList.contains('about-page')) return;
+      if (el.classList.contains('gloss')) return;
       const target = hintAnchorFor(el);
       if (!target) { if (!el.getAttribute('title')) el.setAttribute('title', entry.text); return; }
       if (target.querySelector('.hint-btn')) return;
@@ -2274,7 +2249,6 @@ async function viewIntegrations(c) {
 
   c.innerHTML = viewHead('Integrations',
     'Systems gpm talks to on your behalf: DNS zones it publishes into, orchestrators it derives hosts from, IP feeds it pulls, and the endpoints it notifies.')
-    + aboutPageHtml('page.integrations')
     + `
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
@@ -3386,224 +3360,173 @@ async function viewIntegrations(c) {
 }
 
 // ---------- OVERVIEW ----------
-// The get-started checklist. Five steps, in the order a first deployment
-// actually needs them, each a deep link into the editor that closes it. It is
-// derived state only (GET /api/config/summary plus the settings object), so it
-// never disagrees with what the config holds, and it disappears on its own once
-// every step is done - a checklist that outlives its usefulness is clutter.
-const CHECKLIST_KEY = 'gpm.overview.checklist';
-function checklistDismissed() {
-  try { return localStorage.getItem(CHECKLIST_KEY) === 'dismissed'; } catch (e) { return false; }
-}
-function getStartedSteps(counts, settings, cfg) {
-  const hosts = arr(cfg.proxyHosts);
-  const mwAuth = {};
-  arr(cfg.middlewares).forEach((m) => { if (m.type === 'auth') mwAuth[m.name] = true; });
-  const guarded = hosts.some((h) => h.auth || arr(h.accessLists).length || arr(h.middlewares).some((n) => mwAuth[n]));
-  return [
-    {
-      id: 'url', label: 'Set the public URL of this panel',
-      done: !!(settings && settings.externalBaseURL),
-      href: '#/settings/general',
-      why: 'OIDC builds its redirect_uri from it, so admin sign-in needs it before anything else.',
-    },
-    {
-      id: 'dns', label: 'Add a DNS provider, or plan on HTTP-01',
-      done: (counts.dnsProviders || 0) > 0 || (counts.certificates || 0) > 0,
-      href: '#/dns/_new',
-      why: 'DNS-01 is the only way to get a wildcard. HTTP-01 needs no provider, just port 80 reachable.',
-    },
-    {
-      id: 'cert', label: 'Add your first certificate',
-      done: (counts.certificates || 0) > 0,
-      href: '#/certs/_new',
-      why: 'A host never picks a certificate: the handshake selects by domain, so one covering the name is all it needs.',
-    },
-    {
-      id: 'host', label: 'Add your first proxy host',
-      done: (counts.proxyHosts || 0) > 0,
-      href: '#/hosts/_new',
-      why: 'One public domain, one internal upstream. This is where most day-to-day work happens.',
-    },
-    {
-      id: 'guard', label: 'Protect it with an access list or a sign-in',
-      done: guarded,
-      href: '#/access/_new',
-      why: 'An access list gates by IP or country; a Sign-in fold on the host gates by identity.',
-    },
-  ];
-}
-function getStartedCardHtml(steps) {
-  const done = steps.filter((s) => s.done).length;
-  return `<div class="card form-section" id="getstarted" style="margin-bottom:16px">
-    <div class="card-head">
-      <div>
-        <p class="section-label" style="margin:0 0 2px">Get started</p>
-        <h3 style="margin:0">${done} of ${steps.length} done</h3>
+// One row in the "needs attention" list: a severity dot, a title line (may
+// carry inline markup, e.g. <b> around a name - callers esc() every dynamic
+// piece before it goes in), a mono/muted detail line, and a deep link.
+function attnRow(sev, title, detail, href, action) {
+  return `<div class="feed-row attn">
+      <span class="feed-tick ${sev}"></span>
+      <div class="feed-body">
+        <div class="feed-msg">${title}</div>
+        <div class="feed-meta">${detail}</div>
       </div>
-      <button class="btn ghost sm" id="gs-dismiss" type="button" title="Hide this card. It stays hidden in this browser.">Dismiss</button>
-    </div>
-    <ol class="checklist">
-      ${steps.map((s) => `<li class="${s.done ? 'done' : ''}">
-        <span class="ck-mark" aria-hidden="true">${s.done ? '&#10003;' : ''}</span>
-        <div class="ck-body">
-          <a href="${esc(s.href)}">${esc(s.label)}</a>
-          <div class="muted" style="font-size:11.5px">${esc(s.why)}</div>
-        </div>
-      </li>`).join('')}
-    </ol>
-  </div>`;
+      <a class="btn ghost sm" href="${esc(href)}">${esc(action)}</a>
+    </div>`;
 }
 
 async function viewOverview(c) {
-  // Five independent reads, issued together. /api/health is the only real
-  // liveness signal the SPA has, so a failure there degrades this page's Data
-  // plane tile rather than failing the whole view. /api/certificates (not
-  // /api/config's plain stored objects) is what carries notAfter/state/
-  // daysRemaining, so the certificates card below can show real expiry instead
-  // of "-".
-  const [cfgR, , histR, healthR, setR, certsR] = await Promise.all([
-    api('/api/config'),
-    loadCapabilities(),
-    routeHistory(),
-    api('/api/health').catch(() => null),
-    routeSettings(),
-    api('/api/certificates'),
+  // Four independent reads, issued together, each tolerated on its own: a
+  // source that fails contributes one warn row ("Could not read ...") instead
+  // of failing the whole view. The two discovery status routes 501/404 when
+  // the integration is not wired at all, which is not a failure - it just
+  // means that source has nothing to report.
+  const [healthR, certsR, idR, dkrR] = await Promise.all([
+    api('/api/health').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
+    api('/api/certificates').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
+    api('/api/ingress-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
+    api('/api/docker-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
   ]);
-  const cfg = cfgR.data || {};
-  const history = arr(histR);
-  const health = (healthR && healthR.data) || null;
-  const settings = setR.data || {};
-  const certsWithStatus = arr(certsR.data);
+  // Only for the empty-state summary's "hosts live" figure. GET /config/summary
+  // is the sidebar's counts-only read and is memoized per route, so this adds
+  // no extra request beyond what the shell already made for the nav.
   await loadCounts();
 
-  const hosts = arr(cfg.proxyHosts);
-  const liveHosts = hosts.filter((h) => !h.disabled).length;
-  const certs = arr(cfg.certificates);
-  const idps = arr(cfg.identityProviders);
-  const idpSub = idps.length ? idps.map((p) => p.name).join(', ') : 'none configured';
+  const health = healthR.ok ? healthR.data : null;
+  const certsWithStatus = certsR.ok ? certsR.data : [];
 
-  // Upstreams tile. If the process is down the admin panel is down too, so a
-  // tile just claiming "listening" told the operator nothing; this one
-  // carries information instead, from GET /api/health's upstreamGroups: the
-  // healthy/unhealthy member counts across every configured group.
-  const upGroups = arr(health && health.upstreamGroups);
-  const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
-  const upUnhealthy = upGroups.reduce((n, g) => n + (g.unhealthy || 0), 0);
-  const upColor = !upGroups.length ? 'var(--faint)' : (upUnhealthy ? 'var(--err)' : 'var(--ok)');
-  const upTitle = !upGroups.length
-    ? 'No upstream groups are configured.'
-    : `${upHealthy} of ${upHealthy + upUnhealthy} upstream group members are healthy.`
-      + (upUnhealthy ? ` Unhealthy in: ${upGroups.filter((g) => g.unhealthy > 0).map((g) => g.name).join(', ')}.` : '');
+  const errRows = [];
+  const warnRows = [];
 
-  const hc = (health && health.certificates) || null;
-  const certProblems = hc ? ((hc.expiring || 0) + (hc.expired || 0) + (hc.error || 0)) : 0;
-  const certProblemText = hc ? [
-    hc.expiring ? `<b>${hc.expiring}</b> expiring soon` : '',
-    hc.expired ? `<b>${hc.expired}</b> expired` : '',
-    hc.error ? `<b>${hc.error}</b> renewal error` : '',
-  ].filter(Boolean).join(', ') : '';
+  // ---- certificates: GET /api/certificates (source order: certs) ----
+  if (certsR.ok) {
+    certsWithStatus.forEach((ct) => {
+      const name = esc(ct.name);
+      const domains = esc(arr(ct.domains).join(', '));
+      const typ = ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : esc(ct.type || 'cert'));
+      const href = '#/certs/' + encodeURIComponent(ct.name);
+      if (ct.state === 'error') {
+        errRows.push(attnRow('err', `Certificate <b>${name}</b> failed to renew`,
+          [typ, domains, ct.lastError ? esc(ct.lastError) : ''].filter(Boolean).join(' &middot; '),
+          href, 'Retry now'));
+      } else if (ct.state === 'expired') {
+        const ago = ct.daysRemaining != null ? -ct.daysRemaining : null;
+        errRows.push(attnRow('err', `Certificate <b>${name}</b> has expired`,
+          [ago != null ? `expired ${ago} day${ago === 1 ? '' : 's'} ago` : 'expired', domains].filter(Boolean).join(' &middot; '),
+          href, 'Open'));
+      } else if (ct.state === 'expiring') {
+        const days = ct.daysRemaining;
+        warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${days} day${days === 1 ? '' : 's'}`,
+          [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : ''].filter(Boolean).join(' &middot; '),
+          href, 'Open'));
+      }
+    });
+  } else {
+    warnRows.push(attnRow('warn', 'Could not read certificates',
+      esc((certsR.err && certsR.err.message) || 'request failed'), '#/certs', 'Open'));
+  }
 
-  const feed = arr(history).slice(0, 6).map((h) => `
-    <div class="feed-row">
-      <span class="feed-tick"></span>
-      <div class="feed-body">
-        <div class="feed-meta">${esc(fmtTime(h.when))} &middot; ${esc(h.author || 'unknown')}</div>
-        <div class="feed-msg">${esc(h.message || '(no message)')}</div>
-        <div class="feed-actions"><span class="sha">${esc(shortSha(h.hash))}</span></div>
+  // ---- upstream groups: GET /api/health (source order: upstreams) ----
+  // UpstreamGroupHealth only carries a healthy/unhealthy count, not member
+  // addresses, so the row can only say how many are down, not which - the
+  // group editor is where that detail lives.
+  if (health) {
+    arr(health.upstreamGroups).forEach((g) => {
+      if (g.unhealthy > 0) {
+        errRows.push(attnRow('err',
+          `Upstream <b>${esc(g.name)}</b>: ${g.unhealthy} of ${g.healthy + g.unhealthy} members unhealthy`,
+          '', '#/upstreams/' + encodeURIComponent(g.name), 'Open group'));
+      }
+    });
+  } else {
+    warnRows.push(attnRow('warn', 'Could not read health status',
+      esc((healthR.err && healthR.err.message) || 'request failed'), '#/settings/operations', 'Open'));
+  }
+
+  // ---- discovery: GET /api/ingress-discovery/status, /api/docker-discovery/status
+  // (source order: discovery, ingress before docker) ----
+  function attnDiscovery(res, label) {
+    if (!res.ok) {
+      const status = res.err && res.err.status;
+      if (status === 501 || status === 404) return; // not enabled: no row
+      warnRows.push(attnRow('warn', `Could not read ${label.toLowerCase()} discovery status`,
+        esc((res.err && res.err.message) || 'request failed'), '#/integrations', 'Open'));
+      return;
+    }
+    const st = res.data;
+    if (st.error) {
+      errRows.push(attnRow('err', `${label} discovery failed`, esc(st.error), '#/integrations', 'Open discovery'));
+    }
+    arr(st.hosts).forEach((h) => {
+      if (h.action === 'skipped' && h.reason) {
+        warnRows.push(attnRow('warn', `${label} discovery skipped <b>${esc(h.name)}</b>`,
+          esc(h.reason), '#/integrations', 'Open discovery'));
+      }
+    });
+  }
+  attnDiscovery(idR, 'Ingress');
+  attnDiscovery(dkrR, 'Docker');
+
+  // ---- config warnings: GET /api/health (source order: config) ----
+  if (health) {
+    arr(health.configWarnings).forEach((w) => {
+      warnRows.push(attnRow('warn', 'Config warning', esc(w), '#/history', 'View history'));
+    });
+  }
+
+  const errCount = errRows.length;
+  const warnCount = warnRows.length;
+
+  let body;
+  if (errCount + warnCount > 0) {
+    const headParts = [];
+    if (errCount) headParts.push(`<span class="err-text">${errCount}</span> problem${errCount === 1 ? '' : 's'}`);
+    if (warnCount) headParts.push(`<span class="warn-text">${warnCount}</span> warning${warnCount === 1 ? '' : 's'}`);
+    body = `<div class="card">
+      <div class="card-head">
+        <div>
+          <p class="section-label" style="margin:0 0 2px">Needs attention</p>
+          <h3 style="margin:0">${headParts.join(' &middot; ')}</h3>
+        </div>
+        <button class="btn ghost sm" id="ov-refresh" type="button">Refresh</button>
       </div>
-    </div>`).join('') || `<div class="muted" style="font-size:13px">No commits yet.</div>`;
-
-  // Soonest-expiring first: ascending daysRemaining (negative - already
-  // expired - sorts to the very top, since that is the most urgent). A cert
-  // with no daysRemaining yet (pending, or an older API build) has no expiry
-  // to sort by, so it drops to the end, ordered by name for a stable list.
-  const certsSoonest = certsWithStatus.slice().sort((a, b) => {
-    const ad = a.daysRemaining, bd = b.daysRemaining;
-    if (ad == null && bd == null) return (a.name || '').localeCompare(b.name || '');
-    if (ad == null) return 1;
-    if (bd == null) return -1;
-    return ad - bd;
-  });
-  const certRows = certsSoonest.length ? certsSoonest.slice(0, 5).map((ct) => {
-    const domains = arr(ct.domains).join(', ');
-    const typ = ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : (ct.type || 'cert'));
-    const detail = ct.type === 'acme'
-      ? (ct.acme && ct.acme.dnsProvider ? `DNS-01 via ${ct.acme.dnsProvider}` : 'ACME')
-      : 'Custom certificate';
-    return `<div class="cert-row">
-      <span class="cert-ico">${ICON.cert.replace('stroke="currentColor"', 'stroke="var(--ok)"')}</span>
-      <div style="flex:1;min-width:0">
-        <div class="host" style="font-size:14px">${esc(ct.name)} <span class="mono muted" style="font-weight:400;font-size:12px">${esc(domains)}</span></div>
-        <div class="muted" style="font-size:11.5px">${esc(typ)} &middot; ${esc(detail)}</div>
-      </div>
-      <div>${certExpiryCellHtml(ct)}</div>
+      ${errRows.join('')}${warnRows.join('')}
     </div>`;
-  }).join('') : `<div class="muted" style="font-size:13px">No certificates yet.</div>`;
+  } else {
+    const disabledHosts = (state.summary && state.summary.disabled && state.summary.disabled['proxy-hosts']) || 0;
+    const liveHosts = Math.max(0, (state.counts.proxyHosts || 0) - disabledHosts);
+    const validCerts = certsWithStatus.filter((ct) => ct.state === 'valid');
+    const upGroups = arr(health && health.upstreamGroups);
+    const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
+    const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
 
-  const steps = getStartedSteps(state.counts, settings, cfg);
-  const showChecklist = !checklistDismissed() && steps.some((s) => !s.done);
+    const parts = [`${liveHosts} host${liveHosts === 1 ? '' : 's'} live`];
+    if (validCerts.length) {
+      const soonest = validCerts.reduce((min, ct) =>
+        (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
+      parts.push(`${validCerts.length} certificate${validCerts.length === 1 ? '' : 's'} valid`
+        + (soonest != null ? `, next expiry in ${soonest} day${soonest === 1 ? '' : 's'}` : ''));
+    }
+    parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
+
+    body = `<div class="empty-state">
+      <div class="es-title">Nothing needs attention</div>
+      <div class="es-sub">${parts.join(' &middot; ')}</div>
+      <button class="btn ghost sm" id="ov-refresh" type="button">Refresh</button>
+    </div>`;
+  }
 
   c.innerHTML = `
     <div class="view-head">
       <h2>Overview</h2>
-      <p>Status of <span class="mono">${esc(state.instance)}</span>: hosts, certificates and recent changes.</p>
+      <p>Status of <span class="mono">${esc(state.instance)}</span>: what needs attention right now.</p>
     </div>
-    ${aboutPageHtml('page.overview')}
-    ${showChecklist ? getStartedCardHtml(steps) : ''}
-    <div class="stat-grid">
-      <div class="stat s-ok">
-        <div class="k">Proxy hosts</div>
-        <div class="v">${hosts.length}</div>
-        <div class="sub"><b>${liveHosts}</b> live &middot; ${hosts.length - liveHosts} disabled</div>
-      </div>
-      <${certProblems > 0 ? 'a href="#/certs"' : 'div'} class="stat s-warn">
-        <div class="k">Certificates</div>
-        <div class="v">${certs.length}</div>
-        <div class="sub"><b>${certs.filter((x) => x.type === 'acme').length}</b> ACME &middot; ${certs.filter((x) => x.type === 'custom').length} custom</div>
-        ${certProblems > 0 ? `<div class="sub warn-text">${certProblemText}</div>` : ''}
-      </${certProblems > 0 ? 'a' : 'div'}>
-      <div class="stat s-cyan">
-        <div class="k">Identity providers</div>
-        <div class="v">${idps.length}</div>
-        <div class="sub">${esc(idpSub)}</div>
-      </div>
-      <div class="stat" title="${esc(upTitle)}">
-        <div class="k">Upstreams</div>
-        <div class="v" style="color:${upColor}">${upGroups.length ? (upHealthy + upUnhealthy) : '-'}</div>
-        <div class="sub">${upGroups.length
-          ? `<b>${upHealthy}</b> healthy${upUnhealthy ? ` &middot; <span class="err-text">${upUnhealthy}</span> unhealthy` : ''}`
-          : 'no groups'}</div>
-      </div>
-    </div>
-    <div class="grid-2-1">
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <p class="section-label" style="margin:0 0 2px">Recent config changes</p>
-            <h3 style="margin:0">Git-backed history</h3>
-          </div>
-          <a class="btn ghost sm" href="#/history">View all</a>
-        </div>
-        <div>${feed}</div>
-      </div>
-      <div class="card">
-        <div class="card-head">
-          <p class="section-label" style="margin:0">Certificates</p>
-          <a class="btn ghost sm" href="#/certs">View all</a>
-        </div>
-        <div>${certRows}</div>
-      </div>
-    </div>`;
+    ${body}`;
 
-  const dismiss = $('#gs-dismiss');
-  if (dismiss) {
-    dismiss.addEventListener('click', () => {
-      try { localStorage.setItem(CHECKLIST_KEY, 'dismissed'); } catch (e) { /* ignore */ }
-      const card = $('#getstarted');
-      if (card) card.remove();
-    });
-  }
+  const refresh = $('#ov-refresh');
+  // Through route(), not viewOverview(c) directly: route() resets the request
+  // memo (so the host count re-reads) and re-applies the shell banners that a
+  // bare re-render would wipe.
+  if (refresh) refresh.addEventListener('click', () => route());
 }
 
 // ---------- PROXY HOSTS LIST ----------
@@ -3645,8 +3568,7 @@ async function listHosts(c) {
 
   const head = viewHead('Proxy Hosts',
     'One public domain routed to one internal upstream, with the TLS, access and middleware chain that sits in between. This is where most day-to-day work happens.',
-    `<a class="btn primary" href="#/hosts/_new">${ICON.plus}Add proxy host</a>`)
-    + aboutPageHtml('page.proxyHosts');
+    `<a class="btn primary" href="#/hosts/_new">${ICON.plus}Add proxy host</a>`);
 
   if (!hosts.length) {
     c.innerHTML = head + emptyState('No proxy hosts yet',
@@ -5028,8 +4950,7 @@ async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
   const head = viewHead('Certificates',
     'The TLS certificates gpm presents at the edge, issued by ACME or brought as PEM files. A host never picks one: the handshake selects by domain, so a certificate covering the name is all a host needs.',
-    `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`)
-    + aboutPageHtml('page.certificates');
+    `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`);
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
       'Request an ACME certificate for the domains you serve - dns-01 if you need a wildcard, http-01 otherwise - or point gpm at PEM files already on the server.',
@@ -5482,8 +5403,7 @@ async function genericList(c, section) {
   const plural = PLURAL[section];
   const items = arr((await api('/api/' + plural)).data);
   const head = viewHead(meta.title, meta.sub,
-    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`)
-    + aboutPageHtml(PAGE_HINT[section]);
+    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`);
   if (!items.length) {
     c.innerHTML = head + emptyState(`No ${meta.singular}s yet`,
       meta.empty || `Add your first ${meta.singular}.`, meta.addLabel, `#/${section}/_new`);
@@ -7707,7 +7627,6 @@ async function viewTokens(c) {
 
   c.innerHTML = viewHead('API Tokens',
     'Non-interactive credentials for scripts and CI. Send as Authorization: Bearer gpm_...; scopes limit what each token can reach.') +
-    aboutPageHtml('page.apiTokens') +
     `<div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Create token</p>
       <div class="inline-fields">
@@ -7895,7 +7814,7 @@ async function viewLogs(c) {
 
   c.innerHTML = `
     <div class="row-between view-head">
-      <div><h2>Access Logs</h2><p>Most recent proxied requests, newest first (in-memory buffer).</p>${aboutPageHtml('page.accessLogs')}</div>
+      <div><h2>Access Logs</h2><p>Most recent proxied requests, newest first (in-memory buffer).</p></div>
       <div style="display:flex;gap:10px">
         <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
         <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
@@ -7943,7 +7862,6 @@ async function viewHistory(c) {
       <h2>History</h2>
       <p>Every change is a git commit. Reviewable, attributable, and reversible.</p>
     </div>
-    ${aboutPageHtml('page.history')}
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Backup &amp; restore</p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -8059,7 +7977,6 @@ async function viewErrorPages(c) {
 
   c.innerHTML = viewHead('Error Pages',
     'Custom HTML for the errors gpm generates itself - a dead upstream, a denial, a rate limit. Applies to every host unless a host overrides it in its own editor.')
-    + aboutPageHtml('page.errorPages')
     + `<div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">What these replace</p>
       <p class="muted" style="font-size:11.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), an auth-middleware refusal (401/403, and the 502/503 an unavailable auth backend or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
@@ -8227,7 +8144,7 @@ async function viewSettings(c, tab) {
   const stls = s.tls || {};
 
   c.innerHTML = `
-    <div class="view-head"><h2>Settings</h2><p>What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.</p>${aboutPageHtml('page.settings')}</div>
+    <div class="view-head"><h2>Settings</h2><p>What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.</p></div>
     <div class="tabs" id="set-tabs" role="tablist">
       ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" data-tab="${esc(t.id)}" aria-selected="false">${esc(t.label)}</button>`).join('')}
     </div>
