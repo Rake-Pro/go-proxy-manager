@@ -1,7 +1,7 @@
 # Discover Docker containers
 
 Turn labelled Docker containers into managed proxy hosts, over a read-only
-Engine API connection. Configure it under **Settings -> Docker discovery**; the
+Engine API connection. Configure it under **Integrations -> Docker discovery**; the
 full field and label reference is
 [Settings: Docker container discovery](../reference/config/settings/docker-discovery.md)
 and the rationale is [design/docker-discovery.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/docker-discovery.md).

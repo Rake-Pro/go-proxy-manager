@@ -105,10 +105,10 @@ replicates on its own channel. The single-writer rule makes a shared volume safe
 ```
 <cert-dir>/                     GPM_CERT_DIR, default /data/certs
   acme/
-    accounts/<hash>.key         ACME account key - both nodes must present the same one
-    issued/<name>/              leaf cert + key + meta.json - leader writes, both read
+    accounts/<hash>.key         ACME account key: both nodes must present the same one
+    issued/<name>/              leaf cert + key + meta.json: leader writes, both read
   sso_signing.key               only when GPM_SSO_SIGNING_KEY is unset (see below)
-  sso_not_before                SSO revocation watermark - shared, re-read on a ticker
+  sso_not_before                SSO revocation watermark: shared, re-read on a ticker
 ```
 
 Either put `<cert-dir>` on a shared volume (NFS, replicated block device) with

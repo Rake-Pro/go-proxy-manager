@@ -3,7 +3,7 @@
 Point Pi-hole and/or Cloudflare records at the edge automatically, and preview
 every change before the first write.
 
-Configure the backends once under **Settings -> DNS sync** (see
+Configure the backends once under **Integrations -> DNS sync** (see
 [Settings: DNS sync](../reference/config/settings/dns-sync.md)), then opt
 individual hosts in with `dns.lanDirect` / `dns.publicCname`.
 

@@ -3,7 +3,7 @@
 Status: **phase 1 implemented.** The "Recommended phase 1" plan below ships:
 SSO watermark refresh loop, static `GPM_HA_ROLE` leader/follower gate, follower
 `git pull --ff-only` config poll, and the deployment recipe in
-[High availability](../operations/high-availability.md). Phase 2 (automatic election, shared bare repo,
+[High availability](../docs/operations/high-availability.md). Phase 2 (automatic election, shared bare repo,
 active/active) remains a proposal. Upstream groups already remove the
 single-node dependency *behind* gpm (a host's backends fail over); the gpm
 instance itself is still a single point of failure. This document settles a
@@ -14,7 +14,7 @@ propagation, traffic-side failover, and stream/UDP state.
 
 The target is the real deployment: a **two-node homelab edge pair**, each an
 instance of the single-binary/single-compose stack described in
-[Install with Docker Compose](../getting-started/install-docker.md). The design is deliberately sized for that,
+[Install with Docker Compose](../docs/getting-started/install-docker.md). The design is deliberately sized for that,
 not for a large fleet.
 
 ## Dependency posture (the deciding lens)
