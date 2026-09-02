@@ -7,13 +7,13 @@ scope list, used by scripts and CI instead of an admin session cookie.
 |-------|------|----------|-------|
 | <span id="api-token-scopes"></span>  `scopes` | []string | yes | What this token may do (below). At least one. |
 | <span id="api-token-expires-at"></span>  `expiresAt` | RFC3339 time | no | Token stops authenticating after this instant. Unset never expires. |
-| <span id="api-token-token-hash"></span>  `tokenHash` | string | **server-owned** | Lowercase SHA-256 hex digest of the secret. Written by the server; a client-supplied value is discarded, and it is **never returned by any endpoint** (`json:"-"`) - a digest is offline-crackable. It exists only in the YAML at rest. |
+| <span id="api-token-token-hash"></span>  `tokenHash` | string | **server-owned** | Lowercase SHA-256 hex digest of the secret. Written by the server; a client-supplied value is discarded, and it is **never returned by any endpoint** (`json:"-"`): a digest is offline-crackable. It exists only in the YAML at rest. |
 | <span id="api-token-disabled"></span>  `disabled` | bool | no | Keep the token in config without it authenticating. |
 
 **The secret is never stored.** It is generated server-side (`gpm_` + 32 random
 bytes, base64url) and returned **exactly once**, as the `token` field in the
 response to the `PUT` that created it. Only its digest is committed, in a plain
-string field rather than a `Secret` - a digest is not a value to resolve from the
+string field rather than a `Secret`: a digest is not a value to resolve from the
 environment, and the store refuses literal `Secret` values outright.
 
 ```
@@ -34,43 +34,43 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
 
 - **write implies read** on the same subject; read never implies write.
 - `*` matches any subject, but a concrete subject never satisfies a `*`
-  requirement - a whole-config read (`/api/config`, `/api/history`, `/api/logs`,
+  requirement: a whole-config read (`/api/config`, `/api/history`, `/api/logs`,
   `/api/upstream-health`) genuinely needs `*:read`.
 - `admin` satisfies everything, and is the **only** scope that reaches:
   - `/api/api-tokens` (a token that could mint tokens could widen itself),
   - **`PUT /api/settings`** (see below),
-  - `GET /api/backup` - the archive is the raw on-disk YAML, so unlike the JSON
+  - `GET /api/backup`: the archive is the raw on-disk YAML, so unlike the JSON
     reads it carries the api-tokens' stored digests,
   - `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`,
-  - `/debug/pprof/*` when profiling is enabled - a heap dump and the process
+  - `/debug/pprof/*` when profiling is enabled: a heap dump and the process
     command line contain resolved backend credentials in cleartext, and every
     token principal is admin-*role* by construction, so the role gate alone is
     not a boundary there.
 
   `GET /metrics` is gated the same way but on its own, narrower scope
-  (`metrics:read`) rather than `admin` - an exposition is not a credential dump.
+  (`metrics:read`) rather than `admin`: an exposition is not a credential dump.
 
 **`settings:write` does not reach `PUT /api/settings`.** Writing settings is
 admin-equivalent and takes the `admin` scope: a settings write can point
 `dnsSync.pihole.url` or a webhook at an attacker-controlled URL while supplying
 `${ENV:SOME_TOKEN}` as its credential, and the write itself triggers the
-reconcile/dispatch that resolves that env var and sends it offsite - and it can
+reconcile/dispatch that resolves that env var and sends it offsite, and it can
 rewrite `adminAuth` outright. `settings:read` still grants `GET /api/settings`
 (reading resolves nothing). `settings:write` remains a valid scope string for
 forward compatibility but grants nothing beyond `settings:read` today; the UI
 greys the box out rather than offering a grant that does nothing.
 
-**Reverting an `APIToken` is refused** - scoped (`POST
+**Reverting an `APIToken` is refused**: scoped (`POST
 /api/api-tokens/{name}/revert`) and whole-config (`POST /api/revert`, which
 preserves the `api-tokens` directory across the restore). Restoring an older
 token file would restore an older `tokenHash` and silently revive a secret the
 operator rotated away, so rotation would stop meaning revocation. Create a
 replacement token instead.
 
-Valid subjects are the REST resource plurals - `proxy-hosts`, `redirect-hosts`,
+Valid subjects are the REST resource plurals (`proxy-hosts`, `redirect-hosts`,
 `stream-hosts`, `parked-hosts`, `certificates`, `client-cas`, `dns-providers`,
 `identity-providers`, `upstream-groups`, `access-lists`, `middlewares`,
-`api-tokens` - plus five pseudo-resources for non-CRUD endpoint groups:
+`api-tokens`), plus five pseudo-resources for non-CRUD endpoint groups:
 `settings`, `dns-sync`, `ingress-discovery`, `docker-discovery` and `metrics`. An unknown subject or verb is rejected at write time.
 
 **`metrics:read`** is what a Prometheus scrape credential needs for
@@ -97,7 +97,7 @@ expiresAt: 2027-01-01T00:00:00Z
 resolved as a token *before* the cookie path and never falls through to it: a
 presented-but-invalid token is a `401`, not an invitation to try a session cookie
 riding along on the same request. Any other bearer scheme is left alone and the
-cookie path runs as usual. Token principals are **CSRF-exempt** - the
+cookie path runs as usual. Token principals are **CSRF-exempt**: the
 double-submit check defends against a browser attaching ambient credentials, and
 a bearer token is never attached automatically. Successful and failed token
 authentications are logged (token name on success; never any secret material).

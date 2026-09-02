@@ -20,7 +20,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 }
 
 // haPair builds a leader store publishing to a bare repo, plus a follower store
-// cloned from it - the phase-1 topology from docs/design/ha.md, on temp dirs.
+// cloned from it - the phase-1 topology from design/ha.md, on temp dirs.
 func haPair(t *testing.T) (leader, follower *Store, push func()) {
 	t.Helper()
 	ctx := context.Background()

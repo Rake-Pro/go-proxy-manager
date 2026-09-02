@@ -20,17 +20,17 @@ unchanged.
 
 | Concern | Shared with Ingress discovery | Differs |
 |---------|-------------------------------|---------|
-| Reconcile engine | `internal/discovery.Plan` - the whole full-state plan: ownership by name and domain, freeze-on-derive-failure, fail-closed on an unresolvable profile, operator-owned `disabled`/`maintenance` carry-forward, one commit per run | - |
+| Reconcile engine | `internal/discovery.Plan`, the whole full-state plan: ownership by name and domain, freeze-on-derive-failure, fail-closed on an unresolvable profile, operator-owned `disabled`/`maintenance` carry-forward, one commit per run | none |
 | Template type | `model.IngressHostTemplate`, same fields, same validators | `upstream`/`upstreamGroupRef` are ignored (derived per container) and not required |
 | Profiles | Same map type, same name-only selection, same "undefined name is a skip, never a downgrade" rule | `dockerDiscovery.profiles` empty inherits `ingressDiscovery.profiles` |
-| Label/annotation prefix | `ingressDiscovery.annotationPrefix` (default `gpm.rake.pro`), including the prefix-migration refusal | - |
+| Label/annotation prefix | `ingressDiscovery.annotationPrefix` (default `gpm.rake.pro`), including the prefix-migration refusal | none |
 | Ownership marker | Key `<prefix>/managed-by`, and `<prefix>/disabled-by` for a self-placed hold | Value is `docker-discovery`, not `ingress-discovery` |
 | Domain validation | `model.IsHostname` + `allowedDomainSuffixes`, per-profile narrowing included | Hostnames arrive in one comma-separated label instead of `spec.rules[].host` |
 | Freeze rule | A managed host is deleted only after a complete, successful listing | A non-array body is the "not an `IngressList`" check's counterpart |
 | Client | Plain `net/http` + `encoding/json`, read-only, bounded reads, no redirects, link-local refused | Unix socket (or `tcp://`/`https://`) instead of an HTTPS API server with a bearer token |
 | Trigger | Full-state reconcile, poll interval with a 15s floor | Engine event stream drives the normal case, debounced 2s; the poll is the fallback |
 | Derived name | `<prefix>-<source>` shape, `ValidateName`-checked | `dkr-<container name>` (lowercased), vs `ing-<name>.<namespace>` |
-| HA | Leader-only writer; a follower runs neither reconciler | - |
+| HA | Leader-only writer; a follower runs neither reconciler | none |
 
 ## Decisions
 

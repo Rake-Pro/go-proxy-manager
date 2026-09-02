@@ -218,7 +218,7 @@ func TestSaveAllowsGeoRuleWithDB(t *testing.T) {
 }
 
 // TestSaveGeoRuleNoPredicateSkipsGate confirms an unwired store (nil predicate,
-// e.g. the CLI importer) is unaffected by the gate.
+// e.g. a CLI subcommand) is unaffected by the gate.
 func TestSaveGeoRuleNoPredicateSkipsGate(t *testing.T) {
 	st := newTestStore(t)
 	if _, err := st.Save(context.Background(), geoAccessList("geoblock"), Author{}); err != nil {

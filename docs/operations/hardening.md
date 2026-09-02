@@ -8,7 +8,7 @@ The settings to check before an instance faces the internet.
 - Leave `GPM_COOKIE_SECURE` at its `auto` default. The session cookie becomes
   `Secure` (and `__Host-`-prefixed) on its own once the request reaches gpm over
   TLS, arrives through a **trusted** proxy asserting `X-Forwarded-Proto: https`,
-  or `settings.externalBaseURL` is an `https://` URL - so a bootstrap login over
+  or `settings.externalBaseURL` is an `https://` URL, so a bootstrap login over
   `http://127.0.0.1:8081` works and the same deployment hardens itself the
   moment it is fronted. Set `1` to force `Secure` everywhere and `0` to force it
   off; `0` against an `https://` `externalBaseURL` is only sane for a deliberate

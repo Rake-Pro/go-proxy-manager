@@ -16,7 +16,7 @@ certificate strategy. For the very first host, start at
 ## Steps
 
 1. **Pick the certificate.** A wildcard already covering the name needs nothing
-   new. Otherwise create a `Certificate` object first - selection is by SNI, so
+   new. Otherwise create a `Certificate` object first: selection is by SNI, so
    the certificate must exist before the host serves HTTPS.
 2. **Create the proxy host:**
 

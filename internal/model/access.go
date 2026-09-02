@@ -135,7 +135,7 @@ func (s AccessListSource) EntryLimit() int {
 // database (GPM_GEOIP_DB); no database ships with gpm (GeoLite2's licence
 // forbids redistribution). Evaluation order within a list is: explicit
 // IP/CIDR rules, then geo, then DefaultAction - see
-// docs/design/http3-geoip-mtls.md.
+// design/http3-geoip-mtls.md.
 type AccessListGeo struct {
 	// CountryAllow, if non-empty, is a whitelist: only these ISO-3166-1
 	// alpha-2 country codes pass. Takes priority over CountryDeny - when set,

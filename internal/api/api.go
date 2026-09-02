@@ -153,7 +153,7 @@ type Deps struct {
 	// itself lives in internal/server (it is not an /api/ route), so the API
 	// only ever reports on it.
 	MetricsEnabled bool
-	// Role is the static HA role of this instance (docs/design/ha.md phase 1).
+	// Role is the static HA role of this instance (design/ha.md phase 1).
 	// A follower refuses every config write with 503 and reports itself
 	// read-only in the capability probe; reads are unaffected. The zero value is
 	// the leader, i.e. today's single-node behaviour.
@@ -693,7 +693,7 @@ func New(d Deps) http.Handler {
 	// Kubernetes Ingress discovery: reconcile annotated cluster Ingresses into
 	// template-derived, managed-labelled proxy hosts (which then feed DNS sync),
 	// and report the last run. Writes are ownership-gated and the cluster read is
-	// strictly read-only; see docs/design/ingress-discovery.md.
+	// strictly read-only; see design/ingress-discovery.md.
 	mux.HandleFunc("POST /ingress-discovery/reconcile", d.scoped("ingress-discovery:write", func(w http.ResponseWriter, r *http.Request) {
 		if d.IngressDiscoveryReconcile == nil {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
@@ -749,7 +749,7 @@ func New(d Deps) http.Handler {
 	// and report the last run. The Engine API is read strictly read-only, and
 	// writes are ownership-gated on a label value this reconciler alone uses, so
 	// it can never touch a host Ingress discovery owns. See
-	// docs/design/docker-discovery.md.
+	// design/docker-discovery.md.
 	mux.HandleFunc("POST /docker-discovery/reconcile", d.scoped("docker-discovery:write", func(w http.ResponseWriter, r *http.Request) {
 		if d.DockerDiscoveryReconcile == nil {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))

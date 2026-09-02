@@ -30,3 +30,7 @@ coverage.txt
 .vscode/
 *.swp
 .DS_Store
+
+# Local agent working notes (kept out of the public repo on purpose)
+CLAUDE.md
+CLAUDE.local.md

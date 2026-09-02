@@ -4,9 +4,9 @@ Outbound operational alerts to ntfy, Discord or a generic JSON webhook.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| <span id="settings-notifications"></span> `notifications` | NotificationsSettings | Outbound alert targets - ntfy/Discord/generic (below). |
+| <span id="settings-notifications"></span> `notifications` | NotificationsSettings | Outbound alert targets: ntfy/Discord/generic (below). |
 
-Outbound operational alerts to ntfy, Discord, or a generic JSON webhook - a
+Outbound operational alerts to ntfy, Discord, or a generic JSON webhook, a
 renewal failure, an approaching or actual cert expiry, an upstream health
 flap, an ACME account error, a frozen discovery reconciler, or (opt-in) a
 config change. Delivery is asynchronous and best-effort, mirroring `webhooks`
@@ -25,7 +25,7 @@ own payload shapes, own event filtering). Empty (default) sends nothing.
 | <span id="settings-notifications-targets-name"></span> `name` | string | yes | Name-safe identifier, shown in logs and status. |
 | <span id="settings-notifications-targets-type"></span> `type` | string | yes | `ntfy`, `discord`, or `generic`. |
 | <span id="settings-notifications-targets-url"></span> `url` | string | yes | Absolute http/https endpoint: an ntfy topic URL, a Discord webhook URL (must contain `/api/webhooks/`), or any endpoint for `generic`. |
-| <span id="settings-notifications-targets-secret"></span> `secret` | Secret | no | ntfy access token or `generic` bearer token, sent as `Authorization: Bearer <value>`. Unused for `discord` - the webhook URL is itself the credential. |
+| <span id="settings-notifications-targets-secret"></span> `secret` | Secret | no | ntfy access token or `generic` bearer token, sent as `Authorization: Bearer <value>`. Unused for `discord`: the webhook URL is itself the credential. |
 | <span id="settings-notifications-targets-disabled"></span> `disabled` | bool | no | Keep the target configured without firing it. |
 | <span id="settings-notifications-targets-events"></span> `events` | []string | no | Subset of event kinds this target receives. Empty selects the default set (every kind below except `config.changed`). |
 
@@ -40,12 +40,12 @@ own payload shapes, own event filtering). Empty (default) sends nothing.
 | `upstream.recovered` | The same member flips back up. | yes |
 | `acme.account_error` | Reserved for ACME account/directory-level failures (currently folded into `cert.renewal_failed`; the kind exists for forward compatibility and manual test sends). | yes |
 | `discovery.frozen` | A Kubernetes Ingress or Docker discovery reconcile fails past the freeze boundary (managed hosts are left untouched, stale). | yes |
-| `config.changed` | Any successful config write (the same events `webhooks` fires on). Noisy by default - **opt-in per target**. | no |
+| `config.changed` | Any successful config write (the same events `webhooks` fires on). Noisy by default: **opt-in per target**. | no |
 
 **Payload shapes**
 
 - `ntfy`: POST to the topic URL with the message as the plain-text body; `Title`, `Priority` (`3`/`4`/`5` for info/warning/critical), and `Tags` headers carry the summary and severity. `secret` rides as `Authorization: Bearer <token>`.
-- `discord`: POST `{"content", "embeds": [{"title", "description", "color", "fields": [{"name", "value"}]}]}` to the webhook URL. No `Authorization` header - the URL is the credential.
+- `discord`: POST `{"content", "embeds": [{"title", "description", "color", "fields": [{"name", "value"}]}]}` to the webhook URL. No `Authorization` header: the URL is the credential.
 - `generic`: POST `{"kind", "title", "body", "severity", "fields", "time"}` as JSON, with the kind repeated in the `X-GPM-Event` header. `secret` rides as `Authorization: Bearer <token>`.
 
 **Delivery is bounded, and drops rather than queues.** At most 8 deliveries are
@@ -56,8 +56,8 @@ receiver that cannot keep up, not a gpm backlog to drain.
 
 **Checking a target**, mirroring the webhook endpoints:
 
-- `GET /api/notifications/status` - one row per configured target with the outcome of its most recent send. In-memory and per-process; resets on restart.
-- `POST /api/notifications/{name}/test` - sends a synthetic event and waits up to 5s for the answer, bypassing the target's `events` filter and the dedup window. A **disabled** target is still tested. A refused or timed-out delivery comes back as `200` with `ok: false`; only an unknown target name is a `404`.
+- `GET /api/notifications/status`: one row per configured target with the outcome of its most recent send. In-memory and per-process; resets on restart.
+- `POST /api/notifications/{name}/test`: sends a synthetic event and waits up to 5s for the answer, bypassing the target's `events` filter and the dedup window. A **disabled** target is still tested. A refused or timed-out delivery comes back as `200` with `ok: false`; only an unknown target name is a `404`.
 
 ```yaml
 notifications:

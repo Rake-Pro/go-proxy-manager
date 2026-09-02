@@ -15,7 +15,7 @@ TSIG-signed dynamic update, or a delegated acme-dns zone.
    is refused at write time, naming the missing key. Set it to the zone apex the
    UPDATE is addressed to (`example.com`), not the challenge name. The solver
    also carries an SOA-based zone detector, and it accepts a detected zone only
-   when that zone is a suffix of the challenge name - but that path is not
+   when that zone is a suffix of the challenge name, but that path is not
    reachable through the API or the UI today, because validation requires the
    key.
 
@@ -46,7 +46,7 @@ config:
 
 Link-local, unspecified and multicast literals are refused whatever this is set
 to, and a `3xx` from the acme-dns server is reported as a failed update rather
-than followed - the request carries `X-Api-User` and `X-Api-Key`.
+than followed: the request carries `X-Api-User` and `X-Api-Key`.
 
 ## Verify
 

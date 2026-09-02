@@ -6,10 +6,10 @@
 [![License](https://img.shields.io/github/license/Rake-Pro/go-proxy-manager)](LICENSE)
 [![Go version](https://img.shields.io/github/go-mod/go-version/Rake-Pro/go-proxy-manager)](go.mod)
 
-A standalone edge for homelab and small-site ingress - TLS termination and
+A standalone edge for homelab and small-site ingress: TLS termination and
 ACME, SSO and mTLS, access control, DNS publishing, Kubernetes and Docker
 discovery,
-git-backed config, a REST API and a web UI - in one static binary.
+git-backed config, a REST API and a web UI, in one static binary.
 
 - A single static binary that terminates TLS for many domains
 - Reverse-proxies them to your backends
@@ -26,7 +26,7 @@ git-backed config, a REST API and a web UI - in one static binary.
   History view or the API.
 - **Typed auth as config, not text snippets.** OIDC, forward-auth,
   auth-request, client-cert and basic auth are validated objects with referential
-  integrity - a dangling reference is a load-time error, not a 2 a.m. outage.
+  integrity: a dangling reference is a load-time error, not a 2 a.m. outage.
 - **An in-product certificate authority.** Generate a client CA, issue mTLS
   client certificates as PKCS#12 downloads, and track expiry, with no
   external tooling.
@@ -40,8 +40,7 @@ git-backed config, a REST API and a web UI - in one static binary.
 - **One CGO-free binary.** 9 direct dependencies, all pure Go or
   `golang.org/x`; every import is justified against the stdlib first.
 - **The one non-core dependency is SQLite.** `modernc.org/sqlite` (plus 7
-  indirect modules) backs the local session store and the one-time NPM
-  importer, not the proxying path.
+  indirect modules) backs the local session store, not the proxying path.
 
 ## Features
 
@@ -82,7 +81,7 @@ git-backed config, a REST API and a web UI - in one static binary.
   per-host as a nullable three-state override) is the single setting that
   decides whose `X-Forwarded-For` is believed, and the address it derives is
   what access lists, geo, rate limits, every `allowFrom` exemption, the admin
-  login lockout, the access log and the upstream headers all compare - see
+  login lockout, the access log and the upstream headers all compare: see
   [Client IP and the three trust
   tiers](docs/concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers).
 - **IP access lists.** Allow/deny CIDR rules, default-deny, optional GeoIP
@@ -101,7 +100,7 @@ git-backed config, a REST API and a web UI - in one static binary.
 - **Auth-request.** An `auth_request`-style subrequest to an identity
   outpost.
 - **Client-certificate auth.** Requires a verified mTLS certificate, with an
-  optional trusted-network exemption - see
+  optional trusted-network exemption: see
   [which IP `allowFrom` compares](docs/concepts/request-pipeline.md#which-ip-allowfrom-compares)
   before relying on it.
 - **HTTP basic auth.** An auth middleware in `basic` mode gates a host on local
@@ -113,7 +112,7 @@ git-backed config, a REST API and a web UI - in one static binary.
   never a redirect.
 - **Path and Host escape hatches.** Strip a location's prefix, prefix an
   upstream base path, and override the Host header sent upstream.
-- **Bouncer hook.** Denies on a CrowdSec LAPI or generic HTTP verdict - a deny
+- **Bouncer hook.** Denies on a CrowdSec LAPI or generic HTTP verdict: a deny
   hook, not a bundled WAF.
 - **Scoped security headers.** Per-header scope (`all` / `generated-only` /
   `proxied-only`) so a header safe on gpm's own pages never breaks a proxied
@@ -146,9 +145,7 @@ git-backed config, a REST API and a web UI - in one static binary.
   summary covering data-plane listeners, certificate counts and
   upstream-group health.
 - **Git-backed config.** Full referential validation, per-commit history, and
-  revert - whole-config or scoped to one object.
-- **NPM importer.** One-time, best-effort import from an existing NPM/NPMplus
-  data directory.
+  revert: whole-config or scoped to one object.
 - **Structured logging.** zerolog, with a toggleable access log and
   slow-request warnings.
 - **Prometheus metrics.** Opt-in `/metrics`, no `client_golang` dependency,
@@ -251,7 +248,7 @@ upstream: {scheme: http, host: backend, port: 8080}
 tls: {certificateRef: wildcard, forceSSL: true}
 ```
 
-`tls` is optional - omit it entirely for a first run and the host is reachable
+`tls` is optional: omit it entirely for a first run and the host is reachable
 over plain HTTP on `:80` with no certificate configured yet; add `tls` once
 you're ready to issue or attach one.
 
@@ -289,8 +286,7 @@ go build -o gpm ./cmd/gpm     # build the binary
 go test ./...                 # run the test suite (hermetic; needs `git` on PATH)
 ```
 
-Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm totp-secret`,
-`gpm import -npm-data <dir>`.
+Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm totp-secret`.
 
 ## Security model
 
@@ -301,7 +297,7 @@ Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm totp-secret`,
 - All trust decisions are rooted in the connection peer IP, never a forwarded
   header, unless that peer is explicitly trusted.
 - Secrets are referenced, never stored: literal secret values are rejected at
-  commit time. API token secrets are never stored at all - only their SHA-256
+  commit time. API token secrets are never stored at all: only their SHA-256
   digest is committed, and the plaintext is shown exactly once at creation.
 - API tokens are scope-limited, not just role-limited: token management, writing
   settings, backup, restore, whole-config revert and the pprof endpoints all
@@ -316,7 +312,7 @@ For deployment hardening notes see
 ## Project layout
 
 ```
-cmd/gpm/            entrypoint, subcommands (daemon, hashpw, totp-secret, import)
+cmd/gpm/            entrypoint, subcommands (daemon, hashpw, totp-secret)
 internal/model/     config object types + validation
 internal/store/     git-backed config store
 internal/dataplane/ TLS, routing, middleware chain, reverse proxy
@@ -326,12 +322,4 @@ internal/auth/      sessions, OIDC, forward-auth, role mapping
 internal/oidc/      OIDC client (discovery, PKCE, token verification)
 internal/api/       REST API
 internal/ui/        embedded web UI (go:embed)
-internal/importer/  Nginx-Proxy-Manager importer
 ```
-
-## Migrating from Nginx Proxy Manager
-
-- **One-time importer.** Reads an existing NPM/NPMplus `/data` directory and
-  maps proxy/redirect/stream/parked hosts, access lists, and certificates
-  into gpm's schema. See
-  [docs/how-to/migrate-from-npm.md](docs/how-to/migrate-from-npm.md).

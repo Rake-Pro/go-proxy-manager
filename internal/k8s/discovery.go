@@ -84,7 +84,7 @@ type Status struct {
 }
 
 // Applier commits one reconcile's worth of changes as a SINGLE revision: every
-// upsert and every delete in one commit. See docs/design/ingress-discovery.md section 2
+// upsert and every delete in one commit. See design/ingress-discovery.md section 2
 // for why granularity is per-reconcile rather than per-object. It returns the
 // commit hash, or "" when there was nothing to write.
 type Applier func(ctx context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error)
