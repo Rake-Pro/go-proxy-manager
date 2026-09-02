@@ -35,7 +35,6 @@ data plane and the admin control plane.
 | Look up a config key | [Configuration reference](reference/config/README.md) |
 | Run it in production | [Operations](operations/backup-and-restore.md) |
 | Automate it | [REST API](reference/api.md) |
-| Move off Nginx Proxy Manager | [Migrate from NPM](how-to/migrate-from-npm.md) |
 
 ## Planes and ports
 

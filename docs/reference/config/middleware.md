@@ -18,10 +18,10 @@ object carries exactly one `type` and its matching spec.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-auth-identity-provider"></span>  `identityProvider` | string | - | yes, except in `client-cert` and `basic` mode | Name of an [IdentityProvider](identity-provider.md). Naming one in `client-cert` or `basic` mode is an error. A dangling name is a load-time error, and the data plane fails closed with `503` if one ever reaches it. |
+| <span id="middleware-auth-identity-provider"></span>  `identityProvider` | string | none | yes, except in `client-cert` and `basic` mode | Name of an [IdentityProvider](identity-provider.md). Naming one in `client-cert` or `basic` mode is an error. A dangling name is a load-time error, and the data plane fails closed with `503` if one ever reaches it. |
 | <span id="middleware-auth-mode"></span>  `mode` | string | the provider's `type` | no | `oidc` \| `forward-auth` \| `auth-request` \| `client-cert` \| `basic`. See the mode table below. |
 | <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass. **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
-| <span id="middleware-auth-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this gate, compared against the derived client IP. Valid in `auth-request`, `client-cert` and `basic` mode only; **refused in `oidc` and `forward-auth` mode**, where the gate has no bypass to honour. With `mode` unset the effective mode is the provider's `type`, so an exemption against an `oidc` or `forward-auth` provider is refused too - set `mode` explicitly rather than relying on the default. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-auth-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this gate, compared against the derived client IP. Valid in `auth-request`, `client-cert` and `basic` mode only; **refused in `oidc` and `forward-auth` mode**, where the gate has no bypass to honour. With `mode` unset the effective mode is the provider's `type`, so an exemption against an `oidc` or `forward-auth` provider is refused too: set `mode` explicitly rather than relying on the default. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
 | <span id="middleware-auth-basic"></span>  `basic` | BasicAuthSpec | none | yes in `basic` mode | Local credentials for `basic` mode. Table below. Setting it in any other mode is an error. |
 
@@ -39,9 +39,9 @@ object carries exactly one `type` and its matching spec.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-auth-basic-users"></span>  `users` | []BasicAuthUser | - | yes | Accepted credentials. At least one, at most 64. |
-| <span id="middleware-auth-basic-users-username"></span>  `users[].username` | string | - | yes | Compared in full; no `:` or line break. |
-| <span id="middleware-auth-basic-users-password-hash"></span>  `users[].passwordHash` | string | - | yes | bcrypt hash (`$2a$`/`$2b$`/`$2y$`, 60 chars). Anything else is refused at write time. |
+| <span id="middleware-auth-basic-users"></span>  `users` | []BasicAuthUser | none | yes | Accepted credentials. At least one, at most 64. |
+| <span id="middleware-auth-basic-users-username"></span>  `users[].username` | string | none | yes | Compared in full; no `:` or line break. |
+| <span id="middleware-auth-basic-users-password-hash"></span>  `users[].passwordHash` | string | none | yes | bcrypt hash (`$2a$`/`$2b$`/`$2y$`, 60 chars). Anything else is refused at write time. |
 | <span id="middleware-auth-basic-realm"></span>  `realm` | string | the host name | no | Realm in the `WWW-Authenticate` challenge. Printable ASCII, no `"` or `\`, at most 128 chars. |
 
 ```yaml
@@ -59,11 +59,11 @@ auth:
 
 Generate a hash with `htpasswd -nbB admin 'hunter2'` (the part after the colon),
 or POST a plaintext `password` field instead of `passwordHash` and gpm hashes it
-server-side - on a `type: auth` middleware and on an inline `auth` block on a
+server-side, on a `type: auth` middleware and on an inline `auth` block on a
 proxy host or one of its locations alike. A password is never stored and never
 returned: only the hash reaches the git-backed config and the API response.
 
-The gate behaves exactly like the deprecated access-list basic auth it replaces -
+The gate behaves exactly like the deprecated access-list basic auth it replaces:
 same `401` and `WWW-Authenticate` challenge, same per-client-IP lockout after 5
 failures for 15 minutes (answered identically to a wrong password, so the response
 is no oracle), same bounded bcrypt work. What it adds is the treatment every other
@@ -73,7 +73,7 @@ render the refusal, denials are counted, and `allowFrom` exempts trusted network
 
 In `client-cert` mode the identity comes from the TLS handshake, so no
 `identityProvider` is named (setting one is an error). The gate admits a request
-only when the handshake **verified** a client certificate for this host - i.e.
+only when the handshake **verified** a client certificate for this host, i.e.
 the host runs `tls.clientAuth` and the trust anchor (and its CRL, if configured)
 accepted the certificate; otherwise it replies `401`. `clientCertRoles` maps a
 certificate subject to a role: the key is the RFC 2253 subject (`CN=ops,O=Corp`)
@@ -87,7 +87,7 @@ chain and this middleware is what refuses them, leaving an SSO middleware free t
 cover other hosts or locations.
 
 `allowFrom` works here exactly as it does in `auth-request` mode: a client whose
-resolved IP falls in one of the listed CIDRs is proxied **straight through** - no
+resolved IP falls in one of the listed CIDRs is proxied **straight through**: no
 certificate requirement and no `clientCertRoles` check at all. That is the "the LAN
 does not need a client certificate, the internet does" shape: run
 `tls.clientAuth.mode: optional`, list the LAN in `allowFrom`, and every other client
@@ -129,7 +129,7 @@ At least one of the four must be set.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-guard-triggers"></span>  `triggers` | []GuardTrigger | - | yes | At least one. A trigger fires when **every** field it sets matches; any firing trigger denies. |
+| <span id="middleware-guard-triggers"></span>  `triggers` | []GuardTrigger | none | yes | At least one. A trigger fires when **every** field it sets matches; any firing trigger denies. |
 | <span id="middleware-guard-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this guard's deny, compared against the derived client IP. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-guard-deny-status"></span>  `denyStatus` | int | `403` | no | Status returned when a trigger fires and the client is not exempt. |
 
@@ -137,7 +137,7 @@ At least one of the four must be set.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-guard-triggers-paths"></span>  `paths` | []string | none | no | Exact request paths this trigger covers. Matching is exact - see [the four path mechanisms](../../concepts/which-mechanism.md#four-path-aware-mechanisms). |
+| <span id="middleware-guard-triggers-paths"></span>  `paths` | []string | none | no | Exact request paths this trigger covers. Matching is exact, see [the four path mechanisms](../../concepts/which-mechanism.md#four-path-aware-mechanisms). |
 | <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | Upper-case HTTP methods this trigger covers. |
 | <span id="middleware-guard-triggers-query-equals"></span>  `queryEquals` | map[string]string | none | no | Query parameters that must equal these values for the trigger to fire. See the `;` note below. |
 
@@ -149,7 +149,7 @@ that is legal and occasionally what you want behind an `allowFrom`.
 > allow/deny decision, so `allowFrom` does not exempt it). gpm parses the query
 > the modern way, where only `&` separates parameters, so `?a=1;direct=1` is one
 > parameter `a` with the value `1;direct=1` and a `direct: "1"` trigger would not
-> fire - but the raw query is forwarded to the upstream unchanged, and a backend
+> fire, but the raw query is forwarded to the upstream unchanged, and a backend
 > still honouring the legacy `;` separator would read `direct=1` and act on it.
 > Rather than evaluate a query it cannot read the same way the upstream will, the
 > guard fails closed. This mirrors the same rule for `;` in request paths. Guards
@@ -170,12 +170,12 @@ rule; at least one rule of any kind is required.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-rewrite-rules-from"></span>  `from` | string | - | yes | The prefix (for `prefixRules`) or the pattern (for `regexRules`) to match. |
-| <span id="middleware-rewrite-rules-to"></span>  `to` | string | - | yes | The replacement path, absolute and confined by the rules below. |
+| <span id="middleware-rewrite-rules-from"></span>  `from` | string | none | yes | The prefix (for `prefixRules`) or the pattern (for `regexRules`) to match. |
+| <span id="middleware-rewrite-rules-to"></span>  `to` | string | none | yes | The replacement path, absolute and confined by the rules below. |
 
 **Every `to` is confined, on the same rules as `upstream.path`.** It must be an
 absolute path with **no `.` or `..` segment, no backslash, no `;`, and no query
-string or fragment**. The rule holds for a regex replacement template too - `$1`
+string or fragment**. The rule holds for a regex replacement template too: `$1`
 expands at request time, so the composed path is re-cleaned and re-confined to
 the upstream base path before it is forwarded, and a rewritten path that still
 carries a path separator an upstream could re-interpret is answered `400`.
@@ -224,12 +224,12 @@ rewrite:
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="middleware-rate-limit-requests"></span>  `requests` | float | - | one of | "N requests per `window`". Use this for limits that do not reduce cleanly to a per-second rate, e.g. `100` per `1m` or `5` per `1h`. Set with `window`. |
-| <span id="middleware-rate-limit-window"></span>  `window` | string | - | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
-| <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | - | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
+| <span id="middleware-rate-limit-requests"></span>  `requests` | float | none | one of | "N requests per `window`". Use this for limits that do not reduce cleanly to a per-second rate, e.g. `100` per `1m` or `5` per `1h`. Set with `window`. |
+| <span id="middleware-rate-limit-window"></span>  `window` | string | none | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
+| <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | none | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
 | <span id="middleware-rate-limit-burst"></span>  `burst` | int | `ceil(requests)` | no | Token-bucket capacity: how far above the steady rate a short spike may go. |
-| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from rate limiting entirely - no token consumed, no `429` - compared against the derived client IP. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
-| <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket - see below. Omitted means the token bucket alone governs. |
+| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
@@ -250,7 +250,7 @@ rewrite -> upstream.
 harsher penalty on top of the token bucket: the first request that exceeds
 the limit blocks that client for `blockFor`, and every request from it is
 rejected (`429`, `Retry-After` counting down to the end of the block) for the
-whole period - independent of token refill, so a client that merely pauses
+whole period, independent of token refill, so a client that merely pauses
 and resumes cannot slip back through once tokens would otherwise have
 refilled. The block is **fixed, not sliding**: repeat requests during the
 block do not push it back out, so it always expires exactly `blockFor` after
@@ -266,12 +266,12 @@ immediately.
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
 | <span id="middleware-bouncer-provider"></span>  `provider` | string | `crowdsec` | no | `crowdsec` \| `http`. Selects the verdict protocol. |
-| <span id="middleware-bouncer-url"></span>  `url` | string | - | yes | Base URL of the bouncer. For `crowdsec`, the LAPI root; for `http`, the endpoint that answers the query below. |
+| <span id="middleware-bouncer-url"></span>  `url` | string | none | yes | Base URL of the bouncer. For `crowdsec`, the LAPI root; for `http`, the endpoint that answers the query below. |
 | <span id="middleware-bouncer-api-key"></span>  `apiKey` | Secret | none | no | Sent as `X-Api-Key`. Must be a `${ENV:...}` / `${FILE:...}` placeholder; a literal is refused at commit. |
 | <span id="middleware-bouncer-timeout"></span>  `timeout` | string | `2s` | no | Go duration for one verdict lookup. |
 | <span id="middleware-bouncer-cache-ttl"></span>  `cacheTTL` | string | `60s` | no | How long a verdict is cached per client IP. In `stream` mode this is also the delta-pull interval. A verdict derived from an **error** is capped at `5s` regardless. |
 | <span id="middleware-bouncer-cache-max-entries"></span>  `cacheMaxEntries` | int | `10000` | no | LRU bound on the verdict cache, so a rotating-source-IP flood cannot grow it without bound. |
-| <span id="middleware-bouncer-on-error"></span>  `onError` | string | `fail-open` | no | `fail-open` \| `fail-closed`. What an unanswerable lookup means - see below. |
+| <span id="middleware-bouncer-on-error"></span>  `onError` | string | `fail-open` | no | `fail-open` \| `fail-closed`. What an unanswerable lookup means, see below. |
 | <span id="middleware-bouncer-deny-status"></span>  `denyStatus` | int | `403` | no | Status returned on a deny verdict. |
 | <span id="middleware-bouncer-deny-with"></span>  `denyWith` | string | `error-page` | no | `error-page` renders the host's configured page for `denyStatus`; `plain` sends a bare status body, giving a scanner nothing to fingerprint. |
 | <span id="middleware-bouncer-stream"></span>  `stream` | bool | `false` | no | `crowdsec` only. Pull the whole decision set once and delta it every `cacheTTL`, so the request hot path never calls the LAPI. |
@@ -284,7 +284,7 @@ outside gpm.
 
 It sits **after the access list and before auth**: an operator allow-list still
 wins outright (it is evaluated first, so an explicitly allowed IP is never
-overridden by an external feed), and a banned IP never reaches the IdP - no
+overridden by an external feed), and a banned IP never reaches the IdP: no
 forward-auth subrequest, no OIDC redirect. A denial is reported to the per-host
 denial counter.
 
@@ -293,7 +293,7 @@ endpoint `GET {url}/v1/decisions?ip=<client>` with `X-Api-Key: <apiKey>`. A
 `null` or empty body means "no decisions" (allow); any decision of type `ban`
 or `captcha` denies. **`captcha` is treated as a deny**: it is the LAPI telling
 the bouncer this client must prove it is human, and gpm has no captcha flow to
-hand it - serving the request anyway would silently downgrade the operator's
+hand it: serving the request anyway would silently downgrade the operator's
 decision to an allow. Decision types gpm does not implement are ignored rather
 than guessed at. The LAPI resolves range (CIDR) decisions itself, so one `ip=`
 query covers those too.
@@ -336,7 +336,7 @@ minute of guessed verdicts and keep guessing long after the bouncer recovered.
 
 `denyWith: error-page` (the default) renders the host's configured custom error
 page for `denyStatus`, falling back to the plain status body when none is
-configured; `plain` opts out of the custom page deliberately -
+configured; `plain` opts out of the custom page deliberately:
 a bare status body gives a scanner nothing to fingerprint.
 
 **CrowdSec quickstart.** On the host running the CrowdSec LAPI:
@@ -346,7 +346,7 @@ cscli bouncers add gpm
 ```
 
 Copy the printed key into the environment gpm runs with (e.g.
-`CROWDSEC_BOUNCER_KEY`) and reference it as a placeholder - never commit the
+`CROWDSEC_BOUNCER_KEY`) and reference it as a placeholder, never commit the
 literal:
 
 ```yaml

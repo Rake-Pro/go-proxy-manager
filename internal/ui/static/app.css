@@ -141,6 +141,7 @@ select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible, .switch:
 .dot.ok { background:var(--ok); box-shadow:0 0 0 3px rgba(63,185,132,.16); }
 .dot.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(232,177,76,.16); }
 .dot.err { background:var(--err); box-shadow:0 0 0 3px rgba(229,104,122,.16); }
+.dot.muted { background:var(--faint); }
 
 /* main */
 .main { flex:1 1 auto; margin-left:var(--sidebar-w); min-width:0; display:flex; flex-direction:column; }
@@ -223,11 +224,16 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .btn.danger:hover { border-color:var(--err); }
 .btn:disabled { opacity:.5; cursor:not-allowed; }
 
-/* chips */
+/* chips - one base class with state modifiers. .ok/.warn/.err/.brand/.cyan are
+   the filled/bordered pill, for a state that should draw the eye (warning,
+   error, a link to another object). A calm/neutral state (a healthy cert, a
+   live host, an up backend) instead adds .flat: no border or fill, just the
+   coloured .dot inside it plus text, so attention stays on what needs it. */
 .chip {
   display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:500;
   padding:3px 9px; border-radius:999px; border:1px solid var(--border);
   background:var(--raised); color:var(--muted); font-family:var(--mono);
+  white-space:nowrap;
 }
 .chip .dot { width:7px; height:7px; }
 .chip.ok { color:var(--ok); border-color:rgba(63,185,132,.4); background:rgba(63,185,132,.08); }
@@ -236,6 +242,10 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .chip.brand { color:var(--brand); border-color:rgba(110,139,255,.4); background:rgba(110,139,255,.08); }
 .chip.cyan { color:var(--cyan); border-color:rgba(63,208,201,.4); background:rgba(63,208,201,.08); }
 .chip.kind { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; padding:2px 7px; }
+.chip.tag { font-size:10px; padding:1px 6px; }
+.chip.flat { border-color:transparent; background:transparent; padding:3px 2px; }
+.chip.flat.ok { color:var(--muted); }
+.chip.flat.muted { color:var(--muted); }
 
 /* toggleable filter chips (e.g. hosts list zone filter) */
 .chip-row { display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
@@ -308,6 +318,18 @@ tbody td { padding:13px 16px; border-bottom:1px solid var(--border-soft); font-s
 tbody tr:last-child td { border-bottom:0; }
 tbody tr.clickable { transition:background .1s; cursor:pointer; }
 tbody tr.clickable:hover { background:var(--raised); }
+
+/* certificates list. table-layout stays auto (a data table sizes to its
+   content), but that lets an all-buttons Actions column get stretched wider
+   than it needs under width:100% - the classic width:1% trick shrinks it back
+   to content instead, and the domains column gets to keep the freed space. */
+.certs-table .col-actions { width:1%; white-space:nowrap; }
+.certs-table .col-issuance { white-space:nowrap; }
+.certs-table .col-domains { min-width:220px; }
+.certs-table td.col-domains { overflow-wrap:normal; word-break:keep-all; }
+.domain-list { overflow-wrap:normal; word-break:keep-all; }
+.cert-expiry { display:inline-flex; align-items:center; gap:8px; white-space:nowrap; }
+.expiry-date { color:var(--faint); font-family:var(--mono); font-size:11.5px; }
 
 /* search input */
 .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }

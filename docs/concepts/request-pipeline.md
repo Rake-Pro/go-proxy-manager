@@ -62,7 +62,7 @@ middleware's does.
 **Request-aware access-list rules.** An IP rule may carry `paths` (and
 `methods`), in which case it matches only a request to one of those exact paths
 with one of those methods; without them it applies to every request exactly as
-before. Ordering is unchanged - top-down, first match wins, then geo, then
+before. Ordering is unchanged: top-down, first match wins, then geo, then
 `defaultAction`.
 
 Path rules are **allow-only**, and validation refuses `action: deny` alongside
@@ -102,7 +102,7 @@ its own base path and Host header). Every stage is wrapped innermost, so
 rate-limit, access-list, bouncer, auth and guard all evaluate the ORIGINAL
 client path and no composition step can carry a request past a path-scoped
 security control. `RawQuery` is never touched, and none of it is ever an HTTP
-redirect - the method and body reach the backend unchanged.
+redirect: the method and body reach the backend unchanged.
 
 The **rewrite** middleware carries three rule kinds, evaluated exact, then
 prefix (longest first), then regex (config order), with the first match winning
@@ -110,9 +110,9 @@ and no rule seeing another rule's output. Prefix rules are boundary-matched the
 same way a location is, so `/reports` cannot capture `/reports-evil`. Regex
 rules are implicitly anchored with `^`, compiled once at config load (a bad
 pattern is a validation error naming the rule index, never a request-time
-failure), capped at 32 rules of 256 characters, and run on Go's RE2 engine -
+failure), capped at 32 rules of 256 characters, and run on Go's RE2 engine:
 linear time, no backtracking, so no ReDoS class exists. Its motivating case is
-repairing a client that mangles an upstream path - e.g. adding the trailing
+repairing a client that mangles an upstream path, e.g. adding the trailing
 slash a mobile OIDC client strips off Authentik's `/application/o/token`
 endpoint, which Django would otherwise answer `405`. The reverse proxy sets `X-Forwarded-*`, preserves the client `Host` (unless the
 upstream sets `hostHeader` to `upstream` or an explicit hostname), and
@@ -138,7 +138,7 @@ inferred from another.
 
 ### How the client IP is derived
 
-1. The connection address is `RemoteAddr` - or, on a PROXY protocol listener
+1. The connection address is `RemoteAddr`, or, on a PROXY protocol listener
    whose TCP peer is inside `proxyProtocol.trustedCIDRs`, the address that
    header asserts.
 2. If that address is **not** inside the host's effective `trustedProxies` set,
@@ -149,16 +149,16 @@ inferred from another.
 
 The effective set for a host is its own `trustedProxies` when it declares one,
 otherwise `settings.trustedProxies`. The per-host key is **nullable and
-three-state** - omitted inherits the fleet list, `[]` trusts nobody, a non-empty
-list replaces the fleet list - see
+three-state**: omitted inherits the fleet list, `[]` trusts nobody, a non-empty
+list replaces the fleet list, see
 [Per-host override](../reference/config/settings/trusted-proxies.md#per-host-override-absent-is-not-the-same-as-empty).
 
 **Bounds on the walk.** The rightmost-untrusted walk is deliberately strict, so
 a header gpm cannot fully read never becomes a client identity:
 
 - **An entry that does not parse as an address ends the walk** and gpm falls
-  back to the connection peer. A token it cannot read - an RFC 7239 obfuscated
-  identifier such as `_abc`, the literal `unknown`, a `unix:` marker - is
+  back to the connection peer. A token it cannot read (an RFC 7239 obfuscated
+  identifier such as `_abc`, the literal `unknown`, a `unix:` marker) is
   evidence the chain is not the one you configured, so it is not guessed past.
 - **Unspecified (`0.0.0.0`, `::`), broadcast and multicast addresses are treated
   as unparseable** and never become the client IP.
@@ -171,19 +171,19 @@ a header gpm cannot fully read never becomes a client identity:
 
 Everything, with no per-feature configuration:
 
-- **Access control** - `AccessList` rules and sources, geo rules.
-- **Exemptions** - `allowFrom` on guard, rate-limit, bouncer, `auth-request`
+- **Access control**: `AccessList` rules and sources, geo rules.
+- **Exemptions**: `allowFrom` on guard, rate-limit, bouncer, `auth-request`
   auth and `client-cert` auth middlewares.
-- **Throttling** - the rate-limit bucket key and the basic-auth lockout key.
-- **Outbound** - the `X-Real-IP` and `X-Forwarded-For` gpm sends to the
+- **Throttling**: the rate-limit bucket key and the basic-auth lockout key.
+- **Outbound**: the `X-Real-IP` and `X-Forwarded-For` gpm sends to the
   upstream, to a forward-auth/auth-request server, and to a bouncer.
-- **Observability** - the access log `client` field and the `/api/logs` viewer.
-- **Admin login throttling** - the admin listener derives the login and TOTP
+- **Observability**: the access log `client` field and the `/api/logs` viewer.
+- **Admin login throttling**: the admin listener derives the login and TOTP
   lockout key with the **same** function and the same `settings.trustedProxies`
   list, so a proxied admin panel does not collapse every operator into one
   lockout bucket. See
   [Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md).
-- **Upstream stickiness** - the `ip-hash` upstream-group policy hashes the
+- **Upstream stickiness**: the `ip-hash` upstream-group policy hashes the
   derived client IP, not `RemoteAddr`.
 
 ### Defaults and sharp edges
@@ -232,19 +232,19 @@ trustedProxies: []             # present but empty: not the same as omitting it
 
 ## Which IP `allowFrom` compares
 
-The one derived client IP - see [Client IP and the three trust
+The one derived client IP, see [Client IP and the three trust
 tiers](#client-ip-and-the-three-trust-tiers). Two consequences worth stating
 here, because `allowFrom` on a `client-cert` middleware is the highest-stakes
 place they apply:
 
 - **If gpm is the edge**, `allowFrom` means what it reads like: the machine that
   opened the connection. This is the default (`trustedProxies` empty) and is
-  fail-safe - a client cannot forge a header gpm does not read.
+  fail-safe: a client cannot forge a header gpm does not read.
 - **If gpm is behind an L7 proxy and you have not declared it in
   `trustedProxies`**, every request through that proxy is attributed to the
-  proxy's own address. Should that address fall inside an `allowFrom` network -
-  a Docker or Kubernetes bridge address, a sidecar, a `10.0.0.0/8` that happens
-  to contain the pod network - then **every** request arriving through it is
+  proxy's own address. Should that address fall inside an `allowFrom` network
+  (a Docker or Kubernetes bridge address, a sidecar, a `10.0.0.0/8` that happens
+  to contain the pod network), then **every** request arriving through it is
   exempt, from the internet as much as from the LAN. On a `client-cert` host
   that is a total mTLS bypass, and nothing logs it as unusual: the requests
   simply succeed.
@@ -258,6 +258,6 @@ trustedProxies: [192.0.2.10/32]
 
 Alternatives when you cannot: put the network rule in an
 [AccessList](../reference/config/access-list.md) instead, terminate the LAN on a
-separate host name with its own policy, or - behind an L4 balancer - enable the
+separate host name with its own policy, or, behind an L4 balancer, enable the
 [PROXY protocol](../reference/config/settings/proxy-protocol.md), which replaces
 the connection address before any of this runs.

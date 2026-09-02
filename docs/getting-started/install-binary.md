@@ -15,7 +15,7 @@ make build              # -> bin/gpm, with VERSION/COMMIT/DATE stamped via ldfla
 ```
 
 `go build -trimpath -o /usr/local/bin/gpm ./cmd/gpm` works too, but skips the
-version stamping `make build` does - fine for a quick local test, not for
+version stamping `make build` does, fine for a quick local test, not for
 something you will run `gpm version` against later. The container image installs
 `git` explicitly for the same reason.
 
@@ -49,7 +49,7 @@ GPM_LOG_LEVEL=info
 ```
 
 Add any other flags from the [table above](../reference/env-vars-and-flags.md#flags-and-environment-variables)
-as `GPM_*` lines here - there is no separate bare-metal flag surface.
+as `GPM_*` lines here: there is no separate bare-metal flag surface.
 
 ## Unit file
 

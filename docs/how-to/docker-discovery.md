@@ -4,12 +4,12 @@ Turn labelled Docker containers into managed proxy hosts, over a read-only
 Engine API connection. Configure it under **Settings -> Docker discovery**; the
 full field and label reference is
 [Settings: Docker container discovery](../reference/config/settings/docker-discovery.md)
-and the rationale is [design/docker-discovery.md](../design/docker-discovery.md).
+and the rationale is [design/docker-discovery.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/docker-discovery.md).
 
 ## Prerequisites
 
 - gpm able to reach the Docker Engine API read-only. A socket proxy is the
-  recommended shape - see [Engine access](#engine-access) below.
+  recommended shape: see [Engine access](#engine-access) below.
 - A certificate that already covers the hostnames the labels will publish;
   discovery never issues one.
 - Every middleware, access list and upstream group the template or a profile
@@ -37,7 +37,7 @@ it can start a privileged container and own the host. Pick one of:
 | Direct socket mount | `-v /var/run/docker.sock:/var/run/docker.sock:ro` | The read-only flag bounds the file, not the API |
 | Remote Engine over TLS | `host: https://docker.example.com:2376` with `tlsCA` (plus `tlsCert`/`tlsKey` for mutual TLS) | No skip-verify option; link-local destinations are refused at connect time |
 
-**Never publish the raw socket over plain `tcp://`** - that hands the credential
+**Never publish the raw socket over plain `tcp://`**: that hands the credential
 to anyone who can reach the port.
 
 ```yaml

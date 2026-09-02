@@ -3,7 +3,7 @@
 Ordered IP allow/deny rules and optional GeoIP country rules over the derived
 client IP (see [Client IP and the three trust
 tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)). For username/password gating use an
-[auth middleware in `basic` mode](middleware.md) - the `basicAuth`/`satisfyAny`
+[auth middleware in `basic` mode](middleware.md): the `basicAuth`/`satisfyAny`
 pair below is deprecated.
 
 | Field | Type | Notes |
@@ -26,7 +26,7 @@ pair below is deprecated.
 Rules are evaluated **top-down, first match wins**, then `geo`, then
 `defaultAction`. A rule with `paths` matches only when the request's already-
 normalised path is exactly one of them *and* the method is in the effective
-method set - so `paths` narrows a rule, it never widens one. Paths must be
+method set, so `paths` narrows a rule, it never widens one. Paths must be
 absolute, clean (no `.`/`..` segments, no trailing slash, no query string) and
 unique within the rule; anything else is refused at write time, because it could
 never match the cleaned path the router compares against.
@@ -34,8 +34,8 @@ never match the cleaned path the router compares against.
 > **`paths` are allow-only.** `action: deny` together with `paths` is refused at
 > validation. The match is **exact, case-sensitive, and does no trailing-slash
 > folding**: `/admin` covers neither `/admin/` nor `/ADMIN`. That is fine for an
-> allow rule - a spelling it misses falls through to `defaultAction`, so it fails
-> closed - and unsafe for a deny, which would fail *open* on exactly those
+> allow rule: a spelling it misses falls through to `defaultAction`, so it fails
+> closed, and unsafe for a deny, which would fail *open* on exactly those
 > spellings. Use a [guard middleware](middleware.md) for
 > deny-by-path.
 
@@ -48,7 +48,7 @@ redistribution.
 |-----|------|---------|----------|-------------|
 | <span id="access-list-geo-country-allow"></span>  `countryAllow` | []string | none | no | Whitelist of ISO-3166-1 alpha-2 codes; **only** these pass. When set it takes priority and `countryDeny` is ignored entirely. |
 | <span id="access-list-geo-country-deny"></span>  `countryDeny` | []string | none | no | Codes to reject. Every other known country falls through to `defaultAction`. Consulted only when `countryAllow` is empty. |
-| <span id="access-list-geo-on-unknown"></span>  `onUnknown` | string | mode-dependent (below) | no | `allow` \| `deny`. Governs an IP with no country in the database - private, loopback, link-local, or simply absent. |
+| <span id="access-list-geo-on-unknown"></span>  `onUnknown` | string | mode-dependent (below) | no | `allow` \| `deny`. Governs an IP with no country in the database (private, loopback, link-local, or simply absent). |
 
 **The `onUnknown` default depends on the mode, and both directions fail safe:**
 
@@ -61,7 +61,7 @@ An explicit `onUnknown` always wins over both defaults. Codes must be
 upper-case two-letter codes; anything else is refused at write time.
 
 **With geo rules configured and no database loaded, every IP is unknown**, so
-`onUnknown` alone decides - which means a whitelist list denies outright. That
+`onUnknown` alone decides: which means a whitelist list denies outright. That
 is the same fail-closed rule the L4 path applies to a stream host.
 
 ```yaml
@@ -105,7 +105,7 @@ ULA, CGNAT `100.64.0.0/10`, multicast, `192.0.0.0/24`, `198.18.0.0/15`,
 A list can also be attached to a **StreamHost**, where only the `rules` and `geo`
 dimensions are evaluated. A list carrying the deprecated `basicAuth` users is
 rejected for a stream host at validation, and so is one with any `sources` or any
-rule carrying `paths` or `source` - a raw stream has no request path and resolves
+rule carrying `paths` or `source`: a raw stream has no request path and resolves
 no ledger, so evaluating half the gate would be worse than refusing it. See
 [StreamHost](stream-host.md).
 

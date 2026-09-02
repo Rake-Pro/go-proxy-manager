@@ -16,7 +16,7 @@
 // rather than a
 // downgrade.
 //
-// See docs/design/docker-discovery.md for the decision record.
+// See design/docker-discovery.md for the decision record.
 package docker
 
 import (

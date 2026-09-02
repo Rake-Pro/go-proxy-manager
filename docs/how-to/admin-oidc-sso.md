@@ -16,7 +16,7 @@ local login kept as the anti-lockout path.
 
 Only an `oidc` provider renders a sign-in button. A settings write that turns on
 `ssoOnly` while `adminAuth.providers` names a provider that does not exist, or
-one of type `forward-auth` / `auth-request`, is **refused** - it would leave a
+one of type `forward-auth` / `auth-request`, is **refused**: it would leave a
 login page with no buttons and no password form.
 
 ### No admin login is configured

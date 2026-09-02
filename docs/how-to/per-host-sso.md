@@ -20,8 +20,8 @@ refuses a request that carries no valid identity. This is separate from
 | `oidc` | A browser redirect to the IdP; gpm is the relying party | gpm is the only thing in front of the app and you want a login page |
 | `forward-auth` | Identity headers asserted by a trusted proxy | Something ahead of gpm already authenticated the user |
 | `auth-request` | A subrequest to an identity outpost | You run an Authentik-style outpost that owns the sign-in flow |
-| `client-cert` | The TLS handshake | Devices carry certificates - see [mTLS](mtls-client-certs.md) |
-| `basic` | The middleware's own bcrypt hashes | A shared password is enough - see [Basic auth](basic-auth.md) |
+| `client-cert` | The TLS handshake | Devices carry certificates: see [mTLS](mtls-client-certs.md) |
+| `basic` | The middleware's own bcrypt hashes | A shared password is enough: see [Basic auth](basic-auth.md) |
 
 Full field rules for every mode are in
 [Middleware](../reference/config/middleware.md).
