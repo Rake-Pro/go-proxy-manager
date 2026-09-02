@@ -1,6 +1,6 @@
 # Security model
 
-Who can reach the admin plane, what a role or a token may do, and what gpm
+Who can reach the admin panel, what a role or a token may do, and what gpm
 deliberately never stores.
 
 This is a deliberate stance, not a gap: gpm has **no local user table** and no

@@ -1,7 +1,7 @@
 # Gate a host with SSO
 
-Put an identity provider in front of one proxied host, so the data plane
-refuses a request that carries no valid identity. This is separate from
+Put an identity provider in front of one proxied host, so the proxy listeners
+refuse a request that carries no valid identity. This is separate from
 [admin SSO](admin-oidc-sso.md), which governs the gpm panel itself.
 
 ## Prerequisites
@@ -87,8 +87,8 @@ Full field rules for every mode are in
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `503` and "authentication not available" | The middleware could not be compiled, usually a dangling `identityProvider` | Fix the reference; the data plane fails closed rather than serving the host open |
+| `503` and "authentication not available" | The middleware could not be compiled, usually a dangling `identityProvider` | Fix the reference; the proxy listeners fail closed rather than serving the host open |
 | Redirect loop at the IdP | The redirect URI registered at the IdP does not match `https://<host>/__gpm/oidc/callback` exactly | Register the exact URI for that host |
 | Everyone is denied with `403` | The groups claim is not in the ID token | gpm reads claims from the ID token; configure the IdP to include the groups claim there |
 | A write is refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` inheriting the provider type | Set `mode` explicitly, or move the network rule into an [access list](../reference/config/access-list.md) |
-| Sessions end after an hour | The data-plane SSO cookie has a 1-hour absolute TTL, not a sliding window | Expected. Re-auth is silent while the IdP session is valid |
+| Sessions end after an hour | The per-host SSO cookie has a 1-hour absolute TTL, not a sliding window | Expected. Re-auth is silent while the IdP session is valid |

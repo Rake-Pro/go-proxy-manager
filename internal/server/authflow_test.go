@@ -816,7 +816,7 @@ func TestSameOriginGuardOnCredentialPosts(t *testing.T) {
 
 // --- throttle key ----------------------------------------------------------
 
-// clientIPKey is deliberately the connection peer only: the admin plane is
+// clientIPKey is deliberately the connection peer only: the admin panel is
 // reached directly, so an X-Forwarded-For a client can set must never become the
 // lockout key (that would let one attacker rotate the key per attempt).
 func TestClientIPKey(t *testing.T) {

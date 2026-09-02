@@ -26,8 +26,8 @@ There are two ways to get one, and the UI presents them as the either/or they ar
 
 With no CRL configured, certificates are verified against the CA only: a revoked
 but unexpired certificate still passes (the Go standard library's chain
-verification checks no revocation). With one configured, the data plane rejects
-any presented certificate whose serial is listed, after checking that the CRL is
+verification checks no revocation). With one configured, the proxy listeners
+reject any presented certificate whose serial is listed, after checking that the CRL is
 **signed by this CA**, so dropping a file into the cert store cannot un-revoke
 or mass-revoke anything.
 

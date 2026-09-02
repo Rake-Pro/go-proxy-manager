@@ -48,7 +48,8 @@
     "bullets": [
       "Counts link straight to the list behind them.",
       "The getting-started checklist tracks the first certificate, host and gate.",
-      "Certificate and discovery warnings surface here before they break traffic."
+      "Certificate and discovery warnings surface here before they break traffic.",
+      "The upstream tile shows healthy vs unhealthy group members, so a backend outage is visible without opening each group."
     ],
     "doc": "index.md"
   },
@@ -191,7 +192,7 @@
     "doc": "reference/config/api-token.md"
   },
   "page.accessLogs": {
-    "text": "A live tail of requests the data plane served.",
+    "text": "A live tail of requests the proxy served.",
     "bullets": [
       "Entries carry the derived client IP, not the connection peer.",
       "The filter matches host, path, method, status and client.",
@@ -227,7 +228,7 @@
     "doc": "concepts/config-model.md#common-fields-every-object"
   },
   "common.disabled": {
-    "text": "Keeps the object in config but excludes it from the running data plane. A disabled host releases its domains and withdraws its DNS records.",
+    "text": "Keeps the object in config but excludes it from the running proxy. A disabled host releases its domains and withdraws its DNS records.",
     "doc": "concepts/config-model.md#common-fields-every-object"
   },
   "proxyHost.tags": {

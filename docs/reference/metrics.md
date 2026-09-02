@@ -9,7 +9,7 @@ Off by default. Set `GPM_METRICS=1` (or `-metrics`) and restart; with it off,
 `/metrics` answers `404`.
 
 The endpoint is on the **admin server** (`-admin-addr`, default `:8081`), not
-the data plane, because the payload is admin data: it names every proxy host,
+the proxy listeners, because the payload is admin data: it names every proxy host,
 stream host and certificate you have configured. It is gated by an admin-role
 principal **plus**, for an API token, an explicit `metrics:read` scope, so the
 credential you park in a Prometheus config can scrape and nothing else. Mint one

@@ -874,6 +874,23 @@ effect of this defence in depth.
   operator-authored discovery profile, which is why there is no annotation that
   names those objects directly.
 
+## Repository layout
+
+Where each mechanism above lives in the source tree.
+
+```
+cmd/gpm/            entrypoint, subcommands (daemon, hashpw, totp-secret)
+internal/model/     config object types + validation
+internal/store/     git-backed config store
+internal/dataplane/ TLS, routing, middleware chain, reverse proxy
+internal/acme/      ACME issuance + renewal (DNS-01 solvers, HTTP-01 tokens)
+internal/dnssync/   Pi-hole / Cloudflare DNS record reconciler
+internal/auth/      sessions, OIDC, forward-auth, role mapping
+internal/oidc/      OIDC client (discovery, PKCE, token verification)
+internal/api/       REST API
+internal/ui/        embedded web UI (go:embed)
+```
+
 ## Dependencies
 
 A deliberately small, vetted set (Go 1.26, CGO disabled):

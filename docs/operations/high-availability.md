@@ -116,7 +116,7 @@ the leader as the only writer, or `rsync` it leader -> follower on a short
 interval. Certificates are read at TLS handshake time, so the follower picks up a
 renewal with no restart.
 
-**`GPM_SSO_SIGNING_KEY`**: set the *same* value on both nodes. Data-plane SSO
+**`GPM_SSO_SIGNING_KEY`**: set the *same* value on both nodes. Per-host SSO
 cookies are stateless HMACs, so a shared key is what lets the survivor accept
 cookies the other node minted; without it every SSO user re-authenticates at
 failover. Setting it explicitly also keeps the key out of the file-sync path;

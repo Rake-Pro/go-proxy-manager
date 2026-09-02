@@ -6,10 +6,10 @@ openapi: 3.1.0
 info:
   title: go-proxy-manager admin API
   version: 0.1.0
-  summary: 'REST API for the go-proxy-manager control plane: config CRUD, settings, backup/restore, DNS
+  summary: 'REST API for the go-proxy-manager admin panel: config CRUD, settings, backup/restore, DNS
     sync, Ingress discovery, and admin auth.'
-  description: 'Covers the admin control-plane surface only (port 8081 by default), not the public data
-    plane that serves proxied traffic. Every non-2xx response uses the uniform `{"error": "..."}` shape
+  description: 'Covers the admin API surface only (port 8081 by default), not the public proxy
+    listeners that serve proxied traffic. Every non-2xx response uses the uniform `{"error": "..."}` shape
     (see #/components/schemas/Error), except the plain-text/HTML auth endpoints noted individually below.
 
 
@@ -31,7 +31,7 @@ info:
     name: See repository LICENSE
 servers:
 - url: http://localhost:8081
-  description: Admin control plane (default). Bind to loopback or front with your own ingress - do not
+  description: Admin panel (default). Bind to loopback or front with your own ingress - do not
     expose to the internet.
 tags:
 - name: Auth
@@ -134,7 +134,7 @@ components:
           description: Free-form grouping/filter labels.
         disabled: &id005
           type: boolean
-          description: Keep the object in config but exclude it from the running data plane. Default false.
+          description: Keep the object in config but exclude it from the running proxy listeners. Default false.
         createdAt: &id006
           type: string
           description: 'Creation timestamp, resolved by the store. On CREATE (no object with this
@@ -359,7 +359,7 @@ components:
           - $ref: '#/components/schemas/AuthMiddleware'
           description: >-
             Gate this host through an identity provider with NO Middleware
-            object. Identical shape, validation and data-plane handler to a
+            object. Identical shape, validation and proxy-listener handler to a
             type=auth middleware; Middleware objects remain the reuse path for a
             gate shared across a fleet. Not mutually exclusive with middlewares:
             the inline block runs at the auth chain position, before any auth
@@ -1348,7 +1348,7 @@ components:
         refused:
           type: integer
           description: Sources whose most recent fetch was refused; their previously fetched set is
-            still what the data plane serves.
+            still what the proxy listeners serve.
         sources:
           type: array
           items:
@@ -2092,7 +2092,7 @@ components:
               only proxied upstream responses.
     ProxyProtocolSettings:
       type: object
-      description: 'Inbound HAProxy PROXY protocol (v1 and v2) on the data-plane HTTP/HTTPS
+      description: 'Inbound HAProxy PROXY protocol (v1 and v2) on the HTTP/HTTPS proxy
         listeners and every TCP stream listener. The parsed source replaces the connection
         RemoteAddr, so access lists, geo, rate limits, X-Forwarded-For, the access log
         and metrics all see the real client. The header is an unauthenticated claim and
@@ -2377,10 +2377,10 @@ components:
           properties:
             http:
               type: string
-              description: Data-plane HTTP listen address (-http-addr / GPM_HTTP_ADDR).
+              description: Proxy listener HTTP listen address (-http-addr / GPM_HTTP_ADDR).
             https:
               type: string
-              description: Data-plane HTTPS listen address (-https-addr / GPM_HTTPS_ADDR).
+              description: Proxy listener HTTPS listen address (-https-addr / GPM_HTTPS_ADDR).
             admin:
               type: string
               description: Admin listen address (-admin-addr / GPM_ADMIN_ADDR).
@@ -2822,7 +2822,7 @@ components:
             properties: {}
             additionalProperties: true
           description: Newest first. Shape depends on internal/dataplane's access-log entry.
-      description: Recent data-plane access-log entries for the in-UI log viewer.
+      description: Recent proxied-request access-log entries for the in-UI log viewer.
     ReconcileAck:
       type: object
       properties:
@@ -4294,7 +4294,7 @@ paths:
   /api/health:
     get:
       summary: Aggregate runtime health
-      description: A single-request snapshot of whether this instance is actually working - data-plane
+      description: A single-request snapshot of whether this instance is actually working - proxy
         listener state, certificate expiry counts, upstream-group health, the ACME renewal loop's last
         run, HA role and the current config HEAD. Everything comes from in-memory state (plus the cached
         certificate files GET /certificates already reads); it never calls out to an ACME CA or a DNS
@@ -4623,7 +4623,7 @@ paths:
       x-scope: ingress-discovery:read
   /api/logs:
     get:
-      summary: Recent data-plane access-log entries
+      summary: Recent proxied-request access-log entries
       description: Newest first, for the in-UI log viewer. Empty/disabled when no access-log viewer is
         wired.
       tags:
@@ -4641,7 +4641,7 @@ paths:
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
     put:
-      summary: Toggle data-plane request capture live
+      summary: Toggle proxied-request capture live
       description: Runtime-only - never persisted, so a restart reverts to the `-access-log` flag /
         `GPM_ACCESS_LOG`. Admin scope because it changes global logging output, not one resource.
       tags:
@@ -5247,7 +5247,7 @@ paths:
       x-scope: admin
   /api/sso/revoke:
     post:
-      summary: Revoke every outstanding data-plane SSO session
+      summary: Revoke every outstanding per-host SSO session
       description: Users re-authenticate at the IdP on their next request.
       tags:
       - Meta
@@ -6008,7 +6008,7 @@ paths:
               schema:
                 type: string
                 example: |
-                  # HELP gpm_http_requests_total Data-plane HTTP requests, by proxy host, method and status class.
+                  # HELP gpm_http_requests_total Proxy listener HTTP requests, by proxy host, method and status class.
                   # TYPE gpm_http_requests_total counter
                   gpm_http_requests_total{host="app",method="GET",status="2xx"} 12
         '401':

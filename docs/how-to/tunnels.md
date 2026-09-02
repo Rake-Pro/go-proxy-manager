@@ -9,7 +9,7 @@ today.
 
 ## Prerequisites (all patterns)
 
-- gpm running with the data-plane listeners (`:80`/`:443`) reachable from
+- gpm running with the proxy listeners (`:80`/`:443`) reachable from
   whichever tunnel/relay component you pick, not necessarily from the
   public internet.
 - A DNS-01-capable [DNSProvider](../reference/config/dns-provider.md)
@@ -276,4 +276,4 @@ so gpm recovers the real client IP.
 | Access list allows/denies the wrong clients (Patterns A/C) | `RemoteAddr` isn't what you assumed, check the access log | Pattern A: no fix today, see the [client-IP limitation](#client-ip-limitation-read-before-writing-access-lists); Pattern C: confirm `proxyProtocol.trustedCIDRs` names the relay's WireGuard address and the relay actually sends `send-proxy-v2`/`proxy_protocol on` |
 | Stream backend behind Pattern C stalls for several seconds per connection | `proxyProtocol.enabled: true` on gpm but the relay isn't actually sending a PROXY header (or the reverse: relay sends it but gpm hasn't enabled it) | Enable on the relay first, then on gpm; see the ordering warning in [ProxyProtocolSettings](../reference/config/settings/proxy-protocol.md) |
 | `cloudflared` logs a TLS verification error to gpm | gpm is presenting a cert whose SNI/CN doesn't match `originServerName`, or a private cert without `noTLSVerify` | Confirm the `Certificate` object's `domains` matches the `hostname` in `cloudflared`'s ingress rule, or add `noTLSVerify: true` only if the cert is deliberately private |
-| Tailnet peer gets connection refused | gpm's data-plane listener isn't actually reachable on the tailnet interface, or MagicDNS/Split DNS hasn't propagated | Confirm `tailscale status` shows gpm as a peer and `tailscale ip` resolves the hostname; `curl` gpm's tailnet IP directly to isolate DNS from connectivity |
+| Tailnet peer gets connection refused | gpm's proxy listener isn't actually reachable on the tailnet interface, or MagicDNS/Split DNS hasn't propagated | Confirm `tailscale status` shows gpm as a peer and `tailscale ip` resolves the hostname; `curl` gpm's tailnet IP directly to isolate DNS from connectivity |

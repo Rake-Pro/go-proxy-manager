@@ -41,8 +41,8 @@ func TestSecurityHeaders(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "//") {
 		t.Errorf("CSP must have no external origins, got %q", csp)
 	}
-	// HSTS must NOT be set by the admin server: the data plane is the TLS edge and
-	// owns it; emitting it here duplicated the header on the proxied admin path.
+	// HSTS must NOT be set by the admin server: the proxy listeners are the TLS edge and
+	// own it; emitting it here duplicated the header on the proxied admin path.
 	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("admin server must not set Strict-Transport-Security, got %q", got)
 	}

@@ -78,8 +78,8 @@ roleMapping:
 > window, it is not extended by activity). On expiry the next request re-runs the
 > OIDC flow against the IdP, which is silent when the IdP session is still valid
 > and re-checks group membership. This bounds the offboarding window: a user
-> removed from a group or disabled at the IdP loses data-plane access within an
-> hour, without gpm holding server-side session state. There is no per-user
+> removed from a group or disabled at the IdP loses access at the proxy
+> listeners within an hour, without gpm holding server-side session state. There is no per-user
 > revocation, but there is a global one: `POST /api/sso/revoke` (admin-gated;
 > also a button under Settings) moves a signed revocation watermark to "now",
 > invalidating every outstanding SSO session on this instance immediately:
