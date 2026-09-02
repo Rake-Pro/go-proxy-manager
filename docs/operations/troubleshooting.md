@@ -3,6 +3,28 @@
 Every symptom documented across this site, in one lookup table. Each row links
 to the page that explains the mechanism behind it.
 
+## Start at the Overview
+
+The admin panel's Overview page is a single "Needs attention" list, refreshed
+on every visit or with its Refresh button. It shows nothing but problems: when
+it reads "Nothing needs attention" the summary line under it (hosts live,
+certificates valid and next expiry, upstream members healthy) is the whole
+status. Problems sort before warnings, and every row links to the object or
+page that fixes it.
+
+| Row | Severity | Source | Link |
+|---|---|---|---|
+| Certificate failed to renew, or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
+| Certificate expires in N days | warning | `GET /api/certificates` state `expiring` (inside the 30-day renewal window) | The certificate |
+| Upstream group has unhealthy members | problem | `GET /api/health` `upstreamGroups[]` | The group |
+| Ingress or Docker discovery failed | problem | `GET /api/ingress-discovery/status`, `GET /api/docker-discovery/status` `error` | Integrations |
+| Discovery skipped a host | warning | The same status routes, `hosts[]` with `action: skipped` and a `reason` | Integrations |
+| Config warning | warning | `GET /api/health` `configWarnings[]` (an unknown YAML key, see [Upgrading](upgrading.md)) | History |
+| Could not read a source | warning | The corresponding request failed | The page that owns it |
+
+A disabled integration (its status route answers 501) adds no row. The tables
+below map each row's wording to its cause and fix.
+
 ## Startup and admin access
 
 | Symptom | Cause | Fix |
