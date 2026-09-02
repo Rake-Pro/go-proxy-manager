@@ -7,6 +7,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 Nothing yet.
 
+## [1.0.1] - 2026-09-02
+
+### Changed
+
+- Build on Go 1.27.1 (builder image and CI toolchain).
+- Dependencies: go-oidc v3.21.0, golang.org/x/crypto v0.56.0,
+  modernc.org/sqlite v1.58.0 (with its libc and memory modules).
+
 ## [1.0.0] - 2026-09-02
 
 First public release.
@@ -36,5 +44,6 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Rake-Pro/go-proxy-manager/releases/tag/v1.0.0
