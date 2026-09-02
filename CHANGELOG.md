@@ -5,6 +5,10 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.4.0] - 2026-09-02
+
 ### Changed
 
 - **Overview rewritten as a "needs attention" list.** The landing view now
@@ -87,5 +91,6 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 Earlier releases predate the public repository and are not listed.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/Rake-Pro/go-proxy-manager/releases/tag/v1.3.0
