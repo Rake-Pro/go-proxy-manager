@@ -34,7 +34,7 @@ whatever the policy):
 **Stickiness** (`stickiness`): `ttl` (required, a Go duration such as `30m` /
 `12h`, with a whole-day `d` suffix also accepted, e.g. `3d`) and `cookie`
 (optional name, default `gpm-sticky-<group>`). On a client's first request the
-data plane assigns an upstream by the policy and sets an HMAC-signed cookie
+proxy listeners assign an upstream by the policy and set an HMAC-signed cookie
 (`HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` when the client came over
 HTTPS) naming it; later requests honor the pin while the cookie is valid and
 that upstream is healthy. Semantics worth knowing:
@@ -42,7 +42,7 @@ that upstream is healthy. Semantics worth knowing:
 - **TTL is enforced server-side**: the expiry rides inside the signed value, so
   a client replaying a cookie past its `Max-Age` is still re-assigned. The
   window is fixed from assignment (not sliding), matching "stick for X".
-- The cookie is signed with the same key as data-plane SSO sessions
+- The cookie is signed with the same key as per-host SSO sessions
   (`GPM_SSO_SIGNING_KEY` / the persisted `sso_signing.key`), so a client cannot
   forge a pin to steer itself onto a chosen backend. A restart with an
   ephemeral key re-assigns everyone once.

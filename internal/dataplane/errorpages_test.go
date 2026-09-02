@@ -63,6 +63,26 @@ func TestServeErrorPagePerStatusTemplate(t *testing.T) {
 	}
 }
 
+// http.Error (the unconfigured path) sets nosniff itself, so a rendered page has
+// to set it too: otherwise CONFIGURING an error page silently drops a header the
+// built-in response carried, on every tier.
+func TestServeErrorPageSetsNosniff(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	ep, err := compileErrorPages(model.ErrorPagesConfig{
+		Inline: map[string]string{"default": "<h1>{{.Status}}</h1>"},
+	}, "")
+	if err != nil {
+		t.Fatalf("compileErrorPages: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	serveErrorPage(rec, http.StatusForbidden, ep, "myhost", func() {
+		t.Fatal("writeDefault must not run when a template resolves")
+	})
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+}
+
 func TestServeErrorPageDefaultFallback(t *testing.T) {
 	withGlobalErrorPages(t, nil)
 	ep, err := compileErrorPages(model.ErrorPagesConfig{

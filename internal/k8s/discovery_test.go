@@ -2629,6 +2629,71 @@ func TestDerivedHostInheritsStripResponseHeadersFromAProfile(t *testing.T) {
 	}
 }
 
+func TestDerivedHostInheritsSecurityHeaders(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := baseSettings(f)
+	s.Template.SecurityHeaders = map[string]model.SecurityHeaderValue{
+		"X-Content-Type-Options":  {Value: "nosniff"},
+		"Content-Security-Policy": {Value: "frame-ancestors 'none'", Scope: model.SecurityScopeGenerated},
+	}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if got := h.SecurityHeaders["X-Content-Type-Options"].Value; got != "nosniff" {
+		t.Fatalf("securityHeaders X-Content-Type-Options = %q, want the template's", got)
+	}
+	if got := h.SecurityHeaders["Content-Security-Policy"].Scope; got != model.SecurityScopeGenerated {
+		t.Fatalf("securityHeaders scope = %q, want the template's generated-only", got)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
+func TestDerivedHostInheritsSecurityHeadersFromAProfile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.example.com"),
+		}, "")
+	}
+	s := profileSettings(f)
+	prof := s.Profiles["sso-internal"]
+	prof.SecurityHeaders = map[string]model.SecurityHeaderValue{"X-Frame-Options": {Value: "DENY"}}
+	s.Profiles["sso-internal"] = prof
+	// A default that would be WRONG for this host, so inheriting it shows up.
+	s.Template.SecurityHeaders = map[string]model.SecurityHeaderValue{"X-Default-Only": {Value: "1"}}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	h := rec.upserts[0]
+	if _, ok := h.SecurityHeaders["X-Default-Only"]; ok {
+		t.Fatal("the default template's securityHeaders leaked onto a profiled host")
+	}
+	if got := h.SecurityHeaders["X-Frame-Options"].Value; got != "DENY" {
+		t.Fatalf("securityHeaders = %v, want the profile's, not the default template's", h.SecurityHeaders)
+	}
+}
+
 // maintenance is operator-owned runtime state, like disabled: no Ingress
 // annotation derives it, so a reconcile must carry the stored value forward
 // rather than reset it. Without that, the next poll would put a host back into

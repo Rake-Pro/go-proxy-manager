@@ -61,7 +61,7 @@ appear at two scopes (it is a case-insensitive duplicate, which is rejected).
   `X-Frame-Options: SAMEORIGIN` / `Referrer-Policy` / `X-Content-Type-Options`
   keeps it untouched.
 
-The data plane distinguishes the two at inject time: the reverse proxy marks the
+The proxy listeners distinguish the two at inject time: the reverse proxy marks the
 response as proxied only when an upstream actually responds (its `ModifyResponse`
 hook), so the upstream-unreachable 502/504 (written by the proxy's error handler,
 not the upstream) correctly counts as gpm-generated.
@@ -140,7 +140,7 @@ the scope note above), this keeps them on gpm's own pages, where they are safe.
 The removal half of the same mechanism: a list of response headers gpm **deletes
 from what an upstream sends**, so a backend's `Server: Apache/2.4.1 (Unix)`,
 `X-Powered-By: PHP/8.1.0` or `X-AspNet-Version: 4.0.30319` never reaches a
-client. It is applied in the data plane's reverse proxy, on the upstream's own
+client. It is applied in the proxy listeners' reverse proxy, on the upstream's own
 response, so it covers **every** response that upstream returns for the host
 regardless of which middlewares that host wires up.
 

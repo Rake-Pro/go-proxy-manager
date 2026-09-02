@@ -172,8 +172,8 @@ func requireScope(scope string, next http.Handler) http.Handler {
 // nosniff, clickjacking protection (frame-ancestors + the legacy X-Frame-Options),
 // and a conservative referrer policy. HSTS is deliberately NOT set here: the admin
 // panel is either reached over plain HTTP on its direct port (where browsers ignore
-// HSTS) or fronted by the data plane over TLS, which is the actual TLS edge and
-// owns the Strict-Transport-Security header for the host. Emitting it here too
+// HSTS) or fronted by the proxy listeners over TLS, which are the actual TLS edge and
+// own the Strict-Transport-Security header for the host. Emitting it here too
 // produced a duplicate HSTS header on the proxied admin path. The CSP pins
 // script execution to 'self' as an XSS backstop behind the SPA's esc()
 // discipline, and has NO external origin: Space Grotesk, Inter and JetBrains

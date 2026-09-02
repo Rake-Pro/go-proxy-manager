@@ -1,14 +1,14 @@
 # Settings: PROXY protocol
 
-Accept the HAProxy PROXY protocol on the data-plane listeners so gpm behind
+Accept the HAProxy PROXY protocol on the proxy listeners so gpm behind
 an L4 balancer sees the real client address.
 
 | Field | Type | Notes |
 |-------|------|-------|
 | <span id="settings-proxy-protocol"></span> `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 
-Accepts the HAProxy **PROXY protocol** (v1 text and v2 binary) on the data-plane
-`:80`/`:443` listeners **and on every TCP stream listener**, so gpm behind an L4
+Accepts the HAProxy **PROXY protocol** (v1 text and v2 binary) on the
+`:80`/`:443` proxy listeners **and on every TCP stream listener**, so gpm behind an L4
 load balancer (HAProxy, an AWS NLB with proxy protocol enabled, a Kubernetes
 `Service` with `externalTrafficPolicy` behind an LB that sends it) sees the real
 client address instead of the balancer's.

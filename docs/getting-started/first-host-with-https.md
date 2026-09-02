@@ -40,7 +40,7 @@ domains: [app.example.com]
 acme: {email: admin@example.com, challenge: http-01}
 ```
 
-The HTTP-01 token is served by the data plane's own `:80` listener ahead of host
+The HTTP-01 token is served by gpm's own `:80` proxy listener ahead of host
 routing and the force-SSL redirect, so no host or exception has to be configured
 for `/.well-known/acme-challenge/`. Anything in front of gpm (a router port
 forward, a cloud LB) must pass port 80 through unmodified. A CA that requires

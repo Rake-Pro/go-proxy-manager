@@ -52,7 +52,7 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 | `displayName` | string | no | Human label for the UI. |
 | `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` is reserved**: see below. (The exact key follows `ingressDiscovery.annotationPrefix`; `gpm.rake.pro` is the default and what every example below uses.) |
 | `tags` | []string | no | Flat, free-form labels for grouping/filtering. On the Proxy Hosts list they render as chips and are matched by the filter box. |
-| `disabled` | bool | no | Keep the object in config but exclude it from the running data plane. |
+| `disabled` | bool | no | Keep the object in config but exclude it from the running proxy listeners. |
 
 > **`gpm.rake.pro/managed-by` is a reserved label: do not set it by hand.** It
 > marks an object as owned by an automated reconciler. Adding
@@ -73,7 +73,7 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 > honours an operator-set `disabled` and never clears it itself: hand-disabling a
 > managed host (in the UI or by editing
 > `config/proxy-hosts/<name>.yaml`) survives every subsequent poll, keeps the
-> object out of the running data plane, and withdraws its DNS records exactly
+> object out of the running proxy listeners, and withdraws its DNS records exactly
 > like disabling a hand-written host does. Editing the Ingress cannot undo this:
 > a cluster user has no way to re-enable a host you disabled. The one case where
 > a `disabled: true` a poll wrote itself IS cleared automatically is the
@@ -111,11 +111,11 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 
 ## Domains are exclusive
 
-The data plane routes by hostname, so **at most one enabled host may claim a
+The proxy listeners route by hostname, so **at most one enabled host may claim a
 given domain**. Two enabled proxy, redirect or parked hosts listing the same domain
 are rejected at load time (`hosts "a" and "b" both claim domain "x.example.com"`)
 rather than resolved by whichever file happens to be read last. *Disabled* hosts
-are exempt: they are excluded from the running data plane entirely, so staging a
+are exempt: they are excluded from the running proxy listeners entirely, so staging a
 replacement host beside the live one stays legal: enable the new one in the same
 change that disables the old one.
 

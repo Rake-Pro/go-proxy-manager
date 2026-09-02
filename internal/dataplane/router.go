@@ -26,9 +26,18 @@ type router struct {
 	parked    map[string]*parkedHandler
 	certs     *certResolver
 
-	// tlsConfigs holds a per-domain TLS config for any host (of any type) that
-	// pins a non-default minimum TLS version; absent = the listener default.
+	// tlsConfigs holds a per-domain TLS config for any host (of any type) whose
+	// minimum TLS version differs from the fleet floor; absent = the fleet
+	// default (defaultTLS below, or the listener config when that is nil).
 	tlsConfigs map[string]*tls.Config
+
+	// tlsFleetFloor is settings.tls.minVersion as a crypto/tls constant, read
+	// once per build. defaultTLS is the config serving any SNI with no entry in
+	// tlsConfigs: nil when the fleet floor is the listener's own 1.2, and a 1.3
+	// config when settings raised the floor, which is what makes a fleet-wide
+	// switch cover an unknown or absent SNI too, not just configured hosts.
+	tlsFleetFloor uint16
+	defaultTLS    *tls.Config
 
 	// clientAuth records, per domain, a host's mTLS requirement so it can be
 	// re-checked per REQUEST at dispatch. mTLS is negotiated in the per-SNI
@@ -81,23 +90,30 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 	reg := buildRegistry(cfg)
 	reg.health = health
 
+	fleetFloor := currentTLSFleetFloor()
 	rt := &router{
-		hosts:      map[string]*hostHandler{},
-		redirects:  map[string]*redirectHandler{},
-		parked:     map[string]*parkedHandler{},
-		certs:      certs,
-		tlsConfigs: map[string]*tls.Config{},
-		clientAuth: map[string]*clientAuthReq{},
-		clientIP:   reg.clientIP,
+		hosts:         map[string]*hostHandler{},
+		redirects:     map[string]*redirectHandler{},
+		parked:        map[string]*parkedHandler{},
+		certs:         certs,
+		tlsConfigs:    map[string]*tls.Config{},
+		tlsFleetFloor: fleetFloor,
+		clientAuth:    map[string]*clientAuthReq{},
+		clientIP:      reg.clientIP,
 		// Settings-level default headers for host-less responses (404/421) and
 		// redirect/parked hosts. A proxy host composes its own merge below.
 		securityHeaders: partitionSecurityHeaders(currentSecurityHeaders()),
+	}
+	// Only a raised fleet floor needs a config of its own: at 1.2 the listener's
+	// own TLSConfig already is the default, so nil keeps the zero-overhead path.
+	if fleetFloor != tls.VersionTLS12 {
+		rt.defaultTLS = baseHostTLSConfig(fleetFloor, certs)
 	}
 	// pinTLS records the per-host TLS config (min-version pin and/or mTLS) for each
 	// domain. It composes both dimensions into one config, since a host with both a
 	// version pin and client-cert auth needs a single tls.Config carrying both.
 	pinTLS := func(domains []string, tlsSettings model.TLSSettings) error {
-		c, err := hostSNIConfig(tlsSettings, clientCAs, certs)
+		c, err := hostSNIConfig(tlsSettings, rt.tlsFleetFloor, clientCAs, certs)
 		if err != nil {
 			return err
 		}
@@ -368,26 +384,26 @@ func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([
 }
 
 // baseHostTLSConfig returns a per-host TLS config with the shared cert resolver,
-// AEAD cipher suites, h2 ALPN, and the default 1.2 floor - a complete drop-in for
-// the handshake via GetConfigForClient that callers then specialise.
-func baseHostTLSConfig(certs *certResolver) *tls.Config {
+// AEAD cipher suites, h2 ALPN, and the given minimum version: a complete drop-in
+// for the handshake via GetConfigForClient that callers then specialise.
+func baseHostTLSConfig(minVersion uint16, certs *certResolver) *tls.Config {
 	return &tls.Config{
-		MinVersion:     tls.VersionTLS12,
+		MinVersion:     minVersion,
 		CipherSuites:   secureCipherSuites, // ignored for 1.3 (suites are fixed), kept for consistency
 		NextProtos:     []string{"h2", "http/1.1"},
 		GetCertificate: certs.GetCertificate,
 	}
 }
 
-// hostTLSConfig returns a per-host TLS config pinning a non-default minimum
-// version, or nil when the host uses the listener default (TLS 1.2 floor).
-func hostTLSConfig(minTLSVersion string, certs *certResolver) *tls.Config {
-	if minTLSVersion != "1.3" {
-		return nil // "", "1.2", or unknown -> default listener config (1.2 floor)
+// hostTLSConfig returns a per-host TLS config pinning a minimum version that
+// differs from the fleet floor, or nil when the host is content with it (the
+// listener default already applies, so there is nothing to swap in per SNI).
+func hostTLSConfig(minTLSVersion string, fleet uint16, certs *certResolver) *tls.Config {
+	eff := effectiveTLSFloor(minTLSVersion, fleet)
+	if eff == fleet {
+		return nil
 	}
-	c := baseHostTLSConfig(certs)
-	c.MinVersion = tls.VersionTLS13
-	return c
+	return baseHostTLSConfig(eff, certs)
 }
 
 // clientAuthType maps a ClientAuth mode to the tls.ClientAuthType. An empty mode
@@ -404,13 +420,13 @@ func clientAuthType(mode string) tls.ClientAuthType {
 // listener default applies). A clientAuth referencing a CA that did not compile
 // into a pool is a hard error, so the host fails closed rather than serving
 // without the client-certificate check.
-func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*clientCAAnchor, certs *certResolver) (*tls.Config, error) {
-	c := hostTLSConfig(t.MinTLSVersion, certs)
+func hostSNIConfig(t model.TLSSettings, fleet uint16, clientCAs map[string]*clientCAAnchor, certs *certResolver) (*tls.Config, error) {
+	c := hostTLSConfig(t.MinTLSVersion, fleet, certs)
 	if t.ClientAuth == nil {
 		return c, nil // version pin only (may be nil)
 	}
 	if c == nil {
-		c = baseHostTLSConfig(certs)
+		c = baseHostTLSConfig(fleet, certs)
 	}
 	anchor := clientCAs[t.ClientAuth.CARef]
 	if anchor == nil || anchor.pool == nil {
@@ -427,11 +443,18 @@ func hostSNIConfig(t model.TLSSettings, clientCAs map[string]*clientCAAnchor, ce
 	return c, nil
 }
 
-// tlsConfigForSNI returns the per-host TLS config for the SNI server name, or nil
-// to use the listener's default. Wired to tls.Config.GetConfigForClient so a
-// host can pin a higher minimum TLS version than the global floor.
+// tlsConfigForSNI returns the TLS config for the SNI server name: the host's own
+// when it differs from the fleet floor, else the fleet default (nil to use the
+// listener's own config). Wired to tls.Config.GetConfigForClient so a host can
+// pin a minimum TLS version either side of the fleet floor.
 func (rt *router) tlsConfigForSNI(serverName string) *tls.Config {
-	return rt.tlsConfigs[hostKey(serverName)] // nil if not pinned
+	if c, ok := rt.tlsConfigs[hostKey(serverName)]; ok {
+		return c
+	}
+	// nil unless settings.tls raised the fleet floor above the listener's own,
+	// in which case every other name (including an unknown or absent SNI) gets
+	// the fleet config so the switch really is fleet-wide.
+	return rt.defaultTLS
 }
 
 // securityHeadersFor returns the response-header set to inject for a request

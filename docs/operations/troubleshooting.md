@@ -12,7 +12,7 @@ to the page that explains the mechanism behind it.
 | Login form answers "authentication failed" every time | `GPM_LOCAL_ADMIN_USER` is set but the hash is missing or unreadable | Generate it with `gpm hashpw` and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
 | Login page has no buttons and no password form | `ssoOnly: true` with a provider name that does not resolve to an `oidc` provider | Recover by editing `config/settings.yaml` and redeploying ([Admin authentication](../reference/config/settings/admin-auth.md)) |
 | Login "does nothing" over `http://127.0.0.1:8081` | `GPM_COOKIE_SECURE=1` forces `Secure`, and a browser refuses to store a `Secure` cookie received over plain HTTP: the POST succeeds and the next request is anonymous | Leave `GPM_COOKIE_SECURE` at its `auto` default, which issues the cookie without `Secure` on a plain-HTTP request and turns `Secure` on by itself under TLS ([Hardening](hardening.md)) |
-| The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin plane with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
+| The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin panel with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
 | Process exits at startup naming the config directory | The config dir is not writable by the `gpm` user | Fix ownership on the mounted volume |
 | Startup fails on an unmigrated config tree | `config/dead-hosts/` still holds objects, or a stream host still uses `forwardHost`/`forwardPort` | Apply both renames in the config repo first ([Upgrading](upgrading.md)) |
 
@@ -48,7 +48,7 @@ to the page that explains the mechanism behind it.
 |---|---|---|
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check `domains` and `disabled`; two enabled hosts cannot share a domain |
 | Config write refused: two hosts claim one domain | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
-| `503` on every request to one host | The host references a middleware or access list that does not exist | Fix the reference; the data plane fails that one host closed |
+| `503` on every request to one host | The host references a middleware or access list that does not exist | Fix the reference; the proxy listeners fail that one host closed |
 | The backend receives the wrong path | Location match, `stripPrefix`, rewrite rules and the upstream base `path` compose in a fixed order | See [Path composition](../concepts/request-pipeline.md#path-composition) |
 | A guard answers `400` on a URL containing `;` | A guard with a `queryEquals` trigger fails closed on legacy `;` separators | Remove the `;`, or drop the `queryEquals` trigger |
 | `502` reaching the admin UI through gpm | The proxy host's upstream does not match `GPM_ADMIN_ADDR` | Align both ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
@@ -67,7 +67,7 @@ to the page that explains the mechanism behind it.
 | Config write refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` | Set `mode` explicitly, or use an access list |
 | A LAN client is prompted for a password after migrating basic auth | The old list required both the IP and the password, so no `allowFrom` was copied | Add the CIDR to the middleware's `allowFrom` deliberately ([Migrate basic auth](../how-to/migrate-basic-auth.md)) |
 | `409` from `migrate-basic-auth` | A middleware named `<list>-basic` already exists | Rename or delete it, or migrate by hand |
-| SSO sessions end after an hour | The data-plane SSO cookie has a 1-hour absolute TTL | Expected; re-auth is silent while the IdP session is valid |
+| SSO sessions end after an hour | The per-host SSO cookie has a 1-hour absolute TTL | Expected; re-auth is silent while the IdP session is valid |
 
 ## DNS sync
 
