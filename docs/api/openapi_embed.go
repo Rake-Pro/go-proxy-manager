@@ -4,7 +4,7 @@
 // purely as a workaround for go:embed's restriction against ascending path
 // elements: only a Go file inside docs/api can embed docs/api/openapi.yaml
 // directly, and the spec's canonical home has to stay under docs/ (see
-// docs/api/README.md).
+// docs/reference/api.md).
 package openapidoc
 
 import _ "embed"

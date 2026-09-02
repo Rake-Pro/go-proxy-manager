@@ -23,9 +23,12 @@ type OIDCSpec struct {
 	// UsePKCE defaults to true; public clients can run with an empty secret.
 	UsePKCE              *bool `json:"usePKCE,omitempty" yaml:"usePKCE,omitempty"`
 	RequireVerifiedEmail bool  `json:"requireVerifiedEmail,omitempty" yaml:"requireVerifiedEmail,omitempty"`
-	// TrustIdPMFA delegates MFA to the IdP: trust acr/amr instead of prompting a
-	// second local TOTP (avoids a double MFA prompt when the IdP already
-	// enforces MFA).
+	// Deprecated: no effect. It was meant to delegate MFA to the IdP by trusting
+	// acr/amr instead of prompting a second local TOTP, but gpm has no local TOTP
+	// prompt to suppress and never reads acr/amr, so the flag decides nothing. It
+	// is still parsed so existing YAML keeps loading, and is dropped from the UI,
+	// the API docs and the config reference. See FEATURES.md for the roadmap item
+	// that would give it meaning.
 	TrustIdPMFA bool `json:"trustIdPMFA,omitempty" yaml:"trustIdPMFA,omitempty"`
 }
 

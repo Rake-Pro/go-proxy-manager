@@ -455,10 +455,15 @@ func TestLoginStateCookieRoundTrip(t *testing.T) {
 			name = "secure"
 		}
 		t.Run(name, func(t *testing.T) {
-			a := NewAuthenticator(Options{Store: testStore(t), Secure: secure})
+			mode := CookieSecureNever
+			if secure {
+				mode = CookieSecureAlways
+			}
+			a := NewAuthenticator(Options{Store: testStore(t), SecureMode: mode})
+			r := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
 
 			rec := httptest.NewRecorder()
-			a.SetLoginStateCookie(rec, "state-value")
+			a.SetLoginStateCookie(rec, r, "state-value")
 			c := findCookie(t, rec.Result(), oidcStateCookie)
 			if c.Value != "state-value" {
 				t.Fatalf("value = %q", c.Value)
@@ -479,7 +484,7 @@ func TestLoginStateCookieRoundTrip(t *testing.T) {
 
 			// Clearing expires it in place.
 			rec2 := httptest.NewRecorder()
-			a.ClearLoginStateCookie(rec2)
+			a.ClearLoginStateCookie(rec2, r)
 			cleared := findCookie(t, rec2.Result(), oidcStateCookie)
 			if cleared.Value != "" || cleared.MaxAge != -1 || cleared.Path != "/auth" {
 				t.Fatalf("cleared cookie: %+v", cleared)
@@ -523,7 +528,7 @@ func TestIssueCookieAndLogout(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	a.IssueCookie(rec, sess)
+	a.IssueCookie(rec, httptest.NewRequest(http.MethodPost, "/auth/local", nil), sess)
 	c := findCookie(t, rec.Result(), "gpm_session")
 	if c.Value != sess.ID || !c.HttpOnly || c.Path != "/" || c.MaxAge <= 0 {
 		t.Fatalf("issued cookie: %+v", c)
@@ -574,7 +579,7 @@ func TestLocalLoginLockoutExpiresWithWindow(t *testing.T) {
 		if a.LoginThrottled(key) {
 			return true, false
 		}
-		_, err := a.LocalLogin(ctx, "admin", pass)
+		_, _, err := a.LocalLogin(ctx, "admin", pass)
 		a.NoteLoginResult(key, err == nil)
 		return false, err == nil
 	}
@@ -607,7 +612,7 @@ func TestLocalLoginLockoutExpiresWithWindow(t *testing.T) {
 func TestLocalLoginWithoutConfiguredAdmin(t *testing.T) {
 	a := NewAuthenticator(Options{Store: testStore(t)})
 	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{LocalLoginEnabled: true}})
-	if _, err := a.LocalLogin(context.Background(), "admin", "whatever"); err == nil {
+	if _, _, err := a.LocalLogin(context.Background(), "admin", "whatever"); err == nil {
 		t.Fatal("local login must fail when no local admin is configured")
 	}
 	if a.LocalLoginVisible() {

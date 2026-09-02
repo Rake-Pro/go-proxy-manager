@@ -121,13 +121,13 @@ func TestAuthGateRefusalsUseErrorPages(t *testing.T) {
 			wantDefault: "forbidden\n",
 		},
 		{
-			// Driven through the REAL authMiddlewareHandler, not a hand-built
+			// Driven through the REAL authHandler, not a hand-built
 			// dataOIDC: `gate.ep = ep` in auth.go is the single line wiring error
 			// pages into the OIDC gate, and a test that constructs the gate itself
 			// would keep passing with that line deleted. The refusal used here is
 			// the request-Host check, which is the one OIDC terminal refusal that
 			// needs no discovery and no network.
-			name: "oidc 404 unserved request host (through authMiddlewareHandler)",
+			name: "oidc 404 unserved request host (through authHandler)",
 			gate: func(ep *compiledErrorPages) http.Handler {
 				idp := model.IdentityProvider{
 					ObjectMeta: model.ObjectMeta{Name: "sso"},
@@ -140,7 +140,7 @@ func TestAuthGateRefusalsUseErrorPages(t *testing.T) {
 					Auth:       &model.AuthMiddleware{Mode: model.AuthModeOIDC, IdentityProvider: "sso"},
 				}
 				reg := buildRegistry(model.Config{IdentityProviders: []model.IdentityProvider{idp}})
-				return authMiddlewareHandler(mw, reg, "m", []string{"m.example"}, peerIP, ep, okNext(t))
+				return authHandler(*mw.Auth, reg, "m", []string{"m.example"}, peerIP, ep, okNext(t))
 			},
 			req: func() *http.Request {
 				r := httptest.NewRequest("GET", "https://other.example/", nil)

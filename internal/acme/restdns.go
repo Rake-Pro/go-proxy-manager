@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/webhook"
 )
 
 // restAPI is the shared plumbing behind the token-authenticated REST DNS
@@ -23,11 +25,23 @@ type restAPI struct {
 	authorize func(*http.Request)
 }
 
+// newRESTAPI builds the shared client. It uses webhook.NewSecureClient - the
+// same hardened client every other admin-configured outbound integration uses -
+// for two reasons that both bite here:
+//
+//   - Redirects are never followed. Go's stdlib strips only Authorization,
+//     Www-Authenticate, Cookie and Cookie2 across a host change; a provider's
+//     custom credential headers (acme-dns sends X-Api-User / X-Api-Key) would be
+//     replayed verbatim to whatever host a 302 named. A 3xx is now surfaced as
+//     the response instead.
+//   - Link-local destinations are refused at connect time, post-DNS, so a
+//     provider baseURL (or a rebinding resolver) cannot aim gpm's own network
+//     position at a cloud metadata service.
 func newRESTAPI(name, baseURL string, authorize func(*http.Request)) *restAPI {
 	return &restAPI{
 		name:      name,
 		baseURL:   strings.TrimRight(baseURL, "/"),
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client:    webhook.NewSecureClient(30 * time.Second),
 		authorize: authorize,
 	}
 }
@@ -64,6 +78,12 @@ func (a *restAPI) do(ctx context.Context, method, path string, body, out any) er
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Errorf("%s: read response (%s): %w", a.name, resp.Status, err)
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// Not followed on purpose (see newRESTAPI): the redirect target is not
+		// the endpoint the operator configured, and the request carries this
+		// provider's credentials.
+		return fmt.Errorf("%s: %s %s: server answered %d redirecting to another location; redirects are not followed because the request carries this provider's credentials", a.name, method, path, resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &apiError{provider: a.name, method: method, path: path, status: resp.StatusCode, body: snippet(raw)}

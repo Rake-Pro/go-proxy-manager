@@ -33,7 +33,8 @@ func (s *importState) tlsFor(r map[string]any, certID int64, hostLabel string) m
 	return model.TLSSettings{
 		CertificateRef: s.resolveCertRef(certID, hostLabel),
 		ForceSSL:       asBool(r["ssl_forced"]),
-		HTTP2:          asBool(r["http2_support"]),
+		//lint:ignore SA1019 compat write of deprecated TLSSettings.HTTP2 during NPM import
+		HTTP2: asBool(r["http2_support"]),
 		HSTS: model.HSTS{
 			Enabled:           asBool(r["hsts_enabled"]),
 			IncludeSubdomains: asBool(r["hsts_subdomains"]),
@@ -98,6 +99,7 @@ func (s *importState) importProxyHosts() error {
 				Host:   host,
 				Port:   int(asInt(r["forward_port"])),
 			},
+			//lint:ignore SA1019 compat write of deprecated ProxyHost.WebsocketsUpgrade during NPM import
 			WebsocketsUpgrade: asBool(r["allow_websocket_upgrade"]),
 			TLS:               s.tlsFor(r, asInt(r["certificate_id"]), label),
 		}

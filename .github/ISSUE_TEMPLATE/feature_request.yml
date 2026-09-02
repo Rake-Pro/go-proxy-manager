@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new feature or an enhancement to an existing one
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [FEATURES.md](../../FEATURES.md) (roadmap) and
+        [BACKLOG.md](../../BACKLOG.md) (tracked follow-ups) first - your idea
+        may already be scoped or deliberately deferred with a reason stated.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that gpm does not support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: >
+        How you would expect this to be configured (a new field, object
+        kind, or middleware type - typed config, not a raw-snippet escape
+        hatch; see CLAUDE.md conventions).
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've already tried, and why they fall short.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This does not require a new third-party dependency (or I've noted why one is unavoidable).
+        - label: This is not on the "Not planned at this time" list in FEATURES.md.

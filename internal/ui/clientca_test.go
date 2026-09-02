@@ -81,15 +81,23 @@ func TestStaticBundleSupersededRowsAreHistorical(t *testing.T) {
 	}
 }
 
-// TestStaticBundleExpiryWarningDefault checks the UI's placeholder matches the Go
-// default, so the hint does not tell operators the wrong number.
+// TestStaticBundleExpiryWarningDefault checks the UI copy matches the Go
+// default, so the help text does not tell operators the wrong number. The
+// sentence lives in the in-app help registry now, not in an inline hint.
 func TestStaticBundleExpiryWarningDefault(t *testing.T) {
 	js := readStatic(t, "static/app.js")
 	if model.DefaultExpiryWarningDays != 30 {
-		t.Fatalf("model.DefaultExpiryWarningDays is %d but app.js says 30 - keep them in step", model.DefaultExpiryWarningDays)
+		t.Fatalf("model.DefaultExpiryWarningDays is %d but the UI says 30 - keep them in step", model.DefaultExpiryWarningDays)
 	}
-	if !strings.Contains(js, "uses the 30-day default") {
-		t.Error("expiryWarningDays hint does not state the default")
+	if !strings.Contains(js, `placeholder="30"`) {
+		t.Error("the expiryWarningDays input no longer shows the default as its placeholder")
+	}
+	hint, ok := loadHintRegistry(t)["clientCA.expiryWarningDays"]
+	if !ok {
+		t.Fatal("hints.json has no clientCA.expiryWarningDays entry")
+	}
+	if !strings.Contains(hint.Text, "30 days") {
+		t.Errorf("clientCA.expiryWarningDays help text does not state the 30-day default: %q", hint.Text)
 	}
 }
 

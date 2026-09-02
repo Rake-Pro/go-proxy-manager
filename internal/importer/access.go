@@ -45,9 +45,11 @@ func (s *importState) importAccessLists() error {
 
 		al := model.AccessList{
 			ObjectMeta: model.ObjectMeta{Name: name, DisplayName: nm},
+			//lint:ignore SA1019 compat write of deprecated AccessList.SatisfyAny during NPM import
 			SatisfyAny: asBool(r["satisfy_any"]),
-			BasicAuth:  authByList[id],
-			Rules:      clientsByList[id],
+			//lint:ignore SA1019 compat write of deprecated AccessList.BasicAuth during NPM import
+			BasicAuth: authByList[id],
+			Rules:     clientsByList[id],
 		}
 
 		if _, has := r["pass_auth"]; has && asInt(r["pass_auth"]) != passAuthDefault {
@@ -58,6 +60,7 @@ func (s *importState) importAccessLists() error {
 		// Fail closed: a list left with no IP rules and no basic-auth users (e.g.
 		// every client row was malformed and dropped) must be unambiguously
 		// deny-all rather than relying on the data plane's empty-list default.
+		//lint:ignore SA1019 compat read of deprecated AccessList.BasicAuth during NPM import
 		if len(al.Rules) == 0 && len(al.BasicAuth) == 0 {
 			al.DefaultAction = model.ActionDeny
 			s.warn(label, "rules",

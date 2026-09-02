@@ -35,7 +35,7 @@ func TestLocalLoginPolicy(t *testing.T) {
 		SSOOnly:   true,
 		Providers: []string{"x"},
 	}})
-	if _, err := a.LocalLogin(context.Background(), "admin", "s3cret"); err == nil {
+	if _, _, err := a.LocalLogin(context.Background(), "admin", "s3cret"); err == nil {
 		t.Fatal("SSO-only must disable local login")
 	}
 	if a.LocalLoginVisible() {
@@ -44,14 +44,14 @@ func TestLocalLoginPolicy(t *testing.T) {
 
 	// Not SSO-only with local login enabled: correct creds pass, wrong fail.
 	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{LocalLoginEnabled: true}})
-	sess, err := a.LocalLogin(context.Background(), "admin", "s3cret")
+	sess, _, err := a.LocalLogin(context.Background(), "admin", "s3cret")
 	if err != nil {
 		t.Fatalf("local login should succeed when enabled: %v", err)
 	}
 	if len(sess.Roles) != 1 || sess.Roles[0] != string(RoleAdmin) {
 		t.Fatalf("local admin should get admin role, got %v", sess.Roles)
 	}
-	if _, err := a.LocalLogin(context.Background(), "admin", "wrong"); err == nil {
+	if _, _, err := a.LocalLogin(context.Background(), "admin", "wrong"); err == nil {
 		t.Fatal("wrong password must be rejected")
 	}
 }
@@ -328,16 +328,21 @@ func TestRateGateClear(t *testing.T) {
 }
 
 func TestHostPrefixCookieWhenSecure(t *testing.T) {
-	// Secure cookies take the __Host- prefix.
-	a := NewAuthenticator(Options{Store: testStore(t), Secure: true})
-	if a.cookieName != "__Host-gpm_session" {
-		t.Fatalf("secure cookie should take the __Host- prefix, got %q", a.cookieName)
+	// The authenticator carries both names; which one is written is decided per
+	// request (see cookiesecure_test.go). A Secure cookie takes the __Host-
+	// prefix, a plain-HTTP one must keep the bare name or the browser drops it.
+	a := NewAuthenticator(Options{Store: testStore(t), SecureMode: CookieSecureAlways})
+	if a.cookieNameFor(true) != "__Host-gpm_session" {
+		t.Fatalf("secure cookie should take the __Host- prefix, got %q", a.cookieNameFor(true))
 	}
-	// A plain-HTTP deployment (e.g. GPM_COOKIE_SECURE=0) keeps the bare name and
-	// is unaffected - a __Host- cookie requires Secure and would be rejected.
-	b := NewAuthenticator(Options{Store: testStore(t), Secure: false})
-	if b.cookieName != "gpm_session" {
-		t.Fatalf("non-secure cookie must not be prefixed, got %q", b.cookieName)
+	if a.cookieNameFor(false) != "gpm_session" {
+		t.Fatalf("non-secure cookie must not be prefixed, got %q", a.cookieNameFor(false))
+	}
+	// A caller that supplies an already-prefixed name gets the same pair back,
+	// never "__Host-__Host-gpm_session".
+	b := NewAuthenticator(Options{Store: testStore(t), CookieName: "__Host-gpm_session"})
+	if b.cookieNameFor(true) != "__Host-gpm_session" || b.cookieNameFor(false) != "gpm_session" {
+		t.Fatalf("prefixed CookieName not normalized: %q / %q", b.cookieNameFor(true), b.cookieNameFor(false))
 	}
 }
 

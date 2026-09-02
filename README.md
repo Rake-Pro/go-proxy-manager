@@ -1,153 +1,163 @@
 # go-proxy-manager
 
-A reverse-proxy manager written in Go: a single static binary that terminates
-TLS for many domains, reverse-proxies them to your backends, issues and renews
-Let's Encrypt certificates over DNS-01 or HTTP-01, and gates access with IP access lists,
-forward-auth, and OpenID Connect single sign-on. Configuration is declarative,
-git-backed YAML; there is a REST API and an embedded web UI.
+[![CI](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/ci.yml?branch=main&label=CI)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/release.yml?label=release)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/release.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-go--proxy--manager-blue?logo=docker)](https://github.com/Rake-Pro/go-proxy-manager/pkgs/container/go-proxy-manager)
+[![License](https://img.shields.io/github/license/Rake-Pro/go-proxy-manager)](LICENSE)
+[![Go version](https://img.shields.io/github/go-mod/go-version/Rake-Pro/go-proxy-manager)](go.mod)
 
-It is a clean-room reimplementation of the ideas behind
-[Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager)
-and [NPMplus](https://github.com/ZoeyVid/NPMplus), with first-class SSO and a
-small, vetted dependency set as the headline differences.
+A standalone edge for homelab and small-site ingress - TLS termination and
+ACME, SSO and mTLS, access control, DNS publishing, Kubernetes and Docker
+discovery,
+git-backed config, a REST API and a web UI - in one static binary.
 
-## Why
+- A single static binary that terminates TLS for many domains
+- Reverse-proxies them to your backends
+- Issues and renews Let's Encrypt certificates over DNS-01 or HTTP-01
+- Gates access with IP access lists, forward-auth, and OpenID Connect single
+  sign-on
+- Configuration is declarative, git-backed YAML; there is a REST API and an
+  embedded web UI
 
-Running an Nginx-Proxy-Manager-style edge means inheriting a large Node
-dependency surface and configuring authentication through raw nginx snippets that
-are easy to get subtly wrong. go-proxy-manager takes the same feature set and
-builds it with a narrower, more focused design:
+## Why gpm
 
-- **One CGO-free binary.** ~7 direct dependencies, all pure-Go or `golang.org/x`.
-- **Authentication is first-class config, not text snippets.** OIDC, forward-auth,
-  and an nginx-`auth_request`-style outpost mode are typed objects with validation,
-  not hand-written directives.
-- **GitOps-native.** Every config object is a YAML file; every change is a git
-  commit. The whole graph is validated (dangling references are a load-time error,
-  not a 2 a.m. outage).
-- **Secrets never live in the config.** Values use `${ENV:...}` / `${FILE:...}`
-  placeholders; committing a literal secret is refused.
+- **Git history and revert, per object.** Every config object is a YAML file
+  and every change is a commit; revert one object or the whole tree from the
+  History view or the API.
+- **Typed auth as config, not text snippets.** OIDC, forward-auth,
+  auth-request, client-cert and basic auth are validated objects with referential
+  integrity - a dangling reference is a load-time error, not a 2 a.m. outage.
+- **An in-product certificate authority.** Generate a client CA, issue mTLS
+  client certificates as PKCS#12 downloads, and track expiry, with no
+  external tooling.
+- **DNS that follows the config.** DNS sync publishes records to Pi-hole
+  and/or Cloudflare and tracks ownership in a git-backed ledger, so it never
+  deletes a record it did not create.
+- **Kubernetes Ingress discovery with name-only profiles.** An annotated
+  `Ingress` becomes a managed proxy host; the annotation can only name an
+  operator-authored profile, never a middleware or upstream, so an untrusted
+  manifest can't weaken a chain you configured.
+- **One CGO-free binary.** 9 direct dependencies, all pure Go or
+  `golang.org/x`; every import is justified against the stdlib first.
+- **The one non-core dependency is SQLite.** `modernc.org/sqlite` (plus 7
+  indirect modules) backs the local session store and the one-time NPM
+  importer, not the proxying path.
 
 ## Features
 
 **Proxying**
-- SNI-based TLS termination with exact and wildcard certificate selection
-- HTTP/2, WebSocket upgrades, force-SSL (HTTP→HTTPS 308)
-- Path-scoped **locations** (per-path upstream and middleware on one host)
-- **Upstream groups**: failover, weighted round-robin, least-connections, and
-  sticky ip-hash across multiple backends, with active TCP/HTTP health checks,
-  passive connect-failure detection, and signed sticky-session cookies with a
-  configurable TTL
-- Redirect hosts, raw TCP/UDP **stream** forwarding, and parked hosts (reserve a
-  name without serving anything; absorb unmatched vhosts)
-- **Stream TLS/SNI**: several TCP stream hosts share one port, routed by the SNI
-  in the ClientHello, either passed through untouched (never decrypted) or
-  terminated at gpm; plus **L4 access lists** (IP + geo) evaluated before any
-  backend is dialled
-- **Inbound PROXY protocol** (v1 + v2) from trusted load-balancer CIDRs, so the
-  real client IP drives access lists, geo, rate limits, `X-Forwarded-For` and the
-  access log
-- **Dual-stack**: one listener serves IPv4 and IPv6, and a v6 client is gated and
-  logged as its own address
+- **TLS termination.** SNI-based, with exact and wildcard certificate
+  selection.
+- **HTTP/2 and WebSockets.** Always on, plus an HTTP-to-HTTPS 308 redirect.
+- **Locations.** Path-scoped upstream and middleware within one host.
+- **Upstream groups.** Failover, weighted round-robin, least-connections, or
+  sticky ip-hash, with active health checks and passive failure detection.
+- **Redirect, stream and parked hosts.** Raw TCP/UDP forwarding, reserved
+  names, and a catch-all for unmatched vhosts.
+- **Stream TLS/SNI routing.** Several TCP hosts share one port, routed by
+  SNI, passthrough or terminated, plus L4 access lists evaluated before any
+  backend dial.
+- **PROXY protocol.** Inbound v1/v2 from trusted CIDRs, so the real client IP
+  drives every downstream check.
+- **Dual-stack.** One listener serves IPv4 and IPv6, each gated and logged as
+  its own address.
 
 **Certificates**
-- Let's Encrypt (or any ACME CA) via **DNS-01** (Cloudflare, DigitalOcean,
-  Hetzner, deSEC) or **HTTP-01** on the plaintext `:80` listener
-- External Account Binding for CAs that require it (ZeroSSL, Google Public CA)
-- Automatic renewal (30 days before expiry), ECDSA P-256
-- Bring-your-own custom certificates
-- **mTLS client certificates** - per-host `tls.clientAuth` against a `ClientCA`
-  trust anchor (`require` or `optional`), CRL revocation, and identity
-  passthrough headers, all switchable from the host editor
-- **One-click client CA** - generate a self-signed, issuance-ready CA from the UI
-  (RSA-4096, `pathlen:0`, key stored at `0600` in the cert store). No openssl, no
-  files to place by hand; pasting an existing CA stays fully supported
-- **Client-certificate issuance** - give a `ClientCA` a signing key and mint
-  client certificates from the UI or `POST /api/client-cas/{name}/issue`,
-  downloaded as a password-protected PKCS#12 bundle. The private key is never
-  stored or logged; it exists only in the download
-- **Client-certificate expiry warnings and renewal** - gpm records what each CA
-  issued (subject, serial, validity, never key material), warns before a
-  certificate expires, and renews one in place with a new key and serial. There is
-  no client-side renewal: every device has to import the new `.p12` by hand, and
-  the UI says so before you start
+- **ACME.** DNS-01 (four named providers plus the generic RFC2136 and
+  acme-dns solvers, covering any nameserver) or HTTP-01, against any ACME CA
+  including EAB-gated ones like ZeroSSL and Google Public CA.
+- **Auto-renewal.** 30 days before expiry, ECDSA P-256.
+- **Custom certificates.** Bring your own.
+- **mTLS.** Per-host `tls.clientAuth` against a `ClientCA` trust anchor, with
+  CRL revocation and identity-passthrough headers.
+- **Client CA generation.** A self-signed, issuance-ready CA from the UI, no
+  external tooling required.
+- **Client-certificate issuance.** Mint certificates from a signing CA,
+  downloaded as a password-protected PKCS#12 bundle.
+- **Expiry warnings and renewal.** gpm tracks what it issued and warns before
+  expiry; renewal needs a manual re-import on the device.
 
 **Access control & auth**
-- IP access lists (allow/deny CIDR rules, default-deny, HTTP basic-auth)
-- **Path-scoped access-list rules + remote IP sources**: a rule can be limited to
-  exact paths and methods, and can draw its networks from a published feed that
-  gpm re-fetches on a schedule - so a monitoring provider's ~200 prober addresses
-  reach only `/api/health` on a host that is otherwise LAN/VPN-only, and stay
-  current without you pasting CIDRs
-- **OIDC** admin login (authorization code + PKCE, group→role mapping)
-- **Forward-auth** (trust upstream-asserted identity headers from trusted peers)
-- **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)
-- **Client-certificate auth** (`client-cert` middleware mode: require a verified
-  mTLS certificate, optionally mapped to a role, with an `allowFrom` CIDR
-  exemption so a trusted network skips the certificate requirement - read
-  [the note on which IP that compares](docs/configuration.md#which-ip-allowfrom-actually-compares)
-  if gpm is not your internet-facing edge)
-- Request **guards** (deny by path/method/query, with CIDR exemptions)
-- Exact-match path **rewrite** (upstream-facing, method/body preserved, never a redirect)
-- **Bouncer** deny hook (CrowdSec LAPI or any generic HTTP endpoint) — hook-only, no bundled WAF
-- **Scoped security response headers** — `settings.securityHeaders` (plus a
-  per-host override), each header carrying a **scope** (`all` /
-  `generated-only` / `proxied-only`). `all`/`generated-only` land on every
-  response gpm generates itself (auth-gate denials, sign-in redirects, error
-  pages, `400`/`404`/`421`, parked/redirect hosts), at the same layer as HSTS so
-  denials get them too; `all`/`proxied-only` land on proxied upstream responses.
-  Always set-if-absent, so a proxied app's own headers are never clobbered — and
-  `generated-only` keeps app-breaking headers (`Content-Security-Policy`
-  frame-ancestors, `Permissions-Policy`) off proxied apps entirely.
-  Opt-in (empty by default); HSTS stays separate
-- **Response-header stripping** - `settings.stripResponseHeaders` (plus a
-  per-host list, unioned with it) removes leaked backend headers (`Server`,
-  `X-Powered-By`, `X-AspNet-Version`) from what an upstream sends,
-  case-insensitively, including on a `101` WebSocket handshake. It touches only
-  the backend's own headers, never anything gpm adds. Opt-in (empty by default)
-- **Maintenance mode** - take one host or the whole edge out of service for a
-  downtime window: gpm answers `503` with a `Retry-After` and never dials the
-  upstream, while the host keeps its domains, certificate and DNS records. A
-  per-host `maintenance` flag plus a fleet-wide `settings.maintenance.enabled`
-  that wins over it; both apply with no restart. The page is just the `503`
-  entry in your error pages, and the built-in fallback answers JSON to a JSON
-  client and HTML to a browser - never an empty body. Ingress discovery
-  preserves the flag rather than reverting it
-- Composable, ordered middleware chain per host and per location
+- **One client IP, three trust tiers.** `trustedProxies` (fleet-wide, or
+  per-host as a nullable three-state override) is the single setting that
+  decides whose `X-Forwarded-For` is believed, and the address it derives is
+  what access lists, geo, rate limits, every `allowFrom` exemption, the admin
+  login lockout, the access log and the upstream headers all compare - see
+  [Client IP and the three trust
+  tiers](docs/concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers).
+- **IP access lists.** Allow/deny CIDR rules, default-deny, optional GeoIP
+  country rules.
+- **Path-scoped rules and remote sources.** A rule can be limited to exact
+  paths and methods, or draw its CIDRs from a feed gpm re-fetches on a
+  schedule.
+- **OIDC.** Admin login via authorization code + PKCE, with group-to-role
+  mapping.
+- **Local admin TOTP.** An optional RFC 6238 second factor on the local admin
+  password, configured by secret file and enrolled with `gpm totp-secret`.
+- **Read-only viewer role.** The `user` role reads every `GET` and is refused
+  every write, so a viewer can be handed a login without handing over control.
+- **Forward-auth.** Trusts upstream-asserted identity headers from trusted
+  peers.
+- **Auth-request.** An `auth_request`-style subrequest to an identity
+  outpost.
+- **Client-certificate auth.** Requires a verified mTLS certificate, with an
+  optional trusted-network exemption - see
+  [which IP `allowFrom` compares](docs/concepts/request-pipeline.md#which-ip-allowfrom-compares)
+  before relying on it.
+- **HTTP basic auth.** An auth middleware in `basic` mode gates a host on local
+  username/bcrypt-hash pairs, with the same trusted-network exemption.
+- **Auth and rate limit on the host itself.** Attach SSO or a rate limit
+  directly on a host or location; middleware objects remain for reuse.
+- **Guards.** Deny by path, method, or query, with CIDR exemptions.
+- **Rewrite.** Upstream-facing path rewrite with exact, prefix and regex rules,
+  never a redirect.
+- **Path and Host escape hatches.** Strip a location's prefix, prefix an
+  upstream base path, and override the Host header sent upstream.
+- **Bouncer hook.** Denies on a CrowdSec LAPI or generic HTTP verdict - a deny
+  hook, not a bundled WAF.
+- **Scoped security headers.** Per-header scope (`all` / `generated-only` /
+  `proxied-only`) so a header safe on gpm's own pages never breaks a proxied
+  app.
+- **Response-header stripping.** Removes leaked backend headers (`Server`,
+  `X-Powered-By`, ...) case-insensitively, including on WebSocket upgrades.
+- **Maintenance mode.** Per-host or fleet-wide: answers `503` with
+  `Retry-After` and never dials the upstream, with no restart.
+- **Composable middleware chain.** Ordered, per host and per location.
 
 **Automation & DNS**
-- **Scoped API tokens** — bearer credentials for scripts and CI, minted
-  server-side and shown once (only a SHA-256 digest is committed), with
-  per-resource `read`/`write` scopes, optional expiry, and instant revocation
-- **DNS sync** — publishes CNAMEs for opted-in hosts to a local Pi-hole v6
-  resolver and/or a Cloudflare zone; full-state reconcile that only ever deletes
-  records it *recorded creating*, in a git-backed ownership ledger. Enabling it on
-  a resolver full of hand-written records adopts what matches and touches nothing
-  else - and a record it adopted is later *released*, never deleted or retargeted -
-  and `GET /api/dns-sync/plan` previews the whole run before you commit to it
-- **Kubernetes Ingress discovery** — opt an `Ingress` in with one annotation and
-  gpm derives a proxy host from your template, or from one of your **named
-  profiles** the manifest picks by name (read-only against the cluster, no
-  `client-go`), which then feeds the same DNS sync; the annotation can only carry
-  a profile *name*, never a middleware/access-list/upstream, so a cluster
-  manifest can never weaken a chain you configured; a derived host is a *full*
-  proxy host (TLS/mTLS, chains, websockets, `robotsNoIndex`, `timeouts`, tags),
-  so moving a service into discovery does not quietly drop half its settings;
-  only gpm's own labelled objects are ever touched, and it freezes rather than
-  deleting when the cluster cannot be read
+- **Scoped API tokens.** Bearer credentials with per-resource read/write
+  scopes, shown once, revocable instantly.
+- **DNS sync.** Publishes records to Pi-hole and/or Cloudflare, tracked in a
+  git-backed ownership ledger that only ever deletes what it recorded
+  creating.
+- **Kubernetes Ingress discovery.** An annotated `Ingress` derives a full
+  proxy host from an operator-authored template or named profile; the
+  annotation can only name a profile, never a middleware or upstream.
+- **Docker container discovery.** The same reconciler and the same name-only
+  profile contract for containers: `gpm.rake.pro/enabled: "true"` opts a
+  container in, with domains, port, scheme and profile set by label. Reads the
+  Engine API read-only (a socket proxy is enough) and reconciles on container
+  events.
 
 **Operations**
-- REST API + embedded single-page web UI
-- Git-backed declarative config with full referential validation, per-commit
-  history, and revert (whole-config or scoped to a single object)
-- One-time importer from an existing Nginx-Proxy-Manager/NPMplus data directory
-- Structured logging (zerolog), optional access log (toggleable live from the
-  Access Logs page, zero overhead while off), slow-request warnings
-- Opt-in Prometheus metrics at `/metrics` on the admin listener (`GPM_METRICS=1`),
-  with no `client_golang` dependency and host labels bounded by config, not by
-  client-supplied `Host` headers
+- **REST API and web UI.** A single embedded SPA.
+- **Certificate health.** Expiry, issuer and last-renewal status on every
+  certificate, a force-renew endpoint, and a fleet-wide `GET /api/health`
+  summary covering data-plane listeners, certificate counts and
+  upstream-group health.
+- **Git-backed config.** Full referential validation, per-commit history, and
+  revert - whole-config or scoped to one object.
+- **NPM importer.** One-time, best-effort import from an existing NPM/NPMplus
+  data directory.
+- **Structured logging.** zerolog, with a toggleable access log and
+  slow-request warnings.
+- **Prometheus metrics.** Opt-in `/metrics`, no `client_golang` dependency,
+  host labels bounded by config.
+- **Notifications.** ntfy/Discord/generic-webhook alerts on renewal failure,
+  cert expiry, upstream health flaps, and a frozen discovery reconciler, with
+  per-target event filtering and a test-send endpoint.
 
-See [FEATURES.md](FEATURES.md) for the full roadmap (P0–P3 tiers).
+See [FEATURES.md](FEATURES.md) for the full roadmap (P0-P3 tiers).
 
 ## Architecture
 
@@ -163,47 +173,70 @@ See [FEATURES.md](FEATURES.md) for the full roadmap (P0–P3 tiers).
                          +----------------------------------------------------------------+
 ```
 
-Two independent listeners: the **data plane** (public, ports 80/443) serves
-proxied traffic; the **control plane** (admin, port 8081) serves the API and UI
-and is meant to sit behind your own ingress or an SSH tunnel. A config change in
-the store atomically recompiles the data plane's routing table and certificate
-set. See [docs/architecture.md](docs/architecture.md).
+| Plane | Port | Purpose |
+|---|---|---|
+| Data plane | 80 / 443 | Proxied traffic: SNI TLS, host routing, middleware chain, upstream dial |
+| Control plane | 8081 | REST API + web UI, authenticated by OIDC or local bcrypt |
+
+A config change in the store atomically recompiles the data plane's routing
+table and certificate set. See
+[docs/concepts/architecture.md](docs/concepts/architecture.md).
 
 ## Quick start
 
-With Docker (see [docs/deployment.md](docs/deployment.md) for the full guide):
+See [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md)
+for the full guide, and
+[docs/getting-started/install-binary.md](docs/getting-started/install-binary.md)
+for bare metal and systemd.
 
-```
-# 1. Generate an admin password hash
-docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password'
+Prerequisites: Docker and Docker Compose.
 
-# 2. Minimal compose
-cat > compose.yaml <<'YAML'
-services:
-  gpm:
-    image: ghcr.io/rake-pro/go-proxy-manager
-    ports: ["80:80", "443:443", "127.0.0.1:8081:8081"]
-    environment:
-      GPM_LOCAL_ADMIN_USER: admin
-      GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_hash
-    volumes: ["gpm-data:/data"]
-    secrets: [admin_hash]
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-secrets:
-  admin_hash:
-    file: ./admin_hash      # the hash from step 1; chmod 644 so the non-root user can read it
-volumes:
-  gpm-data:
-YAML
+1. Generate an admin password hash and write it to a file:
 
-docker compose up -d
-```
+   ```
+   docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > admin_hash
+   chmod 644 admin_hash
+   ```
 
-Open `http://127.0.0.1:8081/` (tunnel to it for a remote host) and sign in. Add a
-proxy host, point it at a backend, and attach a certificate. Configuration is
-written as YAML under the `/data/config` git repo, so you can also manage it as
-code.
+   The container runs as a non-root user; without the `chmod`, that user
+   cannot read the Docker secret, and the admin panel starts with no
+   authentication configured instead of failing loudly.
+
+2. Write a minimal compose file:
+
+   ```yaml
+   # compose.yaml
+   services:
+     gpm:
+       image: ghcr.io/rake-pro/go-proxy-manager
+       ports: ["80:80", "443:443", "127.0.0.1:8081:8081"]
+       environment:
+         GPM_LOCAL_ADMIN_USER: admin
+         GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_hash
+       volumes: ["gpm-data:/data"]
+       secrets: [admin_hash]
+       cap_drop: ["ALL"]
+       security_opt: ["no-new-privileges:true"]
+   secrets:
+     admin_hash:
+       file: ./admin_hash
+   volumes:
+     gpm-data:
+   ```
+
+3. Start it:
+
+   ```
+   docker compose up -d
+   ```
+
+4. Open `http://127.0.0.1:8081/` (tunnel to it for a remote host) and sign
+   in. No cookie setting is needed: the session cookie is issued without
+   `Secure` over plain HTTP and becomes `Secure` (and `__Host-` named)
+   automatically once the panel is served over HTTPS or `externalBaseURL` is an
+   `https://` URL. Add a proxy host, point it at a backend, and attach a
+   certificate. Configuration is written as YAML under the `/data/config` git
+   repo, so you can also manage it as code.
 
 ## Configuration
 
@@ -224,7 +257,28 @@ you're ready to issue or attach one.
 
 The complete object reference (proxy/redirect/stream/parked hosts, certificates,
 DNS providers, identity providers, access lists, middlewares, settings) with
-validation rules and examples is in **[docs/configuration.md](docs/configuration.md)**.
+validation rules and examples is in
+**[docs/reference/config/](docs/reference/config/README.md)**.
+
+## Documentation
+
+Full documentation lives in [docs/](docs/index.md).
+
+- **[Quickstart](docs/getting-started/quickstart.md).** Container to signed-in
+  admin panel to a first HTTPS host, in 15 minutes.
+- **[Concepts](docs/concepts/architecture.md).** Architecture, the request
+  pipeline, the security model, and a
+  [glossary](docs/concepts/terminology.md).
+- **[How-to guides](docs/how-to/add-https-host.md).** One page per task: hosts,
+  certificates, SSO, mTLS, DNS sync, discovery, migration.
+- **[Configuration reference](docs/reference/config/README.md).** One page per
+  object kind, plus every
+  [environment variable and flag](docs/reference/env-vars-and-flags.md).
+- **[Operations](docs/operations/backup-and-restore.md).** Backup, upgrading,
+  high availability, hardening, and a consolidated
+  [troubleshooting table](docs/operations/troubleshooting.md).
+- **[REST API](docs/reference/api.md).** Authentication, token scopes, and the
+  OpenAPI specification.
 
 ## Building from source
 
@@ -235,7 +289,8 @@ go build -o gpm ./cmd/gpm     # build the binary
 go test ./...                 # run the test suite (hermetic; needs `git` on PATH)
 ```
 
-Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm import -npm-data <dir>`.
+Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm totp-secret`,
+`gpm import -npm-data <dir>`.
 
 ## Security model
 
@@ -246,7 +301,7 @@ Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm import -npm-data <dir
 - All trust decisions are rooted in the connection peer IP, never a forwarded
   header, unless that peer is explicitly trusted.
 - Secrets are referenced, never stored: literal secret values are rejected at
-  commit time. API token secrets are never stored at all — only their SHA-256
+  commit time. API token secrets are never stored at all - only their SHA-256
   digest is committed, and the plaintext is shown exactly once at creation.
 - API tokens are scope-limited, not just role-limited: token management, writing
   settings, backup, restore, whole-config revert and the pprof endpoints all
@@ -255,12 +310,13 @@ Subcommands: `gpm` (daemon), `gpm hashpw <password>`, `gpm import -npm-data <dir
   reverting an `APIToken` from history is refused so a rotation always means
   revocation.
 
-For deployment hardening notes see [docs/deployment.md](docs/deployment.md).
+For deployment hardening notes see
+[docs/operations/hardening.md](docs/operations/hardening.md).
 
 ## Project layout
 
 ```
-cmd/gpm/            entrypoint, subcommands (daemon, hashpw, import)
+cmd/gpm/            entrypoint, subcommands (daemon, hashpw, totp-secret, import)
 internal/model/     config object types + validation
 internal/store/     git-backed config store
 internal/dataplane/ TLS, routing, middleware chain, reverse proxy
@@ -273,8 +329,9 @@ internal/ui/        embedded web UI (go:embed)
 internal/importer/  Nginx-Proxy-Manager importer
 ```
 
-## Acknowledgements & license
+## Migrating from Nginx Proxy Manager
 
-Nginx Proxy Manager (MIT) and NPMplus (AGPLv3) are referenced as behavioural
-inspiration only; this is a clean-room implementation with no copied code or
-configuration. See the repository license for terms.
+- **One-time importer.** Reads an existing NPM/NPMplus `/data` directory and
+  maps proxy/redirect/stream/parked hosts, access lists, and certificates
+  into gpm's schema. See
+  [docs/how-to/migrate-from-npm.md](docs/how-to/migrate-from-npm.md).

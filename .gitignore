@@ -1,7 +1,11 @@
 # Build output
 /bin/
 /gpm
+/site/
 /test/stream/echo/echo
+
+# Local scratch/workspace dir (not part of the shipped tree)
+/work/
 
 # Local runtime data (git-backed config dir, certs, db, etc.)
 /data/

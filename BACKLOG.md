@@ -1,6 +1,6 @@
 # Backlog
 
-Outstanding, actionable work. The long-range feature roadmap (P0–P3 tiers) lives
+Outstanding, actionable work. The long-range feature roadmap (P0-P3 tiers) lives
 in [FEATURES.md](FEATURES.md); this file tracks concrete near-term tasks.
 
 > Note: items under *Security & hardening* derive from an internal security
@@ -24,13 +24,16 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
 - [x] **Strip a baseline identity-header denylist** from untrusted peers
   (`Remote-User`, `X-Forwarded-User`, the `X-Auth-Request-*` / `X-Authentik-*`
   families, etc.), regardless of which IdP is configured. *(Medium)*
-- [x] **Scope identity-header trust per host/provider** — trust is now the union
+- [x] **Scope identity-header trust per host/provider** - trust is now the union
   of a host's own (and its locations') providers, not a global union. *(Medium)*
 - [x] **Bound importer resource use**: a per-table `LIMIT` / row cap
   (`maxImportRows`) fails an over-large source loudly; dedup is map-based. *(Medium)*
-- [x] `__Host-` prefix on the session cookie when cookies are `Secure` (gated on
-  `GPM_COOKIE_SECURE` so a plain-HTTP admin deployment is not forced onto Secure
-  cookies). *(Low)*
+- [x] `__Host-` prefix on the session cookie whenever the cookie is issued
+  `Secure`. `GPM_COOKIE_SECURE=auto` (the default) decides per request - TLS to
+  gpm, a trusted proxy asserting `X-Forwarded-Proto: https`, or an `https://`
+  `externalBaseURL` - so a plain-HTTP bootstrap login still works and the same
+  deployment hardens itself once fronted; `1`/`0` force the decision. Both cookie
+  names are accepted on the way in, so a session survives the switch. *(Low)*
 - [x] Emit baseline security headers (HSTS, `X-Content-Type-Options`,
   `X-Frame-Options`, CSP `frame-ancestors`, `Referrer-Policy`) on admin/login
   responses. *(Low)*
@@ -58,7 +61,7 @@ All findings from that review are remediated in the same change (see CHANGELOG
   *(Low)*
 - [x] Manual DNS reconcile returns 409 instead of blocking on the run lock.
   *(Low)*
-- [x] `apexTarget` change orphans previously-managed records — **fixed, not just
+- [x] `apexTarget` change orphans previously-managed records - **fixed, not just
   documented**, by the ownership ledger: a record gpm created and nobody has
   touched since is still recognisably gpm's after the apex moves, so it is
   retargeted on the next reconcile instead of being orphaned. *(Low)*
@@ -73,6 +76,40 @@ All findings from that review are remediated in the same change (see CHANGELOG
   type. *(Info)*
 
 ## Functionality gaps
+
+### Inline host/location `auth` and `rateLimit` (follow-ups)
+
+- [ ] **Discovery templates do not carry the inline blocks.**
+  `IngressHostTemplate` (used by both `settings.ingressDiscovery` and
+  `settings.dockerDiscovery`) mirrors proxy-host fields one by one, not
+  generically, so adding `auth` / `rateLimit` there is not a model-only change:
+  the Settings page rebuilds the whole template object in `app.js` on every save,
+  so a field it neither renders nor carries forward is wiped (the invariant
+  `TestSettingsSaveSendsEveryFlatTemplateField` exists for). Deferred until the
+  template editor is worked on; discovered hosts keep using `middlewares` /
+  `accessLists` for a shared chain, which is the right shape for a fleet anyway.
+- [ ] **UI editors.** Host editor "Sign-in" and "Rate limit" folds, and the same
+  two on the location row editor. Spec written; the UI agent applies it.
+
+### Path / Host escape hatches (follow-ups)
+
+- [ ] **UI editors (blocking: the host editor currently WIPES the new upstream
+  fields on save).** `internal/ui/static/app.js` rebuilds `obj.upstream` from
+  scheme/host/port alone in the host editor (~line 2156), the location editor
+  (~line 2327) and the ingress-discovery template (~line 5339), so a
+  `path` / `hostHeader` written by API or git is dropped the next time that page
+  is saved. Until the spec is applied, treat the fields as API/YAML only and do
+  not edit such a host in the UI. Spec written (`ui-specs/escape-hatch.md`):
+  locations row gets a "Strip prefix" switch; every upstream field group gets
+  "Base path" and "Host header" (keep client Host / use upstream host / custom);
+  the rewrite middleware editor grows Prefix and Regex rule groups beside the
+  existing Exact map.
+- [ ] **`healthCheck.path` is not prefixed with a group member's
+  `upstream.path`.** Deliberate (the probe path is configured in full), but worth
+  revisiting if operators keep writing the base path twice.
+- `IngressHostTemplate.upstream` is a plain `Upstream`, so the model carries
+  `path` / `hostHeader` there for free - only the Settings page's flat rebuild
+  needs the two extra fields.
 
 ### Error pages (observations from the auth-refusal review, no code changed)
 
@@ -102,7 +139,7 @@ error-page system; none is a regression from that change.
   iframes). *(Addressed: each header carries a `scope` of `all` (default),
   `generated-only` or `proxied-only`; the recommended set now scopes CSP and
   Permissions-Policy to `generated-only`. The legacy plain map stays valid
-  (bare string ⇒ scope `all`). See CHANGELOG / `docs/configuration.md`.)*
+  (bare string => scope `all`). See CHANGELOG / `docs/configuration.md`.)*
 - [ ] **A broken template passes validation, survives reload, and then blocks the
   next restart.** `settings.errorPages` is not compiled at write time, so a
   syntactically-broken template commits cleanly. The reload path is fail-safe
@@ -123,13 +160,13 @@ error-page system; none is a regression from that change.
 - [x] **HSTS emission.** The data plane now emits `Strict-Transport-Security` on
   HTTPS responses for hosts with `tls.hsts.enabled`.
 - [x] **Per-host OIDC relying-party gating** on the data plane: auth mode `oidc`
-  makes gpm the relying party (redirect → callback → signed SSO session cookie),
+  makes gpm the relying party (redirect -> callback -> signed SSO session cookie),
   replacing the prior 501.
 - [x] **Backup / export / restore** of the whole config (portable gzip-tar
   archive): `GET /api/backup`, `POST /api/restore`, with UI controls.
 - [x] **Config history**: revert endpoint (`POST /api/revert`) + live per-commit
   revert action in the History view.
-- [x] **Per-object revert.** Revert today is whole-tree: `Store.Revert` →
+- [x] **Per-object revert.** Revert today is whole-tree: `Store.Revert` ->
   `RestoreTree` (`git read-tree --reset -u` + `clean -fd`) resets the entire
   config to the target commit, so reverting one object from its History view
   silently deletes every object created after that commit (bit the operator
@@ -139,7 +176,7 @@ error-page system; none is a regression from that change.
   just that change; keep the whole-tree revert as an explicit, clearly-labeled
   separate action.
   *(Done: `Store.RevertObject(kind,name,hash)` restores a single file via
-  `git checkout <hash> -- <rel>` — rel derived from the trusted kind mapping, hash
+  `git checkout <hash> -- <rel>` - rel derived from the trusted kind mapping, hash
   validated, whole-config re-validated with HEAD rollback on failure, absent-at-
   commit refused (no delete-on-revert); endpoint `POST /api/{kind}/{name}/revert`;
   History view gains "revert this object" and the whole-tree action is relabeled
@@ -204,8 +241,7 @@ error-page system; none is a regression from that change.
   IPv6 docs. HTTP/3 HELD (owner decision 2026-08-23): stays in the backlog
   until Go stdlib ships an HTTP/3 server (golang/go#58547, milestone
   Unreleased); quic-go re-check 2026-08-23 found nothing lighter (~20 modules,
-  +2.1 MB, 3 advisories/12 months). Remaining at flip time: author-identity history
-  rewrite (real email on 43 commits), CLAUDE.md purge, final leakage pass.)* Publishing the source of the live edge proxy is a
+  +2.1 MB, 3 advisories/12 months).)* Publishing the source of the live edge proxy is a
   deliberate exposure decision: the full pre-publication pipeline applies
   (all-history secret/infra audit, author-identity normalization, tag/release
   handling, LICENSE choice) plus items specific to this repo - a fresh look at
@@ -221,13 +257,13 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 - [x] **Stream hosts (TCP/UDP) forwarding** validated end-to-end on the live
   `1b6eeaf` image via the `test/stream/` harness (TCP + UDP echo round-tripped
-  from an external client through a published 15432 → gpm forwarder → backend).
+  from an external client through a published 15432 -> gpm forwarder -> backend).
 - [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
   (HELD 2026-08-22: only the handful of auth-request hosts fronting apps without
   native OIDC would benefit - revisit when the outpost becomes a nuisance;
   shared client, one callback URI per host)
   (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
-  walk a host through redirect → callback → session).
+  walk a host through redirect -> callback -> session).
 - [x] **Kubernetes Ingress discovery** validated against a live cluster: apply
   `deploy/k8s-ingress-discovery-rbac.yaml`, extract the token, enable discovery
   with the wildcard `certificateRef`, annotate one Ingress, and confirm the
@@ -237,7 +273,7 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 ## Code hygiene
 
 - [x] Fix the stale middleware-order comment in `internal/dataplane/chain.go`
-  (order is rate-limit → access-list → auth → guard → headers; access-list moved
+  (order is rate-limit -> access-list -> auth -> guard -> headers; access-list moved
   ahead of auth per GPM-L1).
 - [x] Remove or keep-in-sync the unused `router.tlsConfig()` (the server builds an
   equivalent `tls.Config` separately).
@@ -247,8 +283,18 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 
 ## UI polish
 
-- [ ] **`securityHeaders` is missing from the ingress-discovery template.** A
-  per-host `securityHeaders` override on a discovery-managed host is rebuilt away
+- [ ] **No control for `trustedProxies` yet (Settings and proxy host).** The
+  model, validation, data plane, API and docs shipped; the UI has not. Until it
+  does, a Settings save from the admin panel DROPS `settings.trustedProxies`,
+  because the save handler builds its PUT body from the controls on the page.
+  `internal/ui/settingsmerge_test.go` records this in its `pendingUIControl` map
+  (a `t.Logf` TODO rather than a failure) and fails again once the field appears,
+  so the entry cannot be left behind. Spec: a "Client IP" card after PROXY
+  protocol in Settings, and a "Trusted proxies (override)" chip list in the proxy
+  host editor's Advanced fold, both with the 0.0.0.0/0 warning.
+- [ ] **`securityHeaders` and `trustedProxies` are missing from the
+  ingress-discovery template.** A per-host `securityHeaders` or `trustedProxies`
+  override on a discovery-managed host is rebuilt away
   (with a git commit) on every reconcile, exactly the gap
   `stripResponseHeaders` closed by gaining an `IngressHostTemplate` field. The
   fix is the same shape: add `SecurityHeaders` to `IngressHostTemplate`, validate
@@ -306,8 +352,8 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 ## DNS sync (phase 2: Kubernetes Ingress discovery)
 
 Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) and
-phase 2 (Kubernetes Ingress discovery) are both shipped — see CHANGELOG
-`Added`, [docs/configuration.md](docs/configuration.md#ingressdiscoverysettings-settingsingressdiscovery)
+phase 2 (Kubernetes Ingress discovery) are both shipped - see CHANGELOG
+`Added`, [docs/configuration.md](docs/reference/config/settings/ingress-discovery.md)
 and the design record
 [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
 
@@ -317,7 +363,7 @@ and the design record
   `gpm.rake.pro/public-cname` setting the derived host's `dns` policy.
   - [x] **Plain Kubernetes REST, no `client-go`** (`internal/k8s`): `net/http` +
     `encoding/json` against `/apis/networking.k8s.io/v1/ingresses`, in-cluster or
-    explicit `apiURL`/`tokenFile`/`caFile` (the latter is the real deployment —
+    explicit `apiURL`/`tokenFile`/`caFile` (the latter is the real deployment  - 
     gpm runs off-cluster on the edge host), token re-read on a TTL for projected
     SA rotation, hardened transport, bounded pagination.
   - [x] **Scoped read-only ServiceAccount**: `deploy/k8s-ingress-discovery-rbac.yaml`
@@ -345,12 +391,12 @@ and the design record
     certificate/upstreamGroup/middleware/accessList/clientCA name used to pass
     `SaveSettings` and then reject the whole reconcile batch on every poll,
     dropping every unrelated tenant's changes with it.
-  - [x] **Domain ownership, not just name ownership** — a derived host whose
+  - [x] **Domain ownership, not just name ownership** - a derived host whose
     domains are already claimed by a host discovery does not own is skipped and
     reported, and `Config.Validate` rejects two enabled hosts claiming one domain
     whatever wrote them. Ownership is re-checked under the store lock at write
     time via `Store.ApplyBatch`'s `ApplyGuard`, since the plan predates the list.
-  - [x] **Feeds the existing DNS sync** — discovery sets the `dns` policy and
+  - [x] **Feeds the existing DNS sync** - discovery sets the `dns` policy and
     reuses the phase-1 trigger, so there is one DNS code path.
   - [x] **Template/profile parity with a hand-written host** (`robotsNoIndex`,
     `timeouts`, `tags`). The template expressed the upstream, TLS, websockets,
@@ -406,20 +452,20 @@ one change:
 - [x] **Explicit ownership ledger** (`model.DNSLedger`, singleton
   `config/dns-ledger.yaml`) replaces target-equality inference. A record absent
   from the ledger is never deleted, whatever it points at.
-- [x] **Adopt, don't purge, on first enable** — a present record matching the
+- [x] **Adopt, don't purge, on first enable** - a present record matching the
   desired set is claimed rather than recreated; everything else is left alone and
   counted as `untouched`.
 - [x] **Dry run**: `GET /api/dns-sync/plan` (`dns-sync:read`), wired into the
   settings UI as *Preview changes*, reporting the same decisions the reconcile
   would take without writing anything.
-- [x] **Cloudflare on the same discipline** — the ledger is authoritative for
+- [x] **Cloudflare on the same discipline** - the ledger is authoritative for
   deletion, the `managed-by:gpm` comment stays as an independent second condition.
 - [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
   created and deleted.
 
 Adversarial review of that change (2026-08-01), all remediated:
 
-- [x] **Adoption was a one-way trap** — an adopted record the config later stopped
+- [x] **Adoption was a one-way trap** - an adopted record the config later stopped
   wanting was deleted. Ledger entries now record provenance (`adopted`) and an
   adopted entry is *released*, never deleted; a missing field reads as adopted so
   upgrades cannot destroy anything. *(High)*
@@ -429,9 +475,9 @@ Adversarial review of that change (2026-08-01), all remediated:
   host removal to hard-delete it. An adopted claim whose record no longer matches
   the apex is now released, not retargeted; retarget applies only to records gpm
   created. *(Med)*
-- [x] **Pi-hole session leaked on context cancellation** — `logout` ran on the
+- [x] **Pi-hole session leaked on context cancellation** - `logout` ran on the
   caller's (cancelled) context. It now uses a detached 5s context. *(High)*
-- [x] **Retarget had no rollback** — a failed create after a successful delete
+- [x] **Retarget had no rollback** - a failed create after a successful delete
   destroyed the record and under-reported the run. The original is restored, the
   run fails loudly, and the counter increments as soon as the delete lands. *(Med)*
 - [x] **A Pi-hole API shape change read as "zero records"** and wiped the ledger.
@@ -441,7 +487,7 @@ Adversarial review of that change (2026-08-01), all remediated:
 - [x] **Ledger read-modify-write raced a concurrent Revert** (confirmed). The save
   carries the revision it read at and is refused when the tree moved; the run then
   re-writes without the claims the revert withdrew. *(Med)*
-- [x] **A revert can resurrect a stale claim** — documented beside the existing
+- [x] **A revert can resurrect a stale claim** - documented beside the existing
   revert note, and deletions now log at warn with the authorising `ledgerRev`.
   *(Med)*
 - [x] Ledger duplicate-domain validation is case-insensitive. *(Low)*
@@ -478,22 +524,22 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   host is never touched). If a need ever appears, the only shape that keeps the
   containment property is operator-side: locations written per profile in
   settings and selected by name like everything else. See
-  [docs/design/ingress-discovery.md §5](docs/design/ingress-discovery.md).
+  [docs/design/ingress-discovery.md section 5](docs/design/ingress-discovery.md).
 - **Per-host ACME** for discovered names outside the wildcard's coverage. Would
   need its own rate-limit budget and a CT-disclosure note in the UI.
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
 - **Gateway API** (`Gateway`/`HTTPRoute`) as a second discovery source.
 - ~~**A dry-run endpoint** (`GET /ingress-discovery/plan`)~~ shipped 2026-08-22.
 - ~~**Operator-side profile selection**~~ shipped 2026-08-22 as `profileRules` / `profileSelection`. Original rationale: mapping rules in settings
-  (`namespace`/label ⇒ profile) so the `Ingress` selects nothing at all. Strictly
+  (`namespace`/label => profile) so the `Ingress` selects nothing at all. Strictly
   stronger than the annotation, and the answer to the one residual risk profiles
   carry: **every profile is selectable by every annotating Ingress**, so a tenant
   can pick the most permissive profile you defined. Until this exists, the
-  mitigation is documented policy — define only profiles you are willing for any
+  mitigation is documented policy - define only profiles you are willing for any
   tenant to choose (now stated in `docs/configuration.md` and in the settings UI).
   Cost: a settings commit per new service. Named
   profiles are the substrate it would sit on. See
-  [design/ingress-discovery.md §5a](docs/design/ingress-discovery.md).
+  [design/ingress-discovery.md section 5a](docs/design/ingress-discovery.md).
 - ~~**Per-profile `allowedDomainSuffixes`**~~ shipped 2026-08-22 (subset of the global list, validated at settings-write).
 - ~~**Live validation** against the real cluster~~ done (live since 2026-08-01).
 
@@ -536,27 +582,27 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 ## Roadmap
 
-See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts shipped, backup/
-restore, rate limiting, access-log viewer, custom timeouts, load balancing), P2
-(HTTP/3, hardened TLS, proxy protocol, IPv6, multi-ACME EAB - GeoIP
-geoblocking and mTLS client certs phases 1-3, issuance included, are now shipped,
-see FEATURES.md),
-P3 (local-admin passkeys + TOTP for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd, OCSP,
-WAF/CrowdSec, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM,
-MPTCP, Anubis, cosign signing).
+See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts, backup/
+restore, rate limiting, access-log viewer, custom timeouts, load balancing - all
+shipped), P2 (proxy protocol, IPv6, GeoIP geoblocking, mTLS client certs phases
+1-3 with issuance, multi-ACME EAB, gzip compression, custom error pages, cosign
+image signing, and the WAF/CrowdSec `bouncer` hook are all shipped; HTTP/3 and
+hardened-TLS-as-a-fleet-switch are not started), P3 (local-admin passkeys + TOTP
+for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd,
+OCSP, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM, MPTCP, Anubis).
 
 ### Design proposals
 
-- **Kubernetes Ingress discovery** —
+- **Kubernetes Ingress discovery**  - 
   [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md)
   (implemented). Settles the certificate strategy (template wildcard ref, not
   per-host ACME), commit granularity (one per reconcile), freeze-on-error
-  semantics, poll-vs-watch, and the Ingress → ProxyHost field mapping for an
+  semantics, poll-vs-watch, and the Ingress -> ProxyHost field mapping for an
   off-cluster gpm.
 - **High availability (gpm itself)** -
   [docs/design/ha.md](docs/design/ha.md) (phase 1 implemented 2026-08-22). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
   automatic election / active/active.
-- **HTTP/3** — [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
+- **HTTP/3** - [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
   from the same document are now shipped - see FEATURES.md and
   CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
@@ -567,19 +613,16 @@ MPTCP, Anubis, cosign signing).
   (`POST /api/client-cas/{name}/generate`) so the whole mTLS path needs no
   external tooling - `internal/clientcert`) shipped after it; OCSP deliberately
   not implemented (CRL only), see
-  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) §1.
+  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) section 1.
 
   Follow-ups identified while shipping phase 3. (a) **A trusted-proxy source for
-  `client-cert` mode** - `hostIdentityTrust` builds a host's trusted-proxy set
-  only from the `forwardAuth.trustedProxies` of the IdPs its auth middlewares
-  reference, and a `client-cert` middleware has no IdP, so on a pure client-cert
-  host `allowFrom` compares the raw TCP peer and `X-Forwarded-For` is never
-  walked. That is fail-safe with gpm at the edge and a total mTLS bypass behind an
-  L7 proxy whose address lands inside an `allowFrom` network. Documented as a
-  warning in docs/configuration.md ("Which IP `allowFrom` actually compares") for
-  now; the fix is a per-middleware or per-host `trustedProxies` that client-cert
-  mode can declare without inventing a dummy IdP. Weigh against just telling
-  operators to use PROXY protocol or an AccessList, which already solve it.
+  `client-cert` mode** - DONE. Client-IP trust is now one setting,
+  `settings.trustedProxies` with a per-host `proxyHost.trustedProxies` override
+  (`internal/dataplane/clientip.go`), read by every IP-comparing tier including a
+  `client-cert` `allowFrom`. `forwardAuth.trustedProxies` is back to meaning only
+  "who may assert identity headers" and no longer affects the client IP; a config
+  relying on it gets a load-time WARN carrying the YAML to add. Documented as
+  docs/configuration.md, "Client IP and the three trust tiers".
   The rest, none blocking: (b) **one-click
   revoke** - the issuance ledger now knows every serial, so "revoke this
   certificate" could append it to the CA's `crlFile` instead of the operator
@@ -602,3 +645,64 @@ MPTCP, Anubis, cosign signing).
   and relies on the admin-role + scope gate; revisit if the API ever grows a
   general limiter; (h) there is no delete-a-record action;
   retention is a prune of records expired more than a year.
+
+## Post-review follow-ups
+
+Identified by the 2026-09-02 pre-public review (purpose-fit, docs-onboarding,
+UX/IA, release-hygiene passes).
+
+- [ ] **Help-hint registry coverage backfill.** Several icon-only controls and
+  unexplained fields have no inline help (bulk actions, HSTS sub-fields, the
+  certificate editor's Account email/Directory URL/Key type, External base URL,
+  the admin-authentication switches). Recommended shape: a single
+  `field-path -> {short, more}` hint registry driving a `?` popover per field,
+  plus a docs-link tier and a small jargon glossary - see the UX/IA review,
+  section 5.3, for the four-tier design. UI-owned; write a spec to
+  `ui-specs/` when picked up.
+- [x] **Docker label auto-discovery.** Shipped: `internal/docker` reads a
+  read-only Docker socket and derives proxy hosts from `gpm.rake.pro/*`
+  container labels, the same name-only profile contract as Kubernetes
+  Ingress discovery (`internal/model/dockerdisc.go`,
+  `settings.dockerDiscovery`).
+- [ ] **Tunnel integration (CGNAT bypass).** No `cloudflared` or Tailscale
+  (`tsnet`) recipe exists; gpm structurally requires inbound `:80`/`:443`
+  today. A documented `cloudflared` sidecar recipe, and/or a `tsnet` listener
+  as a second bind alongside the normal one, would serve the growing
+  no-port-forward cohort without adding a required dependency.
+- [x] **TOTP for the local admin.** Shipped: `GPM_LOCAL_ADMIN_TOTP_SECRET`
+  (RFC 6238, stdlib-only) turns local login into password + 6-digit code, with
+  `gpm totp-secret` for enrolment. Still open below it: WebAuthn, and more than
+  one named local admin (deliberately not planned - see
+  docs/configuration.md#users-roles-and-audit).
+- [ ] **v2 consolidations** (breaking, batch for a major version bump):
+  - **One backend "slot"**: `ProxyHost.upstream` and `.upstreamGroupRef` are
+    two ways to say the same thing at the host level (already true per
+    `Location`); consider a single discriminated `backend` field.
+  - **Fold `ParkedHost` into `ProxyHost`** as a mode/flag rather than a
+    separate object kind and API surface, now that the DeadHost->ParkedHost
+    rename (v1.0.18) has already broken the old name once.
+  - **`certificateRef` authoritative-or-removed**: decide whether the legacy
+    inline certificate fields on `ProxyHost` are ever the source of truth
+    again, and either enforce `certificateRef` as authoritative everywhere or
+    drop the parallel path. Interim (non-breaking) state shipped: it is
+    documented as inert for L7 hosts (authoritative only for a stream host in
+    `terminate` mode), and a load-time WARN names any proxy/redirect/parked host
+    whose ref covers none of its domains.
+  - **Remove deprecated fields** once a major-version migration exists to
+    carry old configs forward: `basicAuth`, `satisfyAny`, `http2`,
+    `websocketsUpgrade`, `trustIdPMFA` (also unimplemented, see FEATURES.md
+    section 1.4), `requestsPerSecond`. `http2`, `websocketsUpgrade` and
+    `trustIdPMFA` now carry `// Deprecated:` comments and are gone from the UI,
+    `docs/api/openapi.yaml` and the `docs/configuration.md` field tables; only
+    the struct fields (and the NPM importer's round-trip) remain.
+    `basicAuth`/`satisfyAny` have now joined them: an auth middleware with
+    `mode: basic` is the replacement, `POST
+    /api/access-lists/{name}/migrate-basic-auth` converts a list in one commit
+    (`?plan=1` for a dry run), a load-time WARN names every list still carrying
+    them, and the fields are marked deprecated in the struct and the OpenAPI
+    schema. Removing the fields themselves stays part of the v2 batch, and it
+    also retires the L4 special case in `Config.Validate` (a stream host may not
+    reference a `basicAuth` list) and the `satisfyAny` branch in
+    `accessListHandler`.
+  - None of these are urgent enough to justify a breaking change alone; batch
+    them into one v2 config migration when enough of them have accumulated.

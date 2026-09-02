@@ -1,3 +1,4 @@
+//lint:file-ignore SA1019 test file exercises deprecated AccessList.BasicAuth/SatisfyAny compat evaluation in accesslist.go
 package dataplane
 
 import (
