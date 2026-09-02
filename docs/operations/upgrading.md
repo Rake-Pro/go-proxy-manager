@@ -118,10 +118,10 @@ Starting an **older** gpm binary against a config directory a **newer** one has
 written to. Both config loaders (per-object files and `settings.yaml`) use a
 non-strict YAML decode, so a key the older struct does not recognise is
 silently dropped rather than rejected, and the first write after that,
-including an automatic reconciler commit, makes the drop permanent. Since
-1.3.0 a load that meets an unknown key warns (`GET /api/health`
-`configWarnings`) and the reconciler refuses to write that file, so the drop
-is visible before it becomes permanent. The [changelog](https://github.com/Rake-Pro/go-proxy-manager/blob/main/CHANGELOG.md)
+including an automatic reconciler commit, makes the drop permanent. A load
+that meets an unknown key warns (`GET /api/health` `configWarnings`) and the
+reconciler refuses to write that file, so the drop is visible before it
+becomes permanent. The [changelog](https://github.com/Rake-Pro/go-proxy-manager/blob/main/CHANGELOG.md)
 lists the fields each release introduces.
 
 ### Prerequisites
@@ -169,7 +169,7 @@ lists the fields each release introduces.
 | Symptom | Cause | Fix |
 |---|---|---|
 | A host with an inline `auth:` or `rateLimit:` block is reachable with no login or rate limit after rollback | The older binary's first write to that file silently dropped the unknown block | Recover the file with `git checkout` above, then re-apply the block once back on a version that supports it |
-| The older binary refuses to start, or a load error names `auth.mode` | A middleware or inline `auth` block uses `mode: basic` (added in 1.1.0); older versions reject the value outright | Recover the config to before that middleware/block existed, or stay on 1.1.0+ |
+| The older binary refuses to start, or a load error names `auth.mode` | A middleware or inline `auth` block uses `mode: basic`; a build that predates it rejects the value outright | Recover the config to before that middleware/block existed, or stay on a build that knows the mode |
 | `upstream.path`, `hostHeader`, `stripPrefix`, or a `trustedProxies` list reverted to empty | Same silent-drop, on those fields | Same recovery as above |
 | A `rewrite` middleware stopped matching | Same silent-drop, on its prefix/regex rules | Same recovery as above |
 | `settings.notifications` or `settings.dockerDiscovery` stopped firing or discovering | Same silent-drop, on `settings.yaml` | Recover `settings.yaml` from git and re-add the section once back on a version that supports it |
