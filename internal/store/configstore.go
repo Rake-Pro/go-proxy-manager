@@ -124,7 +124,7 @@ type Store struct {
 	// geoLoaded reports whether a GeoIP database is currently loaded. It is the
 	// only coupling between the store and the geo subsystem: a plain predicate
 	// injected from main (geoResolver.Loaded), never a dataplane import. When nil
-	// (e.g. the CLI importer, or a test) the geo-availability gate is skipped, so
+	// (e.g. a CLI subcommand, or a test) the geo-availability gate is skipped, so
 	// the store stays usable without a geo wiring.
 	geoLoaded func() bool
 }
@@ -393,8 +393,8 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 
 // SaveBatch writes many objects in a single commit. It merges them onto the
 // current config, validates the whole graph once, and only then writes every
-// file and commits - so a bulk import (e.g. from NPM) lands atomically as one
-// revision, or fails without writing a partial, invalid state.
+// file and commits - so a bulk write lands atomically as one revision, or
+// fails without writing a partial, invalid state.
 func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message string, author Author) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -569,7 +569,7 @@ func restoreFiles(snaps []fileState) {
 // It exists for the Ingress-discovery reconciler, whose unit of work is a whole
 // reconcile: a poll that adds two hosts and removes one is a single revision an
 // operator can read and revert, not four commits with a reload, webhook and DNS
-// trigger apiece (see docs/design/ingress-discovery.md section 2).
+// trigger apiece (see design/ingress-discovery.md section 2).
 //
 // An empty batch is a no-op: it returns ("", nil) without committing, so a
 // steady-state reconcile produces no empty revisions. A delete naming an object

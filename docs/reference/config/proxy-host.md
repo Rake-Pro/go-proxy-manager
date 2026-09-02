@@ -16,24 +16,24 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-auth"></span>  `auth` | AuthMiddleware | no | Gate this host through an identity provider **without a Middleware object**. Same shape and same gate as a `type: auth` middleware. See [Inline auth and rate limit](#proxy-host-inline-auth-and-rate-limit). |
 | <span id="proxy-host-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | no | Throttle this host **without a Middleware object**. Same shape and same limiter as a `type: rate-limit` middleware. See [Inline auth and rate limit](#proxy-host-inline-auth-and-rate-limit). |
 | <span id="proxy-host-locations"></span>  `locations` | []Location | no | Path-scoped overrides (below). |
-| <span id="proxy-host-maintenance"></span>  `maintenance` | bool | no | Take this host out of service without removing it: gpm answers every request with a 503 maintenance page and never dials the upstream. The host keeps its domains, certificate and DNS records. Operator-owned - Ingress discovery preserves it. See [Maintenance mode](settings/maintenance.md). |
+| <span id="proxy-host-maintenance"></span>  `maintenance` | bool | no | Take this host out of service without removing it: gpm answers every request with a 503 maintenance page and never dials the upstream. The host keeps its domains, certificate and DNS records. Operator-owned: Ingress discovery preserves it. See [Maintenance mode](settings/maintenance.md). |
 | <span id="proxy-host-compression"></span>  `compression` | Compression | no | Gzip response compression (below). Zero value (`enabled: false`) is today's behaviour: no compression. |
 | <span id="proxy-host-error-pages"></span>  `errorPages` | ErrorPagesConfig | no | Overrides [`settings.errorPages`](settings/error-pages.md) for this host's own gpm-generated errors. Unset uses the settings-level pages, if any. Same shape and same validation as the settings block: `dir`, `inline`, `interceptUpstream`. |
 | <span id="proxy-host-error-pages-dir"></span>  `errorPages.dir` | string | no | Directory of `<status>.html` templates plus an optional `default.html`, relative to the cert store. Same rules as [`settings.errorPages.dir`](settings/error-pages.md#settings-error-pages-dir). |
 | <span id="proxy-host-error-pages-inline"></span>  `errorPages.inline` | map[string]string | no | Status code (or `"default"`) mapped to `html/template` source, for a page kept in config rather than a mounted directory. |
 | <span id="proxy-host-error-pages-intercept-upstream"></span>  `errorPages.interceptUpstream` | []int | no | Status codes for which this host also replaces the **upstream's own** error body. |
 | <span id="proxy-host-security-headers"></span>  `securityHeaders` | map[string]string \| map[string]{value,scope} | no | Merges over [`settings.securityHeaders`](settings/security-headers.md) per key for this host (replacing the settings value **and its scope** for a header it names). Unset uses the settings-level default unchanged. |
-| <span id="proxy-host-strip-response-headers"></span>  `stripResponseHeaders` | []string | no | Response headers removed from what this host's upstream sends, **in addition to** [`settings.stripResponseHeaders`](settings/security-headers.md#strip-response-headers-section) (union, not replacement - a host cannot opt out of a fleet-level strip). |
+| <span id="proxy-host-strip-response-headers"></span>  `stripResponseHeaders` | []string | no | Response headers removed from what this host's upstream sends, **in addition to** [`settings.stripResponseHeaders`](settings/security-headers.md#strip-response-headers-section) (union, not replacement: a host cannot opt out of a fleet-level strip). |
 | <span id="proxy-host-trusted-proxies"></span>  `trustedProxies` | []string (nullable) | no | The L7 proxies whose `X-Forwarded-For` is believed when deriving this host's client IP. **Three states:** omitted or `null` inherits [`settings.trustedProxies`](settings/trusted-proxies.md); `[]` trusts nobody for this host whatever the fleet default is; a non-empty list **replaces** the fleet list (never extends it). See [Per-host override](settings/trusted-proxies.md#per-host-override-absent-is-not-the-same-as-empty) and [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers). |
 
-**Upstream** - a single backend target. Used by `proxyHost.upstream`,
+**Upstream**: a single backend target. Used by `proxyHost.upstream`,
 `location.upstream` and each member of an [UpstreamGroup](upstream-group.md).
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="proxy-host-upstream-scheme"></span>  `scheme` | string | - | yes | `http` or `https`. |
-| <span id="proxy-host-upstream-host"></span>  `host` | string | - | yes | Backend hostname or IP. |
-| <span id="proxy-host-upstream-port"></span>  `port` | int | - | yes | 1-65535. |
+| <span id="proxy-host-upstream-scheme"></span>  `scheme` | string | none | yes | `http` or `https`. |
+| <span id="proxy-host-upstream-host"></span>  `host` | string | none | yes | Backend hostname or IP. |
+| <span id="proxy-host-upstream-port"></span>  `port` | int | none | yes | 1-65535. |
 | <span id="proxy-host-upstream-path"></span>  `path` | string | `""` | no | Base path prefixed to every forwarded request: `/api` turns a client `/v1/x` into `/api/v1/x`. Must be absolute, must not contain `.`/`..` segments, `\`, `;`, a query string or a fragment. Applied **last**, after any location prefix strip and any rewrite middleware. |
 | <span id="proxy-host-upstream-host-header"></span>  `hostHeader` | string | `""` | no | Host header sent upstream. `""` keeps the client's Host (today's behaviour); `upstream` sends the upstream's own `host:port`; anything else is sent literally and must be a hostname, optionally `host:port`. |
 
@@ -52,10 +52,10 @@ that actually reaches that member. `healthCheck.path` is used verbatim and is
 **not** prefixed with `path`, so write the full probe path there.
 
 **TLSSettings**: `certificateRef` (a Certificate name; see [Which certificate a
-host serves](certificate.md#which-certificate-a-host-serves) - it does **not** select the
+host serves](certificate.md#which-certificate-a-host-serves); it does **not** select the
 certificate for an L7 host), `forceSSL` (redirect HTTP->HTTPS), `hsts` (`enabled`,
-`maxAge` - seconds, default one year when unset, `includeSubdomains`, `preload`),
-`minTLSVersion` (`"1.2"` default | `"1.3"`), `clientAuth` (mTLS - below).
+`maxAge` in seconds, default one year when unset, `includeSubdomains`, `preload`),
+`minTLSVersion` (`"1.2"` default | `"1.3"`), `clientAuth` (mTLS, below).
 When `hsts.enabled` is set, the data plane emits `Strict-Transport-Security` on
 HTTPS responses for the host (never over plain HTTP).
 
@@ -63,8 +63,8 @@ HTTPS responses for the host (never over plain HTTP).
 are verified at the TLS handshake against a [ClientCA](client-ca.md).
 It is editable from the host editor's TLS section ("Client certificates (mTLS)"):
 a toggle, a Client CA picker and the mode. Turning it **on** is greyed out with
-the reason until its preconditions hold - `forceSSL` on, and at least one enabled
-ClientCA to point at - while turning it **off** is always possible, so a host
+the reason until its preconditions hold (`forceSSL` on, and at least one enabled
+ClientCA to point at), while turning it **off** is always possible, so a host
 whose stored combination is already invalid is never trapped. Turning `forceSSL`
 off under a live mTLS host is refused rather than silently dropping the
 certificate requirement. A `caRef` the CA list does not contain is shown flagged
@@ -89,28 +89,28 @@ anchor, and if the CA list cannot be loaded at all the page says so and leaves
 
 These headers ride the existing identity-trust model: all four default names are
 in the **baseline identity denylist**, so they are stripped from every request
-whose peer is not a proxy the host trusts - whether or not the host enables
-passthrough - and a custom `subjectHeader` is added to that host's own strip set.
+whose peer is not a proxy the host trusts (whether or not the host enables
+passthrough), and a custom `subjectHeader` is added to that host's own strip set.
 gpm sets them *after* the strip, only from a certificate the handshake actually
 **verified**; in `optional` mode a certless request reaches the upstream with no
 identity headers at all.
 
 `minTLSVersion` is a **per-host** floor selected by SNI at handshake time. The
 edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
-set `"1.3"` only on hosts where every client supports it (drops 1.2 - old smart
+set `"1.3"` only on hosts where every client supports it (drops 1.2: old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
 for public hosts to keep the widest client compatibility.
 
 **DNSSyncPolicy** (`dns`): `lanDirect` publishes each of the host's domains as a
 local CNAME on the LAN resolver (Pi-hole), so internal clients reach the edge
 directly instead of hairpinning through the WAN address; `publicCname` publishes
-them in the authoritative public zone (Cloudflare). Both default false - nothing
+them in the authoritative public zone (Cloudflare). Both default false: nothing
 is published unless asked for, and an opted-out host omits the `dns` key from its
 API responses entirely rather than returning an empty object. The backends
 themselves are configured once, in
 [`settings.dnsSync`](settings/dns-sync.md); a policy flag with its
 backend disabled publishes nothing, and the UI says so inline while leaving the
-toggle usable - setting the flag before the backend exists is legitimate staging
+toggle usable: setting the flag before the backend exists is legitimate staging
 (the host is the declaration; the syncer publishes once it is wired), so it is
 not refused.
 
@@ -130,7 +130,7 @@ than replacing it, so a location is always at least as restrictive as its host.
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| <span id="proxy-host-locations-path"></span>  `path` | string | - | yes | Path prefix this override applies to. |
+| <span id="proxy-host-locations-path"></span>  `path` | string | none | yes | Path prefix this override applies to. |
 | <span id="proxy-host-locations-upstream"></span>  `upstream` | Upstream | host's backend | no | Single backend for this path. Mutually exclusive with `upstreamGroupRef`; with neither, the host's backend (including an upstream group) is inherited. |
 | <span id="proxy-host-locations-upstream-group-ref"></span>  `upstreamGroupRef` | string | host's backend | no | UpstreamGroup name for this path. Mutually exclusive with `upstream`. |
 | <span id="proxy-host-locations-strip-prefix"></span>  `stripPrefix` | bool | false | no | Remove this location's matched prefix before forwarding: `/app/foo` reaches the backend as `/foo`, and `/app` (or `/app/`) as `/`. A root location (`path: /`) strips nothing. |
@@ -171,13 +171,13 @@ already set `Content-Encoding` (never double-encoded); the response
 `Content-Type` doesn't match `types`; the body stays under `minBytes`; the
 status is `204`, `304`, or `101` (protocol switch); or the response is
 `text/event-stream` or otherwise starts **streaming** (the handler flushes
-before the compress decision is made - this is also what keeps a WebSocket
+before the compress decision is made, this is also what keeps a WebSocket
 upgrade, which is hijacked rather than written through, untouched). A
 compressed response gets `Content-Encoding: gzip`, `Vary: Accept-Encoding`, and
 has `Content-Length` stripped (the compressed size isn't known up front).
 **BREACH**: compressing a response whose size depends on attacker-controlled
 input reflected alongside a secret (e.g. a CSRF token) can leak that secret
-through the compressed size - that trade-off is why compression is opt-in per
+through the compressed size; that trade-off is why compression is opt-in per
 host rather than default-on; hosts serving that shape of response should leave
 it off.
 
@@ -216,7 +216,7 @@ the middleware of that kind, so behaviour, metrics and error pages are identical
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `auth` | AuthMiddleware | none | no | Identical to a `type: auth` middleware's `auth` spec: `identityProvider`, `mode`, `requiredRoles`, `allowFrom`, `clientCertRoles`, `basic`. **Every mode works inline, `basic` included**, so `auth.basic.realm` and `auth.basic.users[].username`/`.passwordHash` are valid here - see [BasicAuthSpec](middleware.md#middleware-auth-basic-users). A plaintext `password` field on a `PUT` is hashed server-side on a host or location exactly as on a middleware. See [AuthMiddleware](middleware.md#authmiddleware-auth) for every field rule. |
+| `auth` | AuthMiddleware | none | no | Identical to a `type: auth` middleware's `auth` spec: `identityProvider`, `mode`, `requiredRoles`, `allowFrom`, `clientCertRoles`, `basic`. **Every mode works inline, `basic` included**, so `auth.basic.realm` and `auth.basic.users[].username`/`.passwordHash` are valid here, see [BasicAuthSpec](middleware.md#middleware-auth-basic-users). A plaintext `password` field on a `PUT` is hashed server-side on a host or location exactly as on a middleware. See [AuthMiddleware](middleware.md#authmiddleware-auth) for every field rule. |
 | `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
 
 Validation is the middleware's, verbatim: `identityProvider` must resolve to an
@@ -253,7 +253,7 @@ OpenAPI schema and the tables above, and set nothing at runtime.
 
 | Field | Status | Reason |
 |---|---|---|
-| <span id="proxy-host-websockets-upgrade"></span>  `websocketsUpgrade` | Deprecated, ignored | WebSocket upgrades always work: the proxy forwards the `Upgrade` handshake, and the compression and header-strip layers both special-case a `101`. The field exists only because NPM has the checkbox. |
-| <span id="proxy-host-tls-http2"></span>  `tls.http2` | Deprecated, ignored | HTTP/2 is always offered - the listener advertises `h2,http/1.1` via ALPN unconditionally, so there is nothing per-host to switch. |
+| <span id="proxy-host-websockets-upgrade"></span>  `websocketsUpgrade` | Deprecated, ignored | WebSocket upgrades always work: the proxy forwards the `Upgrade` handshake, and the compression and header-strip layers both special-case a `101`. The field is retained only so existing YAML keeps loading. |
+| <span id="proxy-host-tls-http2"></span>  `tls.http2` | Deprecated, ignored | HTTP/2 is always offered: the listener advertises `h2,http/1.1` via ALPN unconditionally, so there is nothing per-host to switch. |
 
 ---

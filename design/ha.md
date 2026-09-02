@@ -87,7 +87,7 @@ picked up without a restart, with no risk of the two repos silently diverging.
   leader's `/data/config` as a git remote (over ssh, e.g.
   `ssh://gpm@leader/data/config`) and runs `git pull --ff-only` on a poll
   interval. No push, no third component; reuses `PullFFOnly` verbatim.
-  *Trade-off:* while the leader is down the follower cannot pull - but it keeps
+  *Trade-off:* while the leader is down the follower cannot pull, but it keeps
   serving the last-synced config on disk, which is exactly what we want.
 - **B. Shared bare repo.** A bare repo (on either node, or a small shared
   location) is the hub: the leader `git push`es after each `CommitAll`, the
@@ -105,7 +105,7 @@ picked up without a restart, with no risk of the two repos silently diverging.
 Cheapest and it reuses the existing `PullFFOnly` as-is with zero new git verbs.
 The follower runs a poll loop: `PullFFOnly` -> if `Head()` changed, call the
 existing `reload()` path (which re-reads from disk and re-applies to data plane
-+ auth). Divergence is impossible by construction - the follower never commits,
++ auth). Divergence is impossible by construction: the follower never commits,
 and `pull --ff-only` refuses anything that is not a clean fast-forward, so a
 follower that somehow acquired a local commit surfaces an error instead of
 merging. Adopt B later only if leader-independent sync becomes worth the extra
@@ -126,7 +126,7 @@ account key, and the issued certs. The SSO key is trivially shared by **setting
 `GPM_SSO_SIGNING_KEY` identically on both nodes** (env), which also keeps it out
 of the file-sync path. The ACME account key and issued certs live under the cert
 dir and are **not** in git (they contain private keys); they replicate on a
-separate channel - a **shared volume** for `<cert-dir>/acme` (single copy, only
+separate channel: a **shared volume** for `<cert-dir>/acme` (single copy, only
 the leader writes) or an **`rsync`-on-change** leader->follower. Phase 1
 recommends the shared volume for `<cert-dir>/acme` and `<cert-dir>/sso_not_before`
 because the single-writer gate below makes concurrent writes a non-issue.
@@ -144,7 +144,7 @@ writer.
   (`GPM_HA_ROLE=leader|follower`, default `leader` so a lone node is unchanged).
   Leader runs the ACME loop and accepts admin writes; follower disables the ACME
   loop and serves the admin API read-only (its config arrives only via pull).
-  *Trade-off:* leadership does not move automatically - promoting the follower
+  *Trade-off:* leadership does not move automatically: promoting the follower
   after a leader loss is an operator action (flip the env, redeploy).
 - **Lease file (phase 2).** A lease on shared storage (write `{holder, expiry}`
   via atomic `os.Rename`, renew before a short TTL, take over when expired)
@@ -157,7 +157,7 @@ writer.
 ### Decision: **static leader (env) for phase 1.**
 
 DNS-01 needs no inbound port and no VIP, so the leader renews certs regardless
-of which node currently holds the traffic VIP - ACME is decoupled from failover.
+of which node currently holds the traffic VIP: ACME is decoupled from failover.
 For operational clarity, make the static leader the node that is *normally* the
 keepalived MASTER, so "leader" and "active" usually coincide. A leader outage
 degrades to: follower keeps serving the last replicated certs/config, renewals
@@ -174,7 +174,7 @@ and persists it next to the signing key; the data-plane gate rejects any SSO
 cookie issued strictly before the watermark. But `ssoRevokedAt()` reads that
 file **exactly once**, lazily, under a `sync.Once`, caching it in an
 `atomic.Int64` for the process lifetime. So a peer instance that shares the
-signing key will keep honoring a revoked cookie until *its own* next restart -
+signing key will keep honoring a revoked cookie until *its own* next restart:
 the watermark it loaded at startup never advances. Sharing the key without
 fixing this actively *weakens* revocation: a stolen cookie rejected on the
 leader still works on the follower.
@@ -187,7 +187,7 @@ leader still works on the follower.
   issued on the leader and the file is the single source of truth.
 - Add a **watermark refresh loop** on every instance: on a ticker (e.g. 15-30s)
   re-read `sso_not_before` and advance the in-memory atomic **monotonically**
-  (`if v > current { store(v) }` - never move it backwards, matching the
+  (`if v > current { store(v) }`: never move it backwards, matching the
   existing clock-skew guard in `RevokeAllSSOSessions`). The atomic is already
   the read path for the gate, so no gate change is needed; only its source
   refreshes. This turns the `sync.Once` one-shot into a periodic reconcile.
@@ -196,7 +196,7 @@ leader still works on the follower.
   instead of "next restart."
 
 This is the minimal, stdlib-only fix (`os.ReadFile` on a ticker) and it also
-improves the single-node story - a watermark edited out-of-band is now honored
+improves the single-node story: a watermark edited out-of-band is now honored
 live.
 
 ---
@@ -216,7 +216,7 @@ keepalived**, active/standby.
   HTTP probe) and demotes a node whose gpm is unhealthy, floating the VIP to the
   peer within a couple of VRRP intervals.
 - **Client IP is preserved.** VRRP is an L2 same-subnet mechanism, so there is
-  no SNAT: the real client source IP reaches gpm unchanged. This matters -
+  no SNAT: the real client source IP reaches gpm unchanged. This matters:
   access lists, GeoIP, rate limiting, and XFF trust all key off the resolved
   client IP, and a DNS-failover or naive L4-NAT approach would break or muddy
   that. The VIP approach keeps the existing client-IP resolver correct with no
@@ -227,7 +227,7 @@ keepalived**, active/standby.
   it is not required for correctness.
 - **Interaction with streams.** Both instances bind their TCP/UDP stream
   listeners continuously (each runs its own `streamManager`), so the survivor
-  already has the ports open when the VIP arrives - no bind delay, no rebind
+  already has the ports open when the VIP arrives: no bind delay, no rebind
   race. Existing flows drop and reconnect (section 6).
 
 ### Alternatives (documented, not recommended for the homelab)
@@ -259,7 +259,7 @@ capped at `maxUDPSessions`). None of this can be handed to another process.
   (`forward` allocates on cache miss). UDP being connectionless, "reconnect" is
   transparent for stateless protocols and a re-handshake for stateful ones.
 - This is the same reconnect semantics a client already sees on a single-node
-  restart, so it introduces no new failure mode - it just needs to be stated in
+  restart, so it introduces no new failure mode: it just needs to be stated in
   the deployment doc so operators do not expect stream sessions to survive a
   failover.
 
@@ -305,7 +305,7 @@ changes.
   source of truth.
 - **Config sync via a shared bare repo** (option B in section 2) if
   leader-independent sync becomes worth a `Push` verb on `GitRepo`.
-- **Active/active behind an L4 balancer**, if it is ever wanted - explicitly
+- **Active/active behind an L4 balancer**, if it is ever wanted: explicitly
   gated on making the per-node lossy state (rate limits especially) either
   acceptable-per-node or shared. For a homelab pair it is not worth it, and
   phase 1 active/standby is the recommended terminal state.
@@ -313,7 +313,7 @@ changes.
 ## Non-goals
 
 - **No consensus/clustering dependency.** No etcd, consul, raft, or embedded
-  equivalent - the entire point of the project is to avoid that surface.
+  equivalent: the entire point of the project is to avoid that surface.
 - **No multi-writer / synchronous config consensus.** Exactly one writer
   (leader) at any time; the follower is read-only.
 - **No replication of live stream state.** TCP/UDP sessions are failover-with-
@@ -327,7 +327,7 @@ changes.
 
 ## Suggested sequencing
 
-1. **SSO watermark refresh loop** - smallest, and it improves the single-node
+1. **SSO watermark refresh loop**: smallest, and it improves the single-node
    story too (out-of-band watermark edits honored live). No HA prerequisites.
 2. **Leader/follower role gate** on the ACME loop and admin writes (env-driven).
 3. **Follower config poll loop** (`PullFFOnly` + conditional `reload`).

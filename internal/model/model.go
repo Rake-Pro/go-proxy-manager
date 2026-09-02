@@ -1,7 +1,7 @@
 // Package model defines the first-class, typed configuration objects that the
 // whole system is built around: hosts, certificates, identity providers, access
-// lists and middleware. Everything else (UI, API, git-backed store, importer,
-// data plane) reads and writes these same types, so they cannot diverge.
+// lists and middleware. Everything else (UI, API, git-backed store, data
+// plane) reads and writes these same types, so they cannot diverge.
 //
 // Design rules:
 //   - Stable schema + explicit SchemaVersion so later feature tiers add fields,

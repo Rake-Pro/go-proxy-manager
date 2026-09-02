@@ -12,7 +12,7 @@ brackets where it differs.
 | **Proxy host** (`proxy-hosts/`, UI: **Proxy Hosts**) | Terminates TLS for one or more domains and reverse-proxies to an upstream. Also written "reverse-proxy host" or just "host". |
 | **Redirect host** (`redirect-hosts/`, UI: **Redirects**) | Answers a configured `3xx` to another domain instead of proxying. |
 | **Stream host** (`stream-hosts/`, UI: **Streams**) | Raw TCP/UDP forwarding on its own listen port, optionally SNI-routed. |
-| **Parked host** (`parked-hosts/`, UI: **Parked Hosts**) | Reserves a domain and answers a fixed status, default `404`. gpm's name for what Nginx Proxy Manager calls a `dead_host`; nothing about it is dead, it is a live TLS-terminating vhost doing exactly what it was told. |
+| **Parked host** (`parked-hosts/`, UI: **Parked Hosts**) | Reserves a domain and answers a fixed status, default `404`. Nothing about it is parked in the sense of being offline: it is a live TLS-terminating vhost doing exactly what it was told. |
 
 ## The path a request takes
 
@@ -23,7 +23,7 @@ brackets where it differs.
 | **Upstream** | The backend a proxy host or location forwards to: `{scheme, host, port}`. Prose sometimes says "backend" for the same thing; the schema field is always `upstream`. A stream host's equivalent field is `target`, which carries no scheme. |
 | **Upstream group** (`upstream-groups/`, UI: **Upstream Groups**) | An ordered set of interchangeable upstreams with health checks and a failover policy. |
 | **Location** | A path prefix inside a proxy host with its own upstream and extra policy. Always at least as restrictive as its host. |
-| **Chain** | The ordered sequence of middlewares applied to one host or location. Fixed order, not the order you listed them - see [Request pipeline](request-pipeline.md). |
+| **Chain** | The ordered sequence of middlewares applied to one host or location. Fixed order, not the order you listed them: see [Request pipeline](request-pipeline.md). |
 | **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite` or `bouncer`. |
 | **Inline block** | An `auth` or `rateLimit` block written directly on a host or location instead of referencing a middleware. Same handler, same chain position. |
 
@@ -32,7 +32,7 @@ brackets where it differs.
 | Term | Means |
 |---|---|
 | **Access list** (`access-lists/`, UI: **Access Lists**) | The gate: ordered IP/CIDR allow-deny rules plus optional GeoIP country rules over the derived client IP. Never abbreviated to "ACL" in gpm. |
-| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control - a guard, a rate limit, a bouncer verdict or one auth mode. Never the access list. |
+| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a bouncer verdict or one auth mode). Never the access list. |
 | **Trusted proxy** | A peer whose `X-Forwarded-For` gpm believes when deriving the client IP. Distinct from `proxyProtocol.trustedCIDRs` (who may rewrite the connection address) and `forwardAuth.trustedProxies` (who may assert identity headers). |
 | **Identity provider** (`identity-providers/`, UI: **Identity Providers**), **IdP** | An OIDC issuer, a trusted forward-auth proxy, or an `auth_request` outpost, plus its group-to-role mapping. An IdP on its own has no data-plane effect until an auth gate references it. |
 | **Forward-auth** | Trusting identity headers (`Remote-User` and friends) asserted by a proxy in front of gpm. |

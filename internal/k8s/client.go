@@ -21,7 +21,7 @@
 // to avoid. gpm never writes to the cluster: the client only ever LISTs, and the
 // shipped RBAC grants exactly that verb on ingresses and nothing else.
 //
-// See docs/design/ingress-discovery.md for the decision record.
+// See design/ingress-discovery.md for the decision record.
 package k8s
 
 import (

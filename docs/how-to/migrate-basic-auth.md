@@ -13,7 +13,7 @@ wherever the list is referenced, and clears the deprecated fields.
 - **The attachment.** Every proxy host and location that referenced the list
   gains the middleware, listed in the plan's `attachTo`.
 - **The exemption.** A `satisfyAny` list's allow rules become the middleware's
-  `allowFrom` - the networks that previously satisfied the list *instead of* a
+  `allowFrom`: the networks that previously satisfied the list *instead of* a
   password become the networks exempt from it.
 - **The detach, when the swap is complete.** If the list set `satisfyAny` **and**
   every rule moved into `allowFrom`, the access list is also **detached** from
@@ -71,4 +71,4 @@ Run `?plan=1` and read `detachAccessList` and `warnings` before applying.
 | `400`, "has no basicAuth users to migrate" | Already migrated, or the list never had users. | Nothing to do. |
 | `warnings` names a `source`- or `paths`-scoped allow rule | An auth exemption is a fixed, host-wide CIDR list; those rules are neither. | Leave the access list attached so the rule keeps working, or write the exemption explicitly in `allowFrom`. |
 | A LAN client is now prompted for a password | The list did **not** set `satisfyAny`, so it required *both* the IP and the password, and no `allowFrom` was copied. | If the LAN really should skip the password, add the CIDR to the middleware's `allowFrom` deliberately. |
-| Every password user off the allow-listed networks is refused after migrating | The access list stayed attached, so "IP match OR password" became "IP match AND password" | Check `detachAccessList` in the plan; a list with a deny, `source` or geo rule is kept attached on purpose - detach it by hand, or keep the remaining rules as a deliberate second gate. |
+| Every password user off the allow-listed networks is refused after migrating | The access list stayed attached, so "IP match OR password" became "IP match AND password" | Check `detachAccessList` in the plan; a list with a deny, `source` or geo rule is kept attached on purpose: detach it by hand, or keep the remaining rules as a deliberate second gate. |

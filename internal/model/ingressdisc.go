@@ -33,7 +33,7 @@ const (
 	// else: the Ingress author is untrusted, so they may pick from the set of
 	// chains the operator sanctioned but can never describe one. Naming a profile
 	// that does not exist SKIPS the Ingress - it is never quietly downgraded to
-	// the default. See docs/design/ingress-discovery.md section 5a.
+	// the default. See design/ingress-discovery.md section 5a.
 	AnnotationProfile = "gpm.rake.pro/profile"
 )
 
@@ -73,7 +73,7 @@ const (
 // "ingress-discovery"), an operator set it and discovery leaves it alone on
 // every subsequent reconcile. Discovery sets this label only on the ONE upsert
 // where it itself disables a host (an unresolvable profile - see
-// docs/design/ingress-discovery.md section 5a); the label - and with it the
+// design/ingress-discovery.md section 5a); the label - and with it the
 // disabled-ness - is dropped the moment that host next derives successfully, so
 // discovery's own disables self-heal while an operator's never do.
 const (
@@ -158,7 +158,7 @@ type IngressHostTemplate struct {
 	// TLS is applied verbatim to every derived host. certificateRef is required:
 	// discovery never creates a Certificate and never triggers ACME, so a single
 	// operator-maintained (typically wildcard) certificate covers the discovered
-	// set. See docs/design/ingress-discovery.md section 1.
+	// set. See design/ingress-discovery.md section 1.
 	TLS TLSSettings `json:"tls,omitempty" yaml:"tls,omitempty"`
 
 	// Deprecated: no effect, exactly as on ProxyHost - WebSocket upgrades always
@@ -285,7 +285,7 @@ type IngressDiscoverySettings struct {
 	// profile is selectable by every annotating Ingress). Evaluated in ORDER;
 	// the first matching rule wins and its Profile is used, exactly as if the
 	// Ingress had carried that name in gpm.rake.pro/profile. See
-	// docs/design/ingress-discovery.md section 5a.
+	// design/ingress-discovery.md section 5a.
 	ProfileRules []IngressProfileRule `json:"profileRules,omitempty" yaml:"profileRules,omitempty"`
 
 	// ProfileSelection controls whether the gpm.rake.pro/profile annotation is
@@ -476,7 +476,7 @@ func (d IngressDiscoverySettings) ResolveProfile(raw string) (IngressHostTemplat
 // ResolveProfileFor is the entry point derive() uses. It widens ResolveProfile
 // with settings.ingressDiscovery.profileRules, which let the OPERATOR route an
 // Ingress to a profile with no say at all from its author - strictly stronger
-// than the annotation (see docs/design/ingress-discovery.md section 5a, option C).
+// than the annotation (see design/ingress-discovery.md section 5a, option C).
 // Rules are evaluated in order; the first match wins and the annotation is
 // never consulted for that Ingress.
 //

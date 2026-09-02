@@ -5,7 +5,7 @@
 // No database ships with gpm: GeoLite2's licence forbids redistribution, so
 // the operator supplies the .mmdb path (GPM_GEOIP_DB) and refreshes it
 // themselves (e.g. via geoipupdate). A Resolver with nothing loaded is the
-// normal "feature disabled" state - see docs/design/http3-geoip-mtls.md.
+// normal "feature disabled" state - see design/http3-geoip-mtls.md.
 package geoip
 
 import (

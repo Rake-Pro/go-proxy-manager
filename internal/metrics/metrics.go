@@ -4,8 +4,8 @@
 //
 // It exists instead of client_golang because that library and its transitive
 // tree (protobuf, procfs, common/expfmt, ...) would multiply this project's
-// vetted dependency set several times over for one read-only endpoint - which
-// is the opposite of the reason this project exists (see CLAUDE.md). The
+// vetted dependency set several times over for one read-only endpoint, which
+// is the opposite of the reason this project exists (see CONTRIBUTING.md). The
 // trade-offs it accepts in exchange are deliberate: values are int64, not
 // float64 (every metric gpm exports is a count, a byte total or a unix
 // timestamp); histograms have fixed buckets chosen at registration; and there

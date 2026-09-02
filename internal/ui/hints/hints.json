@@ -32,7 +32,7 @@
     "doc": "concepts/terminology.md#availability"
   },
   "glossary.ledger": {
-    "text": "The committed record of what gpm owns - config/dns-ledger.yaml for DNS records, config/access-list-sources.yaml for fetched feeds. It is what authorises a deletion.",
+    "text": "The committed record of what gpm owns: config/dns-ledger.yaml for DNS records, config/access-list-sources.yaml for fetched feeds. It is what authorises a deletion.",
     "doc": "concepts/terminology.md#configuration-and-automation"
   },
   "glossary.reconcile": {
@@ -40,7 +40,7 @@
     "doc": "concepts/terminology.md#configuration-and-automation"
   },
   "glossary.apex-target": {
-    "text": "The single CNAME target every DNS-sync-managed record points at. It is not an ownership marker - a hand-written record aimed here is still left alone.",
+    "text": "The single CNAME target every DNS-sync-managed record points at. It is not an ownership marker: a hand-written record aimed here is still left alone.",
     "doc": "concepts/terminology.md#configuration-and-automation"
   },
   "page.overview": {
@@ -77,7 +77,7 @@
       "Each stream host owns a listen port of its own.",
       "SNI matching lets several TCP hosts share one port.",
       "Passthrough never decrypts; terminate needs a named certificate.",
-      "Only IP and geo rules apply at L4 - a basic-auth list cannot be used."
+      "Only IP and geo rules apply at L4: a basic-auth list cannot be used."
     ],
     "doc": "reference/config/stream-host.md"
   },
@@ -94,7 +94,7 @@
     "text": "The TLS material gpm serves: ACME-issued certificates it renews itself, or files you supply.",
     "bullets": [
       "ACME dns-01 is the only way to get a wildcard; http-01 needs port 80 reachable.",
-      "A host never picks a certificate - the handshake matches SNI against every certificate's domains.",
+      "A host never picks a certificate: the handshake matches SNI against every certificate's domains.",
       "State, expiry and the last error are read from the material itself, not from config.",
       "Custom certificates are read from the certificate store on the gpm host."
     ],
@@ -183,7 +183,7 @@
   "page.apiTokens": {
     "text": "Non-interactive bearer credentials for scripts and CI.",
     "bullets": [
-      "The secret is shown once and never stored - only its SHA-256 digest is committed.",
+      "The secret is shown once and never stored: only its SHA-256 digest is committed.",
       "Scopes limit what each token may read and write.",
       "Write implies read on the same subject.",
       "Token management, settings writes, restore and whole-config revert need full admin."
@@ -251,7 +251,7 @@
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-scheme"
   },
   "proxyHost.upstream.host": {
-    "text": "The backend's address - an IP or a hostname gpm can resolve. Not the public domain clients ask for.",
+    "text": "The backend's address (an IP or a hostname gpm can resolve). Not the public domain clients ask for.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-host"
   },
   "proxyHost.upstream.port": {
@@ -583,7 +583,7 @@
     "doc": "reference/config/client-ca.md#client-ca-ca-key-file"
   },
   "clientCA.caKeyPEM": {
-    "text": "The same signing key inline. It must be a ${FILE:...} or ${ENV:...} placeholder - a literal private key is refused at commit.",
+    "text": "The same signing key inline. It must be a ${FILE:...} or ${ENV:...} placeholder: a literal private key is refused at commit.",
     "doc": "reference/config/client-ca.md#client-ca-ca-key-pem"
   },
   "clientCA.expiryWarningDays": {
@@ -879,7 +879,7 @@
     "doc": "reference/config/middleware.md"
   },
   "middleware.bouncer.apiKey": {
-    "text": "Sent as X-Api-Key. Required for crowdsec - register one with cscli bouncers add. Use an ${ENV:...} or ${FILE:...} placeholder.",
+    "text": "Sent as X-Api-Key. Required for crowdsec: register one with cscli bouncers add. Use an ${ENV:...} or ${FILE:...} placeholder.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.bouncer.timeout": {
@@ -999,7 +999,7 @@
     "doc": "reference/config/upstream-group.md#upstream-group-upstreams"
   },
   "upstreamGroup.upstreams.host": {
-    "text": "This member's address - an IP or a resolvable hostname.",
+    "text": "This member's address (an IP or a resolvable hostname).",
     "doc": "reference/config/upstream-group.md#upstream-group-upstreams"
   },
   "upstreamGroup.upstreams.port": {
@@ -1107,7 +1107,7 @@
     "doc": "reference/config/settings/proxy-protocol.md#settings-proxy-protocol-enabled"
   },
   "settings.proxyProtocol.trustedCIDRs": {
-    "text": "CIDRs or bare IPs of the load balancers whose PROXY header is believed. Required when enabled - there is no trust-everyone mode.",
+    "text": "CIDRs or bare IPs of the load balancers whose PROXY header is believed. Required when enabled: there is no trust-everyone mode.",
     "doc": "reference/config/settings/proxy-protocol.md#settings-proxy-protocol-trusted-cidrs"
   },
   "settings.proxyProtocol.timeout": {
@@ -1155,7 +1155,7 @@
     "doc": "reference/config/settings/dns-sync.md#settings-dns-sync-pihole-app-password"
   },
   "settings.dnsSync.pihole.apexTarget": {
-    "text": "The CNAME target every managed LAN record points at. It is not an ownership marker - hand-written records aimed here are left alone.",
+    "text": "The CNAME target every managed LAN record points at. It is not an ownership marker: hand-written records aimed here are left alone.",
     "doc": "reference/config/settings/dns-sync.md#settings-dns-sync-pihole-apex-target"
   },
   "settings.dnsSync.cloudflare.enabled": {

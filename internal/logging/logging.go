@@ -1,5 +1,5 @@
 // Package logging configures zerolog as the single global logger for the project.
-// zerolog is the one accepted logging dependency (see CLAUDE.md).
+// zerolog is the one accepted logging dependency (see CONTRIBUTING.md).
 package logging
 
 import (
