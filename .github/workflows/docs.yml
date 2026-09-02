@@ -19,6 +19,9 @@ on:
 
 permissions:
   contents: read
+  # configure-pages (in the build job) reads the Pages site; deploy-pages needs the OIDC token.
+  pages: write
+  id-token: write
 
 concurrency:
   group: docs-${{ github.ref }}
