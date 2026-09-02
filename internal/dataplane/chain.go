@@ -65,10 +65,33 @@ func buildRegistry(cfg model.Config) *registry {
 			}
 		}
 	}
+	warnUnresolvedAccessListSources(cfg)
 	reg.clientIP = clientIPResolver(reg.trustedNets)
 	reg.geoCountry = currentGeoDB().Country
 	reg.geoLoaded = currentGeoDB().Loaded
 	return reg
+}
+
+// warnUnresolvedAccessListSources logs, ONCE per reload (buildRegistry runs once
+// per router build), every access-list source rule that has no fetched set in
+// the ledger yet. Such a rule compiles to the empty set and matches nothing,
+// which is the safe direction but is indistinguishable from a working rule in
+// the request log - so it is called out where an operator will see it.
+func warnUnresolvedAccessListSources(cfg model.Config) {
+	sources := currentAccessListSources()
+	for _, al := range cfg.AccessLists {
+		seen := map[string]bool{}
+		for _, r := range al.Rules {
+			if r.Source == "" || seen[r.Source] {
+				continue
+			}
+			seen[r.Source] = true
+			if len(sources[model.AccessListSourceKey(al.Name, r.Source)]) == 0 {
+				log.Warn().Str("accessList", al.Name).Str("source", r.Source).
+					Msg("dataplane: access-list source has no fetched entries yet; rules referencing it match nothing until the next successful fetch")
+			}
+		}
+	}
 }
 
 // baselineIdentityHeaders is the fixed set of identity headers no direct client

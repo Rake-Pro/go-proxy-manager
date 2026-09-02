@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
@@ -214,6 +215,19 @@ func main() {
 	// to an upstream first.
 	dataplane.SetMaintenance(settings.Maintenance)
 
+	// Fetched access-list source sets, installed before the first Reload for the
+	// same reason as the error pages above: compileAccessList resolves a
+	// source-backed rule against them at build time, so a restart must serve the
+	// last committed set rather than an empty one until the first fetch lands.
+	// A ledger that will not load is NOT fatal: an unreadable ledger leaves every
+	// source rule matching nothing, which denies, and denying is the safe half of
+	// the failure - refusing to boot the whole edge is not.
+	if l, _, err := st.LoadAccessListSourceLedger(ctx); err != nil {
+		log.Error().Err(err).Msg("failed to load the access-list source ledger; source-backed rules match nothing until the next successful fetch")
+	} else {
+		dataplane.SetAccessListSources(l)
+	}
+
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
@@ -295,6 +309,14 @@ func main() {
 		// compile then fails, the hosts still running the previous router honour
 		// the new switch - which is the reading an operator flipping it wants.
 		dataplane.SetMaintenance(st2.Maintenance)
+		// Fetched access-list source sets, refreshed before the compile so a
+		// reload triggered by a completed fetch serves the new set on the very
+		// next request (see accesssync).
+		if l, _, lerr := st.LoadAccessListSourceLedger(ctx); lerr != nil {
+			log.Error().Err(lerr).Msg("reload: failed to load the access-list source ledger; source-backed rules match nothing")
+		} else {
+			dataplane.SetAccessListSources(l)
+		}
 		// Reload the data plane FIRST: only reconfigure the auth layer once the
 		// data plane has accepted the new config, so a rejected reload never
 		// leaves auth and dataplane drifted against each other.
@@ -432,21 +454,42 @@ func main() {
 		})
 	}
 
-	// The reconciler is tracked, not fire-and-forget: a run that is mid-commit when
-	// the process is asked to stop has to be allowed to finish (or roll back)
+	// Access-list source sync: keeps the remote IP feeds an AccessList references
+	// (rule.source) fetched into the committed ledger, so a path-scoped allow rule
+	// for a monitoring provider stays current without the operator re-pasting a
+	// couple of hundred CIDRs. Like the reconcilers above it reads live config on
+	// every run; after a ledger commit it reloads the data plane so the new set is
+	// served immediately.
+	accessSyncer := accesssync.New(func(c context.Context) (model.Config, model.Settings, error) {
+		return st.Load(c)
+	}, accessLedgerStore{st}, func() {
+		if err := reload(); err != nil {
+			log.Error().Err(err).Msg("accesssync: ledger written but reload failed")
+		}
+	})
+
+	// Both reconcilers are tracked, not fire-and-forget: a run that is mid-commit
+	// when the process is asked to stop has to be allowed to finish (or roll back)
 	// before main returns, or shutdown is exactly the window that leaves the config
-	// repo written but uncommitted.
-	// Leader-only: the reconciler commits to the config repo, and a follower that
-	// commits locally would diverge from the leader and break its ff-only pull.
+	// repo written but uncommitted. The access-list fetcher commits the source
+	// ledger, so it needs the same treatment.
+	// Leader-only, both: they commit to the config repo, and a follower that
+	// commits locally would diverge from the leader and break its ff-only pull. A
+	// follower still SERVES the fetched sets, since it replicates the ledger file
+	// with the rest of the config.
 	var discWG sync.WaitGroup
 	if !role.IsFollower() {
-		discWG.Add(1)
+		discWG.Add(2)
 		go func() {
 			defer discWG.Done()
 			ingressDisc.Run(ctx)
 		}()
+		go func() {
+			defer discWG.Done()
+			accessSyncer.Run(ctx)
+		}()
 	} else {
-		log.Info().Msg("HA follower: Ingress discovery reconciler disabled (leader-only writer)")
+		log.Info().Msg("HA follower: Ingress discovery reconciler and access-list source sync disabled (leader-only writers)")
 	}
 
 	// REST CRUD API: writes go through the git-backed store; commits are authored
@@ -471,6 +514,13 @@ func main() {
 			switch {
 			case kind == "ProxyHost", kind == "Settings", action == "restore", action == "revert":
 				dnsSyncer.Trigger()
+			}
+			// A new or re-pointed source has to be fetched before its rules mean
+			// anything, so an access-list write asks for a run rather than waiting
+			// out the poll interval. Trigger is non-blocking and coalescing.
+			switch {
+			case kind == "AccessList", action == "restore", action == "revert":
+				accessSyncer.Trigger()
 			}
 		},
 		RecentLogs: func() any {
@@ -498,6 +548,9 @@ func main() {
 			return ingressDisc.Plan(c)
 		},
 		IngressDiscoveryEnabled: ingressDisc.Enabled,
+
+		AccessListSourceReconcile: accessSyncer.ReconcileNow,
+		AccessListSourceStatus:    func() any { return accessSyncer.Status() },
 
 		// Reported so the SPA can grey out the metrics link instead of pointing at
 		// a route that answers 404. The endpoint itself is on the admin mux, not
@@ -630,5 +683,24 @@ func (d dnsLedgerStore) Load(ctx context.Context) (model.DNSLedger, string, erro
 // abandoning it.
 func (d dnsLedgerStore) Save(ctx context.Context, l model.DNSLedger, rev string) error {
 	_, err := d.st.SaveDNSLedger(context.WithoutCancel(ctx), l, store.Author{Name: "dns-sync", Email: "gpm@localhost"}, rev)
+	return err
+}
+
+// accessLedgerStore adapts the config store to the accesssync.Ledger interface,
+// for the same reasons dnsLedgerStore does: the fetcher depends on the two
+// operations it needs rather than on the whole store, and the commit is authored
+// as the fetcher instead of as whichever operator happened to trigger the run.
+type accessLedgerStore struct{ st *store.Store }
+
+func (a accessLedgerStore) Load(ctx context.Context) (model.AccessListSourceLedger, string, error) {
+	return a.st.LoadAccessListSourceLedger(ctx)
+}
+
+// Save detaches the write from the caller's context for the same reason
+// dnsLedgerStore.Save does: an HTTP-triggered run whose client hangs up must not
+// leave the ledger written to disk but out of git.
+func (a accessLedgerStore) Save(ctx context.Context, l model.AccessListSourceLedger, rev string) error {
+	_, err := a.st.SaveAccessListSourceLedger(context.WithoutCancel(ctx), l,
+		store.Author{Name: "access-list-sync", Email: "gpm@localhost"}, rev)
 	return err
 }

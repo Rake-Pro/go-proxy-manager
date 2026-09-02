@@ -150,9 +150,13 @@ func (c Config) Validate() error {
 	// need the whole config - what an access list actually contains, and who else
 	// is already on the listen port.
 	basicAuthLists := map[string]bool{}
+	requestScopedLists := map[string]bool{}
 	for _, a := range c.AccessLists {
 		if len(a.BasicAuth) > 0 {
 			basicAuthLists[a.Name] = true
+		}
+		if a.HasRequestScopedRules() {
+			requestScopedLists[a.Name] = true
 		}
 	}
 	type portClaim struct {
@@ -176,6 +180,13 @@ func (c Config) Validate() error {
 			// only half the list an operator believed was gating the port.
 			if basicAuthLists[a] {
 				errs = append(errs, fmt.Errorf("stream host %q references accessList %q, which has basicAuth users: basic auth cannot be evaluated on a raw stream (use a list with only ip rules and/or geo, or attach this list to a proxy host)", h.Name, a))
+			}
+			// Same reasoning one step further: a path-scoped rule needs a request
+			// path and a source-backed rule needs the fetched ledger the HTTP data
+			// plane resolves. A raw stream has neither, so the reference is
+			// rejected rather than evaluated as half the gate the operator wrote.
+			if requestScopedLists[a] {
+				errs = append(errs, fmt.Errorf("stream host %q references accessList %q, which has path-scoped and/or source-backed rules: those need an HTTP request path and cannot be evaluated on a raw stream (use a list with only literal cidr rules and/or geo, or attach this list to a proxy host)", h.Name, a))
 			}
 		}
 		if h.Disabled {

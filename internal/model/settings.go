@@ -504,6 +504,12 @@ type Settings struct {
 	// Ingresses, which then feed DNSSync above.
 	IngressDiscovery IngressDiscoverySettings `json:"ingressDiscovery,omitempty" yaml:"ingressDiscovery,omitempty"`
 
+	// AccessListSync configures the fetcher that keeps AccessList sources (remote
+	// IP feeds) up to date. The zero value is ENABLED: a list that declares no
+	// source costs nothing, and a deployment that does declare one wants it
+	// fetched without a second switch to find.
+	AccessListSync AccessListSyncSettings `json:"accessListSync,omitempty" yaml:"accessListSync,omitempty"`
+
 	// Maintenance is the fleet-wide downtime switch (see MaintenanceSettings)
 	// and the Retry-After every maintenance response carries. The zero value is
 	// off: each proxy host is governed by its own maintenance flag alone.
@@ -551,6 +557,55 @@ type Settings struct {
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 }
 
+// Access-list source fetch-loop defaults. PollInterval is only how often the
+// loop asks whether any source is DUE; each source's own interval (default 24h)
+// decides whether it is actually fetched, so polling often is cheap.
+const (
+	DefaultAccessListSyncPollInterval = 15 * time.Minute
+	MinAccessListSyncPollInterval     = time.Minute
+)
+
+// AccessListSyncSettings governs the remote access-list source fetcher
+// (internal/accesssync).
+type AccessListSyncSettings struct {
+	// Enabled is a pointer so "absent" is distinguishable from "false": the
+	// default is ON, and an operator who has never heard of this block must not
+	// have their sources silently frozen by a zero value.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// PollInterval is a Go duration string; empty means 15m, and anything below
+	// 1m is refused.
+	PollInterval string `json:"pollInterval,omitempty" yaml:"pollInterval,omitempty"`
+}
+
+// IsEnabled reports whether the fetcher runs. An unset enabled means yes.
+func (a AccessListSyncSettings) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// Poll is the configured loop interval, or the 15m default.
+func (a AccessListSyncSettings) Poll() time.Duration {
+	if a.PollInterval == "" {
+		return DefaultAccessListSyncPollInterval
+	}
+	d, err := time.ParseDuration(a.PollInterval)
+	if err != nil || d < MinAccessListSyncPollInterval {
+		return DefaultAccessListSyncPollInterval
+	}
+	return d
+}
+
+func (a AccessListSyncSettings) Validate() error {
+	if a.PollInterval == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(a.PollInterval)
+	if err != nil {
+		return fmt.Errorf("settings: accessListSync.pollInterval must be a Go duration (e.g. \"15m\"), got %q: %w", a.PollInterval, err)
+	}
+	if d < MinAccessListSyncPollInterval {
+		return fmt.Errorf("settings: accessListSync.pollInterval must be at least %s, got %q", MinAccessListSyncPollInterval, a.PollInterval)
+	}
+	return nil
+}
+
 func (s Settings) Kind() string { return "Settings" }
 
 func (s Settings) Validate() error {
@@ -591,6 +646,9 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := s.IngressDiscovery.Validate(); err != nil {
+		return err
+	}
+	if err := s.AccessListSync.Validate(); err != nil {
 		return err
 	}
 	if err := s.ErrorPages.validate(); err != nil {

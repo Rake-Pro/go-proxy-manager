@@ -497,6 +497,26 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 - ~~**Per-profile `allowedDomainSuffixes`**~~ shipped 2026-08-22 (subset of the global list, validated at settings-write).
 - ~~**Live validation** against the real cluster~~ done (live since 2026-08-01).
 
+## Access-list remote sources (follow-ups)
+
+- [x] **The admin UI cannot author sources or path-scoped rules.** The access-list
+  editor now authors `sources` (name/url/interval/maxEntries rows) and each
+  rule's cidr-vs-source match, `paths` and `methods`, instead of round-tripping
+  them read-only.
+- [x] **No status surface in the UI.** `GET /api/access-list-sources/status`
+  exists (and `refused > 0` is the number to alert on), but nothing renders it;
+  an operator has to curl for "when was this feed last fetched, and is it still
+  being refreshed?". The access-list editor now shows a per-source sync status
+  panel and a manual reconcile button.
+- [ ] **No Prometheus metric for the fetcher.** DNS sync and Ingress discovery
+  both register one (`metrics.RegisterDNSSync` / `RegisterIngressDiscovery`);
+  a `refused`/`lastSuccess` gauge here would let the staleness alert live
+  alongside them instead of in a scripted status poll.
+- [x] **A refused fetch waits out the full interval before retrying.** Fixed: the
+  attempt is now recorded only on SUCCESS, so a refused fetch is retried on the
+  next poll tick (`pollInterval`, default 15m) instead of after the source's own
+  interval (up to 24h). The previously fetched set is served throughout.
+
 ## High availability (gpm itself)
 
 - [x] **HA support for gpm** (phase 1 shipped 2026-08-22; phase 2 sketch remains a proposal). Upstream groups remove the single-node dependency
