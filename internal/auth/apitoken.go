@@ -174,10 +174,76 @@ func (a *Authenticator) authenticateToken(secret string) (Principal, bool) {
 	return Principal{}, false
 }
 
+// ReadOnlyRoleScopes is what the non-admin `user` role grants: every read, no
+// write. It is expressed as a scope grant so the role gate and the API-token
+// scope gate are the SAME mechanism and compose by intersection - a token can
+// never grant more than its scopes, and a role can never grant more than its
+// scopes either.
+//
+// Read it together with ReadOnlyRoleExcludedSubjects: the effective grant is
+// every `*:read` EXCEPT the subjects listed there. The exclusion cannot be
+// expressed in the scope grammar itself (a wildcard subject matches every
+// concrete one, and enumerating concrete subjects instead would lose the
+// whole-config reads that literally require `*:read` - GET /config, /history,
+// /logs, /health, /upstream-health), so it is a separate, explicit list checked
+// first.
+var ReadOnlyRoleScopes = []string{"*:read"}
+
+// ReadOnlyRoleExcludedSubjects are the scope subjects the read-only role does
+// NOT reach despite the wildcard read grant above.
+//
+// `api-tokens` is excluded because an API token is a CREDENTIAL, not
+// configuration: listing them hands a viewer the name, scopes, expiry and
+// stored digest of every automation credential on the instance - the map an
+// attacker would want, and none of it something a viewer needs to see to view
+// the proxy configuration. Token management is admin-only in both directions.
+var ReadOnlyRoleExcludedSubjects = []string{"api-tokens"}
+
+// readOnlyRoleExcludes reports whether required names a subject the read-only
+// role is barred from, in either direction (read or write).
+func readOnlyRoleExcludes(required string) bool {
+	for _, subject := range ReadOnlyRoleExcludedSubjects {
+		if strings.HasPrefix(required, subject+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// RoleScopes returns the scope grant a role carries, or nil for "no role-level
+// limit". Admin is unconstrained. RoleNone is nil here too, not an empty grant:
+// an unauthenticated caller is refused by the role gate (RequireRole) before
+// any scope is ever consulted, and re-deciding authentication here would only
+// give the same answer a second, less obvious way.
+//
+// For the read-only role the grant is only half the answer: see
+// ReadOnlyRoleExcludedSubjects, which RequireScope applies on top.
+func RoleScopes(r Role) []string {
+	if r == RoleUser {
+		return ReadOnlyRoleScopes
+	}
+	return nil
+}
+
 // RequireScope reports whether p may perform the action described by required.
-// A session (non-token) principal is unaffected: an admin session keeps full
-// access exactly as before, and scopes only ever constrain API tokens.
+//
+// Two independent gates compose, both of which must pass:
+//
+//   - the ROLE gate: an admin principal is unconstrained; a `user` principal is
+//     read-only (ReadOnlyRoleScopes) and additionally barred from the subjects
+//     in ReadOnlyRoleExcludedSubjects, so every write route and every
+//     credential-management route refuses it.
+//   - the TOKEN gate: an API token is limited to its own granted scopes.
+//
+// Because they compose, a token never grants more than its scopes and a
+// read-only role never gains a write through a token that happens to hold one.
 func RequireScope(p Principal, required string) error {
+	if p.Role == RoleUser && readOnlyRoleExcludes(required) {
+		return fmt.Errorf("the %q role cannot access %q", string(p.Role), required)
+	}
+	if rs := RoleScopes(p.Role); rs != nil && !model.ScopeSatisfied(rs, required) {
+		return fmt.Errorf("the %q role is read-only and cannot perform %q", string(p.Role), required)
+	}
 	if !p.IsToken {
 		return nil
 	}

@@ -37,6 +37,13 @@ type Meta struct {
 	NotAfter     time.Time `json:"notAfter"`
 }
 
+// LoadIssuedMeta reads an ACME certificate's issued metadata; os.ErrNotExist
+// (via errors.Is) means "never issued", the pending state GET /certificates
+// reports for an acme certificate whose first order has not run yet.
+func LoadIssuedMeta(certDir, name string) (*Meta, error) {
+	return loadMeta(certDir, name)
+}
+
 // loadMeta reads the issued metadata; os.ErrNotExist means "never issued".
 func loadMeta(certDir, name string) (*Meta, error) {
 	b, err := os.ReadFile(metaPath(certDir, name))
@@ -96,13 +103,44 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 func leafNotAfter(chainPEM []byte) (time.Time, error) {
-	block, _ := pem.Decode(chainPEM)
-	if block == nil {
-		return time.Time{}, fmt.Errorf("issued chain is not PEM")
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
+	info, err := ParseLeaf(chainPEM)
 	if err != nil {
 		return time.Time{}, err
 	}
-	return leaf.NotAfter, nil
+	return info.NotAfter, nil
+}
+
+// LeafInfo is a certificate leaf's status fields, for the read-only decoration
+// GET /certificates adds to every stored Certificate object.
+type LeafInfo struct {
+	NotBefore time.Time
+	NotAfter  time.Time
+	Issuer    string
+	SANs      []string
+}
+
+// ParseLeaf reads the validity window, issuer and subject alternative names off
+// the first certificate in a PEM chain (the leaf). It works on both ACME-issued
+// and custom certificates: both are stored as a plain PEM chain on disk, so
+// there is one parser for both, not two status code paths.
+func ParseLeaf(chainPEM []byte) (LeafInfo, error) {
+	block, _ := pem.Decode(chainPEM)
+	if block == nil {
+		return LeafInfo{}, fmt.Errorf("certificate chain is not PEM")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return LeafInfo{}, err
+	}
+	sans := make([]string, 0, len(leaf.DNSNames)+len(leaf.IPAddresses))
+	sans = append(sans, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	return LeafInfo{
+		NotBefore: leaf.NotBefore,
+		NotAfter:  leaf.NotAfter,
+		Issuer:    leaf.Issuer.CommonName,
+		SANs:      sans,
+	}, nil
 }

@@ -46,7 +46,7 @@ func (d Deps) findClientCA(w http.ResponseWriter, r *http.Request, name string) 
 			return ca, true
 		}
 	}
-	writeErr(w, http.StatusNotFound, errors.New("ClientCA "+name+" not found"))
+	writeErr(w, http.StatusNotFound, errNotFound("ClientCA", name))
 	return model.ClientCA{}, false
 }
 
@@ -105,7 +105,7 @@ func (d Deps) handleIssueClientCert(led *clientcert.Ledger) http.HandlerFunc {
 		}
 		var req clientcert.Request
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		ca, ok := d.findClientCA(w, r, name)
@@ -146,7 +146,7 @@ func (d Deps) handleRenewClientCert(led *clientcert.Ledger) http.HandlerFunc {
 		}
 		var req renewRequest
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		ca, ok := d.findClientCA(w, r, name)
@@ -296,7 +296,7 @@ func (d Deps) handleGenerateClientCA(w http.ResponseWriter, r *http.Request) {
 	var req generateRequest
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 	}

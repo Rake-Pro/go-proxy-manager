@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // accessList is a compiled, fast-to-evaluate form of model.AccessList.
@@ -25,8 +25,11 @@ type accessList struct {
 	// An unset or "allow" default keeps the historical open behavior.
 	explicitDeny bool
 	// rules are the compiled IP rules in configuration order; first match wins.
-	rules   []netRule
-	users   map[string]string // username -> bcrypt hash
+	rules []netRule
+	// users is the DEPRECATED access-list basic-auth credential set (see
+	// model.AccessList.BasicAuth). It shares its compiled form and its verifier
+	// with the auth middleware's `mode: basic` gate - see basicauth.go.
+	users   basicAuthUsers
 	hasIP   bool
 	hasAuth bool
 
@@ -78,11 +81,13 @@ func (r netRule) matches(ip net.IP, path, method string) bool {
 
 func compileAccessList(al model.AccessList) accessList {
 	c := accessList{
-		name:         al.Name,
+		name: al.Name,
+		//lint:ignore SA1019 compat read of deprecated AccessList.SatisfyAny for legacy access-list evaluation
 		satisfyAny:   al.SatisfyAny,
 		defaultAllow: al.DefaultAction == model.ActionAllow,
 		explicitDeny: al.DefaultAction == model.ActionDeny,
-		users:        map[string]string{},
+		//lint:ignore SA1019 compat read of deprecated AccessList.BasicAuth for legacy access-list evaluation
+		users: compileBasicAuthUsers(al.BasicAuth),
 	}
 	sources := currentAccessListSources()
 	for _, r := range al.Rules {
@@ -124,9 +129,6 @@ func compileAccessList(al model.AccessList) accessList {
 			}
 		}
 		c.rules = append(c.rules, nr)
-	}
-	for _, u := range al.BasicAuth {
-		c.users[u.Username] = u.PasswordHash
 	}
 	c.hasIP = len(c.rules) > 0
 	c.hasAuth = len(c.users) > 0
@@ -324,29 +326,11 @@ func (g *authGate) clear(key string) {
 	delete(g.entries, key)
 }
 
-// authOK verifies the request's basic-auth credentials. The bcrypt compare runs
-// under bcryptSem so concurrent verifications stay bounded; r's context cancels
-// the wait, so a client that goes away does not keep a slot queued.
-func (c accessList) authOK(r *http.Request) bool {
-	user, pass, ok := r.BasicAuth()
-	if !ok {
-		return false
-	}
-	select {
-	case bcryptSem <- struct{}{}:
-		defer func() { <-bcryptSem }()
-	case <-r.Context().Done():
-		return false
-	}
-	hash, known := c.users[user]
-	if !known {
-		// Run one compare anyway so the unknown-user path costs the same as a
-		// wrong password (no username-enumeration timing oracle).
-		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
-		return false
-	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
-}
+// authOK verifies the request's basic-auth credentials against the list's
+// DEPRECATED basicAuth users. The verification itself lives in basicauth.go and
+// is shared with the auth middleware's `mode: basic` gate, so the two cannot
+// drift.
+func (c accessList) authOK(r *http.Request) bool { return c.users.verify(r) }
 
 // accessListHandler gates next behind a compiled access list. ipOf extracts the
 // client IP used for rule evaluation; geoLookup resolves that IP to a country
@@ -461,65 +445,12 @@ func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
 	return ip.String()
 }
 
-// peerIP is the IP of the immediate connection peer (RemoteAddr). It is never
-// spoofable by a forwarded header and is the basis for every trust decision.
-func peerIP(r *http.Request) net.IP {
-	host := r.RemoteAddr
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		host = h
-	}
-	return net.ParseIP(strings.TrimSpace(host))
-}
+// peerIP, clientIPResolver and the rest of the client-IP derivation live in
+// clientip.go: one place decides which peers are trusted and what "the client
+// IP" is, and every tier here compares that value.
 
-// clientIPResolver returns a function that yields the real client IP for
-// access-list evaluation. When the connection peer is a trusted proxy, it walks
-// X-Forwarded-For from the right and returns the nearest entry that is not itself
-// a trusted proxy; otherwise (gpm is the edge for this peer) it uses the peer IP.
-// With no trusted proxies configured this is exactly RemoteAddr - the safe
-// default when gpm terminates connections directly.
-func clientIPResolver(trusted []*net.IPNet) func(*http.Request) net.IP {
-	return func(r *http.Request) net.IP {
-		peer := peerIP(r)
-		if peer == nil || !ipInNets(peer, trusted) {
-			return peer
-		}
-		xff := r.Header.Get("X-Forwarded-For")
-		if xff == "" {
-			return peer
-		}
-		parts := strings.Split(xff, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			ip := net.ParseIP(strings.TrimSpace(parts[i]))
-			if ip == nil || ipInNets(ip, trusted) {
-				continue
-			}
-			return ip
-		}
-		return peer
-	}
-}
-
-func ipInNets(ip net.IP, nets []*net.IPNet) bool {
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+func ipInNets(ip net.IP, nets []*net.IPNet) bool { return clientip.InNets(ip, nets) }
 
 // parseNet parses a CIDR or bare IP into an *net.IPNet (a bare IP becomes a
 // /32 or /128). Returns nil on a malformed value.
-func parseNet(s string) *net.IPNet {
-	if _, n, err := net.ParseCIDR(s); err == nil {
-		return n
-	}
-	if ip := net.ParseIP(s); ip != nil {
-		bits := 32
-		if ip.To4() == nil {
-			bits = 128
-		}
-		return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
-	}
-	return nil
-}
+func parseNet(s string) *net.IPNet { return clientip.ParseNet(s) }

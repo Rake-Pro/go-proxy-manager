@@ -5,8 +5,8 @@ forwarding** works end to end, using the same image you deploy.
 
 It runs:
 
-- **echo** — a tiny static TCP+UDP echo backend (echoes whatever it receives).
-- **gpm** — the `ghcr.io/rake-pro/go-proxy-manager:latest` image with one
+- **echo** - a tiny static TCP+UDP echo backend (echoes whatever it receives).
+- **gpm** - the `ghcr.io/rake-pro/go-proxy-manager:latest` image with one
   `StreamHost` (`config/stream-hosts/echo.yaml`) forwarding published port
   **15432** (TCP **and** UDP) to `echo:9000`.
 
@@ -28,13 +28,13 @@ port published).
 ## Notes
 
 - The gpm service runs as **root** here only so the bind-mounted `./config` is
-  writable. The production image runs as the non-root `gpm` user — do not copy
+  writable. The production image runs as the non-root `gpm` user - do not copy
   the `user: "0:0"` line into production.
 - The data-plane HTTP/S/admin ports are parked on 8080/8443/8081 so the harness
   needs no privileged ports; only the stream port 15432 is published.
 - To point at a **real backend** instead of the echo, edit
   `config/stream-hosts/echo.yaml` (`target.host` / `target.port` / `protocol`)
-  and the published `ports:` in `docker-compose.yaml`, then `up -d` again — gpm
+  and the published `ports:` in `docker-compose.yaml`, then `up -d` again - gpm
   reconciles the listeners on reload.
 - `protocol` accepts `tcp`, `udp`, or `both`. A `listenPort` that fails to bind
   (already in use, or colliding with 80/443/admin) is logged and skipped, never

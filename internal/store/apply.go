@@ -6,7 +6,14 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
-// upsert replaces an object with the same name, or appends it.
+// upsert replaces an object with the same name, or appends it. When it
+// replaces, it mutates list[i] in place rather than copying - list and its
+// caller's slice share the same backing array (withObject's "c := *cfg" is a
+// shallow copy), so this also mutates whatever the caller's own slice sees at
+// that index. Every withObject caller that still needs the pre-upsert value
+// (CreatedAt preservation, an ownership guard) already captures it before
+// calling withObject for exactly this reason - see the "Captured BEFORE
+// withObject" comments in configstore.go's Save/SaveBatch/ApplyBatch.
 func upsert[T model.Object](list []T, item T) []T {
 	name := item.GetMeta().Name
 	for i := range list {
@@ -94,8 +101,26 @@ func dropNamed[T model.Object](list []T, name string) []T {
 	return out
 }
 
-func stampMeta(m model.ObjectMeta, now time.Time) model.ObjectMeta {
-	if m.CreatedAt.IsZero() {
+// stampMeta computes the CreatedAt/UpdatedAt to write for an object being
+// saved. UpdatedAt is always stamped to now.
+//
+// CreatedAt is server-managed, not client-managed: if existing is non-nil (an
+// object with this name already exists), its stored CreatedAt wins outright
+// and any CreatedAt on the incoming object is ignored - a PUT can never
+// rewrite an object's creation time, whether the client omitted the field (as
+// the web UI does, which is what makes this matter) or supplied a different
+// one. The one exception is an existing object whose own CreatedAt is zero
+// (written before this field existed): that gets backfilled to now rather
+// than preserved as zero. For a genuinely new object, the incoming CreatedAt
+// is honoured if set (e.g. a batch import restoring timestamps), otherwise it
+// is stamped to now.
+func stampMeta(m model.ObjectMeta, existing *model.ObjectMeta, now time.Time) model.ObjectMeta {
+	switch {
+	case existing != nil && !existing.CreatedAt.IsZero():
+		m.CreatedAt = existing.CreatedAt
+	case existing != nil:
+		m.CreatedAt = now
+	case m.CreatedAt.IsZero():
 		m.CreatedAt = now
 	}
 	m.UpdatedAt = now
@@ -103,43 +128,50 @@ func stampMeta(m model.ObjectMeta, now time.Time) model.ObjectMeta {
 }
 
 // stampTimes returns obj with its CreatedAt/UpdatedAt maintained for writing.
-func stampTimes(obj model.Object, now time.Time) any {
+// existing is the object currently on disk under the same kind and name, or
+// nil if this is a new object; see stampMeta for how it governs CreatedAt.
+func stampTimes(obj model.Object, existing model.Object, now time.Time) any {
+	var existingMeta *model.ObjectMeta
+	if existing != nil {
+		m := existing.GetMeta()
+		existingMeta = &m
+	}
 	switch o := obj.(type) {
 	case model.ProxyHost:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.RedirectHost:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.StreamHost:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.ParkedHost:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.Certificate:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.ClientCA:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.DNSProvider:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.IdentityProvider:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.UpstreamGroup:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.AccessList:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.Middleware:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	case model.APIToken:
-		o.ObjectMeta = stampMeta(o.ObjectMeta, now)
+		o.ObjectMeta = stampMeta(o.ObjectMeta, existingMeta, now)
 		return o
 	}
 	return obj

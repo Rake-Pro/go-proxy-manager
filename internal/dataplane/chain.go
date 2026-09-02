@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"sort"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -18,12 +19,14 @@ type registry struct {
 	middlewares map[string]model.Middleware
 	idps        map[string]model.IdentityProvider
 
-	// trustedNets are the peers gpm trusts for X-Forwarded-For when resolving the
-	// access-list client IP, unioned across all forward-auth identity providers.
-	// (Per-host identity-header trust is computed separately, see hostIdentityTrust.)
+	// trustedNets is the fleet-wide settings.trustedProxies set (see clientip.go).
+	// It is the fallback used for requests that never reach a proxy host - the
+	// access log of a 404/redirect/parked response; a matched host uses its own
+	// effective set (hostTrustedProxies), which its trustedProxies may override.
+	// Identity-header trust is a DIFFERENT tier computed separately, per host,
+	// from forwardAuth.trustedProxies (see hostIdentityTrust).
 	trustedNets []*net.IPNet
-	// clientIP resolves the access-list client IP, honouring X-Forwarded-For only
-	// from trustedNets and otherwise using the connection peer.
+	// clientIP resolves the client IP against trustedNets (see clientIPResolver).
 	clientIP func(*http.Request) net.IP
 	// geoCountry resolves a client IP to an ISO-3166-1 alpha-2 country code for
 	// AccessList geo rules (see internal/geoip). Never nil, but reports every IP
@@ -57,15 +60,10 @@ func buildRegistry(cfg model.Config) *registry {
 	}
 	for _, p := range cfg.IdentityProviders {
 		reg.idps[p.Name] = p
-		if fa := p.ForwardAuth; fa != nil {
-			for _, c := range fa.TrustedProxies {
-				if n := parseNet(c); n != nil {
-					reg.trustedNets = append(reg.trustedNets, n)
-				}
-			}
-		}
 	}
 	warnUnresolvedAccessListSources(cfg)
+	warnLegacyClientIPTrust(cfg)
+	reg.trustedNets = currentTrustedProxies()
 	reg.clientIP = clientIPResolver(reg.trustedNets)
 	reg.geoCountry = currentGeoDB().Country
 	reg.geoLoaded = currentGeoDB().Loaded
@@ -92,6 +90,56 @@ func warnUnresolvedAccessListSources(cfg model.Config) {
 			}
 		}
 	}
+}
+
+// warnLegacyClientIPTrust warns, ONCE per reload, when a config still relies on
+// identityProvider.forwardAuth.trustedProxies to make X-Forwarded-For count.
+// That field no longer influences the client IP (it governs only which peers may
+// assert identity headers); settings.trustedProxies does. The two are NOT merged
+// silently, because an identity-header trust and an address-rewrite trust are
+// different grants and copying one into the other would widen an operator's
+// intent without them asking.
+//
+// The message carries the exact YAML to paste into config/settings.yaml so the
+// fix is a copy, not a research task. It is skipped when the operator has
+// already declared trust anywhere - a fleet-wide list or any host override.
+func warnLegacyClientIPTrust(cfg model.Config) {
+	if len(currentTrustedProxies()) > 0 {
+		return
+	}
+	for _, h := range cfg.ProxyHosts {
+		if h.TrustedProxies != nil {
+			// Present-but-empty is still a declaration ("trust nobody here"),
+			// so the operator has answered this question already.
+			return
+		}
+	}
+	seen := map[string]bool{}
+	var cidrs []string
+	for _, p := range cfg.IdentityProviders {
+		if p.ForwardAuth == nil {
+			continue
+		}
+		for _, c := range p.ForwardAuth.TrustedProxies {
+			if c == "" || seen[c] {
+				continue
+			}
+			seen[c] = true
+			cidrs = append(cidrs, c)
+		}
+	}
+	if len(cidrs) == 0 {
+		return
+	}
+	sort.Strings(cidrs)
+	var b strings.Builder
+	b.WriteString("trustedProxies:")
+	for _, c := range cidrs {
+		b.WriteString("\n  - ")
+		b.WriteString(c)
+	}
+	log.Warn().Str("yaml", b.String()).
+		Msg("dataplane: identityProvider.forwardAuth.trustedProxies no longer decides the client IP, only which peers may assert identity headers. settings.trustedProxies is empty, so X-Forwarded-For is ignored and every IP control (access lists, geo, rate limits, allowFrom exemptions, the access log) compares the connection peer. Add the block in the 'yaml' field to config/settings.yaml to keep resolving the client IP from X-Forwarded-For")
 }
 
 // baselineIdentityHeaders is the fixed set of identity headers no direct client
@@ -160,10 +208,43 @@ func stripIdentityHeaders(h http.Header, extra []string) {
 // locations only - so a proxy trusted by one host's IdP is never implicitly
 // trusted to assert identity to a different host (no global trust union).
 func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trusted []*net.IPNet) {
-	names := append([]string{}, h.Middlewares...)
-	for _, loc := range h.Locations {
-		names = append(names, loc.Middlewares...)
+	return identityTrust(hostAuthSpecs(h, reg), reg)
+}
+
+// hostAuthSpecs collects every auth spec that applies anywhere on h, in chain
+// order: the host's referenced auth middlewares and its inline auth block, then
+// the same for each location. Both sources are gates of equal standing, so both
+// must contribute their provider's identity headers and trusted proxies - an
+// inline block that did not would leave a forward-auth header forgeable.
+func hostAuthSpecs(h model.ProxyHost, reg *registry) []model.AuthMiddleware {
+	var specs []model.AuthMiddleware
+	referenced := func(names []string) {
+		for _, name := range names {
+			mw, ok := reg.middlewares[name]
+			if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
+				continue
+			}
+			specs = append(specs, *mw.Auth)
+		}
 	}
+	referenced(h.Middlewares)
+	if h.Auth != nil {
+		specs = append(specs, *h.Auth)
+	}
+	for _, loc := range h.Locations {
+		referenced(loc.Middlewares)
+		if loc.Auth != nil {
+			specs = append(specs, *loc.Auth)
+		}
+	}
+	return specs
+}
+
+// identityTrust returns the provider-configured identity headers the given auth
+// specs assert and the peer networks trusted to set them. Headers are
+// deduplicated in canonical form; networks may repeat harmlessly (membership is
+// an any-of test).
+func identityTrust(specs []model.AuthMiddleware, reg *registry) (headers []string, trusted []*net.IPNet) {
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		k := textproto.CanonicalMIMEHeaderKey(name)
@@ -176,12 +257,8 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 		seen[k] = struct{}{}
 		headers = append(headers, k)
 	}
-	for _, name := range names {
-		mw, ok := reg.middlewares[name]
-		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
-			continue
-		}
-		idp, ok := reg.idps[mw.Auth.IdentityProvider]
+	for _, spec := range specs {
+		idp, ok := reg.idps[spec.IdentityProvider]
 		if !ok {
 			continue
 		}
@@ -237,6 +314,11 @@ func unresolvedRefs(host model.ProxyHost, reg *registry) string {
 // is upstream-facing only: rate-limit/access-list/bouncer/auth/guard all evaluate
 // the ORIGINAL client path, never the rewritten one.
 //
+// A host's (or location's) INLINE auth / rateLimit block occupies the same
+// position as a middleware of that kind and compiles through the same function,
+// so it behaves identically; it is wrapped just outside the referenced ones,
+// which means an inline gate runs FIRST and both still have to pass.
+//
 // so new behaviours slot into defined positions instead of colliding as text.
 // Rate limiting is outermost so a flood is shed before it can drive work in the
 // auth/access-control tiers (notably a forward-auth subrequest to the IdP). The
@@ -251,6 +333,60 @@ func unresolvedRefs(host model.ProxyHost, reg *registry) string {
 // the settings-level pages still apply as a fallback even when ep is nil (see
 // serveErrorPage).
 func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *compiledErrorPages) http.Handler {
+	return buildChainInline(proxy, host, hostInline(host), reg, ep)
+}
+
+// inlineChain is the set of INLINE middleware blocks that apply to one compiled
+// route: the host's own, plus (for a location route) the location's. They are
+// carried beside the host rather than folded into it because a location route is
+// compiled from a COPY of its host, and a single pointer field cannot hold both
+// levels' blocks at once.
+type inlineChain struct {
+	auth      []model.AuthMiddleware
+	rateLimit []model.RateLimitMiddleware
+
+	// stripPrefix is the normalized location prefix to remove from the request
+	// path before it is forwarded, or "" for a host route and any location that
+	// did not ask for it. It is carried here, not on the host copy, because it is
+	// a property of the ROUTE and there is no host-level equivalent.
+	stripPrefix string
+}
+
+// hostInline returns the inline blocks declared directly on a host.
+func hostInline(h model.ProxyHost) inlineChain {
+	var in inlineChain
+	if h.Auth != nil {
+		in.auth = append(in.auth, *h.Auth)
+	}
+	if h.RateLimit != nil {
+		in.rateLimit = append(in.rateLimit, *h.RateLimit)
+	}
+	return in
+}
+
+// locationInline stacks a location's inline blocks on top of its host's, exactly
+// as a location's middleware/access-list names are APPENDED to the host's rather
+// than replacing them: a location is always at least as restrictive as its host.
+func locationInline(h model.ProxyHost, loc model.Location) inlineChain {
+	in := hostInline(h)
+	if loc.Auth != nil {
+		in.auth = append(in.auth, *loc.Auth)
+	}
+	if loc.RateLimit != nil {
+		in.rateLimit = append(in.rateLimit, *loc.RateLimit)
+	}
+	if loc.StripPrefix {
+		in.stripPrefix = normalizeLocationPrefix(loc.Path)
+	}
+	return in
+}
+
+// buildChainInline is buildChain with the inline blocks passed explicitly, so a
+// location route can carry both its host's and its own. Inline blocks compile
+// through the SAME per-kind function a middleware of that kind does and sit at
+// the same chain position, just outside the referenced ones - so an inline gate
+// runs FIRST and the two are otherwise indistinguishable at runtime.
+func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineChain, reg *registry, ep *compiledErrorPages) http.Handler {
 	// FAIL CLOSED on a name that resolves to nothing. Every loop below skips a
 	// name it cannot find, which for an access list means a typo silently turns a
 	// restricted host into an open one - the exact opposite of what the reference
@@ -277,25 +413,32 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *com
 
 	h := proxy
 
-	// Per-host client-IP resolver for the IP-based controls (access-list, guard,
-	// rate-limit, auth-request allow-from): X-Forwarded-For is honoured only from
-	// the proxies THIS host actually trusts (the forward-auth TrustedProxies of the
-	// IdPs it references), mirroring the host-scoped identity-strip model - not the
-	// global union of every IdP's proxies. A host with no trusted proxy in front
-	// falls back to the connection peer, so a proxy trusted by some other host can
-	// no longer spoof this host's client IP via XFF (see GPM-L4).
-	_, hostTrusted := hostIdentityTrust(host, reg)
-	clientIP := clientIPResolver(hostTrusted)
+	// One client-IP resolver for every IP-based control on this host (access
+	// list, geo, guard, rate limit, bouncer, and the auth-request / client-cert
+	// allowFrom exemptions). It reads the decision the router dispatch already
+	// made from this host's effective trusted-proxy set - its own trustedProxies
+	// override, else settings.trustedProxies - so all of them compare the SAME
+	// address and none of them re-reads a header. See clientip.go.
+	clientIP := clientIPResolver(hostTrustedProxies(host))
 
-	// Innermost: exact-match request-path rewrites (closest to the upstream), so
-	// the rewritten path is upstream-facing only and every security tier above
-	// still sees the original client path.
+	// Innermost: request-path rewrites (closest to the upstream), so the
+	// rewritten path is upstream-facing only and every security tier above still
+	// sees the original client path.
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeRewrite || mw.Rewrite == nil {
 			continue
 		}
 		h = rewriteHandler(*mw.Rewrite, h)
+	}
+
+	// A location's prefix strip sits just OUTSIDE the rewrites, so the composed
+	// path is "strip, then rewrite, then the upstream's base path" - a rewrite
+	// rule is written against the path the backend's own namespace uses. It is
+	// still inside every security tier, which all evaluate the original client
+	// path (that is what the location itself matched on).
+	if inline.stripPrefix != "" {
+		h = stripPrefixHandler(inline.stripPrefix, h)
 	}
 
 	// Header mutations, just outside the rewrite.
@@ -322,7 +465,12 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *com
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authMiddlewareHandler(mw, reg, host.Name, host.Domains, clientIP, ep, h)
+		h = authHandler(*mw.Auth, reg, host.Name, host.Domains, clientIP, ep, h)
+	}
+	// Inline auth blocks wrap OUTSIDE the referenced auth middlewares, so they
+	// run first; both must pass, exactly as two referenced auth middlewares do.
+	for _, a := range inline.auth {
+		h = authHandler(a, reg, host.Name, host.Domains, clientIP, ep, h)
 	}
 
 	// Bouncer deny hooks, just outside auth: an IP an operator-run bouncer
@@ -362,6 +510,11 @@ func buildChain(proxy http.Handler, host model.ProxyHost, reg *registry, ep *com
 			continue
 		}
 		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h)
+	}
+	// Inline rate-limit blocks, outside the referenced ones for the same reason:
+	// an inline limit sheds the flood first, and every limit still applies.
+	for _, rl := range inline.rateLimit {
+		h = rateLimitHandler(rl, clientIP, host.Name, ep, h)
 	}
 
 	return h

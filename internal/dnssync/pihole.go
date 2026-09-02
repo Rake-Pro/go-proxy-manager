@@ -267,7 +267,8 @@ func (s *Syncer) planPihole(ctx context.Context, cfg model.Config, conf model.Pi
 //
 // ledgerRev identifies the config-repo revision the ledger was read at; it is
 // logged with every deletion so an operator can tell which recorded claim
-// authorised destroying a record (see the revert caveat in docs/configuration.md).
+// authorised destroying a record (see the revert caveat in
+// docs/how-to/dns-sync.md).
 func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.PiholeDNSSync, owned map[string]model.DNSClaim, ledgerRev string) (BackendStatus, map[string]model.DNSClaim) {
 	st := BackendStatus{}
 	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
@@ -348,7 +349,7 @@ func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.Pi
 		// authority for it is a recorded claim, and a claim can be older than the
 		// config it is being applied to - a whole-tree revert restores the ledger
 		// along with everything else, so an entry can outlive the record gpm created
-		// (see the revert caveat in docs/configuration.md). Naming the revision the
+		// (see the revert caveat in docs/how-to/dns-sync.md). Naming the revision the
 		// claim was read at makes that auditable after the fact.
 		log.Warn().Str("domain", name).Str("target", state.present[name]).Str("ledgerRev", ledgerRev).
 			Msg("dnssync: deleting a pihole CNAME on the authority of the ownership ledger")
