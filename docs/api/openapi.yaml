@@ -993,10 +993,29 @@ components:
           - deny
         cidr:
           type: string
-          description: e.g. 10.0.0.0/8 or 1.2.3.4/32.
+          description: e.g. 10.0.0.0/8 or 1.2.3.4/32. Exactly one of cidr or source must be set.
+        source:
+          type: string
+          description: Names an entry in the list's sources; the rule matches every network in that
+            source's last fetched set. Exactly one of cidr or source must be set. A source that has
+            never been fetched resolves to the empty set, so the rule matches nothing.
+        paths:
+          type: array
+          items:
+            type: string
+          description: Exact request paths the rule is limited to (clean, absolute, no query). When
+            empty the rule applies to every request. Allow-only - action deny alongside paths is
+            refused, since an exact match cannot be relied on to deny. Matching is case-sensitive
+            with no trailing-slash folding. A list carrying a path-scoped rule cannot be attached to
+            a stream host.
+        methods:
+          type: array
+          items:
+            type: string
+          description: Upper-case HTTP methods the path-scoped rule covers. Only valid with paths;
+            empty means GET and HEAD.
       required:
       - action
-      - cidr
     AccessListGeo:
       type: object
       properties:
@@ -1047,11 +1066,80 @@ components:
           - ''
           - allow
           - deny
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessListSource'
+          description: Remote IP feeds a rule may reference by name. The fetched sets live in the
+            committed ledger config/access-list-sources.yaml, never inline here.
         geo:
           $ref: '#/components/schemas/AccessListGeo'
       required:
       - name
-      description: HTTP basic auth, ordered IP allow/deny rules, and optional GeoIP country rules.
+      description: HTTP basic auth, ordered IP allow/deny rules, optional remote IP sources, and
+        optional GeoIP country rules.
+    AccessListSource:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          description: Absolute https URL of a plain-text feed - one IP or CIDR per line, "#" comments
+            and blank lines ignored. http is not accepted, and no proxy is honoured. An entry that is
+            a default route, broader than /8 (IPv4) or /32 (IPv6), or in a non-public range refuses
+            the whole fetch.
+        interval:
+          type: string
+          description: Go duration between re-fetches. Empty means 24h; below 1h is refused.
+        maxEntries:
+          type: integer
+          description: Cap on how many networks the feed may carry. 0 means 10000; a body with more is
+            refused whole.
+      required:
+      - name
+      - url
+      description: A remote published IP feed referenced by an IPRule's source field.
+    AccessListSourceStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        lastRun:
+          type: string
+          format: date-time
+        lastSuccess:
+          type: string
+          format: date-time
+        error:
+          type: string
+        refused:
+          type: integer
+          description: Sources whose most recent fetch was refused; their previously fetched set is
+            still what the data plane serves.
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              list:
+                type: string
+              name:
+                type: string
+              url:
+                type: string
+              fetchedAt:
+                type: string
+                format: date-time
+              entryCount:
+                type: integer
+              lastError:
+                type: string
+              lastAttempt:
+                type: string
+                format: date-time
+      description: Last access-list source fetch result. Shape mirrored from internal/accesssync; see
+        docs/deployment.md#access-list-remote-sources.
     AuthMiddleware:
       type: object
       properties:
@@ -2149,6 +2237,55 @@ components:
       schema:
         type: string
 paths:
+  /api/access-list-sources/reconcile:
+    post:
+      summary: Fetch every due access-list source now
+      description: 'Synchronous. Never queues: a run already in flight answers 409 instead of blocking.
+        A source whose fetch is refused (non-200, empty body, over maxEntries, any unparseable line)
+        keeps its previously fetched set.'
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessListSourceStatus'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The ledger could not be read or written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:write
+  /api/access-list-sources/status:
+    get:
+      summary: Report what each access-list source last resolved to
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessListSourceStatus'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
   /api/access-lists:
     get:
       summary: List access lists

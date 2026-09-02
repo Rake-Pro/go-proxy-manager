@@ -82,6 +82,12 @@ const settingsFile = "settings.yaml"
 // operator's settings - which in turn triggers another reconcile.
 const dnsLedgerFile = "dns-ledger.yaml"
 
+// accessListSourcesFile is the fetched-set ledger for AccessList sources (see
+// model.AccessListSourceLedger). It is separate from the AccessList objects for
+// the same reason dnsLedgerFile is separate from settings.yaml: a routine
+// re-fetch must never rewrite a file the operator owns.
+const accessListSourcesFile = "access-list-sources.yaml"
+
 // Sentinel errors so callers can branch on outcome without matching message text.
 var (
 	// ErrNotFound is returned when an object does not exist.
@@ -909,6 +915,79 @@ func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Aut
 		return "", err
 	}
 	return s.git.CommitAll(ctx, "DNS sync ledger: update", author)
+}
+
+// LoadAccessListSourceLedger reads the fetched access-list source sets, together
+// with the config repo HEAD they were read at. A missing file is an EMPTY ledger,
+// not an error: that is the state every deployment starts in, and it means "no
+// source has been fetched yet", which the data plane resolves to the empty set -
+// a rule that matches nothing. An unfetched feed can never widen access.
+//
+// The HEAD is returned for the same reason LoadDNSLedger returns it: a reconcile
+// is a read-modify-write spanning seconds of network I/O that a Revert can
+// rewrite in between. See SaveAccessListSourceLedger.
+func (s *Store) LoadAccessListSourceLedger(ctx context.Context) (model.AccessListSourceLedger, string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return model.AccessListSourceLedger{}, "", err
+	}
+	var l model.AccessListSourceLedger
+	path := filepath.Join(s.dir, accessListSourcesFile)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return model.AccessListSourceLedger{SchemaVersion: model.SchemaVersion}, head, nil
+		}
+		return l, head, err
+	}
+	if err := readYAML(path, &l); err != nil {
+		return l, head, fmt.Errorf("%s: %w", accessListSourcesFile, err)
+	}
+	if err := l.Validate(); err != nil {
+		return l, head, fmt.Errorf("%s: %w", accessListSourcesFile, err)
+	}
+	return l, head, nil
+}
+
+// ErrAccessListLedgerStale is the access-list analogue of ErrLedgerStale: the
+// config repo moved on since the ledger was read, so writing would discard what
+// the other writer did.
+var ErrAccessListLedgerStale = errors.New("access-list source ledger changed since it was read")
+
+// SaveAccessListSourceLedger validates and writes the ledger singleton, then
+// commits. Writing an unchanged ledger produces no commit (CommitAll is a no-op
+// on a clean tree), so a steady-state fetch leaves no history noise.
+//
+// baseHead is the repo HEAD the caller read the ledger at. If HEAD has moved
+// since, the write is refused with ErrAccessListLedgerStale rather than
+// clobbering it - the sets in this file decide who reaches a host, so silently
+// re-establishing one a revert withdrew is not an acceptable lost update.
+// Passing "" opts out of the check.
+func (s *Store) SaveAccessListSourceLedger(ctx context.Context, l model.AccessListSourceLedger, author Author, baseHead string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := l.Validate(); err != nil {
+		return "", err
+	}
+	if baseHead != "" {
+		head, err := s.git.Head(ctx)
+		if err != nil {
+			return "", err
+		}
+		if head != baseHead {
+			return "", fmt.Errorf("%w: read at %s, HEAD is now %s", ErrAccessListLedgerStale, baseHead, head)
+		}
+	}
+	if l.SchemaVersion == 0 {
+		l.SchemaVersion = model.SchemaVersion
+	}
+	if err := writeYAML(filepath.Join(s.dir, accessListSourcesFile), l); err != nil {
+		return "", err
+	}
+	return s.git.CommitAll(ctx, "Access-list source ledger: update", author)
 }
 
 func loadDir[T any](root, sub string) ([]T, error) {
