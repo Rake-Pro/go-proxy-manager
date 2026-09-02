@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/clientcert"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
@@ -99,6 +100,12 @@ type Deps struct {
 	// /ingress-discovery/plan), without changing anything. Mirrors DNSSyncPlan.
 	// May be nil (501).
 	IngressDiscoveryPlan func(context.Context) (any, error)
+	// AccessListSourceStatus, if set, returns the last access-list source fetch
+	// result (marshalled as-is) for GET /access-list-sources/status. May be nil (501).
+	AccessListSourceStatus func() any
+	// AccessListSourceReconcile, if set, fetches every due access-list source
+	// synchronously (POST /access-list-sources/reconcile). May be nil (501).
+	AccessListSourceReconcile func(context.Context) error
 	// IngressDiscoveryEnabled, if set, reports whether Ingress discovery is
 	// configured, for the capability probe. May be nil (reported disabled).
 	IngressDiscoveryEnabled func() bool
@@ -490,6 +497,39 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, plan)
+	}))
+
+	// Access-list remote sources: report what each declared source last resolved
+	// to, and fetch the due ones now. Both are scoped on access-lists rather than
+	// a subject of their own - a source is part of an access list, and a token
+	// that may already read or rewrite the list gains nothing new here.
+	mux.HandleFunc("GET /access-list-sources/status", d.scoped("access-lists:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.AccessListSourceStatus == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("access-list source sync is not wired"))
+			return
+		}
+		writeJSON(w, http.StatusOK, d.AccessListSourceStatus())
+	}))
+	mux.HandleFunc("POST /access-list-sources/reconcile", d.scoped("access-lists:write", func(w http.ResponseWriter, r *http.Request) {
+		if d.AccessListSourceReconcile == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("access-list source sync is not wired"))
+			return
+		}
+		if err := d.AccessListSourceReconcile(r.Context()); err != nil {
+			// Same reasoning as the DNS and Ingress reconcile routes: a run already
+			// in flight is a conflict, not a backend failure.
+			if errors.Is(err, accesssync.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if d.AccessListSourceStatus != nil {
+			writeJSON(w, http.StatusOK, d.AccessListSourceStatus())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
 	}))
 
 	// Kubernetes Ingress discovery: reconcile annotated cluster Ingresses into

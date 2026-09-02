@@ -183,6 +183,38 @@ because logout is reached by `defer` and the commonest reason to reach it is the
 caller having gone away — cancelling the logout with it leaks one of Pi-hole's few
 session slots per aborted run.
 
+**Access-list source sync** (`internal/accesssync`). An optional fetcher that
+keeps the remote IP feeds an `AccessList` declares (`sources`) current, so a rule
+can say "the addresses this monitoring provider publishes" instead of naming two
+hundred CIDRs the operator has to re-paste whenever the provider changes them. It
+follows the reconcilers above - live config read on every run, coalescing
+non-blocking triggers, a hardened client that never follows redirects - and, like
+DNS sync, persists its state in a committed singleton
+(`model.AccessListSourceLedger`, `config/access-list-sources.yaml`) rather than in
+memory, so a restart serves the last known set instead of an empty one and every
+change to who can reach a host is a diffable commit.
+
+The design constraint is that a **remote body decides who reaches a host**, so
+every step fails closed and refuses whole rather than accepting part. Its SSRF
+guard is strictly tighter than `dnssync`'s: `https` only, and the dialer refuses
+loopback, link-local, RFC1918/ULA and multicast destinations post-DNS at connect
+time - `dnssync` deliberately permits private targets (a LAN Pi-hole is the
+point), while nothing legitimate here is internal. The body is capped at 1 MiB,
+and a non-200, an empty result, a result over `maxEntries`, or a **single**
+unparseable line refuses the fetch and keeps the previously fetched set; a feed
+that changed shape is one gpm no longer understands, and serving the subset it
+still parses would be a silent, partial allow list. Each entry carries a sha256
+over its network set, validated on load, so a hand-pasted network fails the load
+instead of quietly widening an allow list.
+
+Two consequences are worth stating. An unchanged feed writes **nothing**:
+advancing `fetchedAt` on a no-op would commit a timestamp-only diff every
+interval forever, so the last attempt is kept in memory instead and the interval
+gate still holds across a restart's one re-fetch. And a source with no ledger
+entry resolves to the **empty set** rather than being dropped, which keeps the
+list's IP dimension intact - dropping the rule would leave a default-deny list
+with nothing to match on, which is exactly the shape that serves open.
+
 **Kubernetes Ingress discovery** (`internal/k8s`). An optional, read-only poll
 loop that turns annotated cluster `Ingress` objects into gpm-managed proxy hosts,
 which then feed the DNS reconciler above — one DNS code path, not two. The client
@@ -521,6 +553,35 @@ The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
 
+**Request-aware access-list rules.** An IP rule may carry `paths` (and
+`methods`), in which case it matches only a request to one of those exact paths
+with one of those methods; without them it applies to every request exactly as
+before. Ordering is unchanged - top-down, first match wins, then geo, then
+`defaultAction`.
+
+Path rules are **allow-only**, and validation refuses `action: deny` alongside
+`paths`. Exact matching on the cleaned path is a sound basis for an allow rule
+and an unsound one for a deny: the router preserves a trailing slash and does no
+case folding, so `/admin` does not cover `/admin/` or `/ADMIN`. A missed *allow*
+falls through to `defaultAction` (deny, fail closed); a missed *deny* would let
+the request past (fail open). Deny-by-path is the guard middleware's job, which
+owns that matching problem. With that restriction in place `paths` only ever
+*narrows* a rule. The comparison is
+against the already-normalised `r.URL.Path` (`normalizeRequestPath` runs at
+router dispatch, and a path carrying `\` or `;` is rejected outright), which is
+the same string the upstream will see, so there is no matcher/backend divergence
+to exploit; a path that is not itself clean is refused at config-write time
+because it could never match. This is what makes "let the uptime monitor reach
+`/api/health` on a host that is otherwise VPN-only" expressible in one rule
+instead of a second host. There is no request path at L4, so a path-scoped rule
+never matches on a stream host, and validation refuses such a list there rather
+than evaluating half the gate an operator wrote. A rule may also draw its
+networks from a fetched `source` instead of a literal `cidr`; the compiled list
+reads those sets from a package-level handle installed before each reload
+(`SetAccessListSources`, mirroring `SetSecurityHeaders`), so a completed fetch
+takes effect on the next request without threading the ledger through every
+build function.
+
 **Maintenance mode** (`internal/dataplane/maintenance.go`) sits in front of that
 chain, not inside it. A host in maintenance is answered at the router dispatch
 layer - before path normalization, before the identity strip, before any gate -
@@ -795,6 +856,22 @@ own address are rewritten to the public scheme/host.
   name nor any of its domains is already claimed by a host it does not own — and it
   deletes at all only on the strength of a complete, successful cluster list
   (freeze on error).
+- **A remote feed is bounded on both sides.** An access-list `source` is fetched
+  over https, with no proxy honoured (a proxy would move the address the SSRF
+  guard inspects), from a destination the dialer refuses if it is loopback,
+  link-local, private/ULA, CGNAT, multicast or otherwise non-public. Any anomaly
+  (non-200, empty, oversized, one unparseable line) refuses the fetch whole and
+  keeps the previous set, and a source that has never been fetched resolves to
+  the empty set. The *contents* are bounded by the same range table: an entry
+  that is a default route (`0.0.0.0/0`, `::/0`), broader than a `/8` (v4) or
+  `/32` (v6), or inside a non-public range refuses the whole fetch - one such
+  line in a hijacked feed would otherwise pass every other check and allow the
+  internet.
+
+  **A source rule without `paths` still grants its addresses full access to the
+  host**, exactly like any other allow rule; the path scoping is what bounds a
+  feed to the endpoints the operator chose to expose. Pair every `source` rule
+  with `paths` unless the feed is genuinely trusted with the whole host.
 - **Discovery is opt-in and read-only.** gpm never writes to the cluster — the
   shipped RBAC grants `list` on `ingresses` and nothing else — and
   an `Ingress` without `gpm.rake.pro/managed: "true"` is invisible. There is no

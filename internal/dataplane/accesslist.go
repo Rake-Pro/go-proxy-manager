@@ -24,17 +24,56 @@ type accessList struct {
 	// allow rules to follow"), such a list must deny rather than silently pass.
 	// An unset or "allow" default keeps the historical open behavior.
 	explicitDeny bool
-	nets         []*net.IPNet
-	netActions   []bool            // parallel to nets: true=allow, false=deny
-	users        map[string]string // username -> bcrypt hash
-	hasIP        bool
-	hasAuth      bool
+	// rules are the compiled IP rules in configuration order; first match wins.
+	rules   []netRule
+	users   map[string]string // username -> bcrypt hash
+	hasIP   bool
+	hasAuth bool
 
 	// Geo rules, evaluated after nets and before defaultAllow (see ipAllowed).
 	hasGeo            bool
 	geoCountryAllow   map[string]bool // non-nil => whitelist mode; countryDeny is ignored
 	geoCountryDeny    map[string]bool
 	geoOnUnknownAllow bool
+}
+
+// netRule is one compiled IP rule: the networks it covers, the verdict it
+// yields, and - for a path-scoped rule - the exact request paths and methods it
+// is limited to.
+//
+// A rule with a nil paths map applies to every request, which is what every rule
+// did before path scoping existed. A rule WITH paths matches only when the
+// cleaned request path is a key of paths and the method is a key of methods; on
+// a raw stream (no request at all) it never matches, so a list mixing both kinds
+// degrades to its literal rules rather than to an open gate.
+type netRule struct {
+	nets    []*net.IPNet
+	allow   bool
+	paths   map[string]struct{}
+	methods map[string]struct{}
+}
+
+// matches reports whether the rule applies to a request for path with method.
+// An empty path means "no request path available" (a raw stream), which a
+// path-scoped rule can never satisfy.
+func (r netRule) matches(ip net.IP, path, method string) bool {
+	if r.paths != nil {
+		if path == "" {
+			return false
+		}
+		if _, ok := r.paths[path]; !ok {
+			return false
+		}
+		if _, ok := r.methods[method]; !ok {
+			return false
+		}
+	}
+	for _, n := range r.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func compileAccessList(al model.AccessList) accessList {
@@ -45,28 +84,51 @@ func compileAccessList(al model.AccessList) accessList {
 		explicitDeny: al.DefaultAction == model.ActionDeny,
 		users:        map[string]string{},
 	}
+	sources := currentAccessListSources()
 	for _, r := range al.Rules {
-		_, ipnet, err := net.ParseCIDR(r.CIDR)
-		if err != nil {
-			// A bare IP becomes a /32 or /128.
-			if ip := net.ParseIP(r.CIDR); ip != nil {
-				bits := 32
-				if ip.To4() == nil {
-					bits = 128
+		nr := netRule{allow: r.Action == model.ActionAllow}
+		if r.Source != "" {
+			// A source with no ledger entry yet (never fetched, or the fetch was
+			// refused before the first success) resolves to the EMPTY set: the rule
+			// matches nothing and the list falls through to its defaultAction. The
+			// rule is still kept, so the list keeps its IP dimension and a
+			// default-deny list stays closed rather than losing its only rule and
+			// turning into a list with nothing to match on.
+			nr.nets = sources[model.AccessListSourceKey(al.Name, r.Source)]
+		} else {
+			var ipnet *net.IPNet
+			_, ipnet, err := net.ParseCIDR(r.CIDR)
+			if err != nil {
+				// A bare IP becomes a /32 or /128.
+				if ip := net.ParseIP(r.CIDR); ip != nil {
+					bits := 32
+					if ip.To4() == nil {
+						bits = 128
+					}
+					_, ipnet, _ = net.ParseCIDR(r.CIDR + "/" + strconv.Itoa(bits))
 				}
-				_, ipnet, _ = net.ParseCIDR(r.CIDR + "/" + strconv.Itoa(bits))
+			}
+			if ipnet == nil {
+				continue
+			}
+			nr.nets = []*net.IPNet{ipnet}
+		}
+		if r.PathScoped() {
+			nr.paths = map[string]struct{}{}
+			for _, p := range r.Paths {
+				nr.paths[p] = struct{}{}
+			}
+			nr.methods = map[string]struct{}{}
+			for _, m := range r.EffectiveMethods() {
+				nr.methods[strings.ToUpper(m)] = struct{}{}
 			}
 		}
-		if ipnet == nil {
-			continue
-		}
-		c.nets = append(c.nets, ipnet)
-		c.netActions = append(c.netActions, r.Action == model.ActionAllow)
+		c.rules = append(c.rules, nr)
 	}
 	for _, u := range al.BasicAuth {
 		c.users[u.Username] = u.PasswordHash
 	}
-	c.hasIP = len(c.nets) > 0
+	c.hasIP = len(c.rules) > 0
 	c.hasAuth = len(c.users) > 0
 
 	c.hasGeo = al.Geo.HasRules()
@@ -115,6 +177,15 @@ func compileAccessList(al model.AccessList) accessList {
 // honours a database that loads (or unloads) after it was compiled, without
 // needing to be rebuilt.
 func (c accessList) ipAllowed(ip net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) bool {
+	return c.allowed(ip, "", "", geoLookup, geoLoaded)
+}
+
+// allowed is the request-aware form of ipAllowed: path and method are the
+// cleaned request path (see normalizeRequestPath, which runs before any
+// matching, so this is always the canonical form the upstream will also see) and
+// the request method. Passing an empty path means there is no request to scope
+// on - the raw-stream case - and path-scoped rules are then skipped entirely.
+func (c accessList) allowed(ip net.IP, path, method string, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) bool {
 	if ip == nil {
 		return false
 	}
@@ -127,9 +198,9 @@ func (c accessList) ipAllowed(ip net.IP, geoLookup func(net.IP) (string, bool), 
 	if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
 		return false
 	}
-	for i, n := range c.nets {
-		if n.Contains(ip) {
-			return c.netActions[i]
+	for _, r := range c.rules {
+		if r.matches(ip, path, method) {
+			return r.allow
 		}
 	}
 	if c.hasGeo {
@@ -310,7 +381,7 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		}
 		ipOK := true
 		if c.hasIP || c.hasGeo {
-			ipOK = c.ipAllowed(ipOf(r), geoLookup, geoLoaded)
+			ipOK = c.allowed(ipOf(r), r.URL.Path, strings.ToUpper(r.Method), geoLookup, geoLoaded)
 		}
 		// A list with geo rules and no database loaded denies everything
 		// (ipAllowed fails closed). That is a distinct operational state from a
