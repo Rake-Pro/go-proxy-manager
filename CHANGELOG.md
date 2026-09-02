@@ -5,7 +5,12 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- The Go toolchain is pinned once, in `.go-version`: CI reads it, `make
+  bump-go VERSION=X.Y.Z` rewrites it together with both builder images (tag
+  and digest), and a test fails when any of them drift or when the docs quote
+  a language minimum other than go.mod's.
 
 ## [1.0.1] - 2026-09-02
 
