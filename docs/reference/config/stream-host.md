@@ -89,8 +89,10 @@ terminate it.
 - **`terminate`** completes the handshake at gpm with `certificateRef` from the
   normal certificate store (custom or ACME-issued) and forwards **plaintext** to
   the backend. The floor is TLS 1.2 with the same AEAD cipher suites the HTTPS
-  listener uses. No ALPN is offered: what rides inside a stream is an arbitrary
-  TCP protocol.
+  listener uses, or TLS 1.3 when
+  [`settings.tls.minVersion`](settings/tls.md#settings-tls-min-version) raises it
+  (a stream host has no per-host floor of its own). No ALPN is offered: what
+  rides inside a stream is an arbitrary TCP protocol.
 
 **Port sharing.** Two or more enabled stream hosts may share a TCP `listenPort`
 **only if every one of them sets `sniMatch`**: that is the only thing that tells

@@ -14,7 +14,7 @@ core an operator cannot run without, **P1** high-value work layered on top,
 |---|---|---|
 | P0 | Shipped | Proxy/redirect/stream/parked hosts, DNS-01 + custom certs, IP access lists, OIDC + data-plane forward-auth + auth-request, typed per-host middleware, REST API + web UI, git-backed config. Two design goals were deliberately **reversed** after security review: trusted forward-auth *admin panel* login, and an in-band break-glass for SSO-only mode (design goals 1 and 3). |
 | P1 | Shipped | Every P1 item is complete, including HTTP-01 challenge support. |
-| P2 | Mostly shipped | GeoIP geoblocking, mTLS (phases 1-3: verification, CRL + identity passthrough, `client-cert` mode + issuance), lifecycle webhooks, operational notifications (ntfy/Discord/generic), host tagging, reusable DNS credentials, cosign image signing, the WAF/CrowdSec hook (`bouncer` middleware), PROXY protocol (v1+v2), inbound IPv6, gzip compression, custom error pages, and ACME EAB (ZeroSSL / Google Public CA) are all shipped. HTTP/3 is not started. |
+| P2 | Mostly shipped | GeoIP geoblocking, mTLS (phases 1-3: verification, CRL + identity passthrough, `client-cert` mode + issuance), lifecycle webhooks, operational notifications (ntfy/Discord/generic), host tagging, reusable DNS credentials, cosign image signing, the WAF/CrowdSec hook (`bouncer` middleware), PROXY protocol (v1+v2), inbound IPv6, gzip compression, custom error pages, ACME EAB (ZeroSSL / Google Public CA) and the fleet-wide TLS floor (`settings.tls.minVersion`) are all shipped. HTTP/3 is the only tier item not started. |
 | P3 | Aspirational | Nothing in this tier is built. |
 
 For what ships today and how to use it, see [README.md](README.md) and
@@ -52,11 +52,13 @@ production. These are the design north stars: the reasons this project exists.
 4. **MFA delegation.** Don't double-prompt a user who already satisfied MFA at
    the IdP. Trust IdP `acr`/`amr`; keep local TOTP only for local/break-glass
    accounts.
-   **Partly shipped:** local TOTP now exists for the break-glass admin
+   **Reversed:** local TOTP shipped for the break-glass admin
    (`GPM_LOCAL_ADMIN_TOTP_SECRET`, RFC 6238, `gpm totp-secret`), which is the
    half that matters: the SSO path was never double-prompted, because gpm has
-   no local prompt on it. The delegation field itself
-   (`OIDCSpec.TrustIdPMFA`) is still never read and stays deprecated; see P3.
+   no local prompt on it. Delegation itself is **not planned**: TOTP applies
+   only to the local admin, whom no IdP authenticates, so there is no redundant
+   prompt to suppress. The field (`OIDCSpec.TrustIdPMFA`) is deprecated and gone
+   from the UI, OpenAPI and the config reference.
 5. **Explicit external base URL.** Stop deriving origin from `X-Forwarded-*` (the
    redirect_uri port/scheme footgun that broke login in an earlier iteration).
    Configure the canonical public URL once.
@@ -224,7 +226,10 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
   the cert dir; no clustering dependency). See [docs/ha.md](docs/ha.md).
 
 ### P2: hardening
-- HTTP/3 (QUIC), hardened TLS (1.3; optional 1.2 off).
+- HTTP/3 (QUIC): not started. **Hardened TLS: shipped** as a fleet-wide switch,
+  `settings.tls.minVersion` (`"1.2"` default | `"1.3"`), applied to every HTTPS
+  listener, every stream host in `terminate` mode and an unknown SNI; a
+  ProxyHost's own `tls.minTLSVersion` overrides it in either direction.
 - GeoIP geoblocking (shipped: `geo` on `AccessList` with
   `countryAllow`/`countryDeny`/`onUnknown`, fail-closed at write and at live
   evaluation, `GPM_GEOIP_DB` with a 5-minute hot-reload watch, `GET
@@ -420,15 +425,13 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
 ### P3: nice-to-have (not started)
 - WebAuthn/passkeys for local admin login in IdP-less deployments; local auth
   capped at TOTP (shipped) + WebAuthn, not applicable with OIDC.
-- **MFA delegation** (moved from P0, design goal 4: unimplemented). Trust IdP
-  `acr`/`amr` (`OIDCSpec.TrustIdPMFA` exists as a config field but is never
-  read, and is now marked deprecated) to skip a redundant local prompt.
-  Local TOTP now exists to delegate away from, but the local factor is only ever
-  demanded on the LOCAL account, which no IdP authenticates, so there is still
-  no redundant prompt to suppress. Implementing this means un-deprecating the
-  field, not adding a new one.
 
 ### Not planned at this time
+- **MFA delegation** (was design goal 4, then P3). Trust IdP `acr`/`amr` to skip
+  a redundant local prompt: there is no redundant prompt to skip. TOTP is
+  demanded only on the LOCAL admin account, which no IdP authenticates, and the
+  config field (`OIDCSpec.TrustIdPMFA`) was deprecated and dropped from the UI,
+  OpenAPI and the config reference.
 - Brotli/zstd compression (was P2)
 - OCSP stapling (was P2)
 - Email notifications (was P2)

@@ -3,9 +3,9 @@
 gpm has no native tunnel integration: these are recipes, not integrations.
 Each pattern puts a third-party tool in front of gpm's own `:443`/`:80`
 listeners; gpm still owns TLS termination, routing, ACME and access lists.
-No roadmap item currently tracks native tunnel support (see
-[FEATURES.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/FEATURES.md) "Not planned at this time" for what is explicitly
-out of scope today).
+A native tunnel listener (`tsnet`, a second bind alongside the normal ones) is
+[planned](../roadmap.md) but not started; these recipes are the supported way
+today.
 
 ## Prerequisites (all patterns)
 

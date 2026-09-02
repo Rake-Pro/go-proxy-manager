@@ -57,9 +57,19 @@ empty otherwise), `html/template`, so all four are contextually escaped. A
 **ProxyHost's own `errorPages`** is resolved first for a given status (falling
 back to its own `default` template, then to the settings-level pages) so a host
 override always wins; a host with no override of its own uses the
-settings-level pages outright. Templates are parsed at config reload: a parse
-error (or an unreadable `dir`) **fails the reload** with a clear message rather
-than installing a half-broken set.
+settings-level pages outright.
+
+**When a broken template is caught:**
+
+| Moment | Behaviour |
+|---|---|
+| Settings write | An `inline` template that does not parse is **rejected**, so it never commits. |
+| Config reload | A parse error (or an unreadable `dir`) **fails the reload** with a clear message; the previously compiled pages stay installed. |
+| Startup | A `dir` template that broke out of band is logged as a **warning** and gpm starts with its built-in error output; it never refuses to boot over an error page. |
+
+A rendered page carries `X-Content-Type-Options: nosniff`, matching the
+built-in plain-text response, so configuring a page never drops a header the
+default one had.
 
 ```yaml
 # settings.yaml

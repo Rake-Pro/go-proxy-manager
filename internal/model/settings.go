@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -698,19 +699,50 @@ func (e ErrorPagesConfig) validate() error {
 			return fmt.Errorf("errorPages.dir %q must be relative to the cert store (no absolute or .. paths)", f)
 		}
 	}
-	for k := range e.Inline {
-		if k == "default" {
-			continue
+	for k, src := range e.Inline {
+		if k != "default" {
+			n, err := strconv.Atoi(k)
+			if err != nil || n < 100 || n > 599 {
+				return fmt.Errorf(`errorPages.inline key %q must be a 3-digit status code or "default"`, k)
+			}
 		}
-		n, err := strconv.Atoi(k)
-		if err != nil || n < 100 || n > 599 {
-			return fmt.Errorf(`errorPages.inline key %q must be a 3-digit status code or "default"`, k)
+		// Parse-check at WRITE time. Without it a broken inline template commits
+		// cleanly, the running instance keeps its previously compiled pages (the
+		// reload path is fail-safe), and the NEXT restart is where it surfaces -
+		// a config error that only bites hours later, on the one path where it
+		// is hardest to diagnose. The UI's inline editor makes it easy to hit.
+		if _, err := template.New(k).Parse(src); err != nil {
+			return fmt.Errorf("errorPages.inline[%q]: %w", k, err)
 		}
 	}
 	for _, s := range e.InterceptUpstream {
 		if s < 400 || s > 599 {
 			return fmt.Errorf("errorPages.interceptUpstream %d must be a 4xx/5xx status code", s)
 		}
+	}
+	return nil
+}
+
+// TLSFleetSettings is the fleet-wide TLS floor: the minimum version every
+// HTTPS and stream-terminate listener negotiates, for deployments that want to
+// harden the whole edge in one place instead of per host.
+//
+// A ProxyHost's own tls.minTLSVersion OVERRIDES this for that host, in either
+// direction: with a fleet floor of "1.3" a single legacy host can still pin
+// "1.2", and with the default fleet floor a host can still pin "1.3".
+type TLSFleetSettings struct {
+	// MinVersion is the lowest TLS version the edge accepts: "1.2" (the default,
+	// and what an empty value means, i.e. today's behaviour of negotiating 1.2 or
+	// 1.3 per client) or "1.3". Set "1.3" only once every client of every host
+	// that does not pin its own floor supports it.
+	MinVersion string `json:"minVersion,omitempty" yaml:"minVersion,omitempty"`
+}
+
+func (t TLSFleetSettings) validate() error {
+	switch t.MinVersion {
+	case "", "1.2", "1.3":
+	default:
+		return fmt.Errorf(`tls.minVersion must be "1.2" or "1.3", got %q`, t.MinVersion)
 	}
 	return nil
 }
@@ -729,6 +761,12 @@ type Settings struct {
 	ExternalBaseURL string `json:"externalBaseURL" yaml:"externalBaseURL"`
 
 	AdminAuth AdminAuthSettings `json:"adminAuth,omitempty" yaml:"adminAuth,omitempty"`
+
+	// TLS is the fleet-wide TLS floor applied to every HTTPS and
+	// stream-terminate listener. The zero value is the 1.2 floor gpm has always
+	// used, so an existing settings.yaml is unchanged; a host's own
+	// tls.minTLSVersion overrides it either way (see TLSFleetSettings).
+	TLS TLSFleetSettings `json:"tls,omitempty" yaml:"tls,omitempty"`
 
 	// Webhooks are outbound lifecycle notifications fired after every config change.
 	Webhooks []WebhookConfig `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
@@ -915,6 +953,9 @@ func (s Settings) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("settings: webhook %q: url must be an absolute http(s) URL, got %q", w.Name, w.URL)
 		}
+	}
+	if err := s.TLS.validate(); err != nil {
+		return fmt.Errorf("settings: %w", err)
 	}
 	if err := s.ProxyProtocol.validate(); err != nil {
 		return err

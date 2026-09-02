@@ -50,7 +50,7 @@ every third-party dependency has to earn its place.
 | `gpm_http_response_bytes_total` | counter | `host` |
 | `gpm_http_upstream_errors_total` | counter | `host` |
 | `gpm_http_websocket_upgrades_total` | counter | `host` |
-| `gpm_denials_total` | counter | `host`, `reason` (`rate-limit`, `access-list`, `access-list-auth`, `guard`, `geo`, `bouncer`) |
+| `gpm_denials_total` | counter | `host`, `reason` (`rate-limit`, `access-list`, `access-list-auth`, `guard`, `geo`, `bouncer`, `auth-forward`, `auth-request`, `auth-oidc`, `auth-client-cert`, `auth-basic`) |
 | `gpm_stream_connections_active` | gauge | `host` |
 | `gpm_stream_connections_total` | counter | `host` |
 | `gpm_acme_certificate_expiry_timestamp_seconds` | gauge | `certificate` |
@@ -65,6 +65,11 @@ every third-party dependency has to earn its place.
 | `gpm_ingress_discovery_last_success_timestamp_seconds` | gauge | none |
 | `gpm_ingress_discovery_discovered_ingresses` | gauge | none |
 | `gpm_ingress_discovery_managed_hosts` | gauge | none |
+| `gpm_access_list_sync_enabled` | gauge | none |
+| `gpm_access_list_sync_last_run_timestamp_seconds` | gauge | none |
+| `gpm_access_list_sync_last_success_timestamp_seconds` | gauge | none |
+| `gpm_access_list_sync_sources` | gauge | none |
+| `gpm_access_list_sync_refused_sources` | gauge | none |
 | `gpm_ha_role` | gauge | `role` (1 for this instance's role, 0 for the other) |
 | `gpm_go_goroutines` | gauge | none |
 | `gpm_go_memstats_alloc_bytes` | gauge | none |
@@ -80,4 +85,9 @@ precisely the state where they diverge, so alert on the gap between them:
 ```
 time() - gpm_ingress_discovery_last_success_timestamp_seconds > 3600
 gpm_acme_certificate_expiry_timestamp_seconds - time() < 7 * 86400
+gpm_access_list_sync_refused_sources > 0
 ```
+
+The `auth-*` denial reasons name the gate that refused, so an SSO or mTLS host
+that suddenly serves nothing but 403s is one query rather than a log hunt. A
+redirect into a sign-in flow is not a denial and is not counted.

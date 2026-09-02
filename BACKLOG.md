@@ -86,22 +86,19 @@ All findings from that review are remediated in the same change (see CHANGELOG
   `TestSettingsSaveSendsEveryFlatTemplateField` exists for). Deferred until the
   template editor is worked on; discovered hosts keep using `middlewares` /
   `accessLists` for a shared chain, which is the right shape for a fleet anyway.
-- [ ] **UI editors.** Host editor "Sign-in" and "Rate limit" folds, and the same
-  two on the location row editor. Spec written; the UI agent applies it.
+- [x] **UI editors.** Shipped in 1.1.0: the host editor carries "Sign-in" and
+  "Rate limit" folds (`inlineFoldHtml('f-auth'...)` / `'f-rl'` in
+  `internal/ui/static/app.js`) and the location row editor carries the same two.
 
 ### Path / Host escape hatches (follow-ups)
 
-- [ ] **UI editors (blocking: the host editor currently WIPES the new upstream
-  fields on save).** `internal/ui/static/app.js` rebuilds `obj.upstream` from
-  scheme/host/port alone in the host editor (~line 2156), the location editor
-  (~line 2327) and the ingress-discovery template (~line 5339), so a
-  `path` / `hostHeader` written by API or git is dropped the next time that page
-  is saved. Until the spec is applied, treat the fields as API/YAML only and do
-  not edit such a host in the UI. Spec written (`ui-specs/escape-hatch.md`):
-  locations row gets a "Strip prefix" switch; every upstream field group gets
-  "Base path" and "Host header" (keep client Host / use upstream host / custom);
-  the rewrite middleware editor grows Prefix and Regex rule groups beside the
-  existing Exact map.
+- [x] **UI editors (was blocking: the host editor WIPED the new upstream fields
+  on save).** Shipped in 1.1.0, applying `ui-specs/escape-hatch.md` in full: the
+  location row has a "Strip prefix" switch, every upstream field group has an
+  Advanced fold with "Base path" and "Host header" (keep client Host / use
+  upstream host / custom), and the rewrite middleware editor has Prefix and Regex
+  rule groups beside the exact map. The three rebuild sites now preserve
+  `path` / `hostHeader` explicitly rather than dropping them.
 - [ ] **`healthCheck.path` is not prefixed with a group member's
   `upstream.path`.** Deliberate (the probe path is configured in full), but worth
   revisiting if operators keep writing the base path twice.
@@ -121,7 +118,10 @@ error-page system; none is a regression from that change.
   on every tier (access list, guard, bouncer, rate limit, proxy, parked host and
   now auth), not just auth. The bodies are `html/template`-escaped so this is
   defence in depth rather than a live hole, but the asymmetry is backwards.
-  *(Addressed by the configurable `securityHeaders` feature: setting
+  *(Fixed directly: `serveErrorPage` now sets `X-Content-Type-Options: nosniff`
+  itself, matching `http.Error`, so a configured page never drops a header the
+  default one had. Previously only partly addressed by the configurable
+  `securityHeaders` feature: setting
   `securityHeaders: {X-Content-Type-Options: nosniff, ...}` restores `nosniff`
   (and the rest of the recommended set) on rendered error pages and every other
   gpm-generated response, injected set-if-absent at the dispatch layer above the
@@ -138,22 +138,19 @@ error-page system; none is a regression from that change.
   `generated-only` or `proxied-only`; the recommended set now scopes CSP and
   Permissions-Policy to `generated-only`. The legacy plain map stays valid
   (bare string => scope `all`). See CHANGELOG / `docs/configuration.md`.)*
-- [ ] **A broken template passes validation, survives reload, and then blocks the
-  next restart.** `settings.errorPages` is not compiled at write time, so a
-  syntactically-broken template commits cleanly. The reload path is fail-safe
-  (`cmd/gpm/main.go` logs and returns the error, leaving the previous pages
-  installed), but startup calls `log.Fatal` on the same failure, so the running
-  instance is fine and the *next* restart dies. Now more reachable than before:
-  the new Error pages section makes inline templates easy to author from the UI.
-  Options: compile-check in `Settings.Validate` (best: refuses the commit), or
-  degrade the startup failure to a warning that starts with no custom pages.
-- [ ] **Auth-gate refusals do not increment the denial metrics.** The access
-  list, guard, bouncer and rate-limit tiers all call `countDenial(r, reason)`;
-  the auth gates never have, so a host behind SSO or mTLS shows no denials in
-  `/metrics` no matter how many 401/403s it serves. Threading a `countDenial(r,
-  "auth")` (or a per-mode reason) into the gates is small, but it adds new metric
-  series, so it belongs in its own change rather than riding along with the
-  error-page work.
+- [x] **A broken template passes validation, survives reload, and then blocks the
+  next restart.** Fixed both ways: `Settings.Validate` parse-checks every
+  `errorPages.inline` template, so a broken one is refused at write time, and the
+  startup failure is now a WARN that starts with gpm's built-in error output
+  instead of `log.Fatal`. The reload path was already fail-safe (it logs, returns
+  the error and leaves the previously compiled pages installed).
+- [x] **Auth-gate refusals do not increment the denial metrics.** Fixed: every
+  terminal 401/403 the forward-auth, auth-request, oidc and client-cert gates
+  write now calls `countDenial` with a per-mode reason (`auth-forward`,
+  `auth-request`, `auth-oidc`, `auth-client-cert`), joining the existing
+  `auth-basic`. Sign-in redirects are not counted. Before this a host behind SSO
+  or mTLS showed no denials in `/metrics` no matter how many 401/403s it served,
+  while every other refusal tier was already labelled.
 
 - [x] **HSTS emission.** The data plane now emits `Strict-Transport-Security` on
   HTTPS responses for hosts with `tls.hsts.enabled`.
@@ -276,11 +273,16 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   equivalent `tls.Config` separately).
 - [x] TLS 1.3 floor: implemented as an opt-in **per-host** `tls.minTLSVersion`
   (`"1.2"` default | `"1.3"`) selected by SNI, rather than a global edge pin that
-  would drop older clients.
+  would drop older clients. The fleet-wide half now ships too as
+  `settings.tls.minVersion`, which sets the DEFAULT every unpinned host, stream
+  terminate listener and unknown SNI inherits; a host pin still wins either way.
 
 ## UI polish
 
-- [ ] **No control for `trustedProxies` yet (Settings and proxy host).** The
+- [x] **No control for `trustedProxies` yet (Settings and proxy host).** Shipped:
+  Settings has a "Client IP" card (`#set-trustedproxies`) and the host editor has
+  a three-state inherit/none/custom segment plus chip list
+  (`#f-tp-seg` / `#f-trustedproxies`), both with the 0.0.0.0/0 warning. The
   model, validation, data plane, API and docs shipped; the UI has not. Until it
   does, a Settings save from the admin panel DROPS `settings.trustedProxies`,
   because the save handler builds its PUT body from the controls on the page.
@@ -289,8 +291,14 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   so the entry cannot be left behind. Spec: a "Client IP" card after PROXY
   protocol in Settings, and a "Trusted proxies (override)" chip list in the proxy
   host editor's Advanced fold, both with the 0.0.0.0/0 warning.
-- [ ] **`securityHeaders` and `trustedProxies` are missing from the
-  ingress-discovery template.** A per-host `securityHeaders` or `trustedProxies`
+- [ ] **`trustedProxies` is missing from the ingress-discovery template.**
+  (`securityHeaders` **done**: `IngressHostTemplate.SecurityHeaders` is
+  validated with `validateSecurityHeaders`, threaded through `derive` in both
+  `internal/k8s/discovery.go` and `internal/docker/discovery.go`, carried
+  forward by all four app.js template literals, and covered by the
+  `TestDerivedHostInherits...` pair. `trustedProxies` is still open because it
+  is a three-state nullable field: templating it needs a decision on what
+  "unset in the template" means for a derived host.) A per-host `securityHeaders` or `trustedProxies`
   override on a discovery-managed host is rebuilt away
   (with a git commit) on every reconcile, exactly the gap
   `stripResponseHeaders` closed by gaining an `IngressHostTemplate` field. The
@@ -551,10 +559,12 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   an operator has to curl for "when was this feed last fetched, and is it still
   being refreshed?". The access-list editor now shows a per-source sync status
   panel and a manual reconcile button.
-- [ ] **No Prometheus metric for the fetcher.** DNS sync and Ingress discovery
-  both register one (`metrics.RegisterDNSSync` / `RegisterIngressDiscovery`);
-  a `refused`/`lastSuccess` gauge here would let the staleness alert live
-  alongside them instead of in a scripted status poll.
+- [x] **No Prometheus metric for the fetcher.** Shipped as
+  `metrics.RegisterAccessListSync`: `gpm_access_list_sync_enabled`,
+  `_last_run_timestamp_seconds`, `_last_success_timestamp_seconds`, `_sources`
+  and `_refused_sources`, so the staleness alert
+  (`gpm_access_list_sync_refused_sources > 0`) lives beside the DNS-sync and
+  Ingress-discovery ones instead of in a scripted status poll.
 - [x] **A refused fetch waits out the full interval before retrying.** Fixed: the
   attempt is now recorded only on SUCCESS, so a refused fetch is retried on the
   next poll tick (`pollInterval`, default 15m) instead of after the source's own
@@ -583,8 +593,9 @@ See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts, backup/
 restore, rate limiting, access-log viewer, custom timeouts, load balancing, all
 shipped), P2 (proxy protocol, IPv6, GeoIP geoblocking, mTLS client certs phases
 1-3 with issuance, multi-ACME EAB, gzip compression, custom error pages, cosign
-image signing, and the WAF/CrowdSec `bouncer` hook are all shipped; HTTP/3 and
-hardened-TLS-as-a-fleet-switch are not started), P3 (local-admin passkeys + TOTP
+image signing, the WAF/CrowdSec `bouncer` hook and the fleet-wide TLS floor
+`settings.tls.minVersion` are all shipped; HTTP/3 is held pending a stdlib
+server), P3 (local-admin passkeys + TOTP
 for IdP-less deployments), and the "Not planned at this time" list (Brotli/zstd,
 OCSP, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM, MPTCP, Anubis).
 
@@ -648,24 +659,24 @@ OCSP, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM, MPTCP, Anubis
 Identified by the 2026-09-02 pre-public review (purpose-fit, docs-onboarding,
 UX/IA, release-hygiene passes).
 
-- [ ] **Help-hint registry coverage backfill.** Several icon-only controls and
-  unexplained fields have no inline help (bulk actions, HSTS sub-fields, the
-  certificate editor's Account email/Directory URL/Key type, External base URL,
-  the admin-authentication switches). Recommended shape: a single
-  `field-path -> {short, more}` hint registry driving a `?` popover per field,
-  plus a docs-link tier and a small jargon glossary, see the UX/IA review,
-  section 5.3, for the four-tier design. UI-owned; write a spec to
-  `ui-specs/` when picked up.
+- [x] **Help-hint registry coverage backfill.** Shipped: the
+  `field-path -> {text, bullets, doc}` registry is `internal/ui/hints/hints.json`,
+  driving a `?` popover per control, and `internal/ui/hints_test.go` enforces it
+  structurally: every rendered `data-hint` resolves to an entry, every entry is
+  reachable and points at a real docs anchor, and `TestHintCoverage` fails on any
+  form control with neither a hint nor a documented exemption (currently 0
+  uncovered).
 - [x] **Docker label auto-discovery.** Shipped: `internal/docker` reads a
   read-only Docker socket and derives proxy hosts from `gpm.rake.pro/*`
   container labels, the same name-only profile contract as Kubernetes
   Ingress discovery (`internal/model/dockerdisc.go`,
   `settings.dockerDiscovery`).
-- [ ] **Tunnel integration (CGNAT bypass).** No `cloudflared` or Tailscale
-  (`tsnet`) recipe exists; gpm structurally requires inbound `:80`/`:443`
-  today. A documented `cloudflared` sidecar recipe, and/or a `tsnet` listener
-  as a second bind alongside the normal one, would serve the growing
-  no-port-forward cohort without adding a required dependency.
+- [ ] **Native tunnel listener (CGNAT bypass).** The recipe half is **done**:
+  `docs/how-to/tunnels.md` documents the `cloudflared` sidecar, Tailscale and
+  WireGuard/VPS-relay patterns end to end, with the client-IP and PROXY-protocol
+  caveats each one carries. Still open: a `tsnet` listener as a second bind
+  alongside the normal one, so gpm needs no inbound port at all rather than
+  putting a third-party relay in front of it.
 - [x] **TOTP for the local admin.** Shipped: `GPM_LOCAL_ADMIN_TOTP_SECRET`
   (RFC 6238, stdlib-only) turns local login into password + 6-digit code, with
   `gpm totp-secret` for enrolment. Still open below it: WebAuthn, and more than

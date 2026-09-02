@@ -1857,6 +1857,15 @@ components:
             Applied verbatim to every derived host (see ProxyHost's own field of
             the same name). Validated by the same rules; without it a hand-set
             list on a managed host is reverted on the next reconcile.
+        securityHeaders:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/SecurityHeaderValue'
+          description: >-
+            Applied verbatim to every derived host (see ProxyHost's own field of
+            the same name), merging over settings.securityHeaders per key on that
+            host. Validated by the same rules; without it a hand-set override on
+            a managed host is reverted on the next reconcile.
         defaultDNS:
           $ref: '#/components/schemas/DNSSyncPolicy'
         allowedDomainSuffixes:
@@ -1931,6 +1940,20 @@ components:
           - rules-only
       description: Disabled (default) is inert. Discovers annotated Kubernetes Ingress objects into managed
         proxy hosts.
+    TLSFleetSettings:
+      type: object
+      properties:
+        minVersion:
+          type: string
+          description: >-
+            Fleet-wide minimum TLS version for every HTTPS and stream-terminate
+            listener: 1.2 (default, and what an empty value means) or 1.3. A
+            ProxyHost's own tls.minTLSVersion overrides it in either direction,
+            so a legacy host can stay on 1.2 under a 1.3 fleet floor.
+          enum:
+          - ''
+          - '1.2'
+          - '1.3'
     Settings:
       type: object
       properties:
@@ -1944,6 +1967,8 @@ components:
           description: Canonical public URL of the admin panel. Must be absolute.
         adminAuth:
           $ref: '#/components/schemas/AdminAuthSettings'
+        tls:
+          $ref: '#/components/schemas/TLSFleetSettings'
         webhooks:
           type: array
           items:
