@@ -273,6 +273,39 @@ func (m *Metrics) RegisterIngressDiscovery(fn func() IngressStatus) {
 		func() []Sample { return []Sample{{Value: int64(fn().Managed)}} })
 }
 
+// AccessListSyncStatus is the access-list source fetcher's observable state.
+// Refused is the number to alert on: those sources are still serving their
+// PREVIOUSLY fetched set, so a stale feed denies or admits by yesterday's data
+// with nothing else in the exposition to give it away.
+type AccessListSyncStatus struct {
+	Enabled     bool
+	LastRun     time.Time
+	LastSuccess time.Time
+	Sources     int
+	Refused     int
+}
+
+// RegisterAccessListSync exports the access-list source fetcher's run timestamps
+// and refusal count, so a staleness alert lives beside the DNS-sync and Ingress
+// ones instead of in a scripted poll of the status endpoint.
+func (m *Metrics) RegisterAccessListSync(fn func() AccessListSyncStatus) {
+	m.Registry.GaugeFunc(Namespace+"access_list_sync_enabled",
+		"1 when access-list source fetching is turned on in settings.", nil,
+		func() []Sample { return []Sample{{Value: boolGauge(fn().Enabled)}} })
+	m.Registry.GaugeFunc(Namespace+"access_list_sync_last_run_timestamp_seconds",
+		"Unix timestamp of the last access-list source reconcile, successful or not (0 = never run).", nil,
+		func() []Sample { return []Sample{{Value: unix(fn().LastRun)}} })
+	m.Registry.GaugeFunc(Namespace+"access_list_sync_last_success_timestamp_seconds",
+		"Unix timestamp of the last access-list source reconcile that completed cleanly (0 = never).", nil,
+		func() []Sample { return []Sample{{Value: unix(fn().LastSuccess)}} })
+	m.Registry.GaugeFunc(Namespace+"access_list_sync_sources",
+		"Access-list sources declared by the current config.", nil,
+		func() []Sample { return []Sample{{Value: int64(fn().Sources)}} })
+	m.Registry.GaugeFunc(Namespace+"access_list_sync_refused_sources",
+		"Sources whose most recent fetch was refused; each still serves its previously fetched set.", nil,
+		func() []Sample { return []Sample{{Value: int64(fn().Refused)}} })
+}
+
 // RegisterHA exports this instance's static HA role as a 1/0 gauge per role, so
 // a two-node pair with two leaders (or none) is a query rather than a log hunt.
 func (m *Metrics) RegisterHA(role string) {

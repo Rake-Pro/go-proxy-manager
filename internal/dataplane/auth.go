@@ -26,6 +26,12 @@ import (
 //     set, no identity provider involved, with the same AllowFrom exemption
 //     (see basicAuthGate). This replaces the deprecated AccessList.basicAuth.
 //
+// Every terminal 401/403 a gate writes calls countDenial with a per-mode reason
+// ("auth-forward", "auth-client-cert", "auth-request", "auth-oidc",
+// "auth-basic"), so a host behind SSO or mTLS shows its refusals in /metrics
+// beside the access-list, guard, bouncer and rate-limit tiers. A redirect into
+// a sign-in flow is not a denial and is not counted.
+//
 // domains are the gated host's configured domains; the OIDC gate validates the
 // request Host against them before caching a per-Host relying-party client.
 //
@@ -98,11 +104,13 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 			// The strip stays AHEAD of the refusal: rendering an error page must
 			// not change what this request carries onward.
 			fa.Strip(r)
+			countDenial(r, "auth-forward")
 			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
 			return
 		}
 		role := auth.MapRole(id.Groups, rm)
 		if !roleAllowed(role, required) {
+			countDenial(r, "auth-forward")
 			refuse(w, http.StatusForbidden, ep, host, "forbidden")
 			return
 		}
@@ -141,6 +149,7 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			}
 		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+			countDenial(r, "auth-client-cert")
 			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
 			return
 		}
@@ -154,6 +163,7 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			role, ok = roles[subj.CommonName]
 		}
 		if !ok || !roleAllowed(auth.Role(role), required) {
+			countDenial(r, "auth-client-cert")
 			refuse(w, http.StatusForbidden, ep, host, "forbidden")
 			return
 		}

@@ -10,13 +10,13 @@ manual TLS.
 
 - A running gpm instance with LAN/console access to the admin listener for
   the bootstrap step below.
-- A DNS name for the admin UI (e.g. `gpm.example.com`) pointed at gpm's data
-  plane, and a way to issue a certificate for it (see
+- A DNS name for the admin UI (e.g. `gpm.example.com`) pointed at gpm's proxy
+  listeners, and a way to issue a certificate for it (see
   [Automatic certificates](../getting-started/first-host-with-https.md)).
 - The LAN/VPN CIDR ranges that should be allowed to reach the admin panel.
 
 > **Set `settings.trustedProxies` before you proxy the admin panel.** It must
-> list the address the admin listener sees for gpm's own data plane, for a
+> list the address the admin listener sees for gpm's own proxy listeners, for a
 > loopback bind, `127.0.0.1/32` and/or `::1/128`. Without it every admin login
 > attempt is attributed to that one address, and the login lockout, the TOTP
 > throttle and the pending-login cap all become a single global bucket: one
@@ -39,8 +39,8 @@ manual TLS.
 
 1. **Bind the admin listener to loopback.** The default `GPM_ADMIN_ADDR`
    (`:8081`) is reachable on every interface, not just loopback, see
-   [IPv6](../getting-started/install-docker.md#ipv6) for the same bare-`:port` behaviour on the data
-   plane. Set it explicitly so the only path in is through the proxy host
+   [IPv6](../getting-started/install-docker.md#ipv6) for the same bare-`:port` behaviour on the proxy
+   listeners. Set it explicitly so the only path in is through the proxy host
    built below (or a shell on the same host/container):
 
    ```
@@ -174,4 +174,4 @@ manual TLS.
 | Login redirects back to the login page in a loop | `externalBaseURL` mismatch (step 5) | Set `externalBaseURL` to exactly the scheme + host in the browser's address bar |
 | `403` on every request | Client IP not covered by the access list (step 4) | Check `defaultAction` and the CIDRs; if a proxy sits ahead of gpm for this host, check whether `X-Forwarded-For` is trusted (see the note at the end of step 4) |
 | Login "does nothing" over `http://127.0.0.1:8081` after step 5 | `externalBaseURL` is `https://`, so `auto` issues a `Secure` cookie the plain-HTTP browser drops | Reach the panel over `https://gpm.example.com`, or set `GPM_COOKIE_SECURE=0` for that break-glass session only |
-| One bad password locks out every admin | `settings.trustedProxies` does not include the data-plane source address, so all attempts share one lockout bucket | Add that address (`127.0.0.1/32`, `::1/128` for a loopback bind) to `settings.trustedProxies` |
+| One bad password locks out every admin | `settings.trustedProxies` does not include the proxy listener's source address, so all attempts share one lockout bucket | Add that address (`127.0.0.1/32`, `::1/128` for a loopback bind) to `settings.trustedProxies` |

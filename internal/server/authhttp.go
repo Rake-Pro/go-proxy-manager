@@ -317,7 +317,7 @@ func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, errMsg
 }
 
 // clientIPKey is the throttle key for a login attempt: the client IP derived
-// exactly the way the data plane derives it, from settings.trustedProxies (see
+// exactly the way the proxy listeners derive it, from settings.trustedProxies (see
 // internal/clientip). RemoteAddr alone is wrong for the supported deployment in
 // which the admin listener is bound to loopback and fronted by a gpm proxy host
 // - every attempt then arrives from one address, so the login lockout, the TOTP

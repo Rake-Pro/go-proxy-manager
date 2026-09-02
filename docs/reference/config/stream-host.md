@@ -1,6 +1,6 @@
 # StreamHost
 
-Raw TCP/UDP forwarding. The data plane opens a listener per `listenPort` (TCP, UDP,
+Raw TCP/UDP forwarding. gpm opens a proxy listener per `listenPort` (TCP, UDP,
 or both) and forwards to the backend; listeners are reconciled on every reload
 (ports added/removed, backend swapped, with no listener restart for unchanged
 ports). UDP uses per-client sessions with an idle timeout.
@@ -12,7 +12,7 @@ backend is dialled.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="stream-host-listen-port"></span>  `listenPort` | int | yes | 1-65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port: a bind failure is logged and that one port is skipped, never fatal. |
+| <span id="stream-host-listen-port"></span>  `listenPort` | int | yes | 1-65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the proxy listener ports 80/443 or the admin port: a bind failure is logged and that one port is skipped, never fatal. |
 | <span id="stream-host-protocol"></span>  `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
 | <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme: a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | <span id="stream-host-tls"></span>  `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
@@ -89,8 +89,10 @@ terminate it.
 - **`terminate`** completes the handshake at gpm with `certificateRef` from the
   normal certificate store (custom or ACME-issued) and forwards **plaintext** to
   the backend. The floor is TLS 1.2 with the same AEAD cipher suites the HTTPS
-  listener uses. No ALPN is offered: what rides inside a stream is an arbitrary
-  TCP protocol.
+  listener uses, or TLS 1.3 when
+  [`settings.tls.minVersion`](settings/tls.md#settings-tls-min-version) raises it
+  (a stream host has no per-host floor of its own). No ALPN is offered: what
+  rides inside a stream is an arbitrary TCP protocol.
 
 **Port sharing.** Two or more enabled stream hosts may share a TCP `listenPort`
 **only if every one of them sets `sniMatch`**: that is the only thing that tells

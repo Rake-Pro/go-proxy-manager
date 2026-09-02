@@ -74,15 +74,36 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 		// strips the template's list on every unrelated save and the next
 		// reconcile pushes that onto every derived host.
 		"stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,",
+		"securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,",
 		// each named profile row
 		"switchHtml('pf-robots-' + i",
 		"robotsNoIndex: isOn('pf-robots-' + uid)",
 		"div.querySelector('.pf-tags')",
 		"tags: row._tags.get()",
 		"stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,",
+		"securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js no longer round-trips a discovery template field (%q not found); a settings save now clears it", want)
+		}
+	}
+}
+
+// The fleet TLS floor is a select on the General tab whose value has to reach
+// the PUT body: without the send it renders as a control that silently does
+// nothing, and "1.2" must stay absent so an untouched settings.yaml does not
+// gain a `tls:` block on every save.
+func TestFleetTLSFloorEditorWiring(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		`<select class="field mono" id="set-mintls" data-hint="settings.tls.minVersion" data-path="tls.minVersion">`,
+		"const stls = s.tls || {};",
+		"const fleetMinTLS = $('#set-mintls').value;",
+		"if (fleetMinTLS === '1.3') body.tls = { minVersion: '1.3' };",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the fleet TLS floor control is not wired: missing %q", want)
 		}
 	}
 }
@@ -678,6 +699,7 @@ func TestIntegrationsSaveMergesDockerTemplate(t *testing.T) {
 		"$('#set-dkr-tags')",
 		"tags: dkrTagCtl.get()",
 		"stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,",
+		"securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,",
 		// each named docker profile row
 		"switchHtml('dpf-robots-' + i",
 		"robotsNoIndex: isOn('dpf-robots-' + uid)",

@@ -24,13 +24,14 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-allowed-domain-suffixes"></span> `allowedDomainSuffixes` | []string | **Required when enabled.** A discovered hostname must equal one of these or end in `.` + one of them. |
 | <span id="settings-ingress-discovery-template-upstream"></span> `template.upstream` | Upstream | Where every derived host forwards: the **cluster ingress controller's** address. Mutually exclusive with `template.upstreamGroupRef`. |
 | <span id="settings-ingress-discovery-template-upstream-group-ref"></span> `template.upstreamGroupRef` | string | Names an `upstream-groups` entry instead of a single address. **Prefer this when the ingress controller runs on more than one node**: otherwise every derived host is pinned to one node while hand-written hosts fail over. |
-| <span id="settings-ingress-discovery-template-tls"></span> `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**: discovery never issues a certificate, so one operator-maintained (typically wildcard) certificate must already cover the discovered names. It does not *select* the certificate: derived hosts are L7, and the data plane matches by SNI. See [Which certificate a host serves](../certificate.md#which-certificate-a-host-serves). |
+| <span id="settings-ingress-discovery-template-tls"></span> `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**: discovery never issues a certificate, so one operator-maintained (typically wildcard) certificate must already cover the discovered names. It does not *select* the certificate: derived hosts are L7, and the proxy listeners match by SNI. See [Which certificate a host serves](../certificate.md#which-certificate-a-host-serves). |
 | <span id="settings-ingress-discovery-template-robots-no-index"></span> `template.robotsNoIndex` | bool | Applied to every derived host: sends `X-Robots-Tag: noindex, nofollow`, exactly as on a hand-written host. Omit it and derived hosts carry no such header; do **not** reach for a `headers` middleware instead. |
 | <span id="settings-ingress-discovery-template-timeouts"></span> `template.timeouts` | HostTimeouts | Upstream `connectSeconds`/`readSeconds` override, applied to every derived host and validated by the **same rules as a proxy host's** (0-3600). Unset means the shared pooled transport. |
 | <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host, in order. |
 | <span id="settings-ingress-discovery-template-access-lists"></span> `template.accessLists` | []string | Applied to every derived host. |
-| <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No data-plane effect. |
+| <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. |
 | <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
+| <span id="settings-ingress-discovery-template-security-headers"></span> `template.securityHeaders` | map | Applied to every derived host: that host's `securityHeaders` override (name -> value/scope), merged over `settings.securityHeaders` per key at request time. Validated by the same rules as a hand-written host. Without it a hand-set override on a managed host is reverted on the next reconcile. See [Security headers](security-headers.md#settings-security-headers). |
 | <span id="settings-ingress-discovery-template-default-dns"></span> `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
 | <span id="settings-ingress-discovery-template-allowed-domain-suffixes"></span> `template.allowedDomainSuffixes` | []string | Optional. **Narrows** the top-level `allowedDomainSuffixes` for hosts derived from the template. Must be a **subset** of the global list (checked at settings-write time); empty means no narrowing. |
 | <span id="settings-ingress-discovery-profiles"></span> `profiles` | map[string]-> same shape as `template` (including its own `allowedDomainSuffixes`) | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
@@ -107,7 +108,7 @@ host keeps serving, with a chain nobody chose.
 shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
 required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
 `robotsNoIndex`, range-checked `timeouts`, `tags`,
-validated `stripResponseHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
+validated `stripResponseHeaders`, `securityHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
 
 **The annotation carries a name and nothing else: that is the security model.**
 An Ingress author is untrusted: in a shared cluster a tenant may be able to
@@ -308,7 +309,7 @@ runs *outside* the cluster (on the edge host), so
 `<svc>.<ns>.svc.cluster.local` is neither resolvable nor routable from it. gpm
 therefore ignores `spec.rules[].http.paths[].backend` entirely and forwards every
 derived host to `template.upstream`; the controller then routes to the right
-workload **by vhost**, using the `Host` header the data plane preserves on the way
+workload **by vhost**, using the `Host` header the proxy listeners preserve on the way
 through. Prefer `scheme: http` to the controller's plain port (TLS is terminated
 once, at the edge, and the edge->LB hop is a trusted LAN path). With
 `scheme: https` the Go transport derives SNI and certificate verification from the

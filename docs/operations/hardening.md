@@ -19,12 +19,17 @@ The settings to check before an instance faces the internet.
   so it is crossing untrusted networks in the clear; the SPA shows a banner and
   gpm logs a rate-limited warning. `insecure-private` (loopback or RFC 1918 /
   ULA) is the ordinary first-run and LAN case.
-- If a data-plane SSO session may have been exposed (device theft, cookie
+- If a per-host SSO session may have been exposed (device theft, cookie
   leak), `POST /api/sso/revoke` (or the button under Settings) invalidates
   every outstanding SSO session at once; users re-authenticate at the IdP.
+- Raise the TLS floor once every client can do 1.3:
+  [`settings.tls.minVersion: "1.3"`](../reference/config/settings/tls.md#settings-tls-min-version)
+  covers every host, every stream-terminate listener and an unknown SNI in one
+  place, and any host still serving older clients can pin `tls.minTLSVersion:
+  "1.2"` for itself.
 - Run with `cap_drop: ALL` and `no-new-privileges`, as in the
   [Compose file](../getting-started/install-docker.md#compose-file).
-- Put the admin plane behind your ingress / a tunnel, not on the public internet.
+- Put the admin panel behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't
   show up in the process environment.
 

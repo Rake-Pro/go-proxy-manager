@@ -103,4 +103,4 @@ metrics and error pages are identical. See
 | Auth middleware `mode: oidc` / `forward-auth` / `auth-request` | Request | Browser SSO, trusted identity headers, or an outpost subrequest |
 | Auth middleware `mode: basic` | Request | Local username/bcrypt pairs |
 | `AccessList.basicAuth` | Access-list tier | Deprecated. [Migrate it](../how-to/migrate-basic-auth.md) |
-| `settings.adminAuth` | Admin panel | Who signs in to gpm itself, not the data plane |
+| `settings.adminAuth` | Admin panel | Who signs in to gpm itself, not the proxy listeners |
