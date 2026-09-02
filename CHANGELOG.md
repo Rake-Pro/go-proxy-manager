@@ -9,10 +9,6 @@ Nothing yet.
 
 ## [1.2.0] - 2026-09-02
 
-> Release type: **minor** (feature removal). Label the promotion PR
-> `release:minor` so `.github/workflows/release.yml` mints `1.2.0` rather than a
-> patch.
-
 ### Changed
 
 - **Status and expiry chips are quieter.** Healthy/neutral states (valid
