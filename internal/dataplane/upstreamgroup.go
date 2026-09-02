@@ -461,7 +461,7 @@ func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// same rise counter as the active probe. The request stays counted
 			// against the upstream until its response body is closed.
 			u.reportSuccess()
-			resp.Body = &countedBody{ReadCloser: resp.Body, u: u}
+			resp.Body = countBody(resp.Body, u)
 			// (Re)issue the affinity cookie only when the assignment is new or
 			// moved (failover / expiry / first visit) - a still-valid pin that
 			// was honored needs no Set-Cookie noise. Fixed window, not sliding:
@@ -568,6 +568,28 @@ type countedBody struct {
 func (b *countedBody) Close() error {
 	b.once.Do(func() { b.u.active.Add(-1) })
 	return b.ReadCloser.Close()
+}
+
+// countedRWBody is countedBody for a bidirectional body: the 101 Switching
+// Protocols body is the upstream connection itself, and httputil.ReverseProxy
+// type-asserts it to io.ReadWriteCloser before copying both directions.
+// Wrapping it as a plain ReadCloser makes every WebSocket handshake through a
+// group fail with "101 switching protocols response with non-writable body"
+// (a 502 to the client) and leaks the upstream connection.
+type countedRWBody struct {
+	*countedBody
+	io.Writer
+}
+
+// countBody wraps an upstream response body so the request stays counted
+// against u until the body is closed, preserving the Writer side when the
+// body has one (protocol switches).
+func countBody(body io.ReadCloser, u *upstreamHealth) io.ReadCloser {
+	cb := &countedBody{ReadCloser: body, u: u}
+	if w, ok := body.(io.Writer); ok {
+		return &countedRWBody{countedBody: cb, Writer: w}
+	}
+	return cb
 }
 
 // bodySource hands out a fresh request Body per failover attempt (the transport

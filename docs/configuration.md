@@ -10,6 +10,7 @@ API, or write the files directly and let the daemon load them on start/reload.
 config/
   settings.yaml            # singleton app settings
   dns-ledger.yaml          # singleton DNS record-ownership ledger (reconciler-written)
+  access-list-sources.yaml # singleton fetched access-list source sets (fetcher-written)
   proxy-hosts/<name>.yaml
   redirect-hosts/<name>.yaml
   stream-hosts/<name>.yaml
@@ -154,6 +155,7 @@ Singleton application configuration.
 | `dnsSync` | DNSSyncSettings | Optional DNS record reconcilers (below). |
 | `proxyProtocol` | ProxyProtocolSettings | Optional inbound PROXY protocol (below). |
 | `ingressDiscovery` | IngressDiscoverySettings | Optional Kubernetes Ingress discovery (below). |
+| `accessListSync` | AccessListSyncSettings | Remote [AccessList source](#accesslist-configaccess-lists) fetching (below). Enabled by default. |
 | `maintenance` | MaintenanceSettings | Fleet-wide downtime switch and the `Retry-After` every maintenance response carries (below). Zero value is off: each proxy host is governed by its own `maintenance` flag alone. |
 | `errorPages` | ErrorPagesConfig | Default custom error pages for every host (below). A [ProxyHost](#proxyhost-configproxy-hosts)'s own `errorPages` overrides this. Zero value keeps gpm's built-in plain-text error output. |
 | `securityHeaders` | map[string]string \| map[string]{value,scope} | Fleet-default response headers, each with a per-header `scope` (`all` default / `generated-only` / `proxied-only`) selecting whether it lands on gpm-generated responses, proxied upstream responses, or both. Value is a bare string (scope `all`) or a `{value, scope}` object. A [ProxyHost](#proxyhost-configproxy-hosts)'s own `securityHeaders` merges over this per key. Empty (default) ships nothing. See [SecurityHeaders](#securityheaders-settingssecurityheaders--proxyhostsecurityheaders). |
@@ -198,6 +200,9 @@ dnsSync:
     zoneName: example.com
     apexTarget: edge.example.com
     proxied: false
+accessListSync:
+  enabled: true
+  pollInterval: 15m
 ingressDiscovery:
   enabled: true
   apiURL: https://k8s.example.lan:6443
@@ -406,6 +411,35 @@ run without touching anything (`409` while a reconcile is in flight, for the sam
 reason). Both take `dns-sync:read`. A Pi-hole `403` is
 surfaced as a distinct error — it means the session is read-only or the instance
 was built without `webserver.api.app_sudo`, which retrying will not fix.
+
+### Access-list source sync (`settings.accessListSync`)
+
+Keeps the remote IP feeds an [AccessList](#accesslist-configaccess-lists)
+declares in `sources` fetched into the committed ledger
+`config/access-list-sources.yaml`.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `enabled` | bool | Turn the fetcher off. **Absent means enabled** - a deployment that declares a source wants it fetched. |
+| `pollInterval` | string | Go duration; how often the loop asks whether any source is *due*. Empty = `15m`; below `1m` is refused. |
+
+```yaml
+accessListSync:
+  enabled: true
+  pollInterval: 15m
+```
+
+`pollInterval` is not how often a feed is downloaded - each source's own
+`interval` (default `24h`) decides that, so polling often is cheap. A fetch is
+**refused whole**, keeping the previously fetched set, when the source answers
+anything but `200`, returns no valid entries, returns more than `maxEntries`, or
+contains a single line that is neither a comment nor a valid IP/CIDR. Refusals
+are counted and named in `GET /api/access-list-sources/status`.
+
+Only the **leader** fetches (the ledger is a config-repo commit); a follower
+still serves the sets, since it replicates the ledger with the rest of the
+config. See [docs/deployment.md](deployment.md) for the endpoints, the SSRF
+guard, and the no-op/commit-churn behaviour.
 
 ### IngressDiscoverySettings (`settings.ingressDiscovery`)
 
@@ -2019,14 +2053,71 @@ roleMapping:
 |-------|------|-------|
 | `satisfyAny` | bool | false = require both auth AND IP; true = either suffices. |
 | `basicAuth` | []BasicAuthUser | `username` + `passwordHash` (bcrypt). |
-| `rules` | []IPRule | Ordered `action` (`allow`/`deny`) + `cidr` (CIDR or bare IP). |
+| `rules` | []IPRule | Ordered allow/deny rules (below). |
+| `sources` | []AccessListSource | Remote IP feeds a rule may reference by name (below). |
 | `defaultAction` | string | `allow` \| `deny` (default `deny`). |
 | `geo` | AccessListGeo | Country allow/deny over the same resolved client IP (requires `GPM_GEOIP_DB`). |
 
+**IPRule**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `action` | string | `allow` \| `deny`. |
+| `cidr` | string | CIDR or bare IP. Exactly one of `cidr` or `source` must be set. |
+| `source` | string | Names an entry in this list's `sources`; the rule covers every network in that source's last fetched set. |
+| `paths` | []string | Exact request paths the rule is limited to. Empty = every request (the historical behaviour). |
+| `methods` | []string | Upper-case HTTP methods a path-scoped rule covers. Only valid with `paths`; empty means `GET` and `HEAD`. |
+
+Rules are evaluated **top-down, first match wins**, then `geo`, then
+`defaultAction`. A rule with `paths` matches only when the request's already-
+normalised path is exactly one of them *and* the method is in the effective
+method set - so `paths` narrows a rule, it never widens one. Paths must be
+absolute, clean (no `.`/`..` segments, no trailing slash, no query string) and
+unique within the rule; anything else is refused at write time, because it could
+never match the cleaned path the router compares against.
+
+> **`paths` are allow-only.** `action: deny` together with `paths` is refused at
+> validation. The match is **exact, case-sensitive, and does no trailing-slash
+> folding**: `/admin` covers neither `/admin/` nor `/ADMIN`. That is fine for an
+> allow rule - a spelling it misses falls through to `defaultAction`, so it fails
+> closed - and unsafe for a deny, which would fail *open* on exactly those
+> spellings. Use a [guard middleware](#middleware-configmiddlewares) for
+> deny-by-path.
+
+**AccessListSource**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `name` | string | Referenced by a rule's `source`. Unique within the list. |
+| `url` | string | Absolute **https** URL of a plain-text feed. `http` is refused. |
+| `interval` | string | Go duration between re-fetches. Empty = `24h`; below `1h` is refused. |
+| `maxEntries` | int | Cap on the feed's size. `0` = `10000`. |
+
+The feed format is fixed: one IP or CIDR per line, `#` comment lines and blank
+lines ignored, a bare IP read as a `/32` or `/128`. Fetching is handled by the
+[access-list source sync](#access-list-source-sync-settingsaccesslistsync)
+subsystem; the fetched sets live in `config/access-list-sources.yaml`, never
+inline here, so a routine re-fetch never rewrites a file you own.
+
+A source that has **never been fetched** resolves to the empty set, so rules
+referencing it match nothing and the list falls through to `defaultAction`. An
+unfetched or refused feed can never widen access. Entries are bounded too: a
+default route (`0.0.0.0/0`, `::/0`), a prefix broader than `/8` (IPv4) or `/32`
+(IPv6), or any address in a non-public range (loopback, link-local, RFC1918,
+ULA, CGNAT `100.64.0.0/10`, multicast, `192.0.0.0/24`, `198.18.0.0/15`,
+`64:ff9b::/96`) refuses the whole fetch.
+
+> **Pair every `source` rule with `paths`.** A source rule *without* `paths` is
+> an ordinary allow rule: it grants every address in the feed full access to the
+> host, on every path and method. The path scoping is what bounds a third party's
+> published list to the endpoints you chose to expose.
+
 A list can also be attached to a **StreamHost**, where only the `rules` and `geo`
 dimensions are evaluated (there is no request to carry basic auth). A list with
-`basicAuth` users is rejected for a stream host at validation — see
-[StreamHost](#streamhost-configstream-hosts).
+`basicAuth` users is rejected for a stream host at validation, and so is one with
+any `sources` or any rule carrying `paths` or `source` - a raw stream has no
+request path and resolves no ledger, so evaluating half the gate would be worse
+than refusing it. See [StreamHost](#streamhost-configstream-hosts).
 
 ```yaml
 name: internal-only
@@ -2035,6 +2126,35 @@ rules:
   - {action: allow, cidr: 192.168.0.0/16}
 defaultAction: deny
 ```
+
+### Letting a monitoring provider reach only the health endpoints
+
+The case this exists for: a host is LAN/VPN-only, but an external uptime monitor
+has to be able to probe it. Grant the provider's published prober addresses the
+health paths, and nothing else:
+
+```yaml
+name: home-vpn
+defaultAction: deny
+rules:
+  # Unchanged LAN/VPN rules: every path, every method.
+  - {action: allow, cidr: 10.0.0.0/8}
+  - {action: allow, cidr: 192.168.0.0/16}
+  # The monitor: health endpoints only, read-only methods only.
+  - action: allow
+    source: uptimerobot
+    paths: [/api/health, /v1/health, /-/healthy, /status.php]
+    methods: [GET, HEAD]
+sources:
+  - name: uptimerobot
+    url: https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt
+    interval: 24h
+```
+
+A prober hitting `/api/health` gets through; the same prober hitting `/` or
+`POST`ing to `/api/health` gets a `403`, and so does anyone else off-LAN. The
+~200 IPv4/IPv6 entries are fetched and kept current automatically - you never
+paste them into this file.
 
 ---
 
