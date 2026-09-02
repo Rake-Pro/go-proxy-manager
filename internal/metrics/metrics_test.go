@@ -192,6 +192,9 @@ func TestSubsystemCollectorsSkipUnsetTimestamps(t *testing.T) {
 		}}
 	})
 	m.RegisterIngressDiscovery(func() IngressStatus { return IngressStatus{} })
+	m.RegisterAccessListSync(func() AccessListSyncStatus {
+		return AccessListSyncStatus{Enabled: true, Sources: 3, Refused: 1}
+	})
 	m.RegisterACME(func() []CertStatus {
 		return []CertStatus{
 			{Name: "wildcard", NotAfter: time.Unix(1893456000, 0), RenewFailures: 2},
@@ -211,6 +214,10 @@ func TestSubsystemCollectorsSkipUnsetTimestamps(t *testing.T) {
 		`gpm_dns_sync_records_managed{backend="pihole"} 3`,
 		`gpm_dns_sync_backend_up{backend="pihole"} 1`,
 		"gpm_ingress_discovery_last_success_timestamp_seconds 0",
+		"gpm_access_list_sync_enabled 1",
+		"gpm_access_list_sync_last_success_timestamp_seconds 0",
+		"gpm_access_list_sync_sources 3",
+		"gpm_access_list_sync_refused_sources 1",
 		`gpm_acme_certificate_expiry_timestamp_seconds{certificate="wildcard"} 1893456000`,
 		`gpm_acme_renew_failures_total{certificate="never-issued"} 0`,
 		`gpm_acme_renew_failures_total{certificate="wildcard"} 2`,

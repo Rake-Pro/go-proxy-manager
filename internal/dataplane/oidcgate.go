@@ -547,6 +547,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		if readSignedCookie(r, oidcSessionCookie, macLabelSSOSession, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
 			sess.Iat >= ssoRevokedAt() {
 			if !d.authorized(sess.Groups) {
+				countDenial(r, "auth-oidc")
 				refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
 				return
 			}
@@ -612,10 +613,12 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	claims, err := client.Exchange(r.Context(), code, st.Verifier, st.Nonce)
 	if err != nil {
 		log.Warn().Str("host", d.hostName).Err(err).Msg("oidc exchange failed")
+		countDenial(r, "auth-oidc")
 		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "authentication failed")
 		return
 	}
 	if !d.authorized(claims.Groups) {
+		countDenial(r, "auth-oidc")
 		refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
 		return
 	}

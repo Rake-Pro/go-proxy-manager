@@ -12,7 +12,7 @@ import (
 // attempt from one source address, so keying on RemoteAddr collapsed the login
 // lockout, the TOTP throttle and the pending-login cap into a single global
 // bucket - one attacker could lock out every administrator. The key now derives
-// the client exactly the way the data plane does, from settings.trustedProxies.
+// the client exactly the way the proxy listeners do, from settings.trustedProxies.
 func TestClientIPKeyUsesTrustedProxies(t *testing.T) {
 	tests := []struct {
 		name     string

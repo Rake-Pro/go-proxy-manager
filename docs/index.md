@@ -7,7 +7,7 @@ and renews their certificates, and gates who may reach them.
 go-proxy-manager ships as a single static binary and a multi-arch container
 image (`ghcr.io/rake-pro/go-proxy-manager`, linux/amd64 + arm64). It stores
 everything under one data directory and exposes two HTTP surfaces: the public
-data plane and the admin control plane.
+proxy listeners and the admin panel.
 
 ## What it does
 
@@ -36,12 +36,12 @@ data plane and the admin control plane.
 | Run it in production | [Operations](operations/backup-and-restore.md) |
 | Automate it | [REST API](reference/api.md) |
 
-## Planes and ports
+## Listeners and ports
 
-| Plane | Port | Purpose |
+| Surface | Port | Purpose |
 |---|---|---|
-| Data plane | 80 / 443 | Proxied traffic: SNI TLS, host routing, middleware chain, upstream dial |
-| Control plane | 8081 | REST API and web UI, authenticated by OIDC or local bcrypt |
+| Proxy listeners | 80 / 443 | Proxied traffic: SNI TLS, host routing, middleware chain, upstream dial |
+| Admin panel | 8081 | REST API and web UI, authenticated by OIDC or local bcrypt |
 
-A config change in the store atomically recompiles the data plane's routing
-table and certificate set.
+A config change in the store atomically recompiles the proxy listeners'
+routing table and certificate set.

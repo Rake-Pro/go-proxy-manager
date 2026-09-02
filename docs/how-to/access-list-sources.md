@@ -138,7 +138,7 @@ curl -s -X POST https://<admin>/api/access-list-sources/reconcile -H 'Authorizat
 A reconcile also fires automatically after any access-list write, restore or
 whole-config revert, so a newly added source is fetched without waiting out the
 poll. The manual endpoint does **not** queue: while a run is in flight it answers
-`409 Conflict`. After a successful ledger write the data plane is reloaded, so
+`409 Conflict`. After a successful ledger write the proxy listeners reload, so
 the new set is served on the very next request.
 
 Scopes: `access-lists:read` for status, `access-lists:write` for reconcile.

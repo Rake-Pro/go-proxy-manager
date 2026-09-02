@@ -240,6 +240,31 @@ func TestDerive(t *testing.T) {
 
 // The derived host takes its DNS policy from the profile, with each flag
 // overridable by its own label.
+// The template's securityHeaders and stripResponseHeaders reach every derived
+// host: without that a per-host override on a discovery-managed host is rebuilt
+// away (with a commit) on the next reconcile.
+func TestDeriveInheritsResponseHeaderFields(t *testing.T) {
+	conf := testConf(func(s *model.Settings) {
+		s.DockerDiscovery.Template.StripResponseHeaders = []string{"Server"}
+		s.DockerDiscovery.Template.SecurityHeaders = map[string]model.SecurityHeaderValue{
+			"X-Content-Type-Options": {Value: "nosniff"},
+		}
+	})
+	_, host, _, err := derive(container("grafana", enabled(nil), nil), conf)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if strings.Join(host.StripResponseHeaders, ",") != "Server" {
+		t.Errorf("stripResponseHeaders = %v, want the template's", host.StripResponseHeaders)
+	}
+	if got := host.SecurityHeaders["X-Content-Type-Options"].Value; got != "nosniff" {
+		t.Errorf("securityHeaders X-Content-Type-Options = %q, want the template's", got)
+	}
+	if err := host.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
 func TestDeriveDNSPolicy(t *testing.T) {
 	conf := testConf(func(s *model.Settings) {
 		s.DockerDiscovery.Template.DefaultDNS = &model.DNSSyncPolicy{LanDirect: true}

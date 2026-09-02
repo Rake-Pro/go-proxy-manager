@@ -47,8 +47,8 @@ the supported home for username/password gating; `AccessList.basicAuth` is the
 deprecated form of the same thing and shares the one verifier, so the two cannot
 drift.
 
-A chain step comes from one of two places, and the data plane cannot tell them
-apart: a `Middleware` object the host/location **references**, or an inline
+A chain step comes from one of two places, and the proxy listeners cannot tell
+them apart: a `Middleware` object the host/location **references**, or an inline
 `auth` / `rateLimit` block written **on the host or location itself**. Both
 compile through the same per-kind builder into the same handler at the same
 position, so the gate, its metrics and its error pages are identical; the inline

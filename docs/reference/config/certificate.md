@@ -25,7 +25,7 @@ keys under `<cert-dir>/acme/accounts/`.
 
 Challenge selection:
 
-- **`http-01`**: validated on the data plane's plaintext `:80` listener. The
+- **`http-01`**: validated on gpm's own plaintext `:80` proxy listener. The
   ACME manager parks the in-flight token in memory and the listener answers
   `/.well-known/acme-challenge/<token>` **before** host routing, the force-SSL
   redirect, and any auth, so a certificate can be issued for a host that does not

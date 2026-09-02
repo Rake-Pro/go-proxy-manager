@@ -1,7 +1,7 @@
 # Install with Docker Compose
 
 Run gpm as a container: verify the image, mount one data volume, publish the
-two data-plane ports, and keep the admin plane off the internet.
+two proxy listener ports, and keep the admin panel off the internet.
 
 ## Verifying the image
 

@@ -1,7 +1,7 @@
 # Roadmap
 
-What is planned next, in progress, and deliberately not planned. For full
-detail and history see
+What is planned next and what is deliberately not planned. For full detail and
+history see
 [FEATURES.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/FEATURES.md)
 (the P0-P3 tier roadmap) and
 [BACKLOG.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/BACKLOG.md)
@@ -11,25 +11,19 @@ detail and history see
 
 | Feature | Why it matters | Status |
 |---|---|---|
-| HTTP/3 (QUIC) | Faster, more resilient connections for clients that support it | Not started |
-| Hardened TLS as a fleet-wide switch (TLS 1.3 floor, optional TLS 1.2 off) | A per-host `tls.minTLSVersion` override already ships; a fleet default simplifies hardening every host at once | Not started |
-| Tunnel integration (CGNAT bypass) | A documented `cloudflared` sidecar recipe and/or a `tsnet` listener would serve the growing no-port-forward homelab cohort with no required new dependency | Not started |
+| HTTP/3 (QUIC) | Faster, more resilient connections for clients that support it | Held until the Go standard library ships an HTTP/3 server (golang/go#58547); no third-party QUIC stack is light enough for the dependency budget |
+| Native tunnel listener (`tsnet`) | A second bind alongside the normal listeners would serve the no-port-forward homelab cohort with no inbound port at all. The `cloudflared`, Tailscale and WireGuard/VPS recipes are already documented in [Using gpm behind CGNAT](how-to/tunnels.md); this is the integration those recipes work around | Not started |
 | WebAuthn/passkeys for local admin login | Extends local (IdP-less) login past TOTP for deployments with no OIDC provider | Not started |
-| MFA delegation (trust IdP `acr`/`amr`) | Skips a redundant local prompt when the IdP already enforced MFA; the config field exists but is unread and deprecated | Not started |
+| `trustedProxies` on discovery templates | A per-host client-IP override on a discovery-managed host is rebuilt away on the next reconcile. `securityHeaders` and `stripResponseHeaders` already ship; `trustedProxies` is a three-state nullable field, so templating it needs a decision on what "unset in the template" means | Not started |
+| Inline `auth` / `rateLimit` on discovery templates | A discovery-managed host can only share a gate through `middlewares` / `accessLists` today; the template mirrors proxy-host fields one by one, so this is not a model-only change | Deferred until the template editor is worked on |
+| High availability, phase 2 (lease-file election, shared bare repo, active/active) | Phase 1 (static leader, read-only follower, keepalived VIP) ships; phase 2 removes the manual role assignment | Design sketch only |
 | v2 config consolidations (single backend "slot", fold `ParkedHost` into `ProxyHost`, `certificateRef` authoritative-or-removed, drop deprecated fields) | Batches several breaking cleanups into one major-version migration instead of many small breaks | Not started |
-| Help-hint registry coverage backfill | A handful of icon-only controls and fields still have no inline help popover | Spec not yet written |
-
-## In progress
-
-| Feature | Why it matters | Status |
-|---|---|---|
-| Inline host/location `auth` and `rateLimit`: UI editors | The model and API already carry inline blocks; the host and location row editors still need the fold UI | Spec written, UI work pending |
-| Path/Host escape hatch UI editors (upstream base path, host header, strip prefix, rewrite rule groups) | API/YAML support ships today, but the current UI editor wipes these fields on save until it lands | Spec written (`ui-specs/escape-hatch.md`), UI work pending |
 
 ## Not planned
 
 | Feature | Why not |
 |---|---|
+| MFA delegation (trust IdP `acr`/`amr`) | There is no redundant prompt to skip: TOTP is demanded only on the local admin account, which no identity provider authenticates. The config field is deprecated and gone from the UI |
 | Brotli/zstd compression | Gzip already covers response compression; extra codecs add dependency surface for marginal gain |
 | OCSP stapling | CRL revocation already covers mTLS client-cert revocation; stapling for gpm's own server certificate is low value for a homelab deployment |
 | Email notifications | ntfy/Discord/generic-webhook targets already cover alerting without an SMTP dependency |

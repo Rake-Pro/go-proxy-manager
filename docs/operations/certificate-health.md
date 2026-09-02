@@ -18,7 +18,7 @@ manager's 30-day window.
    Each item carries `state`, `daysRemaining`, `issuer`, `sans` and, for `acme`
    certificates, `lastAttempt`/`lastError`: see
    [Status fields](../reference/config/certificate.md#status-fields-get-only).
-2. Check one instance's aggregate health (data-plane listeners, certificate
+2. Check one instance's aggregate health (proxy listeners, certificate
    counts by state, upstream-group health, the ACME loop's last run):
    ```
    curl -s -b "<admin session cookie>" https://<admin>/api/health | jq

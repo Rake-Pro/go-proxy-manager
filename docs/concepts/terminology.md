@@ -18,8 +18,8 @@ brackets where it differs.
 
 | Term | Means |
 |---|---|
-| **Data plane** | The listeners that serve proxied traffic, `:80` and `:443` plus one per stream `listenPort`. |
-| **Control plane** | The admin listener: REST API and web UI, default `:8081`. |
+| **Proxy listeners** | The listeners that serve proxied traffic, `:80` and `:443` plus one per stream `listenPort`. |
+| **Admin panel** | The admin listener: REST API and web UI, default `:8081`. |
 | **Upstream** | The backend a proxy host or location forwards to: `{scheme, host, port}`. Prose sometimes says "backend" for the same thing; the schema field is always `upstream`. A stream host's equivalent field is `target`, which carries no scheme. |
 | **Upstream group** (`upstream-groups/`, UI: **Upstream Groups**) | An ordered set of interchangeable upstreams with health checks and a failover policy. |
 | **Location** | A path prefix inside a proxy host with its own upstream and extra policy. Always at least as restrictive as its host. |
@@ -34,7 +34,7 @@ brackets where it differs.
 | **Access list** (`access-lists/`, UI: **Access Lists**) | The gate: ordered IP/CIDR allow-deny rules plus optional GeoIP country rules over the derived client IP. Never abbreviated to "ACL" in gpm. |
 | **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a bouncer verdict or one auth mode). Never the access list. |
 | **Trusted proxy** | A peer whose `X-Forwarded-For` gpm believes when deriving the client IP. Distinct from `proxyProtocol.trustedCIDRs` (who may rewrite the connection address) and `forwardAuth.trustedProxies` (who may assert identity headers). |
-| **Identity provider** (`identity-providers/`, UI: **Identity Providers**), **IdP** | An OIDC issuer, a trusted forward-auth proxy, or an `auth_request` outpost, plus its group-to-role mapping. An IdP on its own has no data-plane effect until an auth gate references it. |
+| **Identity provider** (`identity-providers/`, UI: **Identity Providers**), **IdP** | An OIDC issuer, a trusted forward-auth proxy, or an `auth_request` outpost, plus its group-to-role mapping. An IdP on its own has no effect at the proxy listeners until an auth gate references it. |
 | **Forward-auth** | Trusting identity headers (`Remote-User` and friends) asserted by a proxy in front of gpm. |
 | **Auth-request** | An nginx `auth_request`-style subrequest to an external endpoint that answers allow or deny. Distinct from forward-auth: gpm calls out rather than reading headers. |
 | **Outpost** | The external service an `auth-request` gate calls, e.g. an Authentik proxy outpost. gpm proxies its sign-in, callback and sign-out endpoints verbatim. |
@@ -62,7 +62,7 @@ brackets where it differs.
 | Term | Means |
 |---|---|
 | **Maintenance** | A host (or the whole edge) answering `503` with `Retry-After` and never dialling the upstream. Domains, certificate and DNS records are kept. |
-| **Disabled** | An object kept in config but excluded from the running data plane. Its domain is released and its DNS records are withdrawn. |
+| **Disabled** | An object kept in config but excluded from the running proxy listeners. Its domain is released and its DNS records are withdrawn. |
 | **Leader / follower** | The HA roles. A leader runs ACME and the discovery reconcilers and accepts writes; a follower refuses writes and pulls the leader's config repo. |
 
 ## UI-only labels
@@ -79,4 +79,4 @@ navigation labels, not kinds.
 | **Operations** | The Settings group holding runtime facts, metrics and profiling status. |
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |
-| **Access Logs** | The in-memory data-plane request log and its runtime toggle (`PUT /api/logs`). Not stored config. |
+| **Access Logs** | The in-memory log of proxy-listener requests and its runtime toggle (`PUT /api/logs`). Not stored config. |

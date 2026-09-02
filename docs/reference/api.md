@@ -1,6 +1,6 @@
 # REST API reference
 
-The admin control-plane API: how to authenticate, what a token scope grants, and
+The admin API: how to authenticate, what a token scope grants, and
 where the machine-readable specification lives.
 
 ## Authenticating
@@ -52,9 +52,9 @@ certificate's own status, behind `certificates:read`.
 ## The specification
 
 [`openapi.yaml`](../api/openapi.yaml) is an OpenAPI 3.1 specification for the whole
-admin control-plane API (config CRUD, settings, backup/restore, DNS sync,
+admin API (config CRUD, settings, backup/restore, DNS sync,
 Ingress discovery, and the auth endpoints), everything reachable on the admin
-listener (`:8081` by default), not the public data plane that serves proxied
+listener (`:8081` by default), not the proxy listeners that serve proxied
 traffic.
 
 ## Reading it
@@ -92,8 +92,8 @@ traffic.
   (see `components.schemas.Error` and the security description for how scopes
   compose). A session principal is governed by its role alone and is
   unaffected by scopes; scopes only ever constrain a token principal.
-- The public **data plane** (the proxied traffic on `:80`/`:443`) isn't an API
-  in the REST sense and isn't in this document.
+- The public **proxy listeners** (`:80`/`:443`) aren't an API in the REST
+  sense and aren't in this document.
 
 ## Keeping it in sync
 

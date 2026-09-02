@@ -175,6 +175,11 @@ func serveErrorPage(w http.ResponseWriter, status int, hostEP *compiledErrorPage
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	// http.Error (the writeDefault path below every caller) sets nosniff itself,
+	// so without this line CONFIGURING an error page silently dropped a header the
+	// built-in response had. Set unconditionally, matching http.Error:
+	// the rendered body is gpm's own HTML and there is no other sane value.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
