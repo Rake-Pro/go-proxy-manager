@@ -1082,6 +1082,10 @@
     "text": "CIDRs or bare IPs whose X-Forwarded-For gpm believes. Empty trusts nobody, which is correct when gpm faces the internet directly.",
     "doc": "reference/config/settings/trusted-proxies.md#settings-trusted-proxies"
   },
+  "settings.tls.minVersion": {
+    "text": "The fleet-wide TLS floor every listener negotiates. A proxy host's own minimum TLS version overrides it, in either direction.",
+    "doc": "reference/config/settings/tls.md#settings-tls-min-version"
+  },
   "settings.securityHeaders": {
     "text": "Fleet-default response headers, applied set-if-absent so an app's own header is never clobbered. Any proxy host can override one in its editor.",
     "doc": "reference/config/settings/security-headers.md#settings-security-headers"

@@ -242,6 +242,11 @@ func main() {
 	// very first connection.
 	dp.SetProxyProtocol(settings.ProxyProtocol)
 
+	// The fleet-wide TLS floor, installed before the first compile: every per-host
+	// TLS config and every stream-terminate listener is built from it, so it has
+	// to be in place before the router exists and before any listener opens.
+	dataplane.SetTLSFleetDefaults(settings.TLS)
+
 	// The L7 trusted-proxy set, installed before the first compile: every host's
 	// client-IP resolver is built from it, so it has to be in place before the
 	// router exists. Empty (the default) trusts nobody and the connection peer is
@@ -254,8 +259,13 @@ func main() {
 	// the same reason as PROXY protocol above: it is consulted live by every
 	// host that has no errorPages override of its own, so it must be in place
 	// before any request can be served.
+	// A broken template must not keep the edge DOWN: the reload path already
+	// degrades to "keep the previous pages", and refusing to boot the whole
+	// proxy over a cosmetic 502 page is the worse failure. Settings.Validate
+	// parse-checks inline templates at write time, so what reaches here is a
+	// file under errorPages.dir that changed out of band.
 	if err := dataplane.SetErrorPages(settings.ErrorPages, *certDir); err != nil {
-		log.Fatal().Err(err).Msg("failed to compile settings-level error pages")
+		log.Warn().Err(err).Msg("failed to compile settings-level error pages; starting with gpm's built-in error output")
 	}
 
 	// Settings-level default security headers, installed before the first Reload
@@ -365,6 +375,9 @@ func main() {
 		// ahead of the compile means any listener the compile opens is already
 		// wrapped.
 		dp.SetProxyProtocol(st2.ProxyProtocol)
+		// The fleet-wide TLS floor, refreshed before the compile so the router
+		// build (and any stream listener it opens) picks up the new floor.
+		dataplane.SetTLSFleetDefaults(st2.TLS)
 		// The L7 trusted-proxy set, refreshed before the compile so the router
 		// build picks up the new set (see the initial load).
 		dataplane.SetTrustedProxies(st2.TrustedProxies)
@@ -648,6 +661,18 @@ func main() {
 			log.Error().Err(err).Msg("accesssync: ledger written but reload failed")
 		}
 	})
+	if mx != nil {
+		mx.RegisterAccessListSync(func() metrics.AccessListSyncStatus {
+			ss := accessSyncer.Status()
+			return metrics.AccessListSyncStatus{
+				Enabled:     ss.Enabled,
+				LastRun:     ss.LastRun,
+				LastSuccess: ss.LastSuccess,
+				Sources:     len(ss.Sources),
+				Refused:     ss.Refused,
+			}
+		})
+	}
 
 	// Both reconcilers are tracked, not fire-and-forget: a run that is mid-commit
 	// when the process is asked to stop has to be allowed to finish (or roll back)

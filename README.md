@@ -46,7 +46,8 @@ git-backed config, a REST API and a web UI, in one static binary.
 
 **Proxying**
 - **TLS termination.** SNI-based, with exact and wildcard certificate
-  selection.
+  selection, and a minimum TLS version set fleet-wide
+  (`settings.tls.minVersion`) or per host.
 - **HTTP/2 and WebSockets.** Always on, plus an HTTP-to-HTTPS 308 redirect.
 - **Locations.** Path-scoped upstream and middleware within one host.
 - **Upstream groups.** Failover, weighted round-robin, least-connections, or

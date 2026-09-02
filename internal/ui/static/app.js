@@ -3198,10 +3198,11 @@ async function viewIntegrations(c) {
         accessLists: idAlCtl.get(),
         tags: idTagCtl.get(),
         // No control on this form yet, and this literal is a REBUILD - so the
-        // loaded value has to be sent back or an unrelated settings save strips
-        // the template's strip list and the next reconcile pushes that onto
-        // every derived host.
+        // loaded values have to be sent back or an unrelated settings save
+        // strips the template's strip list / security headers and the next
+        // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
+        securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3242,6 +3243,7 @@ async function viewIntegrations(c) {
         tags: row._tags.get(),
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
@@ -3319,6 +3321,7 @@ async function viewIntegrations(c) {
         accessLists: dkrAlCtl.get(),
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
+        securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3347,6 +3350,7 @@ async function viewIntegrations(c) {
         accessLists: row._al.get(),
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
@@ -8249,6 +8253,7 @@ async function viewSettings(c, tab) {
   const maint = s.maintenance || {};
   const idc = s.ingressDiscovery || {};
   const trusted = arr(s.trustedProxies);
+  const stls = s.tls || {};
 
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.</p>${aboutPageHtml('page.settings')}</div>
@@ -8297,6 +8302,19 @@ async function viewSettings(c, tab) {
           <div class="hint">CIDRs or bare IP addresses. When a request arrives from one of these, gpm reads the client address from <span class="mono">X-Forwarded-For</span> instead of the connection. Empty means trust nobody: the connection address is the client, which is correct when gpm faces the internet directly.</div>
           <div class="hint">This one address is what access lists, geo rules, rate limits, <span class="mono">allowFrom</span> exemptions and the access log all compare. <a href="https://github.com/Rake-Pro/go-proxy-manager/blob/main/docs/concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers" target="_blank" rel="noopener">Learn more</a></div>
           <div class="hint warn" id="set-trustedproxies-warn" hidden>${esc(TRUSTED_WILDCARD_WARNING)}</div>
+        </div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">TLS</p>
+        <p class="muted" style="font-size:11.5px;margin:0 0 10px">The floor every HTTPS and stream-terminate listener negotiates, for the whole fleet.</p>
+        <div class="field-group">
+          <label>Minimum TLS version</label>
+          <select class="field mono" id="set-mintls" data-hint="settings.tls.minVersion" data-path="tls.minVersion">
+            <option value="1.2"${(stls.minVersion || '1.2') === '1.2' ? ' selected' : ''}>1.2 (default, negotiates 1.2/1.3)</option>
+            <option value="1.3"${stls.minVersion === '1.3' ? ' selected' : ''}>1.3 only</option>
+          </select>
+          <div class="hint">Applies to every host that does not pin its own. A proxy host's <span class="mono">Minimum TLS version</span> overrides this either way, so one legacy host can stay on 1.2 under a 1.3 fleet floor.</div>
+          <div class="hint">1.3 only refuses the handshake for any client that cannot negotiate it: there is no fallback and no error page. Raise it once every client of every unpinned host supports 1.3.</div>
         </div>
       </div>
       ${settingsSaveBar('set-save')}
@@ -8537,6 +8555,13 @@ async function viewSettings(c, tab) {
       }
       body.trustedProxies = tp;
     }
+
+    // Fleet TLS floor. "1.2" IS the default, so the key is left off the body
+    // entirely for it, so an untouched settings.yaml round-trips without gaining a
+    // `tls: {}`. A host's own tls.minTLSVersion still overrides whatever lands
+    // here (see the proxy host editor).
+    const fleetMinTLS = $('#set-mintls').value;
+    if (fleetMinTLS === '1.3') body.tls = { minVersion: '1.3' };
 
     // Maintenance. The key is left off the body entirely when the switch is off
     // and no Retry-After is set, so an untouched settings.yaml round-trips

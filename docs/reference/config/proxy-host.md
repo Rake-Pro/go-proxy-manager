@@ -101,6 +101,10 @@ set `"1.3"` only on hosts where every client supports it (drops 1.2: old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset
 for public hosts to keep the widest client compatibility.
 
+| Fleet default | Per-host override |
+|---|---|
+| [`settings.tls.minVersion`](settings/tls.md#settings-tls-min-version) sets the floor for every host that leaves `minTLSVersion` unset, plus stream hosts and an unknown SNI. | `minTLSVersion` here wins in **either** direction: `"1.3"` under the default fleet floor, and `"1.2"` under a `"1.3"` fleet floor. |
+
 **DNSSyncPolicy** (`dns`): `lanDirect` publishes each of the host's domains as a
 local CNAME on the LAN resolver (Pi-hole), so internal clients reach the edge
 directly instead of hairpinning through the WAN address; `publicCname` publishes

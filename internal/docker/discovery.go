@@ -705,6 +705,12 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 	if len(tmpl.StripResponseHeaders) > 0 {
 		host.StripResponseHeaders = append([]string(nil), tmpl.StripResponseHeaders...)
 	}
+	if len(tmpl.SecurityHeaders) > 0 {
+		host.SecurityHeaders = make(map[string]model.SecurityHeaderValue, len(tmpl.SecurityHeaders))
+		for k, v := range tmpl.SecurityHeaders {
+			host.SecurityHeaders[k] = v
+		}
+	}
 	if pol := dnsPolicy(ct, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}

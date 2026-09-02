@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
@@ -229,6 +230,46 @@ func TestMetricsHookCountsDenials(t *testing.T) {
 	if hook.denials["gated|access-list"] != 1 {
 		t.Fatalf("denials = %v, want one gated|access-list", hook.denials)
 	}
+}
+
+// Auth gates count their refusals too: without this a host behind SSO or mTLS
+// shows no denials in /metrics no matter how many 401/403s it serves, so the one
+// tier most likely to be misconfigured is the one tier invisible on a dashboard.
+func TestMetricsHookCountsAuthDenials(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	req := func() *http.Request {
+		r := httptest.NewRequest("GET", "https://gated.example.com/", nil)
+		r.RemoteAddr = "203.0.113.5:5000"
+		return withHostName(r, "gated")
+	}
+
+	t.Run("client-cert with no certificate", func(t *testing.T) {
+		hook := installHook(t)
+		w := httptest.NewRecorder()
+		spec := model.AuthMiddleware{Mode: model.AuthModeClientCert}
+		clientCertGate(spec, peerIP, nil, "gated", nil, ok).ServeHTTP(w, req())
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status %d, want 401", w.Code)
+		}
+		if hook.denials["gated|auth-client-cert"] != 1 {
+			t.Fatalf("denials = %v, want one gated|auth-client-cert", hook.denials)
+		}
+	})
+
+	t.Run("forward-auth with no asserted identity", func(t *testing.T) {
+		hook := installHook(t)
+		w := httptest.NewRecorder()
+		fa := auth.CompileForwardAuth(model.ForwardAuthSpec{
+			TrustedProxies: []string{"192.0.2.10/32"}, UserHeader: "Remote-User",
+		}, "idp")
+		forwardAuthGate(fa, nil, nil, "gated", nil, ok).ServeHTTP(w, req())
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status %d, want 401", w.Code)
+		}
+		if hook.denials["gated|auth-forward"] != 1 {
+			t.Fatalf("denials = %v, want one gated|auth-forward", hook.denials)
+		}
+	})
 }
 
 // With no hook installed (and every other toggle off) the handler switch must

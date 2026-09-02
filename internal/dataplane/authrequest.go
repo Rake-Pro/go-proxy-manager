@@ -160,6 +160,7 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 			http.Redirect(w, r, dest, http.StatusFound)
 		case resp.StatusCode == http.StatusForbidden:
 			// Authenticated but not authorized for this application.
+			countDenial(r, "auth-request")
 			refuse(w, http.StatusForbidden, ep, hostName, "forbidden")
 		default:
 			log.Warn().Str("host", hostName).Int("status", resp.StatusCode).Msg("unexpected auth subrequest status")

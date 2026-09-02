@@ -513,8 +513,10 @@ the same mechanism that revokes any other client certificate.
 
 **Listeners** (`internal/dataplane`). An HTTPS listener (TLS 1.2+ by default, a
 fixed set of forward-secret AEAD cipher suites, ALPN `h2,http/1.1`) and an HTTP
-listener. A host may pin a higher minimum TLS version (`tls.minTLSVersion: "1.3"`)
-applied per-connection by SNI via `GetConfigForClient`. Certificates are chosen
+listener. `settings.tls.minVersion` raises the floor for the whole fleet
+(including stream-terminate listeners and an unknown SNI), and a host may pin its
+own minimum TLS version either side of it (`tls.minTLSVersion`), applied
+per-connection by SNI via `GetConfigForClient`. Certificates are chosen
 per-connection by SNI: an exact-domain match wins, otherwise the left-most label
 is stripped and a wildcard match is tried; an unknown SNI is an error (there is no
 default certificate to leak). Custom certs load from the cert store; ACME certs

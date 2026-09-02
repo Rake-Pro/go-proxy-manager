@@ -61,7 +61,7 @@ sub-key is settable and applied verbatim:
 | `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
 Every other template key (`middlewares`, `accessLists`, `robotsNoIndex`, `tags`,
-`stripResponseHeaders`, `allowedDomainSuffixes`) is documented on
+`stripResponseHeaders`, `securityHeaders`, `allowedDomainSuffixes`) is documented on
 [Kubernetes Ingress discovery](ingress-discovery.md), which uses the identical
 type.
 
