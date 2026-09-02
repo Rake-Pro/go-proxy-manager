@@ -52,7 +52,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [edge]
   gpm:
-    image: ghcr.io/rake-pro/go-proxy-manager:1.0.0     # pin a digest or semver
+    image: ghcr.io/rake-pro/go-proxy-manager:1.3.0     # pin a digest or semver
     networks: [edge]
 ```
 

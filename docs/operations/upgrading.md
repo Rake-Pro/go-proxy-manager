@@ -118,10 +118,11 @@ Starting an **older** gpm binary against a config directory a **newer** one has
 written to. Both config loaders (per-object files and `settings.yaml`) use a
 non-strict YAML decode, so a key the older struct does not recognise is
 silently dropped rather than rejected, and the first write after that,
-including an automatic reconciler commit, makes the drop permanent. See
-"Unknown YAML keys are now warned about instead of silently dropped" and
-"Rolling back to 1.0.33 or earlier..." in the [changelog](https://github.com/Rake-Pro/go-proxy-manager/blob/main/CHANGELOG.md#unreleased)
-for the exact field list this release introduces.
+including an automatic reconciler commit, makes the drop permanent. Since
+1.3.0 a load that meets an unknown key warns (`GET /api/health`
+`configWarnings`) and the reconciler refuses to write that file, so the drop
+is visible before it becomes permanent. The [changelog](https://github.com/Rake-Pro/go-proxy-manager/blob/main/CHANGELOG.md)
+lists the fields each release introduces.
 
 ### Prerequisites
 
