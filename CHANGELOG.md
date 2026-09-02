@@ -488,6 +488,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
   absence of a `/metrics` endpoint.
 
 ### Fixed
+- **Release image rebuilt its `apk upgrade` layer from cache.** The final
+  Dockerfile stage was cached by the GitHub Actions layer cache, so the
+  `apk upgrade` meant to pick up Alpine security patches only ran when its RUN
+  line changed. v1.0.32 failed the release scan gate on libexpat 2.8.3-r0 with
+  2.8.4-r0 already in the 3.24 repos. The final stage is now named and excluded
+  from the layer cache (`no-cache-filters: final`) in both the CI and release
+  builds; the Go build stage stays cached.
 - **WebSockets through an upstream group.** A host backed by an `upstreamGroupRef`
   answered every WebSocket handshake with a 502 (`internal error: 101 switching
   protocols response with non-writable body`) and leaked the upstream connection
