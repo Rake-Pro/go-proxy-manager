@@ -488,6 +488,16 @@ All notable changes to go-proxy-manager are documented here. The format follows
   absence of a `/metrics` endpoint.
 
 ### Fixed
+- **WebSockets through an upstream group.** A host backed by an `upstreamGroupRef`
+  answered every WebSocket handshake with a 502 (`internal error: 101 switching
+  protocols response with non-writable body`) and leaked the upstream connection
+  until garbage collection: the group transport wrapped the upstream response
+  body in a read-only counter, but a 101 body is the hijacked upstream
+  connection and `httputil.ReverseProxy` requires it to be an
+  `io.ReadWriteCloser`. The counter now keeps the Writer side when the body has
+  one, so protocol switches proxy exactly as they do on a single-upstream host.
+  Regression test covers a full handshake plus bidirectional bytes through a
+  group. (Every group-backed host was affected since upstream groups shipped.)
 
 - API tokens minted before the ParkedHost rename that carry `dead-hosts:read` /
   `dead-hosts:write` scopes load again and grant the equivalent `parked-hosts`
