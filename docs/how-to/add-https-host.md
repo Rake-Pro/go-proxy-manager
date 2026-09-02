@@ -78,7 +78,7 @@ certificate strategy. For the very first host, start at
 | Symptom | Cause | Fix |
 |---|---|---|
 | Write refused: two hosts claim the same domain | Another **enabled** host already lists this domain | Disable or edit the other host in the same change |
-| `503` on every request to the host | The host references a middleware or access list that does not exist | Fix the reference; the data plane fails one host closed rather than serving it open |
+| `503` on every request to the host | The host references a middleware or access list that does not exist | Fix the reference; the proxy listeners fail one host closed rather than serving it open |
 | `404` for the domain | No enabled host claims it, or the request's `Host` header does not match | Check `domains` and that the host is not `disabled` |
 | Requests reach the backend at the wrong path | Path composition order | See [Path composition](../concepts/request-pipeline.md#path-composition) |
 | An access list allows or denies the wrong clients | The compared address is not what you assumed | See [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers) |

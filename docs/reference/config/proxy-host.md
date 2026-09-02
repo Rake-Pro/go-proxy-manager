@@ -56,7 +56,7 @@ host serves](certificate.md#which-certificate-a-host-serves); it does **not** se
 certificate for an L7 host), `forceSSL` (redirect HTTP->HTTPS), `hsts` (`enabled`,
 `maxAge` in seconds, default one year when unset, `includeSubdomains`, `preload`),
 `minTLSVersion` (`"1.2"` default | `"1.3"`), `clientAuth` (mTLS, below).
-When `hsts.enabled` is set, the data plane emits `Strict-Transport-Security` on
+When `hsts.enabled` is set, the proxy listeners emit `Strict-Transport-Security` on
 HTTPS responses for the host (never over plain HTTP).
 
 **ClientAuth** (`tls.clientAuth`) opts the host into mTLS: client certificates
@@ -204,7 +204,7 @@ locations:
 
 A proxy host or location may carry an `auth` or `rateLimit` block **directly**,
 with no `Middleware` object and no reference to attach. The block has the same
-shape, the same validation rules and compiles to the same data-plane handler as
+shape, the same validation rules and compiles to the same proxy-listener handler as
 the middleware of that kind, so behaviour, metrics and error pages are identical.
 
 - **Direct is for a handful of hosts.** Gating one host by SSO is one block on
@@ -224,8 +224,8 @@ the middleware of that kind, so behaviour, metrics and error pages are identical
 | `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
 
 Validation is the middleware's, verbatim: `identityProvider` must resolve to an
-existing IdentityProvider (a dangling name is a load-time error, and the data
-plane fails closed with `503` if one ever reaches it), `allowFrom` is refused in
+existing IdentityProvider (a dangling name is a load-time error, and the proxy
+listeners fail closed with `503` if one ever reaches it), `allowFrom` is refused in
 `oidc` and `forward-auth` mode, `clientCertRoles` is `client-cert` only, and a
 rate limit must set exactly one of the two rate forms.
 

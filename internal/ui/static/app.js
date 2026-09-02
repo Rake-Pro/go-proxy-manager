@@ -3483,49 +3483,18 @@ async function viewOverview(c) {
   const idps = arr(cfg.identityProviders);
   const idpSub = idps.length ? idps.map((p) => p.name).join(', ') : 'none configured';
 
-  // Data-plane tile. With GET /api/health this is a real liveness claim (are the
-  // :80 and :443 listeners bound), not the old "the control-plane API answered".
-  // Fleet-wide maintenance still wins: a healthy listener serving 503 to every
-  // host reads as maintenance, not as listening.
-  const dpMaint = hasCapability('maintenance.globalEnabled');
-  const dpReadOnly = hasCapability('ha.readOnly');
-  const https = health && health.dataPlane && health.dataPlane.https;
-  const http = health && health.dataPlane && health.dataPlane.http;
-  const unhealthyGroups = arr(health && health.upstreamGroups).filter((g) => g.unhealthy > 0);
-  const bothUp = !!(https && http && https.listening && http.listening);
-  let dpState, dpColor, dpTitle, dpSub;
-  if (!https || !http) {
-    dpState = dpMaint ? 'maintenance' : 'unknown';
-    dpColor = dpMaint ? 'var(--warn)' : 'var(--faint)';
-    dpTitle = dpMaint
-      ? 'Fleet-wide maintenance is on: every proxy host answers 503.'
-      : 'This instance did not report listener health.';
-  } else if (dpMaint) {
-    dpState = 'maintenance';
-    dpColor = 'var(--warn)';
-    dpTitle = 'Fleet-wide maintenance is on: every proxy host answers 503.';
-  } else if (bothUp) {
-    dpState = 'listening';
-    dpColor = unhealthyGroups.length ? 'var(--warn)' : 'var(--ok)';
-    dpTitle = `HTTPS listener (${https.addr}) and HTTP listener (${http.addr}) are bound.`;
-  } else {
-    dpState = 'degraded';
-    dpColor = 'var(--err)';
-    dpTitle = `HTTPS listener (${https.addr}) is ${https.listening ? 'listening' : 'not bound'}. HTTP listener (${http.addr}) is ${http.listening ? 'listening' : 'not bound'}.`;
-  }
-  if (unhealthyGroups.length) {
-    dpTitle += ` ${unhealthyGroups.length} upstream group(s) have an unhealthy backend: ${unhealthyGroups.map((g) => g.name).join(', ')}.`;
-  }
-  if (dpState === 'degraded') {
-    const down = [!https.listening ? `HTTPS ${https.addr}` : '', !http.listening ? `HTTP ${http.addr}` : ''].filter(Boolean).join(', ');
-    dpSub = `<b class="err-text">${esc(down)}</b> not bound`;
-  } else if (unhealthyGroups.length) {
-    dpSub = `<b>${unhealthyGroups.length}</b> upstream group${unhealthyGroups.length === 1 ? '' : 's'} degraded`;
-  } else if (dpReadOnly) {
-    dpSub = `HA follower (read-only) &middot; <b>${arr(cfg.accessLists).length}</b> access lists`;
-  } else {
-    dpSub = `<b>${arr(cfg.accessLists).length}</b> access lists &middot; ${arr(cfg.middlewares).length} middleware`;
-  }
+  // Upstreams tile. If the process is down the admin panel is down too, so a
+  // tile just claiming "listening" told the operator nothing; this one
+  // carries information instead, from GET /api/health's upstreamGroups: the
+  // healthy/unhealthy member counts across every configured group.
+  const upGroups = arr(health && health.upstreamGroups);
+  const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
+  const upUnhealthy = upGroups.reduce((n, g) => n + (g.unhealthy || 0), 0);
+  const upColor = !upGroups.length ? 'var(--faint)' : (upUnhealthy ? 'var(--err)' : 'var(--ok)');
+  const upTitle = !upGroups.length
+    ? 'No upstream groups are configured.'
+    : `${upHealthy} of ${upHealthy + upUnhealthy} upstream group members are healthy.`
+      + (upUnhealthy ? ` Unhealthy in: ${upGroups.filter((g) => g.unhealthy > 0).map((g) => g.name).join(', ')}.` : '');
 
   const hc = (health && health.certificates) || null;
   const certProblems = hc ? ((hc.expiring || 0) + (hc.expired || 0) + (hc.error || 0)) : 0;
@@ -3578,7 +3547,7 @@ async function viewOverview(c) {
   c.innerHTML = `
     <div class="view-head">
       <h2>Overview</h2>
-      <p>Edge and gateway control plane status for <span class="mono">${esc(state.instance)}</span>.</p>
+      <p>Status of <span class="mono">${esc(state.instance)}</span>: hosts, certificates and recent changes.</p>
     </div>
     ${aboutPageHtml('page.overview')}
     ${showChecklist ? getStartedCardHtml(steps) : ''}
@@ -3599,10 +3568,12 @@ async function viewOverview(c) {
         <div class="v">${idps.length}</div>
         <div class="sub">${esc(idpSub)}</div>
       </div>
-      <div class="stat" title="${esc(dpTitle)}">
-        <div class="k">Data plane</div>
-        <div class="v" style="color:${dpColor}">${esc(dpState)}</div>
-        <div class="sub">${dpSub}</div>
+      <div class="stat" title="${esc(upTitle)}">
+        <div class="k">Upstreams</div>
+        <div class="v" style="color:${upColor}">${upGroups.length ? (upHealthy + upUnhealthy) : '-'}</div>
+        <div class="sub">${upGroups.length
+          ? `<b>${upHealthy}</b> healthy${upUnhealthy ? ` &middot; <span class="err-text">${upUnhealthy}</span> unhealthy` : ''}`
+          : 'no groups'}</div>
       </div>
     </div>
     <div class="grid-2-1">
@@ -5612,7 +5583,7 @@ function nameCard(obj, isNew, clonePlaceholder, foldable) {
       <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" data-hint="common.name" data-path="name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(clonePlaceholder || 'internal-name')}" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
       <div class="field-group"><label>Display name</label><input class="field" id="ed-display" data-hint="common.displayName" data-path="displayName" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
     </div>
-    <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the compiled data plane</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>`;
+    <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the running proxy</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>`;
   if (!foldable) return `<div class="card form-section"><p class="section-label">Identity</p>${body}</div>`;
   const parts = [];
   if (obj.displayName) parts.push(obj.displayName);
@@ -7924,7 +7895,7 @@ async function viewLogs(c) {
 
   c.innerHTML = `
     <div class="row-between view-head">
-      <div><h2>Access Logs</h2><p>Most recent data-plane requests, newest first (in-memory buffer).</p>${aboutPageHtml('page.accessLogs')}</div>
+      <div><h2>Access Logs</h2><p>Most recent proxied requests, newest first (in-memory buffer).</p>${aboutPageHtml('page.accessLogs')}</div>
       <div style="display:flex;gap:10px">
         <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
         <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
@@ -8399,7 +8370,7 @@ async function viewSettings(c, tab) {
         </div>
       </div>
       <div class="card form-section danger-zone" style="margin-top:16px">
-        <p class="section-label">Data-plane SSO sessions</p>
+        <p class="section-label">Per-host SSO sessions</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request. This takes effect at once and is not part of a save.</p>
         <button class="btn danger sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
       </div>
@@ -8515,7 +8486,7 @@ async function viewSettings(c, tab) {
     const btn = $('#set-sso-revoke'); btn.disabled = true;
     try {
       await api('/api/sso/revoke', { method: 'POST' });
-      toast('Sessions revoked', 'All data-plane SSO sessions are now invalid.', 'ok');
+      toast('Sessions revoked', 'All per-host SSO sessions are now invalid.', 'ok');
     } catch (e) { toastErr(e); }
     btn.disabled = false;
   });

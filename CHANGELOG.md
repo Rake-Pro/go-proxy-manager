@@ -49,6 +49,13 @@ Nothing yet.
   logs a warning and serves gpm's built-in error output instead of calling
   `log.Fatal`; the reload path was already fail-safe. Refusing to boot the whole
   edge over a cosmetic 502 page was the worse failure.
+- **Overview's status tile now carries information.** The old "Data plane"
+  tile only ever claimed the process was listening, which tells an operator
+  nothing when they can already reach the admin panel to look at it. It is
+  replaced with an "Upstreams" tile showing healthy vs unhealthy
+  upstream-group members from `GET /api/health`. "Control plane" / "data
+  plane" wording is also dropped from the Overview intro, Access Logs,
+  per-host SSO session UI and their hints in favor of plain descriptions.
 
 ### Fixed
 
