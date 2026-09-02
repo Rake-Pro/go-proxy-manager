@@ -21,7 +21,7 @@ password:
 curl -s -X PUT https://<admin>/api/api-tokens/backup-cron \
   -b "<admin session cookie>" -H "X-CSRF-Token: <token from /api/me>" \
   -H 'Content-Type: application/json' \
-  -d '{"scopes":["admin"]}' | jq -r .token   # save this - shown once
+  -d '{"scopes":["admin"]}' | jq -r .token   # save this, it is shown once
 ```
 
 **Cron:**
