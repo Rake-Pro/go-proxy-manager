@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -753,5 +754,65 @@ func TestBuildRouterRejectsMissingGroupState(t *testing.T) {
 	// not compile a host with no backend.
 	if _, err := buildRouter(cfg, "", nil); err == nil {
 		t.Fatal("buildRouter with unresolvable group must error")
+	}
+}
+
+// A WebSocket handshake through a group-backed host must be proxied as a
+// protocol switch: the 101 reaches the client and bytes flow both ways. The
+// group transport wraps the upstream body to keep the in-flight count, and
+// that wrapper must stay an io.ReadWriteCloser or httputil.ReverseProxy
+// refuses the switch with a 502.
+func TestGroupWebSocketUpgrade(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "websocket" {
+			http.Error(w, "no upgrade", http.StatusBadRequest)
+			return
+		}
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("backend hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = brw.Flush()
+		_, _ = io.Copy(conn, brw) // echo whatever the client sends
+	}))
+	defer backend.Close()
+
+	group := model.UpstreamGroup{
+		ObjectMeta:  model.ObjectMeta{Name: "g"},
+		Upstreams:   gups(upstreamOf(t, backend)),
+		HealthCheck: model.HealthCheck{IntervalSeconds: 3600},
+	}
+	rt, m := groupRouter(t, group, true)
+	front := httptest.NewServer(http.HandlerFunc(rt.serveHTTP))
+	defer front.Close()
+
+	conn, err := net.Dial("tcp", front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = fmt.Fprint(conn, "GET /ws HTTP/1.1\r\nHost: app.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handshake response: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake = %d, want 101", resp.StatusCode)
+	}
+	if _, err := fmt.Fprint(conn, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo = %q, %v; want \"ping\"", buf, err)
+	}
+	if snap := m.snapshot()["g"]; len(snap) != 1 || snap[0].Active != 1 {
+		t.Fatalf("snapshot during upgrade = %+v, want one active request", snap)
 	}
 }
