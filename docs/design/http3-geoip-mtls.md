@@ -3,9 +3,9 @@
 Status: **mixed.** mTLS (phases 1 and 2) and GeoIP geoblocking are **implemented**
 (see CHANGELOG.md / FEATURES.md); HTTP/3 is **held** (decision
 2026-08-23): not before Go stdlib ships an HTTP/3 server (golang/go#58547);
-the quic-go quarantine design below stays as the fallback plan. Scope: three P2 edge features from [FEATURES.md](../../FEATURES.md).
-This document records the intended design, the schema/wiring, and —
-critically for this project — the **dependency decision** for each, so
+the quic-go quarantine design below stays as the fallback plan. Scope: three P2 edge features from [FEATURES.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/FEATURES.md).
+This document records the intended design, the schema/wiring, and -
+critically for this project - the **dependency decision** for each, so
 implementation can start from a settled plan.
 
 ## Dependency posture (the deciding lens)
@@ -86,7 +86,7 @@ against an operator-supplied CA, enforced at the TLS handshake. Community ask
 
 ### Key insight: the per-SNI hook already exists
 
-`Server.Start` wires `tls.Config.GetConfigForClient` →
+`Server.Start` wires `tls.Config.GetConfigForClient` ->
 `router.tlsConfigForSNI(serverName)`, today used so a host can pin a higher
 minimum TLS version (`hostTLSConfig`). Client-cert enforcement is **per host**,
 and `GetConfigForClient` is exactly the per-host seam: a host that wants mTLS
@@ -113,13 +113,13 @@ tls:
     mode: require         # require | optional
 ```
 
-- `require` → `tls.RequireAndVerifyClientCert` (no valid cert ⇒ handshake fails,
+- `require` -> `tls.RequireAndVerifyClientCert` (no valid cert => handshake fails,
   request never reaches a handler).
-- `optional` → `tls.VerifyClientCertIfGiven` (cert verified if presented, else
-  the request proceeds — lets mTLS coexist with SSO/forward-auth as a fallback).
+- `optional` -> `tls.VerifyClientCertIfGiven` (cert verified if presented, else
+  the request proceeds - lets mTLS coexist with SSO/forward-auth as a fallback).
 
 Validation: `clientAuth.caRef` must resolve to a `ClientCA`; the CA PEM must
-parse to ≥1 cert at load; `mode` ∈ {require, optional}.
+parse to >=1 cert at load; `mode` in {require, optional}.
 
 ### Data-plane wiring
 
@@ -127,14 +127,14 @@ parse to ≥1 cert at load; `mode` ∈ {require, optional}.
   (merging with any `minTLSVersion` pin) with `ClientCAs = x509.CertPool(caPEM)`
   and the chosen `ClientAuth`. Store in `router.tlsConfigs[hostKey]` (the map
   already feeds `GetConfigForClient`). A host with *both* a TLS-version pin and
-  mTLS needs the two merged into one config — today `hostTLSConfig` returns nil
+  mTLS needs the two merged into one config - today `hostTLSConfig` returns nil
   for the no-pin case, so the builder must compose rather than branch.
 - Optional **identity passthrough** (phase 2): a host can map the verified client
   cert (CN / SAN) to a header for the upstream (e.g. `X-Client-Cert-Subject`),
   set in `serveHTTPS` from `r.TLS.PeerCertificates[0]`. This rides the existing
   identity-strip model (gpm-asserted header, stripped from untrusted peers).
 - Optional **`client-cert` auth-middleware mode** (phase 2): gate at the chain's
-  auth tier on cert presence and map subject → role, for "cert OR SSO" hosts in
+  auth tier on cert presence and map subject -> role, for "cert OR SSO" hosts in
   `optional` mode.
 
 ### Security / open questions
@@ -168,18 +168,18 @@ parse to ≥1 cert at load; `mode` ∈ {require, optional}.
 128 comments); NPMplus #730 is its most-commented open issue. "Do it cleanly /
 native" per FEATURES.
 
-**Dependency:** `oschwald/maxminddb-golang` — pure-Go, no CGO, small, widely
+**Dependency:** `oschwald/maxminddb-golang` - pure-Go, no CGO, small, widely
 used, reads MaxMind GeoLite2/GeoIP2 `.mmdb`. Hand-rolling an mmdb parser is not
 worth it; this is a justified, isolated import. **No DB is bundled** (GeoLite2's
 licence forbids redistribution): the operator mounts the file and refreshes it
-(e.g. `geoipupdate` cron). DB-less ⇒ the feature is simply unavailable.
+(e.g. `geoipupdate` cron). DB-less => the feature is simply unavailable.
 
 ### Key insight: geo is another access-list dimension
 
 Access lists already (a) resolve the **real** client IP (XFF honoured only from
 trusted proxies, via `clientIPResolver`) and (b) run at the right chain position
 (`access-list` tier). Country matching is just another rule dimension over the
-same resolved IP — so **extend `AccessList`** rather than add a parallel
+same resolved IP - so **extend `AccessList`** rather than add a parallel
 `geoblock` middleware. One client-IP resolver, one chain slot, one mental model.
 
 ### Schema
@@ -199,11 +199,11 @@ rules: [...]                 # existing IP/CIDR rules, evaluated first
 geo:
   countryAllow: []           # if set, only these ISO-3166 alpha-2 pass
   countryDeny: [CN, RU, KP]  # these are rejected
-  onUnknown: allow           # IP not in DB (incl. private/LAN) ⇒ allow | deny
+  onUnknown: allow           # IP not in DB (incl. private/LAN): allow | deny
 ```
 
-Evaluation order within a list: explicit IP/CIDR rules → geo → `defaultAction`.
-Private/loopback/link-local IPs have no country ⇒ governed by `onUnknown`. When
+Evaluation order within a list: explicit IP/CIDR rules -> geo -> `defaultAction`.
+Private/loopback/link-local IPs have no country => governed by `onUnknown`. When
 `onUnknown` is unset the default is **mode-dependent**: deny-list (`countryDeny`)
 defaults to `allow` (it only ever narrows a default-allow posture, so the LAN is
 never geo-blocked by accident); whitelist (`countryAllow`) defaults to `deny`
@@ -235,7 +235,7 @@ gap, some cloud/VPN ranges - cannot slip past a "these countries only" gate. Set
 
 ### Security / open questions
 
-- Must use the **trusted** client IP, never raw `X-Forwarded-For` — reuse the
+- Must use the **trusted** client IP, never raw `X-Forwarded-For` - reuse the
   existing resolver; do not add a second IP path.
 - GeoIP is advisory (VPNs, shared CGNAT, stale DB). Document it as defence-in-
   depth, not an authz boundary.
@@ -251,23 +251,23 @@ gap, some cloud/VPN ranges - cannot slip past a "these countries only" gate. Set
 **Goal.** Serve HTTP/3 over QUIC (UDP/443), advertised via `Alt-Svc`. Community
 ask #1550 (~80 upvotes); NPMplus has it.
 
-**Dependency — the real cost.** Go's stdlib has **no** HTTP/3 server. The only
+**Dependency - the real cost.** Go's stdlib has **no** HTTP/3 server. The only
 realistic path is `quic-go/quic-go` + `quic-go/http3` (pure-Go, no CGO, used by
-Caddy, actively maintained) — but it is a **large** surface, the opposite of the
+Caddy, actively maintained) - but it is a **large** surface, the opposite of the
 minimal-deps thesis. Recommendation: adopt it **but quarantine it**:
 
 - Put all quic-go-touching code behind a **build tag** (`//go:build http3`) so the
-  **default binary does not link it** — operators who want the minimal surface get
+  **default binary does not link it** - operators who want the minimal surface get
   a gpm with zero QUIC code. A separate `gpm:http3` image variant carries it.
 - Behind that, a **runtime toggle** (`GPM_HTTP3=1` / `--http3-addr`) actually
-  enables the listener. Off ⇒ no UDP listener, no `Alt-Svc`.
+  enables the listener. Off => no UDP listener, no `Alt-Svc`.
 
 This keeps the costly dependency opt-in at *both* build and run time.
 
 ### Key insight: reuse the shared handler + cert resolver
 
 HTTP/3 is a third listener that serves the **same** handler the HTTPS listener
-already does (`s.observe(dispatchHTTPS)` → the atomic router), so reloads need no
+already does (`s.observe(dispatchHTTPS)` -> the atomic router), so reloads need no
 QUIC restart, and routing/middleware/access-lists are identical across h1/h2/h3.
 
 ### Wiring
@@ -291,13 +291,13 @@ QUIC restart, and routing/middleware/access-lists are identical across h1/h2/h3.
   the real client IP for access lists (same constraint already handled for TCP).
 - quic-go wants a large UDP receive buffer; raise `net.core.rmem_max` /
   `wmem_max` (e.g. 7 MB) or it logs a degraded-performance warning.
-- **0-RTT disabled** initially (replay risk) — quic-go's default; keep it.
+- **0-RTT disabled** initially (replay risk) - quic-go's default; keep it.
 
 ### Security / open questions
 
-- UDP amplification: QUIC mandates address validation (built into quic-go) — but
+- UDP amplification: QUIC mandates address validation (built into quic-go) - but
   confirm config doesn't disable it.
-- Reload semantics for the QUIC listener's own `tls.Config` (cert rotation) —
+- Reload semantics for the QUIC listener's own `tls.Config` (cert rotation) -
   verify GetCertificate is consulted live as it is for TLS-over-TCP.
 - mTLS-over-h3 timing (see feature 1).
 
@@ -307,7 +307,7 @@ QUIC restart, and routing/middleware/access-lists are identical across h1/h2/h3.
 
 ## Suggested sequencing
 
-1. **mTLS** — no dep, reuses the per-SNI hook, closes a parity gap cheaply.
-2. **GeoIP** — one isolated pure-Go dep, extends the access-list model.
-3. **HTTP/3** — last, behind a build tag + runtime toggle; it is the only one that
+1. **mTLS** - no dep, reuses the per-SNI hook, closes a parity gap cheaply.
+2. **GeoIP** - one isolated pure-Go dep, extends the access-list model.
+3. **HTTP/3** - last, behind a build tag + runtime toggle; it is the only one that
    meaningfully grows the dependency surface, and it needs an image/CI variant.

@@ -3,7 +3,9 @@ package acme
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +151,92 @@ func TestSaveAndLoadMeta(t *testing.T) {
 	}
 	if got.DirectoryURL != "u" || len(got.Domains) != 1 {
 		t.Fatalf("unexpected meta: %+v", got)
+	}
+}
+
+func TestRenewNowCertNotFound(t *testing.T) {
+	m := NewManager(Options{CertDir: t.TempDir()})
+	err := m.RenewNow(context.Background(), model.Config{}, "missing")
+	if !errors.Is(err, ErrCertNotFound) {
+		t.Errorf("RenewNow on a missing cert: err = %v, want ErrCertNotFound", err)
+	}
+}
+
+func TestRenewNowNotACME(t *testing.T) {
+	m := NewManager(Options{CertDir: t.TempDir()})
+	cfg := model.Config{Certificates: []model.Certificate{{
+		ObjectMeta: model.ObjectMeta{Name: "c"},
+		Type:       model.CertTypeCustom,
+		Domains:    []string{"app.example.com"},
+		Custom:     &model.CustomCertSpec{CertFile: "c.pem", KeyFile: "c-key.pem"},
+	}}}
+	err := m.RenewNow(context.Background(), cfg, "c")
+	if !errors.Is(err, ErrNotACME) {
+		t.Errorf("RenewNow on a custom cert: err = %v, want ErrNotACME", err)
+	}
+}
+
+func TestRenewNowInFlight(t *testing.T) {
+	m := NewManager(Options{CertDir: t.TempDir()})
+	cfg := model.Config{Certificates: []model.Certificate{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Type:       model.CertTypeACME,
+		Domains:    []string{"app.example.com"},
+		ACME:       &model.ACMESpec{Email: "a@b.c"},
+	}}}
+	// Simulate an order already in flight the same way EnsureAll would hold it.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	err := m.RenewNow(context.Background(), cfg, "app")
+	if !errors.Is(err, ErrRenewInFlight) {
+		t.Errorf("RenewNow while another order holds the lock: err = %v, want ErrRenewInFlight", err)
+	}
+}
+
+// TestRenewNowCooldown proves the second issue of R2-M1: certificates:write
+// alone must not be able to script repeated renews. A certificate whose last
+// attempt (successful or failed - recordAttempt does not distinguish) started
+// less than the cooldown ago refuses a new RenewNow with ErrRenewCooldown,
+// without ever taking m.mu - a caller refused by cooldown must not block a
+// concurrent EnsureAll pass or a renew of a different certificate.
+func TestRenewNowCooldown(t *testing.T) {
+	m := NewManager(Options{CertDir: t.TempDir()}) // default 1h cooldown
+	cfg := model.Config{Certificates: []model.Certificate{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Type:       model.CertTypeACME,
+		Domains:    []string{"app.example.com"},
+		ACME:       &model.ACMESpec{Email: "a@b.c"},
+	}}}
+	m.recordAttempt("app") // simulate a just-started attempt, as RenewNow/EnsureAll would leave it
+
+	err := m.RenewNow(context.Background(), cfg, "app")
+	if !errors.Is(err, ErrRenewCooldown) {
+		t.Fatalf("RenewNow within cooldown: err = %v, want ErrRenewCooldown", err)
+	}
+	if !strings.Contains(err.Error(), "retry in") {
+		t.Errorf("cooldown error = %q, want it to state the remaining wait", err.Error())
+	}
+	if !m.mu.TryLock() {
+		t.Error("RenewNow refused by cooldown left m.mu held")
+	} else {
+		m.mu.Unlock()
+	}
+}
+
+// TestRenewCooldownRemaining exercises the cooldown clock directly: zero
+// before any attempt, positive right after one, and back to zero once the
+// (short, test-only) cooldown elapses.
+func TestRenewCooldownRemaining(t *testing.T) {
+	m := NewManager(Options{CertDir: t.TempDir(), RenewCooldown: 20 * time.Millisecond})
+	if got := m.renewCooldownRemaining("app"); got != 0 {
+		t.Errorf("no attempt recorded: remaining = %v, want 0", got)
+	}
+	m.recordAttempt("app")
+	if got := m.renewCooldownRemaining("app"); got <= 0 {
+		t.Errorf("attempt just recorded: remaining = %v, want > 0", got)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := m.renewCooldownRemaining("app"); got != 0 {
+		t.Errorf("cooldown elapsed: remaining = %v, want 0", got)
 	}
 }

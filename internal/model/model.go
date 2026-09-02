@@ -38,6 +38,14 @@ type Config struct {
 	AccessLists       []AccessList       `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Middlewares       []Middleware       `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	APITokens         []APIToken         `json:"apiTokens,omitempty" yaml:"apiTokens,omitempty"`
+
+	// ConfigWarnings lists non-fatal issues found while this Config was
+	// assembled by Store.Load - currently, unknown YAML keys silently ignored
+	// by an older struct (see UnknownYAMLKeys and docs/operations/upgrading.md
+	// #rollback). Never persisted, and always empty on a Config built any other
+	// way: direct construction, withObject's merges, tests. Folded into
+	// Warnings() (see validate.go) rather than read directly.
+	ConfigWarnings []string `json:"-" yaml:"-"`
 }
 
 // Object is implemented by every first-class config type. Kind/Name give each

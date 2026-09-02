@@ -134,7 +134,8 @@ func TestSecurityHeadersOnAuthGateRefusal(t *testing.T) {
 	}
 	basic := model.AccessList{
 		ObjectMeta: model.ObjectMeta{Name: "basic"},
-		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: "$2a$04$abcdefghijklmnopqrstuv"}},
+		//lint:ignore SA1019 compat read of deprecated AccessList.BasicAuth in security-headers test fixture
+		BasicAuth: []model.BasicAuthUser{{Username: "admin", PasswordHash: "$2a$04$abcdefghijklmnopqrstuv"}},
 	}
 	cfg := model.Config{
 		AccessLists: []model.AccessList{denyAll, basic},

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +25,8 @@ func TestSecurityHeaders(t *testing.T) {
 		"X-Content-Type-Options": "nosniff",
 		"X-Frame-Options":        "DENY",
 		"Content-Security-Policy": "default-src 'self'; script-src 'self'; " +
-			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-			"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " +
+			"style-src 'self' 'unsafe-inline'; " +
+			"font-src 'self'; img-src 'self' data:; " +
 			"connect-src 'self'; object-src 'none'; base-uri 'none'; " +
 			"form-action 'self'; frame-ancestors 'none'",
 		"Referrer-Policy": "same-origin",
@@ -34,6 +35,11 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := rec.Header().Get(k); got != v {
 			t.Errorf("header %s = %q, want %q", k, got, v)
 		}
+	}
+	// The panel vendors its fonts, so the CSP must name no external origin at
+	// all: every host in it is a third party the admin browser would talk to.
+	if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "//") {
+		t.Errorf("CSP must have no external origins, got %q", csp)
 	}
 	// HSTS must NOT be set by the admin server: the data plane is the TLS edge and
 	// owns it; emitting it here duplicated the header on the proxied admin path.

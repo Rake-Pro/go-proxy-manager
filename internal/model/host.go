@@ -6,11 +6,31 @@ import (
 	"strings"
 )
 
+// UpstreamHostHeaderUpstream is the sentinel value of Upstream.HostHeader that
+// asks for the upstream's own "host:port" to be sent as the Host header instead
+// of the client's, for backends that key virtual hosts off their own address.
+const UpstreamHostHeaderUpstream = "upstream"
+
 // Upstream is a single backend target a proxy forwards to.
 type Upstream struct {
 	Scheme string `json:"scheme" yaml:"scheme"` // http | https
 	Host   string `json:"host" yaml:"host"`
 	Port   int    `json:"port" yaml:"port"`
+
+	// Path is an optional base path prefixed to every request forwarded to this
+	// upstream: with Path "/api", a client request for "/v1/x" reaches the
+	// backend as "/api/v1/x". It is applied last, after any location prefix
+	// strip and any rewrite middleware, so the composed path is what the backend
+	// sees and every gpm-side matcher still works on the client path. Empty
+	// (default) forwards the path unchanged. Must be absolute and free of
+	// dot-segments; it carries no query string.
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+
+	// HostHeader selects the Host header sent to this upstream:
+	//   ""         - keep the client's Host (the default, unchanged behaviour),
+	//   "upstream" - send the upstream's own "host:port",
+	//   any other  - send that literal hostname (optionally "name:port").
+	HostHeader string `json:"hostHeader,omitempty" yaml:"hostHeader,omitempty"`
 }
 
 func (u Upstream) validate() error {
@@ -22,6 +42,51 @@ func (u Upstream) validate() error {
 	}
 	if u.Port < 1 || u.Port > 65535 {
 		return fmt.Errorf("upstream port %d out of range", u.Port)
+	}
+	if err := validateUpstreamPath(u.Path); err != nil {
+		return err
+	}
+	return validateUpstreamHostHeader(u.HostHeader)
+}
+
+// validateUpstreamPath checks an Upstream.Path base path. It must be absolute,
+// carry no query or fragment, and contain no "." / ".." segment: a dot-segment
+// would let a base path climb back out of the namespace it is supposed to pin
+// the backend into, which is exactly the confusion normalizeRequestPath exists
+// to prevent on the client side.
+func validateUpstreamPath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("upstream path %q must be absolute (start with %q)", p, "/")
+	}
+	if strings.ContainsAny(p, "?#") {
+		return fmt.Errorf("upstream path %q must not contain a query string or fragment", p)
+	}
+	if strings.ContainsAny(p, `\;`) {
+		return fmt.Errorf("upstream path %q must not contain %q or %q", p, `\`, ";")
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("upstream path %q must not contain %q or %q segments", p, ".", "..")
+		}
+	}
+	return nil
+}
+
+// upstreamHostHeaderRe matches a hostname (one or more LDH labels) with an
+// optional ":port". Deliberately stricter than what a Host header may carry -
+// no userinfo, no path, no spaces - so a configured value cannot smuggle
+// anything else into the outbound request line.
+var upstreamHostHeaderRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$`)
+
+func validateUpstreamHostHeader(h string) error {
+	if h == "" || h == UpstreamHostHeaderUpstream {
+		return nil
+	}
+	if len(h) > 253 || !upstreamHostHeaderRe.MatchString(h) {
+		return fmt.Errorf("upstream hostHeader %q must be %q or a hostname (optionally %q)", h, UpstreamHostHeaderUpstream, "host:port")
 	}
 	return nil
 }
@@ -39,8 +104,14 @@ type HSTS struct {
 type TLSSettings struct {
 	CertificateRef string `json:"certificateRef,omitempty" yaml:"certificateRef,omitempty"`
 	ForceSSL       bool   `json:"forceSSL,omitempty" yaml:"forceSSL,omitempty"` // redirect http->https
-	HTTP2          bool   `json:"http2,omitempty" yaml:"http2,omitempty"`
-	HSTS           HSTS   `json:"hsts,omitempty" yaml:"hsts,omitempty"`
+	// Deprecated: no effect. HTTP/2 is always offered - the listener's ALPN is
+	// unconditionally "h2,http/1.1" (see internal/dataplane baseHostTLSConfig), so
+	// there is nothing per-host to switch. The field exists only because NPM has
+	// the checkbox and its importer round-trips it; it is still parsed so existing
+	// YAML keeps loading, and is dropped from the UI, the API docs and the config
+	// reference.
+	HTTP2 bool `json:"http2,omitempty" yaml:"http2,omitempty"`
+	HSTS  HSTS `json:"hsts,omitempty" yaml:"hsts,omitempty"`
 	// MinTLSVersion is the lowest TLS version this host accepts: "1.2" (default,
 	// empty) or "1.3". Set "1.3" only where every client supports it; the edge
 	// otherwise negotiates 1.2 or 1.3 per client with a 1.2 floor.
@@ -186,6 +257,24 @@ type Location struct {
 	UpstreamGroupRef string    `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
 	Middlewares      []string  `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists      []string  `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+
+	// StripPrefix removes this location's matched path prefix before the request
+	// is forwarded: with Path "/app", a request for "/app/foo" reaches the
+	// backend as "/foo" and "/app" itself as "/". It is applied INSIDE the whole
+	// security chain (after rate-limit, access list, bouncer, auth and guards, all
+	// of which still evaluate the original client path) and just before any
+	// rewrite middleware. False (default) forwards the path unchanged.
+	StripPrefix bool `json:"stripPrefix,omitempty" yaml:"stripPrefix,omitempty"`
+
+	// Auth gates this location through an identity provider WITHOUT a separate
+	// Middleware object. It has the same shape, the same validation and compiles
+	// to the same handler as a `type: auth` middleware; see ProxyHost.Auth.
+	Auth *AuthMiddleware `json:"auth,omitempty" yaml:"auth,omitempty"`
+
+	// RateLimit throttles this location without a separate Middleware object.
+	// Same shape, validation and handler as a `type: rate-limit` middleware;
+	// see ProxyHost.RateLimit.
+	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
 }
 
 // DefaultCompressionMinBytes is the smallest response body gzip bothers with
@@ -264,6 +353,12 @@ type ProxyHost struct {
 	Upstream         Upstream `json:"upstream,omitempty" yaml:"upstream,omitempty"`
 	UpstreamGroupRef string   `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
 
+	// Deprecated: no effect. WebSocket upgrades always work - the reverse proxy
+	// forwards the Upgrade handshake and both the compression and
+	// strip-headers layers special-case a 101 response. The field exists only
+	// because NPM has the checkbox and its importer round-trips it; it is still
+	// parsed so existing YAML keeps loading, and is dropped from the UI, the API
+	// docs and the config reference.
 	WebsocketsUpgrade bool `json:"websocketsUpgrade,omitempty" yaml:"websocketsUpgrade,omitempty"`
 
 	// RobotsNoIndex emits an "X-Robots-Tag: noindex, nofollow" response header so
@@ -287,6 +382,25 @@ type ProxyHost struct {
 	Middlewares []string   `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string   `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Locations   []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
+
+	// Auth gates every request to this host through an identity provider WITHOUT
+	// needing a separate Middleware object: it carries exactly the AuthMiddleware
+	// shape, is validated by the same rules and compiles to the same data-plane
+	// handler as a `type: auth` middleware. Middleware objects remain the REUSE
+	// path - one gate shared by a fleet of hosts - while this block is the direct
+	// one for a handful of hosts that each want their own.
+	//
+	// Order: the inline block runs at the auth chain position, BEFORE any auth
+	// middleware this host references. Setting both is allowed; every gate must
+	// pass. nil (default) means no inline gate.
+	Auth *AuthMiddleware `json:"auth,omitempty" yaml:"auth,omitempty"`
+
+	// RateLimit throttles this host with a per-client-IP token bucket WITHOUT a
+	// separate Middleware object. Same shape, same validation and the same
+	// handler as a `type: rate-limit` middleware, applied at the rate-limit chain
+	// position (outermost) before any rate-limit middleware this host references.
+	// nil (default) means no inline limit.
+	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
 
 	// Compression opts this host into gzip response compression. The zero value
 	// (Enabled: false) is today's behaviour: no compression.
@@ -329,6 +443,26 @@ type ProxyHost struct {
 	// the removal can reach). Names are matched case-insensitively and removed
 	// from what the upstream sent, never from headers gpm adds.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
+
+	// TrustedProxies REPLACES settings.trustedProxies for this host (it does not
+	// merge): the L7 proxies whose X-Forwarded-For gpm believes when it derives
+	// this host's client IP.
+	//
+	// It is a POINTER because absent and empty mean different things:
+	//
+	//	omitted / null      inherit settings.trustedProxies (the default)
+	//	[] (present, empty) trust NOBODY for this host, whatever the fleet
+	//	                    default is - X-Forwarded-For is not read at all and
+	//	                    the connection peer is the client
+	//
+	// It replaces rather than adds so a host CAN narrow the fleet default - the
+	// point of a per-host override is usually "this one host sits behind a
+	// different proxy" or "this host is reached directly, trust nothing".
+	//
+	// See Settings.TrustedProxies for what the derived client IP governs and how
+	// this tier differs from proxyProtocol.trustedCIDRs (L4) and
+	// forwardAuth.trustedProxies (identity headers).
+	TrustedProxies *[]string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
 }
 
 func (h ProxyHost) Kind() string { return "ProxyHost" }
@@ -367,6 +501,21 @@ func (h ProxyHost) Validate() error {
 	if err := validateStripResponseHeaders(h.StripResponseHeaders); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
+	if h.TrustedProxies != nil {
+		// A present-but-empty list is valid and means "trust nobody"; only the
+		// entries of a non-empty one are checked.
+		if err := ValidateTrustedProxies(fmt.Sprintf("proxy host %q: trustedProxies", h.Name), *h.TrustedProxies); err != nil {
+			return err
+		}
+	}
+	// Inline auth/rateLimit blocks are held to exactly the rules a middleware of
+	// the same kind is: one validator per kind, shared with Middleware.Validate.
+	if err := h.Auth.validateInline(fmt.Sprintf("proxy host %q", h.Name)); err != nil {
+		return err
+	}
+	if err := h.RateLimit.validateInline(fmt.Sprintf("proxy host %q", h.Name)); err != nil {
+		return err
+	}
 	for _, l := range h.Locations {
 		if l.Path == "" {
 			return fmt.Errorf("proxy host %q: location with empty path", h.Name)
@@ -378,6 +527,13 @@ func (h ProxyHost) Validate() error {
 			if err := l.Upstream.validate(); err != nil {
 				return fmt.Errorf("proxy host %q location %q: %w", h.Name, l.Path, err)
 			}
+		}
+		owner := fmt.Sprintf("proxy host %q location %q", h.Name, l.Path)
+		if err := l.Auth.validateInline(owner); err != nil {
+			return err
+		}
+		if err := l.RateLimit.validateInline(owner); err != nil {
+			return err
 		}
 	}
 	return nil

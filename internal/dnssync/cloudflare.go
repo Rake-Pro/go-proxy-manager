@@ -268,7 +268,8 @@ func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf mode
 //
 // ledgerRev identifies the config-repo revision the ledger was read at; it is
 // logged with every deletion so an operator can tell which recorded claim
-// authorised destroying a record (see the revert caveat in docs/configuration.md).
+// authorised destroying a record (see the revert caveat in
+// docs/how-to/dns-sync.md).
 func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf model.CloudflareDNSSync, owned map[string]model.DNSClaim, ledgerRev string) (BackendStatus, map[string]model.DNSClaim) {
 	st := BackendStatus{}
 	apex := strings.ToLower(strings.TrimSuffix(conf.ApexTarget, "."))
@@ -339,7 +340,7 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 	for _, name := range d.del {
 		// Loud on purpose, and stamped with the ledger revision that authorised it:
 		// a whole-tree revert restores the ledger with everything else, so a claim
-		// can outlive the record gpm created (see docs/configuration.md).
+		// can outlive the record gpm created (see docs/how-to/dns-sync.md).
 		log.Warn().Str("name", name).Str("target", state.present[name]).Str("ledgerRev", ledgerRev).
 			Msg("dnssync: deleting a cloudflare CNAME on the authority of the ownership ledger")
 		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
