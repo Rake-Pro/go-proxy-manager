@@ -1,6 +1,6 @@
 // Package ha holds the phase-1 high-availability role model: a two-node pair
 // designates exactly one writer (the leader) statically via the environment.
-// See docs/design/ha.md.
+// See design/ha.md.
 package ha
 
 import (

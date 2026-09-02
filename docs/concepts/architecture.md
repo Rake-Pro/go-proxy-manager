@@ -1,13 +1,13 @@
 # Architecture
 
-The two halves of the process - a control plane that owns configuration and
-a data plane that serves traffic - and the trust model between them.
+The two halves of the process (a control plane that owns configuration and
+a data plane that serves traffic) and the trust model between them.
 
 ## Two planes, one process
 
 go-proxy-manager is one process with two cooperating halves: a **control plane**
 that owns configuration and a **data plane** that serves traffic. They are
-decoupled by an in-memory snapshot - a config change recompiles the data plane
+decoupled by an in-memory snapshot: a config change recompiles the data plane
 atomically, so the running state never drifts from the stored config.
 
 ```
@@ -28,8 +28,8 @@ atomically, so the running state never drifts from the stored config.
 ## Control plane
 
 **Config store** (`internal/store`). Configuration lives as one YAML file per
-object under a git repository (default `/data/config`). Every mutation - from the
-API or the UI - merges the object into the in-memory config, validates the
+object under a git repository (default `/data/config`). Every mutation (from the
+API or the UI) merges the object into the in-memory config, validates the
 **entire graph** (cross-references must resolve; a delete that would dangle a
 reference is rejected), writes the file, and makes a git commit. There is no
 non-git mode; history is a first-class feature. Git is invoked with a fixed argv
@@ -53,7 +53,7 @@ embedded in the binary with `go:embed`. Both are served by the admin listener.
 Mutating requests require an admin session plus a double-submit CSRF token, behind
 a same-origin guard. Every admin response also carries hardening headers: a strict
 CSP (`script-src 'self'`, with `'unsafe-inline'` on `style-src` for the SPA's
-inline style attributes as its only carve-out and no external origin at all -
+inline style attributes as its only carve-out and no external origin at all:
 the web fonts are vendored into the binary) as an XSS backstop behind the UI's
 output escaping, `nosniff`,
 `X-Frame-Options: DENY`, and `Referrer-Policy: same-origin`. HSTS is deliberately
@@ -85,8 +85,8 @@ for any caller lacking `api-tokens:read`, so the exclusion cannot be walked
 around by asking for the whole tree. The role gate
 and the API-token scope gate are therefore the same mechanism and compose by
 intersection: a token presented on a `user` session can never exceed `*:read`,
-whatever scopes it holds. Writes are refused twice over - by HTTP method before
-the API mux is reached, and by scope per route - so "a viewer can never write"
+whatever scopes it holds. Writes are refused twice over (by HTTP method before
+the API mux is reached, and by scope per route), so "a viewer can never write"
 does not depend on every route carrying the right annotation. `GET /api/me`
 reports `readOnly` for the role so the SPA can render itself accordingly.
 
@@ -99,7 +99,7 @@ through to it, and matching is a constant-time digest compare across the enabled
 unexpired tokens. The token set is **cached in the authenticator and invalidated
 from the single config-reload path**, so a revoked token stops working
 immediately while an unauthenticated bearer flood cannot force a full config load
-(walk + parse + whole-graph validate) per request - a failed bearer auth never
+(walk + parse + whole-graph validate) per request: a failed bearer auth never
 reaches the login rate gate, so re-reading per request was an internet-facing DoS
 lever. A token principal is admin-role (satisfying the coarse gate) but
 scope-limited per route: `register()` wraps each resource route in a
@@ -108,7 +108,7 @@ management, **writing settings**, backup, restore, whole-config revert and the
 pprof endpoints. Scope enforcement is injected into the API as a closure, so the
 API package stays independent of `auth` for testing; the daemon's implementation
 **denies when no principal is on the request** (which the mounted route makes
-impossible - reaching it means broken wiring, and a broken authorization check
+impossible: reaching it means broken wiring, and a broken authorization check
 must fail closed). A nil closure means "allow" and exists only for the unwired
 case, i.e. tests. `/debug/pprof/` is gated the same way plus its own admin-scope
 check, because a heap dump and the process command line carry resolved backend
@@ -116,14 +116,14 @@ credentials in cleartext and every token principal is admin-*role*. Token
 principals are CSRF-exempt by
 construction: the double-submit token defends against *ambient* browser
 credentials, and a bearer header is never attached automatically. Last-use is
-tracked in memory only - persisting it would turn every API call into a git commit.
+tracked in memory only: persisting it would turn every API call into a git commit.
 
 **DNS sync** (`internal/dnssync`). An optional reconciler that publishes CNAMEs
 for the proxy hosts that opted in (`dns.lanDirect` / `dns.publicCname`), into a
 local Pi-hole v6 resolver and/or the authoritative Cloudflare zone. It follows the
-webhook dispatcher's shape - live settings read on every run, non-blocking
+webhook dispatcher's shape (live settings read on every run, non-blocking
 triggers, a hardened HTTP client that never follows redirects and refuses
-link-local destinations at connect time - with two additions. Reconcile is
+link-local destinations at connect time), with two additions. Reconcile is
 **full-state**: the desired set is recomputed from the whole config and compared
 against what the backend actually holds, so out-of-band drift is repaired in both
 directions. And deletion is **ledger-gated**: gpm removes only records it recorded
@@ -133,7 +133,7 @@ That ledger (`model.DNSLedger`, persisted as the singleton `config/dns-ledger.ya
 next to `settings.yaml`) is the subsystem's load-bearing piece, and it exists
 because the thing it replaced was not ownership at all. Pi-hole/dnsmasq CNAMEs
 carry no comment field, so the original backend inferred ownership from target
-equality - "this CNAME points at `apexTarget`, therefore gpm made it". On a shared
+equality: "this CNAME points at `apexTarget`, therefore gpm made it". On a shared
 apex that is simply false, and on 2026-08-01 it cost an operator 19 hand-written
 LAN CNAMEs: they enabled the backend for the first time, no host carried
 `dns.lanDirect` yet, so the desired set was empty, every one of those records
@@ -141,23 +141,23 @@ looked managed, and the first reconcile deleted the lot. Ownership is now record
 rather than inferred: `decide()` (in `dnssync.go`) is the single place the rules
 live, and both backends plus the dry-run planner call it, so a preview cannot
 disagree with the run it previews. Per desired name it **creates** what is absent,
-**adopts** what is already correct but not yet in the ledger (the migration path -
+**adopts** what is already correct but not yet in the ledger (the migration path:
 an empty ledger makes a first reconcile adopt-only, never a purge), **retargets** a
 record it *created* that still holds exactly what gpm wrote after `apexTarget`
 moved, and **skips and warns** on a name held by a record it does not own rather than
 shadowing or replacing it. It **deletes** only ledger entries the config no longer
-wants, and only while the record still matches what the ledger says gpm left there
-- re-pointed out of band, it is disowned instead. A name absent from the ledger is
+wants, and only while the record still matches what the ledger says gpm left there;
+re-pointed out of band, it is disowned instead. A name absent from the ledger is
 never in a delete list, whatever it points at.
 
 Each entry also records **how** the claim was acquired (`adopted`), because
 adoption is a claim on a record somebody else made and must not become permission
 to destroy it: an adopted entry the config no longer wants is **released** (dropped
 from the ledger, record left standing), never deleted. The same applies when
-`apexTarget` moves - a retarget is a delete plus a create, so an adopted record is
+`apexTarget` moves: a retarget is a delete plus a create, so an adopted record is
 released there too rather than replaced, which also stops the claim being quietly
-upgraded to "created" and arming a later deletion. Without that distinction
-adoption was a one-way trap - turn `dns.lanDirect` on for a hand-written name, turn
+upgraded to "created" and arming a later deletion. Without that distinction,
+adoption was a one-way trap: turn `dns.lanDirect` on for a hand-written name, turn
 it off again, and the next reconcile deleted the operator's record, which is the
 2026-08-01 incident deferred by one config edit. An entry with no recorded
 provenance (a ledger written before the field existed) reads as adopted, the only
@@ -172,7 +172,7 @@ resurrecting them. Cloudflare keeps its
 adoption and deletion (re-checked inside the delete call itself, so it cannot
 become an arbitrary-delete primitive); the ledger is authoritative, the comment is
 additive. The ledger lives in the config repo rather than beside it so it is
-committed, diffable and reverted with everything else - rolling the config back to
+committed, diffable and reverted with everything else: rolling the config back to
 before a host existed also rolls back gpm's claim on the record that host
 published. It is written by the reconciler alone (there is no CRUD route onto it,
 which would amount to an "authorise a DNS deletion" API), and an unchanged ledger
@@ -181,7 +181,7 @@ dry run, so enabling a backend is checkable before it is done. Runs are serialis
 a single-flight mutex. The event-triggered path *waits* for an in-flight run (that
 is what makes trigger coalescing correct: the follow-up must see the config that
 caused it), so a bulk restore costs one reconcile rather than one per object; the
-HTTP-triggered `ReconcileNow` instead refuses with `ErrReconcileInProgress` ->
+HTTP-triggered `ReconcileNow` instead refuses with `ErrReconcileInProgress` to
 **409**, so repeated manual runs cannot pile blocked goroutines up behind a slow
 backend. The Cloudflare client is separate
 from the ACME solver on purpose: record lifecycle management and certificate
@@ -200,15 +200,15 @@ some later reconcile heals it, and the counter is incremented as soon as the del
 lands so a destructive half-step can never be reported as a run that changed
 nothing. The Pi-hole session is closed on a context detached from the caller's,
 because logout is reached by `defer` and the commonest reason to reach it is the
-caller having gone away - cancelling the logout with it leaks one of Pi-hole's few
+caller having gone away: cancelling the logout with it leaks one of Pi-hole's few
 session slots per aborted run.
 
 **Access-list source sync** (`internal/accesssync`). An optional fetcher that
 keeps the remote IP feeds an `AccessList` declares (`sources`) current, so a rule
 can say "the addresses this monitoring provider publishes" instead of naming two
 hundred CIDRs the operator has to re-paste whenever the provider changes them. It
-follows the reconcilers above - live config read on every run, coalescing
-non-blocking triggers, a hardened client that never follows redirects - and, like
+follows the reconcilers above (live config read on every run, coalescing
+non-blocking triggers, a hardened client that never follows redirects), and, like
 DNS sync, persists its state in a committed singleton
 (`model.AccessListSourceLedger`, `config/access-list-sources.yaml`) rather than in
 memory, so a restart serves the last known set instead of an empty one and every
@@ -218,7 +218,7 @@ The design constraint is that a **remote body decides who reaches a host**, so
 every step fails closed and refuses whole rather than accepting part. Its SSRF
 guard is strictly tighter than `dnssync`'s: `https` only, and the dialer refuses
 loopback, link-local, RFC1918/ULA and multicast destinations post-DNS at connect
-time - `dnssync` deliberately permits private targets (a LAN Pi-hole is the
+time; `dnssync` deliberately permits private targets (a LAN Pi-hole is the
 point), while nothing legitimate here is internal. The body is capped at 1 MiB,
 and a non-200, an empty result, a result over `maxEntries`, or a **single**
 unparseable line refuses the fetch and keeps the previously fetched set; a feed
@@ -232,16 +232,16 @@ advancing `fetchedAt` on a no-op would commit a timestamp-only diff every
 interval forever, so the last attempt is kept in memory instead and the interval
 gate still holds across a restart's one re-fetch. And a source with no ledger
 entry resolves to the **empty set** rather than being dropped, which keeps the
-list's IP dimension intact - dropping the rule would leave a default-deny list
+list's IP dimension intact: dropping the rule would leave a default-deny list
 with nothing to match on, which is exactly the shape that serves open.
 
 **Kubernetes Ingress discovery** (`internal/k8s`). An optional, read-only poll
 loop that turns annotated cluster `Ingress` objects into gpm-managed proxy hosts,
-which then feed the DNS reconciler above - one DNS code path, not two. The client
+which then feed the DNS reconciler above: one DNS code path, not two. The client
 is plain `net/http` + `encoding/json` against `/apis/networking.k8s.io/v1`
 (no `client-go`: its transitive tree would dwarf this project's entire direct
 dependency set), with in-cluster *or* explicit `apiURL`/`tokenFile`/`caFile`
-config - the latter is the real deployment, because gpm runs on the edge host
+config; the latter is the real deployment, because gpm runs on the edge host
 rather than as a pod. The bearer token is re-read from disk on a TTL, and dropped
 immediately on a `401`, so a rotated projected ServiceAccount token keeps working
 unattended. Transport hardening matches `dnssync`: TLS verified against the
@@ -254,7 +254,7 @@ containers labelled `gpm.rake.pro/enabled: "true"` into gpm-managed proxy hosts,
 which feed the same DNS reconciler. The client is plain `net/http` +
 `encoding/json` against the Docker Engine API over a unix socket (or a
 `tcp://`/`https://` endpoint, which is how a read-only socket proxy is used), and
-issues exactly three GETs - `/version`, `/containers/json` and `/events` - with
+issues exactly three GETs (`/version`, `/containers/json` and `/events`) with
 no code path that can write to the Engine. Reconciles are driven by the event
 stream with a 2s debounce and a poll interval as the fallback, so correctness
 never depends on the stream.
@@ -263,8 +263,8 @@ Both reconcilers share one planner (`internal/discovery`): full-state desired
 set, ownership by name **and** domain, freeze on an unreadable source, fail
 closed on an unresolvable profile, operator-owned `disabled`/`maintenance`
 carried forward, one commit per run. They are told apart by the **value** of the
-`<prefix>/managed-by` label they stamp - `ingress-discovery` versus
-`docker-discovery` - so the two can run on one instance and neither can update
+`<prefix>/managed-by` label they stamp (`ingress-discovery` versus
+`docker-discovery`), so the two can run on one instance and neither can update
 or delete the other's hosts. What stays per-source is only the listing and the
 derive: an `Ingress` contributes hostnames from `spec.rules`, a container
 contributes them from one comma-separated label plus a port and scheme within
@@ -279,12 +279,12 @@ loaded settings. Parity matters because the alternative is silent: a service
 moved into discovery that loses its no-index header or its upstream timeout keeps
 serving, just differently, and the workaround is a second mechanism (a `headers`
 middleware) for something the model already expresses. The one field a derived
-host deliberately cannot carry is `locations` - path routing belongs to the
+host deliberately cannot carry is `locations`: path routing belongs to the
 cluster ingress controller, which does it from the same `Ingress` gpm read.
 
-Three properties define the reconciler. It is **full-state** - the desired set is
+Three properties define the reconciler. It is **full-state**: the desired set is
 recomputed from a complete list on every poll and compared with the config, so a
-missed event is impossible by construction. It is **ownership-gated** - only
+missed event is impossible by construction. It is **ownership-gated**: only
 proxy hosts labelled `gpm.rake.pro/managed-by: ingress-discovery` are ever
 written or deleted, and a collision with a hand-written host is skipped with a
 warning, exactly as the DNS backends treat a record they do not own. Ownership is
@@ -292,10 +292,10 @@ gated on the **domain** as well as the name, because the router keys its
 per-domain maps by hostname and fills them in config load order: without it a
 derived host whose name merely sorts after the operator's could take over
 `sso.example.com` and serve it with the template's chain instead of the
-operator's. The same rule is enforced one layer down - `Config.Validate` rejects
-any two *enabled* hosts claiming one domain, whatever wrote them - and re-checked
+operator's. The same rule is enforced one layer down: `Config.Validate` rejects
+any two *enabled* hosts claiming one domain, whatever wrote them, and re-checked
 under the store lock at write time, since the plan is computed before a
-multi-second network list. And it **freezes on error** - a managed host is deleted
+multi-second network list. And it **freezes on error**: a managed host is deleted
 only after a complete, successful, fully-paginated list; any transport error,
 non-`200`, decode failure, mid-pagination failure, over-cap body, exceeded
 per-reconcile deadline, or a `200` whose body is not a `kind: IngressList` aborts
@@ -303,8 +303,8 @@ before any write, and the client never returns a partial list with a nil error,
 so "empty" and "failed" are different return shapes rather than different values
 of one. Everything security-relevant on a
 derived host (upstream, certificate, middleware, access lists) comes from an
-operator-authored chain - the default `template`, or one of the named
-`profiles` an Ingress may **select by name** with `gpm.rake.pro/profile`. The
+operator-authored chain (the default `template`, or one of the named
+`profiles` an Ingress may **select by name** with `gpm.rake.pro/profile`). The
 Ingress contributes only strictly-validated, suffix-restricted hostnames, two DNS
 booleans, and that one name. Profiles exist because a real fleet is
 heterogeneous (public-and-rate-limited, SSO-and-VPN, login-middleware) and a
@@ -320,7 +320,7 @@ to the right workload. A whole reconcile lands as **one commit**
 (`Store.ApplyBatch`), and a no-drift run writes nothing at all. `ApplyBatch` is
 transactional in both directions: it takes an ownership guard it re-evaluates
 against freshly loaded state under the store lock, and it snapshots every file it
-touches so a failed write, removal or commit rolls the working tree back - a tree
+touches so a failed write, removal or commit rolls the working tree back: a tree
 left mutated but uncommitted would be read as live config by the next load and
 swept into the next unrelated commit.
 
@@ -337,17 +337,17 @@ record through the referenced DNS provider and waits for propagation against a
 public resolver before accepting; it is the only way to prove a wildcard. Six
 solvers sit behind one `DNSSolver` interface:
 
-- **Cloudflare, DigitalOcean, Hetzner, deSEC** - plain REST clients, one API
+- **Cloudflare, DigitalOcean, Hetzner, deSEC**: plain REST clients, one API
   token each.
-- **`rfc2136`** - an RFC 2136 dynamic UPDATE signed with a TSIG key (RFC 8945),
+- **`rfc2136`**: an RFC 2136 dynamic UPDATE signed with a TSIG key (RFC 8945),
   packed onto the wire here rather than pulling in a DNS library; the same code
   walks up the name with SOA queries when no zone is configured.
-- **`acme-dns`** - one HTTP POST to a joohoi/acme-dns account, reached through a
+- **`acme-dns`**: one HTTP POST to a joohoi/acme-dns account, reached through a
   CNAME the operator places in the real zone once, so gpm never holds a
   credential with authority over that zone. **HTTP-01** needs no provider: the manager parks the key
 authorization in an in-memory token store (`HTTP01Store`, entries expiring with
 the order) which the data plane reads through the one-method
-`dataplane.ACMEChallengeStore` interface - the two packages stay decoupled, the
+`dataplane.ACMEChallengeStore` interface: the two packages stay decoupled, the
 manager owns the map, the listener only reads it. The plaintext `:80` handler
 answers `/.well-known/acme-challenge/<token>` for an in-flight token before host
 routing, the force-SSL redirect, and auth run, so a name that has no host yet (or
@@ -355,7 +355,7 @@ that redirects everything to https) can still be validated; an unknown token
 falls through to normal routing so a proxied upstream's own ACME client keeps
 working. Only the HA leader runs the manager, so only it holds tokens.
 
-**HA role gate** (`internal/ha`, phase 1 of [design/ha.md](../design/ha.md)). A
+**HA role gate** (`internal/ha`, phase 1 of [design/ha.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/ha.md)). A
 two-node pair designates its single writer statically: `GPM_HA_ROLE=leader`
 (default) runs the ACME and Ingress-discovery loops and accepts admin/API
 writes; `GPM_HA_ROLE=follower` disables both loops and wraps the API mux in a
@@ -366,22 +366,22 @@ as any other change, but only when HEAD actually moved; a pull that is not a
 clean fast-forward is refused and logged, never merged or reset, so the two repos
 cannot diverge. Independently of the role, every instance re-reads the persisted
 SSO revocation watermark (`<cert-dir>/sso_not_before`) on a ticker and advances
-it monotonically, so a revoke - or any out-of-band edit - takes effect within one
+it monotonically, so a revoke (or any out-of-band edit) takes effect within one
 interval rather than at the next restart. Traffic-side failover is out of
 process (keepalived VIP, see [High availability (two-node active/standby)](../operations/high-availability.md)).
 
 **Metrics** (`internal/metrics`). An optional Prometheus exposition at
 `GET /metrics` on the admin listener (`-metrics` / `GPM_METRICS=1`; `404` when
 off), gated by admin role plus a dedicated `metrics:read` token scope. It is a
-small in-tree implementation of the exposition format - integer counters and
-gauges, fixed-bucket histograms, a text writer - rather than
+small in-tree implementation of the exposition format (integer counters and
+gauges, fixed-bucket histograms, a text writer) rather than
 `prometheus/client_golang`, whose transitive tree would have several times
 outweighed this project's entire direct dependency set for one read-only route.
 
 Two properties matter more than the metric list. **Cardinality is bounded by
 config, not by clients**: every `host` label is the operator's
 `ProxyHost`/`StreamHost` *name*, resolved once per request in the observe
-wrapper, never the client's `Host` header - a header is attacker-chosen, so
+wrapper, never the client's `Host` header: a header is attacker-chosen, so
 labelling by it would hand any client an unbounded series generator pointed at
 this process's memory. A request matching no host collapses onto one `-` label,
 and each metric independently caps its series count and folds the rest into a
@@ -391,8 +391,8 @@ rule. And **the data plane does not know about metrics**: it declares a
 `internal/metrics` happens to satisfy structurally, exactly as the ACME manager
 reaches the plaintext listener through `ACMEChallengeStore`. With no hook
 installed (and every other observability toggle off) each listener's handler
-switch serves the plain dispatch chain - the observe wrapper is built but never
-on the hot path - so an instance without `-metrics` pays one atomic pointer
+switch serves the plain dispatch chain (the observe wrapper is built but never
+on the hot path), so an instance without `-metrics` pays one atomic pointer
 load per request and nothing else. That switch is also what makes access
 logging a live toggle: `PUT /api/logs` (admin scope) swaps the observed chain
 in or out at runtime with no listener restart, in-flight requests finishing on
@@ -408,20 +408,20 @@ path assumes an operator who already has a CA; `POST /api/client-cas/{name}/gene
 removes that assumption, producing a self-signed RSA-4096 CA (`CA:TRUE, pathlen:0`,
 `certSign|cRLSign`, random serial), writing its private key into the certificate
 store at `client-cas/{name}.key`, and saving the ClientCA object that points at
-it - so a working mTLS setup needs no external tooling and no hand-placed file.
+it, so a working mTLS setup needs no external tooling and no hand-placed file.
 The key size is doubled relative to an issued leaf because this key is dated for
 a decade and cannot be rotated without re-provisioning every device that trusts
 it; `pathlen:0` keeps it from ever minting a subordinate CA.
 
 Three properties shape the implementation. **Everything is checked before
-anything is generated** - the object name, the request, the confinement of the
+anything is generated**: the object name, the request, the confinement of the
 derived key path, the absence of a config object, and what any existing key file
-at the derived path means - so a refusal leaves nothing on disk to roll back (and
+at the derived path means, so a refusal leaves nothing on disk to roll back (and
 RSA-4096 keygen is never spent on a request that was always going to fail). **A
 key file in use is never overwritten**: it is placed with a
 temp-file-plus-`os.Link`, the one primitive that is both atomic and
 `ErrExist`-on-collision, because that file may still be the signing key behind
-certificates already on devices - `os.Rename` would clobber it silently. The
+certificates already on devices: `os.Rename` would clobber it silently. The
 "in use" test is ownership, not mere existence: the handler asks whether any
 ClientCA names that exact `caKeyFile`, refuses with the referrer's name if one
 does, and otherwise reclaims the file, because an unreferenced key can only be
@@ -432,7 +432,7 @@ interrupted generate. And **unlike issuance this is a config mutation**: the
 object goes through the ordinary `Store.Save`, so it is graph-validated,
 committed and in history exactly like a UI `PUT`, and the response is the created
 object. If that save fails after the key landed, the handler removes the key it
-just wrote - otherwise the no-overwrite rule would permanently block retrying the
+just wrote, otherwise the no-overwrite rule would permanently block retrying the
 same name, leaving an operator stuck with no fix available from the UI. Deleting
 a ClientCA deliberately does *not* delete its key file, matching how a deleted
 Certificate leaves its ACME artifacts: a delete is revertible from git, and a
@@ -444,7 +444,7 @@ an optional signing key (`caKeyFile`, confined to the cert store exactly like
 and becomes an issuing CA: `POST /api/client-cas/{name}/issue` mints a client
 certificate signed by it and returns a password-protected PKCS#12 bundle. The key
 is resolved by `model.ClientCA.SigningKey`, which matches it against the
-certificates in `caPEM` - the one it belongs to *is* the issuer, so a bundle
+certificates in `caPEM`: the one it belongs to *is* the issuer, so a bundle
 holding an intermediate and its root resolves to whichever the operator actually
 holds the key for. A key that matches nothing, or matches a non-CA certificate, is
 refused; an inline key is checked at config validation, a `caKeyFile` the first
@@ -452,7 +452,7 @@ time it is used, since only the data plane knows the cert store path.
 
 Three properties define the subsystem. **It is stateless and write-free**: the
 generated private key is never written to the config store, the cert store, or a
-log line - it exists only in the response body, so the endpoint creates no config
+log line; it exists only in the response body, so the endpoint creates no config
 revision, no history entry and no lifecycle event, and a lost bundle means
 re-issuing rather than recovering. Issuance is logged with the CA name, subject,
 serial and validity window and nothing else. **The crypto choices are
@@ -470,13 +470,13 @@ certificate stores them as `IA5String` and anything else fails inside ASN.1
 marshalling rather than at the door. **It is gated as a mutation** even though it mutates nothing: the same
 `client-cas:write` scope, admin session, CSRF and same-origin guard that editing
 the CA takes, because minting a credential from the CA's key is at least as
-privileged - and the HA follower's method-based read-only gate refuses it like any
+privileged, and the HA follower's method-based read-only gate refuses it like any
 other POST.
 
 **Issuance records** (`internal/clientcert/records.go`). "Stateless" above is
 about *secrets*: gpm keeps no key, no certificate and no bundle. It does keep a
-record of each issuance - CA, common name, SANs, serial, validity window, issued-at
-- because an operator who cannot see what a CA issued cannot see what is about to
+record of each issuance (CA, common name, SANs, serial, validity window, issued-at)
+because an operator who cannot see what a CA issued cannot see what is about to
 expire. The records are **runtime state, not configuration**: they describe what
 gpm did rather than what the operator declared, so they live in the certificate
 store (`<certDir>/client-certs/<ca>.json`) and never in the git-backed config repo.
@@ -492,7 +492,7 @@ From the records the API derives a per-certificate `ok` / `expiring` / `expired`
 status against the CA's `expiryWarningDays` (default 30), which drives the UI's
 pre-expiry banner, and `POST
 /api/client-cas/{name}/certificates/{serial}/renew` reissues the recorded identity
-- same subject and SANs, taken from the record rather than the request - with a new
+(same subject and SANs, taken from the record rather than the request) with a new
 key and serial, marking the predecessor superseded in the same atomic write. That
 write refuses rather than no-ops when its target is absent, and the handler refuses
 with `409` when the target is already superseded: either would otherwise leave two
@@ -502,7 +502,7 @@ to prevent.
 Two properties are load-bearing here and are stated in the UI as well as the docs.
 **Renewal is not automatic and cannot be**: unlike an ACME server certificate,
 which gpm both installs and serves, a client certificate lives in a keychain on
-someone's device, so every renewal ends in a human importing a `.p12` - the banner
+someone's device, so every renewal ends in a human importing a `.p12`; the banner
 warns *before* expiry precisely because the fix has a human in it. And **renewing
 does not revoke**: the superseded certificate stays valid until its own `notAfter`
 on every device that has not re-imported, which is why superseded records stay
@@ -520,26 +520,26 @@ is stripped and a wildcard match is tried; an unknown SNI is an error (there is 
 default certificate to leak). Custom certs load from the cert store; ACME certs
 load from their issued artifacts, and an unissued ACME cert is skipped until the
 manager produces it. Both listeners bind a bare `:port` by default, which in Go is
-the IPv6 wildcard with v4-mapped addresses enabled - one socket serving both
+the IPv6 wildcard with v4-mapped addresses enabled: one socket serving both
 families, so an inbound IPv6 client is routed, gated and logged as its own v6
 address with no second listener and no toggle. **Stream hosts** add their own raw
-TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload -
+TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload:
 ports added are opened, ports removed are closed, and a changed route table is
 swapped without dropping the port.
 
 **Inbound PROXY protocol** (`internal/dataplane/proxyproto.go`). When
 `settings.proxyProtocol` is on, every data-plane listener (HTTP, HTTPS, and each
 TCP stream listener) is wrapped so an accepted connection parses a HAProxy PROXY
-header - v1 text and v2 binary, hand-written against the spec with no dependency,
-v2 TLVs consumed and ignored - and the asserted source replaces the connection's
+header (v1 text and v2 binary, hand-written against the spec with no dependency,
+v2 TLVs consumed and ignored) and the asserted source replaces the connection's
 `RemoteAddr`. That is deliberately the *only* integration point: it is the L4
 tier of the trust model below, and the single client-IP derivation
 (`clientip.go`) starts from `RemoteAddr`, so every IP-based control follows with
 no per-feature wiring. The
 header is an unauthenticated claim, so it is parsed **only** when the real TCP
 peer is inside `trustedCIDRs`; from any other peer the bytes are left untouched as
-payload and the peer address stands (warned once per peer). Parsing is lazy - on
-the first `Read`/`RemoteAddr`, not in `Accept` - so one stalled sender cannot hold
+payload and the peer address stands (warned once per peer). Parsing is lazy (on
+the first `Read`/`RemoteAddr`, not in `Accept`), so one stalled sender cannot hold
 up the accept loop; a malformed header closes the connection with a sticky error,
 and a stalled one is cut at the configured deadline. The compiled config is read
 from an atomic pointer per connection, so a settings change applies without
@@ -550,7 +550,7 @@ rebinding a listener.
 forwarder peeks the ClientHello with a hand-written, bounded, stdlib-only parser
 (record header -> handshake message, reassembled across records -> the
 `server_name` extension), routes on the SNI, and replays the peeked bytes
-verbatim to the backend - gpm never decrypts and never holds the key. In
+verbatim to the backend: gpm never decrypts and never holds the key. In
 `terminate`, the same peeked bytes are replayed into `crypto/tls` with the
 referenced certificate and plaintext is forwarded on. Routing is compiled per
 listen port into an exact map plus single-label wildcard suffixes; a name no host
@@ -560,7 +560,7 @@ SNI-routed, which config validation enforces so routing can never depend on
 compile order. Independently, a stream host may reference access lists: only the
 IP/CIDR and geo dimensions are evaluated (basic auth has no challenge/response on
 a raw stream and is rejected at validation), and the gate runs **before the
-backend dial** - for UDP, once per session - so a denied client never causes an
+backend dial** (for UDP, once per session), so a denied client never causes an
 upstream socket to exist.
 
 **Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
@@ -576,24 +576,24 @@ is always at least as restrictive.
 **Upstream groups** (`internal/dataplane/upstreamgroup.go`). A proxy host (or a
 single location) may reference an `UpstreamGroup` instead of one upstream: an
 ordered backend list with per-group health state. A health manager living on the
-data-plane server (across reloads) runs one prober per group - TCP connect or
-HTTP GET, with rise/fall hysteresis - and live-traffic connect failures feed the
+data-plane server (across reloads) runs one prober per group (TCP connect or
+HTTP GET, with rise/fall hysteresis), and live-traffic connect failures feed the
 same counters. Reloads are serialized and staged: a new config's group state is
 built first, the router compiles against it, and only a successful build commits
 (an unchanged group keeps its probers and up/down state; a rejected config
 disturbs nothing). Per request, a failover-aware transport orders the healthy
-upstreams by the group's policy - `failover` (list order), `round-robin`
+upstreams by the group's policy (`failover` (list order), `round-robin`
 (smooth weighted), `least-connections` (in-flight/weight), `ip-hash`
-(rendezvous) - optionally honors a signed sticky-session cookie with a
+(rendezvous)), optionally honors a signed sticky-session cookie with a
 server-enforced TTL, and retries the next candidate **only on connect-phase
-errors** (dial/TLS - the request was never transmitted, so non-idempotent
+errors** (dial/TLS: the request was never transmitted, so non-idempotent
 requests cannot double-apply; request bodies up to 1 MiB are buffered to make
 the replay possible). With every upstream down the group fails open and attempts
 them anyway. Live state is exposed at `GET /api/upstream-health`.
 
 **Maintenance mode** (`internal/dataplane/maintenance.go`) sits in front of that
 chain, not inside it. A host in maintenance is answered at the router dispatch
-layer - before path normalization, before the identity strip, before any gate -
+layer (before path normalization, before the identity strip, before any gate)
 so a downtime window costs no auth subrequest and no upstream dial. The switch
 has two halves that meet in one predicate: the per-host `maintenance` flag is
 compiled into its `hostHandler` like any other host field, while the fleet-wide
@@ -615,13 +615,13 @@ The flag is deliberately stored on the `ProxyHost` (and in `Settings`) rather
 than in runtime-only state: a window has to survive a restart, and git-backed
 config is where every other durable host property already lives. That puts it in
 the discovery reconcilers' blast radius, which derive the whole object on every
-run - so the shared planner carries `maintenance` forward from the stored host
+run, so the shared planner carries `maintenance` forward from the stored host
 exactly as it does `disabled`. Without that the next poll would quietly put a host back into
 service while someone was still working on its backend.
 
 **Refusal rendering** (`internal/dataplane/errorpages.go`). Every tier that
-refuses a request writes its response through one seam, `serveErrorPage` - and,
-for the auth tier, the `refuse` wrapper over it - rather than calling
+refuses a request writes its response through one seam, `serveErrorPage` (and,
+for the auth tier, the `refuse` wrapper over it) rather than calling
 `http.Error` directly. The seam resolves the host's own `errorPages` override
 first, then the settings-level pages, and renders the matching (or `default`)
 `html/template`; with nothing configured it calls the tier's own writer, so an
@@ -636,20 +636,20 @@ a `401` from forward-auth, a `403` from a client certificate, an
 `auth-request` `502`, an OIDC callback failure and the `503` a middleware that
 would not compile serves are all as brandable as an access-list denial. Two
 categories stay out on purpose. A **redirect into a sign-in flow** is not an
-error - the OIDC `302` to the IdP and the `auth-request` `302` into the outpost
+error: the OIDC `302` to the IdP and the `auth-request` `302` into the outpost
 carry the user forward, and replacing them with a page would break login. And a
 response **proxied from the identity provider** is the IdP's to own: in
 `auth-request` mode gpm passes the outpost's sign-in, callback and sign-out
 endpoints through verbatim, so the IdP's response always wins there. Error
 pages apply exactly where gpm generates the body itself. Identity-header
-stripping is unaffected - it happens on the refusal path as before, and the
+stripping is unaffected: it happens on the refusal path as before, and the
 render reads only the same template context an access-list denial gets
 (status, status text, host name, request id), so a refusal cannot leak request
 data that tier was not already exposing.
 
 **Security response headers** (`internal/dataplane/securityheaders.go`). A
 configurable header set (`settings.securityHeaders`, merged per key with a
-`ProxyHost`'s own override) is injected at the router's dispatch layer -
+`ProxyHost`'s own override) is injected at the router's dispatch layer:
 `serveHTTPS`/`serveHTTP` wrap the `ResponseWriter` before dispatching, the same
 place and mechanism that emits per-host HSTS. This is deliberately **outside**
 the middleware chain, and therefore outside the auth gate: a headers middleware
@@ -670,8 +670,8 @@ Each header carries a **scope** (`all` / `generated-only` / `proxied-only`) so
 an operator can place a header that is safe on gpm's own pages but breaks a
 backed app (`Content-Security-Policy: frame-ancestors 'none'`, `Permissions-Policy`)
 on gpm-generated responses **only**. The compiled set is split into two subsets
-at build time - `generated` (scope `all` + `generated-only`) and `proxied`
-(scope `all` + `proxied-only`) - and the dispatch writer picks the subset at
+at build time: `generated` (scope `all` + `generated-only`) and `proxied`
+(scope `all` + `proxied-only`); the dispatch writer picks the subset at
 inject time from a single bit: is this response proxied? The writer defaults to
 the generated subset; the reverse proxy flips it to proxied via `ModifyResponse`,
 which the stdlib runs **only** when an upstream actually answered. The
@@ -679,21 +679,21 @@ upstream-unreachable `502`/`504` is written by the proxy's `ErrorHandler`, not
 `ModifyResponse`, so it correctly stays gpm-generated. The bit reaches
 `ModifyResponse` through the request context: `serveHTTP(S)` stashes the dispatch
 writer on the context after wrapping, and `ModifyResponse` reads it back off the
-(context-preserving) outbound request and sets the flag - so the choice does not
+(context-preserving) outbound request and sets the flag, so the choice does not
 depend on the wrapper's `Unwrap` chain surviving the middleware stack.
 Per-host merges happen on the scoped rule map before the split, so a host
 override replaces a header's value **and** its scope. Both injections happen at the FINAL `WriteHeader` (`>= 200`): an
 upstream `1xx` interim response (`103 Early Hints`, or `100 Continue`) is written
 and then has its header map cleared by `httputil.ReverseProxy`'s `Got1xxResponse`
-hook, so injecting on the interim status would seed headers the clear deletes -
+hook, so injecting on the interim status would seed headers the clear deletes;
 the writer skips `1xx` and injects only on the final status. The per-host HSTS
 and `X-Robots-Tag` emission was moved onto this same writer (previously `Set`
-into the map before proxying, where the `1xx` clear dropped them) - HSTS with
+into the map before proxying, where the `1xx` clear dropped them): HSTS with
 override semantics, `X-Robots-Tag` set-if-absent so an explicit headers-middleware
 value still wins. The one path the dispatch writer does not reach is a
 `101` WebSocket upgrade: the stdlib hijacks the connection and writes the `101`
 without a `WriteHeader` the writer sees, so these headers (and HSTS/robots) are
-absent there - immaterial, since a `wss` upgrade rides an already-loaded `https`
+absent there; immaterial, since a `wss` upgrade rides an already-loaded `https`
 document that carried HSTS and robots on a socket is meaningless.
 
 **Response-header stripping** (`internal/dataplane/stripheaders.go`) is the
@@ -703,11 +703,11 @@ sends (`Server`, `X-Powered-By`, `X-AspNet-Version`, ...). Names are canonicaliz
 to MIME header form at compile time, making the match case-insensitive.
 
 The deletion happens in the reverse proxy's `ModifyResponse` hook, on
-`resp.Header` - the upstream's own header map, before `httputil.ReverseProxy`
+`resp.Header` (the upstream's own header map), before `httputil.ReverseProxy`
 copies it onto the client response. That placement is the whole design, and it is
 deliberately **not** the dispatch writer the injection half uses: by the time the
 writer runs there is ONE merged header map, so a name in the strip list would
-also delete headers **gpm itself** put there earlier - forward-auth's
+also delete headers **gpm itself** put there earlier: forward-auth's
 `copySetCookie` refresh of the IdP session cookie, the compression handler's
 `Content-Encoding`/`Vary`, a headers middleware's `setResponse` value, an
 injected security header. Stripping at `ModifyResponse` can only ever reach what
@@ -717,7 +717,7 @@ rather than an ordering convention.
 It also covers the one response the dispatch writer can never see: a `101`. The
 stdlib runs `modifyResponse` for a switching-protocols response **before**
 `handleUpgradeResponse` copies the headers to the hijacked connection, while the
-writer is bypassed entirely by the hijack - so a WebSocket handshake would
+writer is bypassed entirely by the hijack, so a WebSocket handshake would
 otherwise leak the exact `Server`/`X-Powered-By` fingerprint every other response
 hides. Hop-by-hop names are refused at validation, so `Connection`/`Upgrade`
 survive and the handshake stays intact, and the `Sec-WebSocket-*` trio is refused
@@ -727,14 +727,14 @@ it through `Got1xxResponse` and then clears the header map, so its headers are
 neither stripped nor carried into the final response.
 
 gpm-generated responses have no upstream response at all, so nothing runs on
-them - including the `ErrorHandler`'s `502`/`504`, which never reaches
+them, including the `ErrorHandler`'s `502`/`504`, which never reaches
 `ModifyResponse`. Validation also refuses the headers that carry a response's own
 semantics (`Content-Type`, `Content-Length`, `Content-Encoding`, `Vary`,
 `Location`) on top of the hop-by-hop set; `Content-Type` most of all, since
 removing it hands the body to `DetectContentType` and can re-label a JSON
 response as `text/html`. The compile step drops the same names again as defence
 in depth. The list merges as a **union** rather than per-key like
-`securityHeaders`, because a list has no per-name value for a host to override -
+`securityHeaders`, because a list has no per-name value for a host to override,
 so the only alternative would let a host silently re-expose a header the fleet
 strips. This is also not the headers middleware's `removeResponse`: that runs
 inside a host's chain, applies only where the middleware is attached, and is
@@ -751,14 +751,14 @@ would silently downgrade the operator's decision); the `http` provider is a
 generic `2xx`=allow / `403`=deny endpoint any custom bouncer can implement.
 Optional `stream` mode pulls the whole decision set once and then deltas on the
 cache interval, so the hot path is a local IP/CIDR lookup with no per-request
-LAPI call - refreshes run in the background off a request that finds the set
+LAPI call: refreshes run in the background off a request that finds the set
 stale (rather than a per-chain ticker, which would leak one poller per config
 reload), and a failed refresh keeps serving the previous set. Verdicts are
 cached per client IP with a bounded LRU; a verdict derived from an *error* is
 capped at 5s so an outage cannot pin a long TTL of guesses. `onError` decides
 what an unanswerable lookup means and defaults to **fail-open**: an unreachable
 threat feed must not take the site down, which is the opposite of the right
-default for auth. It sits between the access list and auth deliberately - an
+default for auth. It sits between the access list and auth deliberately: an
 explicit operator allow-list (`allowFrom`, or the access list itself) still wins
 outright over an external feed, and a banned IP never reaches the IdP. Denials
 go through the shared per-host denial counter.
@@ -770,7 +770,7 @@ mismatch is logged at `error`. `Config.Validate` already rejects dangling
 references and is the primary guard, but it must not be the *only* thing between
 a typo and an unauthenticated route: skipping an unresolvable access list would
 turn a restricted host into an open one, which is the opposite of what the
-reference was written for. The blast radius is deliberately one host - a config
+reference was written for. The blast radius is deliberately one host: a config
 that cannot pass validation anyway must not take unrelated hosts down as a side
 effect of this defence in depth.
 
@@ -783,10 +783,10 @@ effect of this defence in depth.
   `X-Real-IP` sent upstream. It is derived once per request at router dispatch
   and carried on the request context, so no two tiers can disagree. Three
   separate grants feed it and none is inferred from another:
-  `settings.proxyProtocol.trustedCIDRs` (L4 - who may rewrite `RemoteAddr`),
-  `settings.trustedProxies` or a proxy host's own `trustedProxies` (L7 - whose
+  `settings.proxyProtocol.trustedCIDRs` (L4: who may rewrite `RemoteAddr`),
+  `settings.trustedProxies` or a proxy host's own `trustedProxies` (L7: whose
   `X-Forwarded-For` is believed, via a rightmost-untrusted walk), and
-  `identityProvider.forwardAuth.trustedProxies` (identity - who may assert
+  `identityProvider.forwardAuth.trustedProxies` (identity: who may assert
   `Remote-User` and friends, and nothing else). The default is empty: trust
   nobody, `RemoteAddr` is the client. A per-host list REPLACES the fleet list, so
   one host being behind a proxy never widens another host's trust.
@@ -797,16 +797,16 @@ effect of this defence in depth.
 - **Network exemptions are explicit and IP-rooted, and only as good as
   `trustedProxies`.** A middleware's `allowFrom` (rate limit, guard, bouncer,
   `auth-request` and `client-cert` auth) is evaluated against the derived client
-  IP above - the same value the access list compared, with no per-middleware
+  IP above (the same value the access list compared), with no per-middleware
   notion of its own. With `trustedProxies` empty that is the raw TCP peer, which
   is fail-safe when gpm is the edge (a client cannot forge a header gpm does not
   read) and dangerous when it is not: an undeclared L7 proxy whose own address
   falls inside an `allowFrom` network exempts every request through it, which on
   a `client-cert` host is a total mTLS bypass. The fix is to declare that proxy
-  in `settings.trustedProxies` (or the host's own) - one knob, every tier; see
+  in `settings.trustedProxies` (or the host's own): one knob, every tier; see
   docs/configuration.md, "Client IP and the three trust tiers".
   In `client-cert` mode the exemption is decided before the certificate check, so
-  an exempt client is never asked for one and never role-checked - and because
+  an exempt client is never asked for one and never role-checked, and because
   identity-passthrough headers are set only from a handshake-verified certificate,
   such a request reaches the upstream carrying no certificate identity at all. It
   is refused in `oidc` and `forward-auth` mode rather than silently ignored, and
@@ -819,18 +819,18 @@ effect of this defence in depth.
 - **Least privilege for automation.** API tokens are scope-limited, not
   role-limited: a CI token can hold `proxy-hosts:write` without being able to read
   the whole config, mint another token, or restore an archive. Escalation paths are
-  closed deliberately - token management, **writing settings**, `backup`,
+  closed deliberately: token management, **writing settings**, `backup`,
   `restore`, whole-config `revert` and `/debug/pprof/` are `admin`-scope only, and
   a client-supplied `tokenHash` is discarded so nobody can install a digest whose
   preimage only they know. Writing settings counts as admin because a settings
   write can aim DNS sync or a webhook at an attacker-controlled URL with a
-  `${ENV:...}` placeholder as its credential - and the write itself triggers the
-  delivery that resolves and sends it - as well as rewrite `adminAuth`.
+  `${ENV:...}` placeholder as its credential, and the write itself triggers the
+  delivery that resolves and sends it, as well as rewrite `adminAuth`.
 - **The stored digest never leaves the process.** `APIToken.TokenHash` is
   `json:"-"`, so no endpoint returns it (not `GET /api-tokens`, not the config
   dump); only the YAML at rest carries it. The backup archive *is* that raw YAML,
   which is why downloading it is `admin`-scope rather than `*:read`.
-- **Rotation means revocation.** Reverting an `APIToken` - scoped or whole-tree -
+- **Rotation means revocation.** Reverting an `APIToken` (scoped or whole-tree)
   would restore an older `tokenHash` and silently revive a secret the operator
   rotated away. `Store.RevertObject` refuses the kind outright
   (`ErrNotRevertible`), and `Store.Revert` snapshots the `api-tokens` directory
@@ -844,8 +844,8 @@ effect of this defence in depth.
   name owned by a foreign record is left alone rather than replaced, so a
   misconfiguration cannot take an operator's zone
   apart. Ingress and Docker discovery apply the same rule inward: only proxy hosts
-  carrying that reconciler's own managed-by label VALUE are written or deleted - and only when neither the derived
-  name nor any of its domains is already claimed by a host it does not own - and it
+  carrying that reconciler's own managed-by label VALUE are written or deleted, and only when neither the derived
+  name nor any of its domains is already claimed by a host it does not own, and it
   deletes at all only on the strength of a complete, successful cluster list
   (freeze on error).
 - **A remote feed is bounded on both sides.** An access-list `source` is fetched
@@ -856,7 +856,7 @@ effect of this defence in depth.
   keeps the previous set, and a source that has never been fetched resolves to
   the empty set. The *contents* are bounded by the same range table: an entry
   that is a default route (`0.0.0.0/0`, `::/0`), broader than a `/8` (v4) or
-  `/32` (v6), or inside a non-public range refuses the whole fetch - one such
+  `/32` (v6), or inside a non-public range refuses the whole fetch: one such
   line in a hijacked feed would otherwise pass every other check and allow the
   internet.
 
@@ -864,11 +864,11 @@ effect of this defence in depth.
   host**, exactly like any other allow rule; the path scoping is what bounds a
   feed to the endpoints the operator chose to expose. Pair every `source` rule
   with `paths` unless the feed is genuinely trusted with the whole host.
-- **Discovery is opt-in and read-only.** gpm never writes to the cluster - the
-  shipped RBAC grants `list` on `ingresses` and nothing else - and
+- **Discovery is opt-in and read-only.** gpm never writes to the cluster: the
+  shipped RBAC grants `list` on `ingresses` and nothing else, and
   an `Ingress` without `gpm.rake.pro/managed: "true"` is invisible. There is no
   namespace-sweep mode, and no field of an Ingress can supply an upstream, a
-  certificate, a middleware or an access list - only the *name* of an
+  certificate, a middleware or an access list, only the *name* of an
   operator-authored discovery profile, which is why there is no annotation that
   names those objects directly.
 
@@ -895,14 +895,3 @@ requirement is `golang.org/x/crypto`, which is already a direct dependency here)
 it adds no transitive tree, and it is the maintained fork of the frozen `x/crypto`
 package. Hand-rolling the ASN.1 for a format whose whole point is
 interoperability with iOS and Android keychains would have been the larger risk.
-
-## Licensing note: Nginx Proxy Manager
-
-- **No code or configuration is copied from either project.**
-  [Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager)
-  is MIT, [NPMplus](https://github.com/ZoeyVid/NPMplus) is AGPLv3. Both are
-  behavioural references only, which matters most for NPMplus given its licence.
-- **The importer is the one place either format is read.**
-  `internal/importer/` parses Nginx Proxy Manager's export schema to migrate
-  hosts, certificates and access lists into gpm's own config model, once. See
-  [Migrate from Nginx Proxy Manager](../how-to/migrate-from-npm.md).

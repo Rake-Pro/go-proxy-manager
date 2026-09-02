@@ -25,14 +25,14 @@ keys under `<cert-dir>/acme/accounts/`.
 
 Challenge selection:
 
-- **`http-01`** - validated on the data plane's plaintext `:80` listener. The
+- **`http-01`**: validated on the data plane's plaintext `:80` listener. The
   ACME manager parks the in-flight token in memory and the listener answers
   `/.well-known/acme-challenge/<token>` **before** host routing, the force-SSL
   redirect, and any auth, so a certificate can be issued for a host that does not
   exist yet or that redirects everything to https. A challenge path whose token
   is not in flight is routed normally, so an upstream running its own ACME client
   keeps working. Port 80 must be reachable from the internet.
-- **`dns-01`** - the only challenge that can prove a wildcard. A wildcard domain
+- **`dns-01`**: the only challenge that can prove a wildcard. A wildcard domain
   with `http-01` (explicit or defaulted) is a validation error.
 
 ```yaml
@@ -59,7 +59,7 @@ acme:
     hmacKey: ${FILE:/run/secrets/google_ca_eab_hmac}
 ```
 
-**CustomCertSpec**: `certFile`, `keyFile` - paths **relative to the cert store**
+**CustomCertSpec**: `certFile`, `keyFile`: paths **relative to the cert store**
 (absolute paths and `..` are rejected). These are file references, not inline PEM.
 
 ```yaml
@@ -102,15 +102,15 @@ state instead). None are accepted on write and none are stored in the YAML.
 | <span id="certificate-status-not-after"></span> `notAfter` | string (RFC 3339) | Leaf certificate's expiry. Absent alongside `notBefore`. |
 | <span id="certificate-status-days-remaining"></span> `daysRemaining` | int | Whole days until `notAfter`, negative once expired. Absent alongside `notAfter`. |
 | <span id="certificate-status-issuer"></span> `issuer` | string | Leaf certificate's issuer common name. Absent alongside `notAfter`. |
-| <span id="certificate-status-state"></span> `state` | string | `valid`, `expiring` (at or inside 30 days), `expired`, `pending` (`acme`, no order has completed yet) or `error` (last attempt failed - see `lastError`). |
-| <span id="certificate-status-last-error"></span> `lastError` | string | Most recent renewal (or, for `custom`, file-read) failure. Empty or absent means the last attempt succeeded. **The text depends on the caller:** an admin gets the raw ACME or file/parse message truncated to 300 characters; any non-admin caller - the read-only `user` role, or a `certificates:read` token - gets the same short classified reason `GET /api/health` uses, e.g. `dns-01 challenge or DNS provider failure`. The raw text can embed a third party's response body, so it is not disclosed more widely than `/health` does. |
+| <span id="certificate-status-state"></span> `state` | string | `valid`, `expiring` (at or inside 30 days), `expired`, `pending` (`acme`, no order has completed yet) or `error` (last attempt failed, see `lastError`). |
+| <span id="certificate-status-last-error"></span> `lastError` | string | Most recent renewal (or, for `custom`, file-read) failure. Empty or absent means the last attempt succeeded. **The text depends on the caller:** an admin gets the raw ACME or file/parse message truncated to 300 characters; any non-admin caller (the read-only `user` role, or a `certificates:read` token) gets the same short classified reason `GET /api/health` uses, e.g. `dns-01 challenge or DNS provider failure`. The raw text can embed a third party's response body, so it is not disclosed more widely than `/health` does. |
 | <span id="certificate-status-last-attempt"></span> `lastAttempt` | string (RFC 3339) | When the ACME manager last attempted to issue/renew this certificate. `acme` certificates only; absent on an HA follower, which does not run the manager. |
 | <span id="certificate-status-sans"></span> `sans` | []string | Leaf certificate's subject alternative names (DNS names and IPs). |
 
 Force an immediate renewal, ignoring the 30-day renewal window, with
 `POST /api/certificates/{name}/renew` (`certificates:write` scope). It
 responds `{"started": true}` once the order has **started**, not once it
-completes - DNS-01 propagation alone can take minutes. Poll the status fields
+completes: DNS-01 propagation alone can take minutes. Poll the status fields
 above for the outcome.
 
 Two things answer `409`, and the error message says which:
@@ -118,9 +118,9 @@ Two things answer `409`, and the error message says which:
 | Cause | Message | Fix |
 |---|---|---|
 | Another order is in flight anywhere on this instance | Names the in-flight order; nothing is queued | Wait for it and retry |
-| This certificate is inside its **1-hour renew cooldown**, counted from `lastAttempt` - a failed attempt starts it too | States the remaining wait, e.g. `retry in 42m10s` | Wait it out, and read `lastError` meanwhile |
+| This certificate is inside its **1-hour renew cooldown**, counted from `lastAttempt` (a failed attempt starts it too) | States the remaining wait, e.g. `retry in 42m10s` | Wait it out, and read `lastError` meanwhile |
 
-`400` is a `custom` certificate (gpm does not renew those - replace the file and
+`400` is a `custom` certificate (gpm does not renew those, replace the file and
 `PUT` the object); `501` is an instance that is not the ACME issuer. See
 [Certificate health](../../operations/certificate-health.md) for the
 operational walkthrough and `GET /api/health` for the fleet-wide summary.
@@ -141,7 +141,7 @@ Where `tls.certificateRef` is honoured:
 |---|---|---|
 | `ProxyHost`, `RedirectHost`, `ParkedHost` | Checked for existence only. **Ignored at request time.** | SNI, across every certificate. |
 | `StreamHost` with `tls.mode: terminate` | **Authoritative and required.** | The named certificate, and only it. |
-| `StreamHost` with `tls.mode: passthrough` | Forbidden. | Nothing - gpm never terminates. |
+| `StreamHost` with `tls.mode: passthrough` | Forbidden. | Nothing, gpm never terminates. |
 
 For an L7 host the field is an intent record: useful documentation of which
 certificate you expect to cover the host, and nothing more. gpm logs a **warning

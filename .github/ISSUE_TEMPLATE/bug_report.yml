@@ -39,7 +39,7 @@ body:
       label: Relevant config
       description: >
         The relevant object(s) from `config/` (proxy host, middleware,
-        settings, ...). **Redact every secret value first** - replace
+        settings, ...). **Redact every secret value first**: replace
         `${ENV:...}` / `${FILE:...}` targets, tokens, and passwords with
         `REDACTED`. Do not paste `admin_hash` or any bearer token.
       render: yaml

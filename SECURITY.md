@@ -36,7 +36,7 @@ attack surface includes:
 - The data plane (public ports 80/443): TLS termination, routing, the
   middleware chain, and every auth gate.
 - The control plane (admin port 8081): the REST API and web UI, which are
-  **not** meant to be exposed directly to the internet - see
+  **not** meant to be exposed directly to the internet: see
   [docs/deployment.md](docs/deployment.md) and the README's Security model
   section.
 - The git-backed config store: secrets are referenced via `${ENV:}` /

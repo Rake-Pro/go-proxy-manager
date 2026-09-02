@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Check [FEATURES.md](../../FEATURES.md) (roadmap) and
-        [BACKLOG.md](../../BACKLOG.md) (tracked follow-ups) first - your idea
+        [BACKLOG.md](../../BACKLOG.md) (tracked follow-ups) first: your idea
         may already be scoped or deliberately deferred with a reason stated.
   - type: textarea
     id: problem
@@ -21,8 +21,8 @@ body:
       label: Proposed solution
       description: >
         How you would expect this to be configured (a new field, object
-        kind, or middleware type - typed config, not a raw-snippet escape
-        hatch; see CLAUDE.md conventions).
+        kind, or middleware type: typed config, not a raw-snippet escape
+        hatch; see CONTRIBUTING.md conventions).
   - type: textarea
     id: alternatives
     attributes:

@@ -10,7 +10,7 @@ individual hosts in with `dns.lanDirect` / `dns.publicCname`.
 ## Prerequisites
 
 - **Pi-hole v6** with an application password, reachable from the gpm container.
-  The API session must be allowed to write configuration - a `403` means the
+  The API session must be allowed to write configuration: a `403` means the
   session is read-only or the instance lacks `webserver.api.app_sudo`, and is
   surfaced verbatim in the sync status.
 - **Cloudflare**: an existing `dns-providers` entry whose `config.apiToken` has
@@ -21,7 +21,7 @@ individual hosts in with `dns.lanDirect` / `dns.publicCname`.
 1. **Preview before you enable.** `GET /api/dns-sync/plan` (the **Preview changes**
 button next to *Reconcile now* in the settings UI) reads both backends and the
 ownership ledger and reports exactly what a reconcile would create, adopt,
-retarget and delete - writing nothing. Do this first on any resolver that already
+retarget and delete, writing nothing. Do this first on any resolver that already
 holds hand-written records:
 
 ```
@@ -62,7 +62,7 @@ The manual endpoint does **not** queue: while a reconcile is in flight it answer
 | Check | Expected on the first run | Expected on the second |
 |---|---|---|
 | `created + adopted` | Equals the number of opted-in domains | `0` |
-| `deleted` | `0` - the ledger is empty, so nothing is deletable | `0` |
+| `deleted` | `0`: the ledger is empty, so nothing is deletable | `0` |
 | `untouched` | Everything you maintain by hand | Unchanged |
 | `skipped` | `0`. Anything else is a real finding: a name a host wants is held by a record gpm does not own, and both were left alone | `0` |
 | `desired` / `managed` | Equal to each other | Equal, and stable |
@@ -73,13 +73,13 @@ Each reconcile that changes what gpm owns writes one commit to the config repo
 nothing. Changing `apexTarget` no longer orphans anything: records gpm created and
 nobody has touched since are **retargeted** on the next reconcile. Records that
 predate the ledger, or that somebody has re-pointed, are left alone and reported
-as `skipped` / disowned - clean those up by hand.
+as `skipped` / disowned: clean those up by hand.
 
 Two things to expect in the logs. A record gpm **adopted** (rather than created)
-is *released* when the config stops asking for it - and equally when `apexTarget`
+is *released* when the config stops asking for it, and equally when `apexTarget`
 moves, since a retarget is a delete plus a create: a warn line, the ledger entry
 dropped, and the record left in the resolver exactly as you wrote it, for you to
-re-point or remove by hand - gpm destroys only what it created. And every
+re-point or remove by hand: gpm destroys only what it created. And every
 deletion is logged at warn with the
 `ledgerRev` that authorised it, because a whole-tree revert restores ownership
 claims along with everything else; after reverting a config that ever contained

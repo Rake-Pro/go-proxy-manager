@@ -19,7 +19,7 @@ data directory.
 
 ## The next release, in full
 
-> **BREAKING - the next release renames two things, and neither is migrated for
+> **BREAKING: the next release renames two things, and neither is migrated for
 > you.** The config store is a git working tree, so gpm refuses an unmigrated
 > tree at startup with the exact fix in the error rather than authoring a commit
 > you never made. Do both steps in the config repo *before* starting the new
@@ -49,7 +49,7 @@ data directory.
 >    ```
 >
 >    A file still using the old keys is **rejected at load** with an error
->    naming the new shape - it is never silently accepted with no backend.
+>    naming the new shape; it is never silently accepted with no backend.
 >
 > Restore is the one place the old name still works: a `GET /api/backup`
 > archive taken before the rename restores fine, its `dead-hosts/` entries
@@ -58,7 +58,7 @@ data directory.
 
 **Pin explicitly, and verify before you deploy.** Bump the image tag/digest
 (GitOps) or the binary version (bare metal) deliberately rather than tracking
-`latest` - see [Verifying the image](../getting-started/install-docker.md#verifying-the-image) for the
+`latest`, see [Verifying the image](../getting-started/install-docker.md#verifying-the-image) for the
 cosign check to run against whatever you're about to pin. There is no
 in-place "upgrade" operation: stop the old process/container, start the new
 one against the same `/data` (or `/var/lib/gpm`) volume, and confirm
@@ -66,32 +66,32 @@ one against the same `/data` (or `/var/lib/gpm`) volume, and confirm
 
 **Config compatibility.** `Config`/`Settings` carry an explicit
 `schemaVersion` (currently `1`); a version bump would come with a documented,
-reversible migration in the store layer, not a silent format break - none has
+reversible migration in the store layer, not a silent format break: none has
 shipped yet. The two situations that matter *today*, both because an **older**
 binary's kind map silently ignores a directory/field it doesn't know about
 rather than erroring on it, so a downgrade can leave live objects invisible to
 it instead of cleanly rejected:
 
-- **Upstream groups** - roll the new binary out *before* the first host
+- **Upstream groups**: roll the new binary out *before* the first host
   references an `upstream-groups` entry. Full reasoning under
   [Upstream-group health](../reference/config/upstream-group.md#watching-live-health-operations) above.
-- **API tokens** - roll the new binary out *before* creating the first
+- **API tokens**: roll the new binary out *before* creating the first
   `api-tokens` object. Full reasoning under [API tokens](../reference/api.md#api-tokens-automation)
   above.
 
 The general rule those two both follow: roll a **newer** binary out before
 adopting any config it introduces; roll an **older** binary back only after
 confirming your config doesn't name a kind or field that predates it (an
-older loader ignoring a directory isn't a downgrade-safety net - the objects
+older loader ignoring a directory isn't a downgrade-safety net; the objects
 in it are simply invisible to that instance until you roll forward again).
 
-**`session.db` has no versioned migrations to worry about yet** - the schema
+**`session.db` has no versioned migrations to worry about yet**: the schema
 is a single idempotent `CREATE TABLE IF NOT EXISTS` with no `ALTER TABLE`
 history (see `internal/session/session.go`), so every released binary to date
 reads and writes the identical schema and a downgrade is safe as far as
 sessions are concerned. If a future release does add a schema change, treat
 `session.db` as roll-forward only for that specific hop unless its changelog
-entry says otherwise - the safe fallback if you must roll back past it is
+entry says otherwise; the safe fallback if you must roll back past it is
 deleting `session.db` (forces every admin to log in again; does not touch
 `config/` or `certs/`).
 
@@ -101,12 +101,12 @@ deleting `session.db` (forces every admin to log in again; does not touch
 2. If the upgrade you're undoing crossed one of the config-compatibility
    points above, resolve that first (e.g. don't roll back past the release
    that introduced your first `upstream-groups` reference while still using
-   it) - `POST /api/revert` or `POST /api/restore` from a
+   it), `POST /api/revert` or `POST /api/restore` from a
    [pre-upgrade backup](backup-and-restore.md) roll the *config* back
    independently of the binary version, and you may need both together.
 3. Start the previous version against the same data directory.
 4. Confirm `GET /version`, `GET /healthz`, and that proxied traffic is still
-   routing - the same checks as a fresh deploy.
+   routing: the same checks as a fresh deploy.
 
 Taking a [`GET /api/backup`](backup-and-restore.md) immediately before an upgrade
 that changes anything nontrivial costs one `curl` and turns "roll back" into
@@ -117,7 +117,7 @@ a config restore instead of a guess.
 Starting an **older** gpm binary against a config directory a **newer** one has
 written to. Both config loaders (per-object files and `settings.yaml`) use a
 non-strict YAML decode, so a key the older struct does not recognise is
-silently dropped rather than rejected - and the first write after that,
+silently dropped rather than rejected, and the first write after that,
 including an automatic reconciler commit, makes the drop permanent. See
 "Unknown YAML keys are now warned about instead of silently dropped" and
 "Rolling back to 1.0.33 or earlier..." in the [changelog](https://github.com/Rake-Pro/go-proxy-manager/blob/main/CHANGELOG.md#unreleased)
@@ -135,7 +135,7 @@ for the exact field list this release introduces.
 
 1. Stop the newer binary.
 2. Check the newer binary's log (or `GET /health`'s `configWarnings` field)
-   for `config: <path>: unknown keys ignored: ...` lines before you stop it -
+   for `config: <path>: unknown keys ignored: ...` lines before you stop it:
    each one names a file the older version will load incorrectly rather than
    fail on.
 3. If any file has unknown keys, recover the config **first**, rather than let
@@ -152,7 +152,7 @@ for the exact field list this release introduces.
    `git checkout <commit> -- <path>` restores one.
 4. Start the older binary against the same data directory.
 5. Confirm `GET /version`, `GET /healthz`, and that proxied traffic is
-   routing - the same checks as a fresh deploy.
+   routing: the same checks as a fresh deploy.
 
 ### Verify
 
@@ -160,7 +160,7 @@ for the exact field list this release introduces.
 - The process log carries no `config: ... unknown keys ignored` warning for a
   file you recovered.
 - A host that had an inline `auth:`/`rateLimit:` block, or a `mode: basic`
-  middleware, gates traffic the way it did before the rollback - not wide
+  middleware, gates traffic the way it did before the rollback, not wide
   open, and the process is not refusing to start.
 
 ### Troubleshooting
@@ -168,7 +168,7 @@ for the exact field list this release introduces.
 | Symptom | Cause | Fix |
 |---|---|---|
 | A host with an inline `auth:` or `rateLimit:` block is reachable with no login or rate limit after rollback | The older binary's first write to that file silently dropped the unknown block | Recover the file with `git checkout` above, then re-apply the block once back on a version that supports it |
-| The older binary refuses to start, or a load error names `auth.mode` | A middleware or inline `auth` block uses `mode: basic` (added in 1.1.0) - older versions reject the value outright | Recover the config to before that middleware/block existed, or stay on 1.1.0+ |
+| The older binary refuses to start, or a load error names `auth.mode` | A middleware or inline `auth` block uses `mode: basic` (added in 1.1.0); older versions reject the value outright | Recover the config to before that middleware/block existed, or stay on 1.1.0+ |
 | `upstream.path`, `hostHeader`, `stripPrefix`, or a `trustedProxies` list reverted to empty | Same silent-drop, on those fields | Same recovery as above |
 | A `rewrite` middleware stopped matching | Same silent-drop, on its prefix/regex rules | Same recovery as above |
 | `settings.notifications` or `settings.dockerDiscovery` stopped firing or discovering | Same silent-drop, on `settings.yaml` | Recover `settings.yaml` from git and re-add the section once back on a version that supports it |

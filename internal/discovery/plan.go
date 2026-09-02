@@ -32,7 +32,7 @@
 // callers, since only they know what a failed list looks like. This package is
 // pure: it performs no I/O and never sees a client.
 //
-// See docs/design/ingress-discovery.md and docs/design/docker-discovery.md.
+// See design/ingress-discovery.md and design/docker-discovery.md.
 package discovery
 
 import (

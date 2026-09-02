@@ -47,7 +47,7 @@ its proxied responses. The three values:
 | `proxied-only` | **no** | yes |
 
 Every scope is injected **set-if-absent** (a value already on the response
-always wins). A header is declared **once**, at one scope - the same name cannot
+always wins). A header is declared **once**, at one scope: the same name cannot
 appear at two scopes (it is a case-insensitive duplicate, which is rejected).
 
 - **gpm-generated responses** are the ones gpm writes itself: auth-gate refusals
@@ -57,16 +57,16 @@ appear at two scopes (it is a case-insensitive duplicate, which is rejected).
   hosts. `generated-only` and `all` headers land here.
 - **proxied upstream responses** are the ones an upstream actually answered
   (any status, including the app's own errors). `proxied-only` and `all` headers
-  land here - always set-if-absent, so an app that sets its own
+  land here, always set-if-absent, so an app that sets its own
   `X-Frame-Options: SAMEORIGIN` / `Referrer-Policy` / `X-Content-Type-Options`
   keeps it untouched.
 
 The data plane distinguishes the two at inject time: the reverse proxy marks the
 response as proxied only when an upstream actually responds (its `ModifyResponse`
-hook), so the upstream-unreachable 502/504 - written by the proxy's error handler,
-not the upstream - correctly counts as gpm-generated.
+hook), so the upstream-unreachable 502/504 (written by the proxy's error handler,
+not the upstream) correctly counts as gpm-generated.
 
-> **Why the scope matters - the real case.** `Content-Security-Policy:
+> **Why the scope matters: the real case.** `Content-Security-Policy:
 > frame-ancestors 'none'` and a restrictive `Permissions-Policy` are exactly what
 > you want on gpm's own error/denial pages, but they **break** a proxied app that
 > ships none of its own: Home Assistant, for one, sets no CSP and relies on
@@ -75,9 +75,9 @@ not the upstream - correctly counts as gpm-generated.
 > those two at `scope: generated-only` keeps them on gpm's pages and off every
 > proxied app. That is the placement in the recommended set below.
 
-`Strict-Transport-Security` is **not** settable here - the per-host
+`Strict-Transport-Security` is **not** settable here: the per-host
 [`tls.hsts`](../proxy-host.md) setting owns it, and this feature is
-additive: HSTS emission is unchanged on every path but one - a `101` WebSocket
+additive: HSTS emission is unchanged on every path but one, a `101` WebSocket
 upgrade, where the stdlib hijacks the connection and writes the `101` without
 going through the dispatch writer, so HSTS/`X-Robots-Tag` (and these headers) are
 absent on that response. This is immaterial: a `wss://` upgrade is always
@@ -86,7 +86,7 @@ indexing directive on a WebSocket has no meaning.
 
 Interim responses are handled: an upstream `1xx` (a `103 Early Hints`, or a
 `100 Continue` when a client sends `Expect: 100-continue`) does **not** drop the
-configured headers - they are injected on the final response, after the reverse
+configured headers, they are injected on the final response, after the reverse
 proxy has forwarded and cleared the interim one. (HSTS and `X-Robots-Tag` ride
 the same mechanism, for the same reason.)
 
@@ -94,7 +94,7 @@ the same mechanism, for the same reason.)
 
 - Header names must be valid RFC 7230 field-name tokens (no CR/LF, no separator
   characters); keys are de-duplicated case-insensitively (so a header is declared
-  once, at one scope - it cannot be set at two scopes).
+  once, at one scope: it cannot be set at two scopes).
 - `scope`, when set, must be one of `all`, `generated-only` or `proxied-only`;
   an unknown scope is rejected. An omitted scope means `all`.
 - `Strict-Transport-Security` is refused (HSTS owns it).
@@ -125,11 +125,11 @@ securityHeaders:
 ```
 
 `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` are safe at
-`all` - a proxied app that sets its own keeps it (set-if-absent), and gpm's
+`all`: a proxied app that sets its own keeps it (set-if-absent), and gpm's
 value is a reasonable default for one that doesn't. `Content-Security-Policy`
 (`frame-ancestors`) and `Permissions-Policy` are at `generated-only` because
 injecting them onto a proxied app that ships none of its own can break it (see
-the scope note above) - this keeps them on gpm's own pages, where they are safe.
+the scope note above), this keeps them on gpm's own pages, where they are safe.
 
 ---
 
@@ -170,7 +170,7 @@ does not, so the only two possible semantics are "host replaces the fleet
 baseline" and "host adds to it". Union is the safe one: a strip list is a
 hardening baseline, and a host must not be able to silently re-expose a header
 the fleet strips just by naming an unrelated one. **A host cannot opt out of a
-fleet-level strip** - remove the name from `settings.stripResponseHeaders` if a
+fleet-level strip**: remove the name from `settings.stripResponseHeaders` if a
 host needs the header through.
 
 ### What it can and cannot reach
@@ -180,14 +180,14 @@ copied onto the response the client sees. That is a structural boundary, not an
 ordering convention:
 
 - **Reached**: the headers the backend sent on its final response, whatever the
-  status - including a `101 Switching Protocols` WebSocket handshake, so an
+  status, including a `101 Switching Protocols` WebSocket handshake, so an
   upgrade does not leak the fingerprint an ordinary response hides. The one
   exception is an **interim `1xx`** (a `103 Early Hints`, or a `100 Continue`):
   those are forwarded on a separate path that the strip does not sit on, so
   their headers pass through unstripped. In practice this leaks nothing an
-  operator is hiding - an upstream's early-hints headers are `Link` preloads,
+  operator is hiding: an upstream's early-hints headers are `Link` preloads,
   and the stdlib clears the interim header map before the final response is
-  written - but a backend that sets `Server` on a `103` would send it there.
+  written, but a backend that sets `Server` on a `103` would send it there.
 - **Never reached**: anything **gpm** adds. Injected
   [`securityHeaders`](#settings-security-headers),
   HSTS, `X-Robots-Tag`, the `Set-Cookie` forward-auth copies back when the IdP
@@ -202,19 +202,19 @@ ordering convention:
 A header named in **both** the strip list and `securityHeaders` therefore ends up
 **present with gpm's configured value**: the upstream's copy is removed on the way
 in, and gpm's is injected on the way out. Listing `X-Frame-Options`,
-`Strict-Transport-Security` or `X-Robots-Tag` is safe and does exactly that -
+`Strict-Transport-Security` or `X-Robots-Tag` is safe and does exactly that:
 replace the backend's value with gpm's.
 
 ### Sharp edges
 
 Two allowed names deserve care. Both are permitted because they only ever remove
-what the **backend** sent, which is a legitimate operator choice - but both change
+what the **backend** sent, which is a legitimate operator choice, but both change
 application behaviour:
 
-- `Set-Cookie` - removes the backend's own cookies, which breaks that app's
+- `Set-Cookie`: removes the backend's own cookies, which breaks that app's
   sessions. (gpm's forward-auth session cookie is unaffected; it is not an
   upstream header.)
-- `WWW-Authenticate` - suppresses the backend's auth challenge, so a browser
+- `WWW-Authenticate`: suppresses the backend's auth challenge, so a browser
   never prompts for its basic-auth credentials.
 
 ### Relationship to the headers middleware
@@ -223,7 +223,7 @@ The [headers middleware](../middleware.md)'s `removeResponse` does
 the same removal, but inside the **auth tier of a host's middleware chain**: it
 only applies where the middleware is attached, and responses generated by the
 auth layer itself (denials, sign-in redirects) never pass through it.
-`stripResponseHeaders` is the recommended edge-wide mechanism - one fleet list,
+`stripResponseHeaders` is the recommended edge-wide mechanism: one fleet list,
 applied in the reverse proxy on the upstream's own response, with no per-host
 wiring to forget.
 `removeResponse` remains for per-middleware, per-location removal (a rule that
@@ -243,10 +243,10 @@ mutations).
   also what keeps a `101` handshake intact while its `Server`/`X-Powered-By` are
   stripped.)
 - `Content-Type`, `Content-Length`, `Content-Encoding`, `Vary` and `Location` are
-  refused for the same reason - they are the response's own semantics.
+  refused for the same reason: they are the response's own semantics.
   `Content-Type` is the sharpest: with no `Content-Type`, Go falls back to
   content sniffing, so a JSON or text body whose first bytes look like markup
-  would be re-labelled `text/html` - turning a config typo into stored XSS.
+  would be re-labelled `text/html`, turning a config typo into stored XSS.
   `Content-Encoding`/`Vary` are body encoding and the cache key, and `Location`
   is the entire meaning of a 3xx.
 - `Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions`
