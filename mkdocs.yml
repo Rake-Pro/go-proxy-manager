@@ -1,0 +1,133 @@
+site_name: go-proxy-manager
+site_description: >-
+  A standalone ingress and proxy manager for homelabs and small sites: TLS and
+  ACME, SSO and mTLS, access control, DNS publishing, Kubernetes and Docker
+  discovery, git-backed config, a REST API and a web UI.
+site_url: https://rake-pro.github.io/go-proxy-manager/
+repo_url: https://github.com/Rake-Pro/go-proxy-manager
+repo_name: Rake-Pro/go-proxy-manager
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+copyright: MIT licensed
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: getting-started/quickstart.md
+      - Install with Docker Compose: getting-started/install-docker.md
+      - Install the binary: getting-started/install-binary.md
+      - Your first host with HTTPS: getting-started/first-host-with-https.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Configuration model: concepts/config-model.md
+      - Request pipeline: concepts/request-pipeline.md
+      - Which mechanism do I use?: concepts/which-mechanism.md
+      - Security model: concepts/security-model.md
+      - Terminology: concepts/terminology.md
+  - How-to:
+      - Hosts and certificates:
+          - Add an HTTPS host: how-to/add-https-host.md
+          - Wildcard over DNS-01 (Cloudflare): how-to/dns-01-cloudflare.md
+          - DNS-01 for any nameserver: how-to/generic-dns01-rfc2136-acme-dns.md
+      - Authentication:
+          - Admin SSO (OIDC): how-to/admin-oidc-sso.md
+          - Per-host SSO: how-to/per-host-sso.md
+          - Basic auth: how-to/basic-auth.md
+          - mTLS client certificates: how-to/mtls-client-certs.md
+          - TOTP for the local admin: how-to/totp.md
+          - Migrate access-list basic auth: how-to/migrate-basic-auth.md
+      - Automation:
+          - DNS sync: how-to/dns-sync.md
+          - Kubernetes Ingress discovery: how-to/expose-k8s-ingress.md
+          - Docker container discovery: how-to/docker-discovery.md
+          - Remote access-list sources: how-to/access-list-sources.md
+          - Notifications: how-to/notifications.md
+      - Deployment shapes:
+          - Admin UI behind gpm: how-to/admin-ui-behind-gpm.md
+          - Tunnels and relays behind CGNAT: how-to/tunnels.md
+          - Migrate from Nginx Proxy Manager: how-to/migrate-from-npm.md
+  - Reference:
+      - Configuration:
+          - Overview and anchors: reference/config/README.md
+          - ProxyHost: reference/config/proxy-host.md
+          - RedirectHost: reference/config/redirect-host.md
+          - StreamHost: reference/config/stream-host.md
+          - ParkedHost: reference/config/parked-host.md
+          - UpstreamGroup: reference/config/upstream-group.md
+          - Certificate: reference/config/certificate.md
+          - ClientCA: reference/config/client-ca.md
+          - DNSProvider: reference/config/dns-provider.md
+          - IdentityProvider: reference/config/identity-provider.md
+          - AccessList: reference/config/access-list.md
+          - Middleware: reference/config/middleware.md
+          - APIToken: reference/config/api-token.md
+          - Settings:
+              - Overview: reference/config/settings/index.md
+              - General: reference/config/settings/general.md
+              - Admin authentication: reference/config/settings/admin-auth.md
+              - Trusted proxies: reference/config/settings/trusted-proxies.md
+              - Security headers: reference/config/settings/security-headers.md
+              - Error pages: reference/config/settings/error-pages.md
+              - Maintenance mode: reference/config/settings/maintenance.md
+              - DNS sync: reference/config/settings/dns-sync.md
+              - Ingress discovery: reference/config/settings/ingress-discovery.md
+              - Docker discovery: reference/config/settings/docker-discovery.md
+              - Access-list source sync: reference/config/settings/access-list-sync.md
+              - Webhooks: reference/config/settings/webhooks.md
+              - Notifications: reference/config/settings/notifications.md
+              - PROXY protocol: reference/config/settings/proxy-protocol.md
+      - Environment variables, flags and CLI: reference/env-vars-and-flags.md
+      - REST API: reference/api.md
+      - Prometheus metrics: reference/metrics.md
+  - Operations:
+      - Backup and restore: operations/backup-and-restore.md
+      - Upgrading and rolling back: operations/upgrading.md
+      - High availability: operations/high-availability.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Certificate health: operations/certificate-health.md
+      - Hardening: operations/hardening.md
+      - Profiling with pprof: operations/pprof.md
+  - Design notes:
+      - Kubernetes Ingress discovery: design/ingress-discovery.md
+      - Docker discovery: design/docker-discovery.md
+      - High availability: design/ha.md
+      - HTTP/3, GeoIP and mTLS: design/http3-geoip-mtls.md
+  - Roadmap: roadmap.md
+  - Moved pages:
+      - Configuration reference (moved): configuration.md
+      - Deployment (moved): deployment.md
+      - Architecture (moved): architecture.md
+      - High availability (moved): ha.md
+      - Migrating from NPM (moved): migrating-from-npm.md

@@ -145,6 +145,11 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
+		// A DIFFERENT trust tier from trustedNets above: this one decides whose
+		// X-Forwarded-For sets the client IP, that one decides who may assert an
+		// identity header. Compiled here so dispatch can derive the client IP once
+		// per request, before the chain runs (see clientip.go).
+		hh.trustedProxies = hostTrustedProxies(h)
 		// Client-certificate passthrough headers ride the same strip model: the
 		// fixed names are in the baseline denylist, and a custom subject header is
 		// added to this host's strip set, so no untrusted peer can assert either -
@@ -324,8 +329,9 @@ func assertedIdentityHeaders(h model.ProxyHost, reg *registry) []string {
 // its own upstream (falling back to the host upstream or upstream group) and
 // inherits the host's middleware/access-list chain with its own appended, so
 // per-location auth is applied on top of the host gate rather than replacing it.
-// The request path is forwarded unchanged - the upstream receives the full
-// request path unmodified. ep is the host's compiled errorPages override
+// The request path is forwarded unchanged unless the location sets
+// stripPrefix, which removes the matched prefix on the way to the upstream (see
+// stripPrefixHandler). ep is the host's compiled errorPages override
 // (already resolved by the caller); a location has no override of its own, so
 // it shares its host's.
 func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([]locationRoute, error) {
@@ -354,7 +360,7 @@ func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([
 		}
 		routes = append(routes, locationRoute{
 			prefix:   normalizeLocationPrefix(loc.Path),
-			handler:  buildChain(proxy, lh, reg, ep),
+			handler:  buildChainInline(proxy, lh, locationInline(h, loc), reg, ep),
 			upstream: upLabel,
 		})
 	}
@@ -552,6 +558,12 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request path", http.StatusBadRequest)
 			return
 		}
+		// Derive the client IP ONCE, from this host's trusted-proxy set, and stash
+		// it for the whole request: the chain's access list, geo, rate limit,
+		// guards, allowFrom exemptions, the upstream X-Forwarded-For/X-Real-IP
+		// rewrite and the access log all read this one value rather than each
+		// re-interpreting the header (see clientip.go).
+		r = withClientIP(r, deriveClientIP(r, hh.trustedProxies))
 		hh.stripUntrustedIdentity(r)
 		if hh.certID != nil {
 			hh.certID.apply(r)
@@ -613,6 +625,7 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			serveMaintenance(w, r, hh.errorPages, hh.host)
 			return
 		}
+		r = withClientIP(r, deriveClientIP(r, hh.trustedProxies)) // see serveHTTPS
 		hh.stripUntrustedIdentity(r)
 		// X-Robots-Tag rides the dispatch writer for the same 1xx-survival reason
 		// as HSTS on the HTTPS path; HSTS itself is never emitted over plain HTTP.

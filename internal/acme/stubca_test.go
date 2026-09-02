@@ -410,6 +410,60 @@ func TestEnsureAllDNS01EndToEnd(t *testing.T) {
 	}
 }
 
+func TestRenewNowEndToEnd(t *testing.T) {
+	ca := newStubCA(t, []string{"http-01"})
+	dir := t.TempDir()
+	changed := make(chan struct{}, 1)
+	// A short RenewCooldown: this test proves two RenewNow calls in quick
+	// succession both succeed once the manager is idle again - the cooldown
+	// itself is covered separately by TestRenewNowCooldown.
+	m := NewManager(Options{CertDir: dir, OnChange: func() { changed <- struct{}{} }, RenewCooldown: time.Nanosecond})
+
+	cfg := model.Config{Certificates: []model.Certificate{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Type:       model.CertTypeACME,
+		Domains:    []string{"app.example.com"},
+		ACME:       &model.ACMESpec{Email: "admin@example.com", DirectoryURL: ca.url("/directory")},
+	}}}
+
+	// RenewNow returns once the order is ACCEPTED, not once it completes (see
+	// its doc comment) - the actual issuance runs in the background, so the
+	// test waits for OnChange rather than asserting synchronously.
+	if err := m.RenewNow(context.Background(), cfg, "app"); err != nil {
+		t.Fatalf("RenewNow: %v", err)
+	}
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RenewNow: OnChange was not called within 5s")
+	}
+
+	if _, err := os.Stat(IssuedCertPath(dir, "app")); err != nil {
+		t.Errorf("fullchain.pem not written: %v", err)
+	}
+	obs := m.CertObservations()
+	if len(obs) != 1 || obs[0].Name != "app" {
+		t.Fatalf("CertObservations = %+v, want one entry for app", obs)
+	}
+	if obs[0].LastError != "" {
+		t.Errorf("LastError = %q, want empty after a successful renew", obs[0].LastError)
+	}
+	if obs[0].LastAttempt.IsZero() {
+		t.Error("LastAttempt was not recorded")
+	}
+
+	// A second RenewNow while the manager is idle again must not report
+	// ErrRenewInFlight - the goroutine released m.mu on completion.
+	if err := m.RenewNow(context.Background(), cfg, "app"); err != nil {
+		t.Errorf("second RenewNow: %v", err)
+	}
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second RenewNow: OnChange was not called within 5s")
+	}
+}
+
 // stubTXTLookuper resolves TXT records straight out of the recording solver, so
 // propagation "succeeds" as soon as the record is provisioned.
 type stubTXTLookuper struct{ s *recordingSolver }

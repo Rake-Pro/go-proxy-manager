@@ -479,7 +479,7 @@ func TestClientCertGateWiredFromMiddleware(t *testing.T) {
 		Type:       model.MWTypeAuth,
 		Auth:       &model.AuthMiddleware{Mode: model.AuthModeClientCert},
 	}
-	h := authMiddlewareHandler(mw, buildRegistry(model.Config{}), "m", []string{"m.example"},
+	h := authHandler(*mw.Auth, buildRegistry(model.Config{}), "m", []string{"m.example"},
 		func(*http.Request) net.IP { return nil }, nil,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
 	w := httptest.NewRecorder()

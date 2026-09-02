@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
 )
@@ -102,22 +103,30 @@ func (p *bufferPool) Put(b []byte) {
 // strip is the host's compiled stripResponseHeaders list, applied to the
 // upstream's own response headers in ModifyResponse (nil when nothing is
 // configured).
+// up.Path, when set, rides on the target URL: httputil's SetURL joins the
+// target's path with the inbound one, so the base path is prefixed to every
+// forwarded request with no per-request work. up.HostHeader selects the Host
+// header the upstream sees.
 func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
+		Path:   strings.TrimSuffix(up.Path, "/"),
 	}
-	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep, strip)
+	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep, strip, up.HostHeader)
 }
 
 // newGroupReverseProxy builds the terminal handler for a host backed by an
 // upstream group. The Rewrite target is nominally the group's first upstream;
 // the groupTransport re-points each attempt at the healthiest candidate, so the
 // URL set here only seeds scheme/host for X-Forwarded computation.
+// A member's own upstream.path / upstream.hostHeader are applied per attempt by
+// the groupTransport (which is the only layer that knows which candidate a
+// request actually went to), not here.
 func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep, strip)
+	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep, strip, "")
 }
 
 // reassertIdentity re-applies the identity headers gpm itself set on the inbound
@@ -146,12 +155,133 @@ func reassertIdentity(pr *httputil.ProxyRequest, names []string) {
 	}
 }
 
-func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
+// applyHostHeader sets the Host header of an outbound proxied request from the
+// upstream's hostHeader setting: empty keeps the client's Host (the default and
+// the behaviour before the setting existed), "upstream" clears out.Host so the
+// stdlib derives it from the outbound URL (the upstream's own host:port), and
+// anything else is sent literally. Validation constrains the literal form to a
+// hostname with an optional port, so nothing else can be smuggled in.
+func applyHostHeader(out *http.Request, hostHeader, clientHost string) {
+	switch hostHeader {
+	case "":
+		out.Host = clientHost
+	case model.UpstreamHostHeaderUpstream:
+		out.Host = ""
+	default:
+		out.Host = hostHeader
+	}
+}
+
+// joinUpstreamBasePath prefixes an upstream's configured base path to a request
+// path, collapsing the slash between them. It is the group-failover twin of what
+// httputil's SetURL does for a single upstream (the base path there rides on the
+// target URL), so both paths through the proxy compose identically.
+func joinUpstreamBasePath(base, p string) string {
+	base = strings.TrimSuffix(base, "/")
+	if base == "" {
+		return p
+	}
+	switch {
+	case p == "":
+		p = base + "/"
+	case !strings.HasPrefix(p, "/"):
+		p = base + "/" + p
+	default:
+		p = base + p
+	}
+	return confineUpstreamPath(base, p)
+}
+
+// confineUpstreamPath is the last gate before a path leaves gpm: it re-cleans
+// the composed path and pins it inside the upstream's base path.
+//
+// Every input is supposed to be clean already - the router cleans the client
+// path (normalizeRequestPath), model validation rejects a dot segment in an
+// upstream base path and in a rewrite target - so this changes nothing for a
+// well-formed config. It exists because the composition is where those separate
+// guarantees meet: a base path is the operator's promise that a backend only
+// ever sees its own namespace, and that promise must not rest on every producer
+// of a path staying correct. A result outside the base is replaced by the base
+// itself and logged loudly rather than sent on.
+func confineUpstreamPath(base, p string) string {
+	if p == "" {
+		return p // asterisk-form request target; there is no path to clean
+	}
+	out := cleanPath(p)
+	base = strings.TrimSuffix(base, "/")
+	if base == "" || base == "/" {
+		return out
+	}
+	if out == base || strings.HasPrefix(out, base+"/") {
+		return out
+	}
+	log.Error().Str("path", p).Str("base", base).
+		Msg("dataplane: composed upstream path escaped the upstream base path; sending the base path instead")
+	return base + "/"
+}
+
+// setForwardedClient makes what the upstream sees agree with what gpm's own
+// gates compared, from the ONE derived client IP (see clientip.go).
+//
+// httputil deletes every client-supplied X-Forwarded-* header before it calls a
+// Rewrite hook, and SetXForwarded then writes back exactly the connection peer -
+// so by default a backend behind a trusted proxy would see the PROXY's address
+// as the client while gpm's own access list compared the browser's. Both cases
+// are fixed here:
+//
+//   - X-Real-IP always carries the derived client IP, so a backend has one field
+//     to read that cannot disagree with the tier that admitted the request.
+//   - X-Forwarded-For keeps the peer alone when the peer is NOT trusted (the
+//     forged chain such a client sent stays dropped, which is what a backend
+//     reading the leftmost entry needs), and is rebuilt as "genuine inbound
+//     chain, peer" when it IS trusted, which is the ordinary multi-hop form.
+func setForwardedClient(pr *httputil.ProxyRequest) {
+	ip := requestClientIP(pr.In)
+	if ip == nil {
+		pr.Out.Header.Del("X-Real-Ip")
+		return
+	}
+	pr.Out.Header.Set("X-Real-Ip", ip.String())
+	if !requestPeerTrusted(pr.In) {
+		// The derived client IS the peer here; write the canonical form of it.
+		pr.Out.Header.Set("X-Forwarded-For", ip.String())
+		return
+	}
+	// Only entries that parse as an address are carried forward, and only the
+	// rightmost clientip.MaxForwardedEntries of them: a backend that reads the
+	// leftmost element must not be handed attacker-chosen text, and a chain a
+	// client padded to thousands of entries must not be re-emitted (a backend
+	// header limit would reject the whole request with a 431).
+	var chain []string
+	for _, e := range clientip.ForwardedChain(pr.In) {
+		if ip := clientip.ParseForwardedEntry(e); ip != nil {
+			chain = append(chain, ip.String())
+		}
+	}
+	if len(chain) == 0 {
+		return // trusted peer that sent no usable chain: it is itself the client
+	}
+	if peer := pr.Out.Header.Get("X-Forwarded-For"); peer != "" {
+		chain = append(chain, peer)
+	}
+	pr.Out.Header.Set("X-Forwarded-For", strings.Join(chain, ", "))
+}
+
+func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string, identityHeaders []string, ep *compiledErrorPages, strip []string, hostHeader string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
-			pr.Out.Host = pr.In.Host // preserve the client's Host header
+			// SetURL joins the upstream base path and the request path; re-clean
+			// and re-confine the result (see confineUpstreamPath) so a dot
+			// segment cannot reach the backend even if something upstream of
+			// here produced one.
+			if p := confineUpstreamPath(target.Path, pr.Out.URL.Path); p != pr.Out.URL.Path {
+				pr.Out.URL.Path = p
+				pr.Out.URL.RawPath = ""
+			}
+			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
+			setForwardedClient(pr)
+			applyHostHeader(pr.Out, hostHeader, pr.In.Host)
 			reassertIdentity(pr, identityHeaders)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -333,6 +463,14 @@ type hostHandler struct {
 	// stripped on top, regardless of these.
 	identityHeaders []string
 	trustedNets     []*net.IPNet
+
+	// trustedProxies is this host's effective L7 trusted-proxy set - its own
+	// trustedProxies override, else settings.trustedProxies. It is a separate
+	// grant from trustedNets above: it decides whose X-Forwarded-For sets the
+	// client IP, not who may assert an identity header. The router dispatch
+	// derives the client IP from it once per request and stashes the result, so
+	// every tier of the chain compares one value (see clientip.go).
+	trustedProxies []*net.IPNet
 
 	// certID is the compiled client-certificate identity passthrough, or nil when
 	// this host does not forward the peer certificate's identity upstream. Applied

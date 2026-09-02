@@ -15,7 +15,9 @@ info:
 
     Authentication: an admin session cookie (`sessionCookie`) or a scoped API bearer token (`bearerAuth`)
     - either satisfies every operation below unless noted. A session''s access is governed by its role
-    (`user` for GET /api/me only; `admin` for everything under /api/); a token''s access is additionally
+    (`user` is read-only: every GET under /api/ plus GET /api/me, and 403 on every write and on
+    anything under /api/api-tokens - GET /api/config omits `apiTokens` for it; `admin` is unconstrained);
+    a token''s access is additionally
     governed by its granted scopes, shown per-operation as `x-scope` (`admin` satisfies every scope check;
     a concrete `<plural>:write` implies `<plural>:read`; `*:read`/`*:write` must be granted literally
     - a resource-scoped grant does not satisfy a wildcard requirement). Mutating session requests additionally
@@ -44,6 +46,8 @@ tags:
   description: Pi-hole / Cloudflare CNAME reconciliation for opted-in hosts.
 - name: Ingress discovery
   description: Kubernetes Ingress -> managed proxy host reconciliation.
+- name: Docker discovery
+  description: Labelled Docker container -> managed proxy host reconciliation.
 - name: API tokens
   description: Scoped bearer credentials for automation.
 - name: Profiling (opt-in)
@@ -61,6 +65,11 @@ tags:
 - name: Upstream groups
 - name: Access lists
 - name: Middlewares
+- name: Webhooks
+  description: Outbound lifecycle notification targets (settings.webhooks) - delivery state and test sends.
+- name: Notifications
+  description: Outbound alert targets (settings.notifications, ntfy/Discord/generic) - delivery state
+    and test sends.
 security:
 - sessionCookie: []
 - bearerAuth: []
@@ -70,10 +79,15 @@ components:
       type: apiKey
       in: cookie
       name: gpm_session
-      description: Admin browser session, issued by /auth/login (OIDC) or /auth/local (bcrypt). Cookie
-        is HttpOnly, SameSite=Lax, and named __Host-gpm_session when GPM_COOKIE_SECURE=1 (default). A
-        session principal has whatever access its role (admin/user) grants and is unaffected by API-token
-        scopes. Mutating requests also need the X-CSRF-Token header.
+      description: 'Admin browser session, issued by /auth/login (OIDC) or /auth/local (bcrypt).
+        Cookie is HttpOnly and SameSite=Lax. It is named __Host-gpm_session when the cookie is
+        issued Secure, and gpm_session otherwise; both names are accepted on the way in, so a
+        session survives the deployment moving between the two. GPM_COOKIE_SECURE=auto (the
+        default) decides per request: Secure when the request reached gpm over TLS, when a trusted
+        proxy asserted X-Forwarded-Proto: https, or when settings.externalBaseURL is an https URL.
+        GPM_COOKIE_SECURE=1 always sets Secure and =0 never does. A session principal has whatever
+        access its role (admin/user) grants and is unaffected by API-token scopes. Mutating requests
+        also need the X-CSRF-Token header.'
     bearerAuth:
       type: http
       scheme: bearer
@@ -123,7 +137,12 @@ components:
           description: Keep the object in config but exclude it from the running data plane. Default false.
         createdAt: &id006
           type: string
-          description: Set by the store on first write. Read-only.
+          description: 'Creation timestamp, resolved by the store. On CREATE (no object with this
+            kind/name exists yet) a client-supplied createdAt is honoured if present, so an importer
+            or a migration can restore historical timestamps; omitted, it is set to server time. On
+            UPDATE the stored value is preserved and any createdAt in the request body is ignored -
+            the server''s stored value always wins, so a save can never move an existing object''s
+            creation time.'
           format: date-time
         updatedAt: &id007
           type: string
@@ -144,6 +163,15 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        path:
+          type: string
+          description: Base path prefixed to every forwarded request (/api + /v1/x -> /api/v1/x). Absolute,
+            no dot-segments, no query string. Applied after any location prefix strip and any rewrite
+            middleware. Empty forwards the path unchanged.
+        hostHeader:
+          type: string
+          description: 'Host header sent upstream: empty keeps the client Host (default), "upstream" sends
+            the upstream''s own host:port, anything else is sent literally (a hostname, optionally host:port).'
       required:
       - scheme
       - host
@@ -201,8 +229,6 @@ components:
         forceSSL:
           type: boolean
           description: Redirect http to https.
-        http2:
-          type: boolean
         hsts:
           $ref: '#/components/schemas/HSTS'
         minTLSVersion:
@@ -239,6 +265,11 @@ components:
         upstreamGroupRef:
           type: string
           description: Mutually exclusive with upstream.
+        stripPrefix:
+          type: boolean
+          description: Remove this location's matched prefix before forwarding (/app/foo -> /foo, /app ->
+            /). Applied inside the whole security chain, which still evaluates the original client path.
+            Default false.
         middlewares:
           type: array
           items:
@@ -247,6 +278,21 @@ components:
           type: array
           items:
             type: string
+        auth:
+          allOf:
+          - $ref: '#/components/schemas/AuthMiddleware'
+          description: >-
+            Inline auth gate for this path, with no Middleware object. Same shape,
+            validation and handler as a type=auth middleware, stacked on top of
+            the host's own inline block and evaluated before any auth middleware
+            this location or its host references.
+        rateLimit:
+          allOf:
+          - $ref: '#/components/schemas/RateLimitMiddleware'
+          description: >-
+            Inline rate limit for this path, with no Middleware object. Same
+            shape, validation and limiter as a type=rate-limit middleware,
+            stacked on top of the host's own inline block.
       required:
       - path
     DNSSyncPolicy:
@@ -278,8 +324,6 @@ components:
         upstreamGroupRef:
           type: string
           description: Name of an UpstreamGroup. Exactly one of upstream/upstreamGroupRef is set.
-        websocketsUpgrade:
-          type: boolean
         robotsNoIndex:
           type: boolean
           description: 'Emit X-Robots-Tag: noindex, nofollow.'
@@ -310,6 +354,24 @@ components:
           type: array
           items:
             type: string
+        auth:
+          allOf:
+          - $ref: '#/components/schemas/AuthMiddleware'
+          description: >-
+            Gate this host through an identity provider with NO Middleware
+            object. Identical shape, validation and data-plane handler to a
+            type=auth middleware; Middleware objects remain the reuse path for a
+            gate shared across a fleet. Not mutually exclusive with middlewares:
+            the inline block runs at the auth chain position, before any auth
+            middleware this host references, and every gate must pass.
+        rateLimit:
+          allOf:
+          - $ref: '#/components/schemas/RateLimitMiddleware'
+          description: >-
+            Throttle this host with a per-client-IP token bucket with NO
+            Middleware object. Identical shape, validation and limiter to a
+            type=rate-limit middleware, applied at the rate-limit chain position
+            (outermost) before any rate-limit middleware this host references.
         locations:
           type: array
           items:
@@ -341,6 +403,22 @@ components:
             header names, hop-by-hop headers, the response-semantic headers
             (Content-Type/-Length/-Encoding, Vary, Location, Sec-WebSocket-*)
             and case-insensitive duplicates are rejected.
+        trustedProxies:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: >-
+            CIDRs or bare IPs of the L7 proxies whose X-Forwarded-For is believed
+            when deriving this host's client IP. REPLACES settings.trustedProxies
+            for this host rather than extending it. Absent (or null) inherits the
+            fleet-wide list; PRESENT AND EMPTY ([]) trusts nobody for this host
+            whatever the fleet default is - the connection peer is the client and
+            X-Forwarded-For is never read. The derived address is
+            what access lists, geo, rate limits, every allowFrom exemption, the
+            access log and the upstream X-Forwarded-For/X-Real-IP all compare.
+            Entries must parse as a CIDR or an IP address; 0.0.0.0/0 and ::/0 are
+            accepted but warned about at load.
       required:
       - name
       - domains
@@ -555,12 +633,69 @@ components:
           $ref: '#/components/schemas/ACMESpec'
         custom:
           $ref: '#/components/schemas/CustomCertSpec'
+        notBefore:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Leaf certificate's validity start. Absent for an acme certificate with no
+            completed order yet (state pending).
+        notAfter:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Leaf certificate's expiry. Absent for an acme certificate with no completed
+            order yet (state pending).
+        daysRemaining:
+          type: integer
+          readOnly: true
+          description: Whole days until notAfter, negative once expired. Absent alongside notAfter.
+        issuer:
+          type: string
+          readOnly: true
+          description: Leaf certificate's issuer common name. Absent alongside notAfter.
+        state:
+          type: string
+          readOnly: true
+          enum:
+          - valid
+          - expiring
+          - expired
+          - pending
+          - error
+          description: 'valid: notAfter is more than 30 days out. expiring: at or inside 30 days.
+            expired: past notAfter. pending: acme certificate, no order has completed yet. error: the
+            last attempt (ACME order, or reading a custom certificate file) failed - see lastError.'
+        lastError:
+          type: string
+          readOnly: true
+          description: 'Most recent renewal/read failure. Empty or absent means the last attempt (if
+            any) succeeded. The text depends on the caller: an **admin** gets the raw ACME or
+            file/parse message, truncated to 300 characters; any **non-admin** caller (the read-only
+            viewer role, or a certificates:read token) gets the same short classified reason
+            GET /health uses, e.g. ''dns-01 challenge or DNS provider failure''. The raw text can
+            embed a third party''s HTTP response body, and certificates:read is held by the viewer
+            role, so it is not disclosed any more widely than /health does.'
+        lastAttempt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When the ACME manager last attempted to issue/renew this certificate. Acme
+            certificates only; absent for custom and for an acme certificate the manager has not
+            looked at yet (e.g. an HA follower, which does not run it).
+        sans:
+          type: array
+          items:
+            type: string
+          readOnly: true
+          description: Leaf certificate's subject alternative names (DNS names and IPs). Absent
+            alongside notAfter.
       required:
       - name
       - type
       - domains
-      description: Desired state for a TLS certificate. Issuance/renewal status is runtime state, not
-        part of this object.
+      description: Desired state for a TLS certificate, plus read-only status fields (notBefore
+        through sans) the server derives from the certificate store and the ACME manager's in-memory
+        state on every read. None of the status fields are accepted on write.
     DNSProvider:
       type: object
       properties:
@@ -573,11 +708,29 @@ components:
         updatedAt: *id007
         provider:
           type: string
-          description: cloudflare (only provider shipped today).
+          enum:
+          - cloudflare
+          - digitalocean
+          - hetzner
+          - desec
+          - rfc2136
+          - acme-dns
+          description: >-
+            DNS-01 solver to use. cloudflare, digitalocean, hetzner and desec are
+            token-authenticated REST providers; rfc2136 sends TSIG-signed dynamic
+            updates to any nameserver; acme-dns writes to a joohoi/acme-dns
+            account reached through a CNAME.
         config:
           type: object
           properties: {}
-          description: 'Provider-specific credential map, e.g. {"apiToken": "${FILE:/run/secrets/cf_token}"}.'
+          description: >-
+            Provider-specific credential map. The REST providers take apiToken,
+            e.g. {"apiToken": "${FILE:/run/secrets/cf_token}"}. rfc2136 takes
+            server, zone, tsigKeyName, tsigSecret and optional tsigAlgorithm,
+            ttl, transport, timeout. acme-dns takes baseURL, username, password
+            and subdomain, plus optional allowInsecureLocal ("true") to permit a
+            loopback baseURL - a link-local baseURL (the cloud metadata range) is
+            always refused, at write time and again at connect time.
           additionalProperties:
             $ref: '#/components/schemas/Secret'
       required:
@@ -782,9 +935,6 @@ components:
           description: Default true.
         requireVerifiedEmail:
           type: boolean
-        trustIdPMFA:
-          type: boolean
-          description: Delegate MFA to the IdP via acr/amr instead of a second local prompt.
       required:
       - issuerURL
       - clientID
@@ -931,6 +1081,13 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        path:
+          type: string
+          description: Base path prefixed to every request sent to THIS member, applied by the failover
+            transport. Same rules as Upstream.path. healthCheck.path is used verbatim and is not prefixed.
+        hostHeader:
+          type: string
+          description: Host header sent to THIS member. Same values as Upstream.hostHeader.
         weight:
           type: integer
           description: Relative share for round-robin/least-connections, 1-256. 0 defaults to 1. Ignored
@@ -979,10 +1136,19 @@ components:
           type: string
         passwordHash:
           type: string
-          description: bcrypt hash.
+          description: bcrypt hash ($2a$/$2b$/$2y$, 60 characters). Required unless password is sent
+            instead. Anything that is not a bcrypt hash is refused at write time.
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          description: Plaintext password, accepted on a write of an auth spec - a Middleware of type
+            auth, or the inline auth block on a ProxyHost or one of its locations. The API hashes it
+            with bcrypt and stores passwordHash; it is never persisted and never echoed back. Omit it
+            to keep the stored hash unchanged. Merged by position, so send users in the order they are
+            displayed.
       required:
       - username
-      - passwordHash
     IPRule:
       type: object
       properties:
@@ -1049,11 +1215,17 @@ components:
         updatedAt: *id007
         satisfyAny:
           type: boolean
-          description: OR- vs AND-evaluation across auth/IP/geo checks.
+          deprecated: true
+          description: 'Deprecated, removed in v2: OR- vs AND-evaluation across basicAuth and IP/geo.
+            Migrate with POST /api/access-lists/{name}/migrate-basic-auth; it becomes allowFrom on the
+            auth middleware. Still honoured.'
         basicAuth:
           type: array
+          deprecated: true
           items:
             $ref: '#/components/schemas/BasicAuthUser'
+          description: 'Deprecated, removed in v2: use an auth middleware with mode basic. Migrate with
+            POST /api/access-lists/{name}/migrate-basic-auth. Still honoured.'
         rules:
           type: array
           items:
@@ -1076,8 +1248,68 @@ components:
           $ref: '#/components/schemas/AccessListGeo'
       required:
       - name
-      description: HTTP basic auth, ordered IP allow/deny rules, optional remote IP sources, and
-        optional GeoIP country rules.
+      description: Ordered IP allow/deny rules, optional remote IP sources, and optional GeoIP country
+        rules over the resolved client IP. The basicAuth/satisfyAny pair is deprecated - put
+        username/password gating in an auth middleware with mode basic.
+    BasicAuthMigrationAttachment:
+      type: object
+      properties:
+        kind:
+          type: string
+          description: Always ProxyHost today; a stream host may not reference a basicAuth list.
+        name:
+          type: string
+        path:
+          type: string
+          description: Location path when the reference is on a location; absent for a host-wide one.
+    BasicAuthMigration:
+      type: object
+      properties:
+        accessList:
+          type: string
+        middleware:
+          type: string
+          description: Name of the auth middleware created, always "<accessList>-basic".
+        users:
+          type: array
+          items:
+            type: string
+          description: Usernames carried over. No credential material is echoed.
+        allowFrom:
+          type: array
+          items:
+            type: string
+          description: Literal allow CIDRs copied onto the middleware. Populated only when the list set
+            satisfyAny.
+        satisfyAny:
+          type: boolean
+          description: What the list had, so a reader can see why allowFrom is or is not populated.
+        attachTo:
+          type: array
+          items:
+            $ref: '#/components/schemas/BasicAuthMigrationAttachment'
+        detachAccessList:
+          type: boolean
+          description: Whether the access list is REMOVED from those hosts and locations. True only
+            when the list set satisfyAny and every rule it carries moved into the middleware's
+            allowFrom - the list evaluated as "IP match OR password", so leaving its now-mandatory
+            rules attached would lock out password users outside them. False when the list still
+            carries a deny rule, a source-backed rule or geo rules, in which case it stays attached
+            and warnings says so.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Allow rules that could not be represented as allowFrom (source-backed or
+            path-scoped) and were therefore not copied, plus a warning when the list stays attached
+            and its remaining rules become mandatory.
+        plan:
+          type: boolean
+          description: True for a dry run (?plan=1), which changed nothing.
+        commit:
+          type: string
+          description: Commit the apply produced; absent for a plan.
+      description: What the basic-auth migration did, or (with ?plan=1) would do.
     AccessListSource:
       type: object
       properties:
@@ -1140,6 +1372,24 @@ components:
                 format: date-time
       description: Last access-list source fetch result. Shape mirrored from internal/accesssync; see
         docs/deployment.md#access-list-remote-sources.
+    BasicAuthSpec:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/BasicAuthUser'
+          description: Accepted credentials. At least one is required; at most 64.
+        realm:
+          type: string
+          maxLength: 128
+          description: Realm advertised in the WWW-Authenticate challenge. Empty means the gated host's
+            name. Printable ASCII only, with no quote or backslash - it is sent verbatim in a quoted
+            header parameter.
+      required:
+      - users
+      description: Credential set for an auth middleware in basic mode. This is where username/password
+        gating belongs; the identical users on an AccessList (basicAuth) are deprecated.
     AuthMiddleware:
       type: object
       properties:
@@ -1148,13 +1398,16 @@ components:
           description: Required except in client-cert mode.
         mode:
           type: string
-          description: oidc | forward-auth | auth-request | client-cert. Defaults from the IdP type.
+          description: oidc | forward-auth | auth-request | client-cert | basic. Defaults from the IdP
+            type. client-cert and basic name no identityProvider - the TLS handshake and the local
+            credential set are their identity sources.
           enum:
           - ''
           - oidc
           - forward-auth
           - auth-request
           - client-cert
+          - basic
         requiredRoles:
           type: array
           items:
@@ -1164,7 +1417,8 @@ components:
           items:
             type: string
           description: CIDRs that bypass authentication entirely - no auth subrequest, no client-certificate
-            requirement, no identity headers. Supported in auth-request and client-cert modes; refused
+            requirement, no password prompt, no identity headers. Supported in auth-request, client-cert
+            and basic modes; refused
             in oidc and forward-auth mode, and refused when mode is unset and the referenced provider's
             type resolves to one of those (set mode explicitly). Matched against the client IP the HOST
             resolves, which honours X-Forwarded-For only from that host's trusted proxies - and a
@@ -1177,6 +1431,11 @@ components:
           description: Certificate subject (or bare CN) -> role, for client-cert mode.
           additionalProperties:
             type: string
+        basic:
+          allOf:
+          - $ref: '#/components/schemas/BasicAuthSpec'
+          description: Credential set for basic mode. Required there and refused in every other mode.
+            requiredRoles is not supported alongside it (a username carries no roles).
     HeadersMiddleware:
       type: object
       properties:
@@ -1258,17 +1517,45 @@ components:
             of refill.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
+    RewriteRule:
+      type: object
+      description: One ordered rewrite rule. For prefixRules, from is a path prefix; for regexRules it is
+        a Go regular expression implicitly anchored with ^, and to may reference capture groups as $1.
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+      required:
+      - from
+      - to
     RewriteMiddleware:
       type: object
+      description: Upstream-facing request-path rewrite. Rule kinds are evaluated exact, then prefix (longest
+        first), then regex (in order); the first match wins and no rule sees another rule's output. Never
+        a redirect - method and body are preserved. At least one rule of any kind is required.
       properties:
         replacePath:
           type: object
           properties: {}
-          description: Exact request path -> replacement path. No regex.
+          description: Exact request path -> replacement path. No prefix or pattern matching.
           additionalProperties:
             type: string
-      required:
-      - replacePath
+        prefixRules:
+          type: array
+          maxItems: 32
+          description: Prefix replacements, boundary matched like a location (/reports never captures /reports-evil).
+            The longest matching from wins.
+          items:
+            $ref: '#/components/schemas/RewriteRule'
+        regexRules:
+          type: array
+          maxItems: 32
+          description: Regex replacements. Each from is compiled at config load (max 256 characters); a pattern
+            that does not compile is a validation error naming the rule index. The matched leading span is
+            replaced and the remainder appended unchanged.
+          items:
+            $ref: '#/components/schemas/RewriteRule'
     BouncerMiddleware:
       type: object
       description: >-
@@ -1448,6 +1735,58 @@ components:
       - name
       - url
       description: Outbound lifecycle notification POSTed after every successful config change.
+    NotificationTarget:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+          - ntfy
+          - discord
+          - generic
+        url:
+          type: string
+          description: Absolute http(s) endpoint. A discord url must contain "/api/webhooks/".
+        secret:
+          $ref: '#/components/schemas/Secret'
+          description: ntfy access token or generic bearer token, sent as "Authorization Bearer".
+            Unused for discord.
+        disabled:
+          type: boolean
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+            - cert.renewal_failed
+            - cert.expiring
+            - cert.expired
+            - upstream.unhealthy
+            - upstream.recovered
+            - acme.account_error
+            - discovery.frozen
+            - config.changed
+          description: Empty selects the default set (every kind above except config.changed,
+            which is opt-in).
+      required:
+      - name
+      - type
+      - url
+      description: Outbound alert receiver - see settings.notifications and internal/notify.
+    NotificationsSettings:
+      type: object
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationTarget'
+        expiringThresholdDays:
+          type: integer
+          description: Days before ACME expiry a certificate joins the daily cert.expiring digest.
+            0 selects the default (14).
+      description: Empty (default) sends nothing, matching every deployment before this feature.
     PiholeDNSSync:
       type: object
       properties:
@@ -1494,8 +1833,6 @@ components:
           description: Mutually exclusive with upstream.
         tls:
           $ref: '#/components/schemas/TLSSettings'
-        websocketsUpgrade:
-          type: boolean
         robotsNoIndex:
           type: boolean
         timeouts:
@@ -1611,10 +1948,30 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WebhookConfig'
+        notifications:
+          $ref: '#/components/schemas/NotificationsSettings'
         dnsSync:
           $ref: '#/components/schemas/DNSSyncSettings'
         proxyProtocol:
           $ref: '#/components/schemas/ProxyProtocolSettings'
+        trustedProxies:
+          type: array
+          items:
+            type: string
+          description: >-
+            Fleet-wide CIDRs or bare IPs of the L7 proxies whose X-Forwarded-For
+            is believed. The single source of truth for the client IP: when the
+            connection peer is inside this set the client IP is the rightmost
+            X-Forwarded-For entry that is not itself a trusted proxy, otherwise
+            it is the peer. That one value is compared by access lists, geo, rate
+            limits, guard/auth-request/client-cert/bouncer allowFrom, the
+            basic-auth lockout, the access log and the X-Forwarded-For/X-Real-IP
+            sent upstream. Empty (default) trusts nobody. A ProxyHost's own
+            trustedProxies REPLACES this list for that host. Distinct from
+            proxyProtocol.trustedCIDRs (L4, who may rewrite the connection
+            address) and identityProvider.forwardAuth.trustedProxies (who may
+            assert identity headers). Entries must parse as a CIDR or an IP
+            address; 0.0.0.0/0 and ::/0 are accepted but warned about at load.
         ingressDiscovery:
           $ref: '#/components/schemas/IngressDiscoverySettings'
         securityHeaders:
@@ -1783,6 +2140,34 @@ components:
           items:
             $ref: '#/components/schemas/APIToken'
       description: The full assembled config graph, as returned by GET /config.
+    ConfigSummary:
+      type: object
+      description: Object counts per kind, as returned by GET /config/summary.
+      properties:
+        counts:
+          type: object
+          description: Keyed by the plural resource name used in API paths (e.g.
+            "proxy-hosts"), one entry per first-class config kind. apiTokens is 0
+            for a caller without api-tokens:read, same restriction GET /config
+            applies to the rows themselves.
+          additionalProperties:
+            type: integer
+        disabled:
+          type: object
+          description: Count of objects with meta.disabled=true, by kind. Today
+            only "proxy-hosts" is reported.
+          additionalProperties:
+            type: integer
+        maintenance:
+          type: object
+          description: Count of proxy hosts with maintenance=true. Maintenance is
+            a ProxyHost-only field, so only "proxy-hosts" is reported.
+          additionalProperties:
+            type: integer
+        head:
+          type: string
+          description: The config repo's current commit, same value as
+            GET /health's configHead.
     Commit:
       type: object
       properties:
@@ -1864,6 +2249,11 @@ components:
           items:
             type: string
           description: The token's granted scopes. Empty for a session principal (governed by role alone).
+        readOnly:
+          type: boolean
+          description: True for the `user` role, which may read everything except API tokens and
+            write nothing. The SPA renders a read-only banner and disables every Save control when
+            it is set.
       description: The authenticated caller, as returned by GET /api/me.
     Capabilities:
       type: object
@@ -1916,14 +2306,203 @@ components:
                 currently serving the maintenance page whatever its own maintenance flag says. The
                 SPA says so on the host editor rather than showing a per-host toggle that reads off
                 while the host is in fact down.
+        adminLogin:
+          type: object
+          properties:
+            configured:
+              type: boolean
+              description: False in the bootstrap failure state - no local admin credential and no
+                admin SSO provider that renders a sign-in button, so the login page cannot succeed
+                for anyone. The SPA and the server-rendered login page both show the remedy.
+            totp:
+              type: boolean
+              description: True when the local admin must present a TOTP code after their password
+                (GPM_LOCAL_ADMIN_TOTP_SECRET is set). Says nothing about SSO logins, whose MFA
+                belongs to the IdP.
+            cookieSecure:
+              type: string
+              enum:
+              - secure
+              - insecure-private
+              - insecure-public
+              description: How the admin session cookie was issued for this request; insecure-public
+                means plain HTTP from a routable address and the SPA shows a banner; absent when
+                unwired.
         scopeSubjects:
           type: array
           items:
             type: string
-          description: The authoritative list of scope subjects (resource plurals + settings/dns-sync/ingress-discovery/metrics),
+          description: The authoritative list of scope subjects (resource plurals + settings/dns-sync/ingress-discovery/docker-discovery/metrics),
             for building a token-scope form.
       description: 'Read-only runtime feature-availability probe. Not scope-gated: any authenticated caller
         may ask.'
+    RuntimeInfo:
+      type: object
+      description: Read-only startup facts for the admin UI's Runtime card.
+      properties:
+        version:
+          type: string
+        haRole:
+          type: string
+          enum:
+          - leader
+          - follower
+        listeners:
+          type: object
+          properties:
+            http:
+              type: string
+              description: Data-plane HTTP listen address (-http-addr / GPM_HTTP_ADDR).
+            https:
+              type: string
+              description: Data-plane HTTPS listen address (-https-addr / GPM_HTTPS_ADDR).
+            admin:
+              type: string
+              description: Admin listen address (-admin-addr / GPM_ADMIN_ADDR).
+        paths:
+          type: object
+          description: Deployment filesystem layout. OMITTED for a caller without the admin scope
+            (the read-only user role and any narrower token).
+          properties:
+            configDir:
+              type: string
+            certDir:
+              type: string
+            sessionDB:
+              type: string
+        metricsEnabled:
+          type: boolean
+        accessLogEnabled:
+          type: boolean
+          description: Live value, not the -access-log flag (PUT /api/logs toggles it at runtime).
+        geoipLoaded:
+          type: boolean
+        secretFileRoots:
+          type: array
+          items:
+            type: string
+          description: Effective ${FILE:...} allowlist (GPM_SECRET_FILE_ROOTS). Empty for a caller
+            without the admin scope.
+        localAdminConfigured:
+          type: boolean
+          description: True when both GPM_LOCAL_ADMIN_USER and a bcrypt hash are set. The username
+            and the hash are never reported.
+        localAdminTOTP:
+          type: boolean
+          description: True when a TOTP secret is set for the local admin (GPM_LOCAL_ADMIN_TOTP_SECRET
+            or its _FILE form). The secret itself is never reported.
+        pprofEnabled:
+          type: boolean
+    Health:
+      type: object
+      description: Aggregate runtime health for GET /api/health. Everything comes from in-memory state,
+        no ACME CA or DNS calls.
+      properties:
+        dataPlane:
+          type: object
+          properties:
+            https:
+              $ref: '#/components/schemas/HealthListener'
+            http:
+              $ref: '#/components/schemas/HealthListener'
+        certificates:
+          type: object
+          description: Counted from the same status fields GET /certificates reports; total includes
+            every state.
+          properties:
+            total:
+              type: integer
+            expiring:
+              type: integer
+            expired:
+              type: integer
+            error:
+              type: integer
+        upstreamGroups:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              healthy:
+                type: integer
+              unhealthy:
+                type: integer
+        acme:
+          type: object
+          properties:
+            lastRenewalRun:
+              type: string
+              format: date-time
+              description: When the ACME renewal loop last ran. Absent if it has never run (an HA
+                follower, which does not run it, or before the first tick).
+            lastError:
+              type: string
+              description: The most recent renewal failure across every certificate, truncated to
+                300 characters. Absent if none has failed since startup.
+        haRole:
+          type: string
+          enum:
+          - leader
+          - follower
+        configHead:
+          type: string
+          description: Current config repo HEAD commit SHA.
+        configWarnings:
+          type: array
+          items:
+            type: string
+          description: Non-fatal config smells (mirrors Config.Warnings()), including one entry per
+            config file with an unknown YAML key an older struct silently ignored - see
+            docs/operations/upgrading.md#rollback. Absent when there is nothing to warn about.
+    HealthListener:
+      type: object
+      properties:
+        listening:
+          type: boolean
+        addr:
+          type: string
+    WebhookDelivery:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          description: Target URL. For a caller without the admin scope the path and query are
+            replaced with "/(redacted)" - for a Discord, Slack or ntfy receiver the URL path is the
+            credential, and these status routes ride settings:read.
+        disabled:
+          type: boolean
+        lastAttempt:
+          type: string
+          format: date-time
+          description: RFC3339. Absent when the target has never fired in this process.
+        status:
+          type: integer
+          description: HTTP status the receiver returned; absent when the request got no response.
+        durationMs:
+          type: integer
+        ok:
+          type: boolean
+        error:
+          type: string
+    WebhookTestResult:
+      type: object
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+        status:
+          type: integer
+        durationMs:
+          type: integer
+        ok:
+          type: boolean
+        error:
+          type: string
     DNSSyncStatus:
       type: object
       properties:
@@ -2057,6 +2636,77 @@ components:
             error:
               type: string
       description: Dry-run preview of what a reconcile would do. Never writes anything.
+      additionalProperties: true
+    DockerDiscoveryStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        lastRun:
+          type: string
+          format: date-time
+        lastSuccess:
+          type: string
+          description: 'Watch this, not lastRun, for staleness: a failed run freezes the managed set instead
+            of changing it.'
+          format: date-time
+        reachable:
+          type: boolean
+          description: Whether the last run could talk to the Docker Engine endpoint at all.
+        endpoint:
+          type: string
+          description: The socket path or host URL the last run used.
+        discovered:
+          type: integer
+        managed:
+          type: integer
+        created:
+          type: integer
+        updated:
+          type: integer
+        deleted:
+          type: integer
+        skipped:
+          type: integer
+        error:
+          type: string
+        commit:
+          type: string
+        hosts:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              container:
+                type: string
+              profile:
+                type: string
+              domains:
+                type: array
+                items:
+                  type: string
+              action:
+                type: string
+                enum:
+                - created
+                - updated
+                - unchanged
+                - deleted
+                - skipped
+              reason:
+                type: string
+                description: Present on a skip, and on the two updates that are not a plain derive.
+      description: Last-reconcile result. Shape mirrored from internal/docker; see docs/design/docker-discovery.md.
+      additionalProperties: true
+    DockerDiscoveryPlan:
+      type: object
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+      description: Dry-run preview mirroring the reconcile decisions, without writing anything.
       additionalProperties: true
     IngressDiscoveryStatus:
       type: object
@@ -2424,6 +3074,52 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: access-lists:write
+  /api/access-lists/{name}/migrate-basic-auth:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Migrate an AccessList's deprecated basicAuth to an auth middleware
+      description: 'Creates an auth middleware named "<name>-basic" with mode basic from the list''s
+        basicAuth users, attaches it to every proxy host and location that references the list, copies
+        the list''s literal allow CIDRs to the middleware''s allowFrom ONLY when satisfyAny was set (the
+        sole configuration in which an IP match alone admitted a request), and clears basicAuth and
+        satisfyAny on the list - all in a single commit. When every rule moved, the list is also
+        DETACHED from those hosts and locations (see detachAccessList): with satisfyAny it admitted on
+        "IP match OR password", so leaving its rules attached would make them mandatory. Source-backed
+        and path-scoped allow rules are not copied and are reported in warnings. Admin-scoped because one call rewrites access lists,
+        middlewares and proxy hosts together. Add ?plan=1 for a dry run that returns the same payload
+        and changes nothing.'
+      tags:
+      - Access lists
+      parameters:
+      - name: plan
+        in: query
+        required: false
+        description: Set to 1 for a dry run. Nothing is written and the response carries no commit.
+        schema:
+          type: string
+          enum:
+          - '1'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BasicAuthMigration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
   /api/api-tokens:
     get:
       summary: List api tokens
@@ -2745,6 +3441,70 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '503':
           $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:write
+  /api/certificates/{name}/renew:
+    parameters:
+    - $ref: '#/components/parameters/NamePath'
+    post:
+      summary: Force an immediate certificate renewal
+      description: Starts an ACME order for this certificate now, ignoring the normal 30-day renewal
+        window. Responds as soon as the order has STARTED, not once it completes - DNS-01 propagation
+        alone can take minutes. Poll GET /certificates/{name}'s status fields (state, lastAttempt,
+        lastError) to see the outcome. Only one order runs at a time across the whole instance; a
+        second renew request while one is already in flight gets 409, not queued. A 1-hour cooldown
+        also applies per certificate, counted from its last attempt - failed attempts included - so
+        a retry loop cannot hammer the CA into a rate limit.
+      tags:
+      - Certificates
+      responses:
+        '200':
+          description: The order was accepted and is now running in the background.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  started:
+                    type: boolean
+                required:
+                - started
+        '400':
+          description: This certificate is type custom, not acme. gpm does not renew custom certificates
+            - replace the file and PUT the object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 'Refused for one of two reasons, both named in the error message: an ACME order
+            is already in flight for this instance (this certificate or another one), or this
+            certificate is within its 1-hour renew cooldown, counted from its last attempt whether
+            that attempt succeeded or failed. The cooldown message states the remaining wait
+            ("retry in 42m10s"). Wait and retry; nothing is queued.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '501':
+          description: This instance is not the ACME issuer (an HA follower, or ACME is not configured).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Unexpected error starting the order (rare - the request itself, not the order,
+            failed). An order failure once running (CA rejection, DNS-01 propagation timeout) is NOT
+            reported here; check the certificate's lastError status field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3134,6 +3894,26 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
+  /api/config/summary:
+    get:
+      summary: Object counts per config kind
+      description: The same store read GET /api/config does, reduced to counts so
+        a caller that only needs "how many" (the UI sidebar, to decide whether the
+        advanced nav group starts open) does not have to fetch every object.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
   /api/parked-hosts:
     get:
       summary: List parked hosts
@@ -3486,6 +4266,28 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: dns-sync:read
+  /api/health:
+    get:
+      summary: Aggregate runtime health
+      description: A single-request snapshot of whether this instance is actually working - data-plane
+        listener state, certificate expiry counts, upstream-group health, the ACME renewal loop's last
+        run, HA role and the current config HEAD. Everything comes from in-memory state (plus the cached
+        certificate files GET /certificates already reads); it never calls out to an ACME CA or a DNS
+        provider.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: '*:read'
   /api/history:
     get:
       summary: Whole-config commit history
@@ -3644,6 +4446,81 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: identity-providers:write
+  /api/docker-discovery/plan:
+    get:
+      summary: Preview a Docker discovery reconcile
+      description: Read-only dry run, without changing anything.
+      tags:
+      - Docker discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerDiscoveryPlan'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The Docker Engine API call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: docker-discovery:read
+  /api/docker-discovery/reconcile:
+    post:
+      summary: Run a Docker discovery reconcile now
+      description: 'Synchronous. Never queues: a run already in flight answers 409 instead of blocking.'
+      tags:
+      - Docker discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerDiscoveryStatus'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          description: The Docker Engine API call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: docker-discovery:write
+  /api/docker-discovery/status:
+    get:
+      summary: Last Docker discovery reconcile result
+      tags:
+      - Docker discovery
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerDiscoveryStatus'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: docker-discovery:read
   /api/ingress-discovery/plan:
     get:
       summary: Preview an Ingress discovery reconcile
@@ -4278,6 +5155,26 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: admin
+  /api/runtime:
+    get:
+      summary: Read-only runtime facts (flags, env, listeners, paths)
+      description: How THIS process was started. Reports no username, hash or secret value - only
+        addresses, paths and booleans. Sourced from the flags/env parsed at startup, never re-read
+        per request.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:read
   /api/settings:
     get:
       summary: Get the singleton application settings
@@ -4638,6 +5535,117 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
+  /api/webhooks/status:
+    get:
+      summary: Last-delivery state per webhook target
+      description: In-memory and per-process - an operational hint, never config. Every configured
+        target is listed; one that has never fired has an empty lastAttempt.
+      tags:
+      - Webhooks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookDelivery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:read
+  /api/webhooks/{name}/test:
+    post:
+      summary: Send a synthetic test event to one webhook target
+      description: 'POSTs {"action":"test","kind":"Webhook","name":"<target>","time":"<RFC3339>"} and
+        waits for the answer (5s timeout). A disabled target is still tested, so a receiver can be
+        proved before it is turned on. A refused or timed-out delivery is a 200 with ok:false - only
+        an unknown target name is a 404. Admin scope: it makes gpm POST to an admin-configured URL on
+        demand and resolves that target''s secret.'
+      tags:
+      - Webhooks
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The test ran; see ok/error for what the receiver did.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No webhook target with that name is configured.
+        '501':
+          description: Webhook delivery is not wired in this deployment.
+      x-scope: admin
+  /api/notifications/status:
+    get:
+      summary: Last-delivery state per notification target
+      description: In-memory and per-process - an operational hint, never config. Every configured
+        target is listed; one that has never fired has an empty lastAttempt. Same shape as
+        /api/webhooks/status (internal/notify reuses webhook.Delivery).
+      tags:
+      - Notifications
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookDelivery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:read
+  /api/notifications/{name}/test:
+    post:
+      summary: Send a synthetic test notification to one target
+      description: 'Sends a synthetic event and waits for the answer (5s timeout), bypassing the
+        target''s events filter and the dedup window. A disabled target is still tested, so a
+        receiver can be proved before it is turned on. A refused or timed-out delivery is a 200
+        with ok:false - only an unknown target name is a 404. Admin scope: it makes gpm POST to an
+        admin-configured URL on demand and resolves that target''s secret.'
+      tags:
+      - Notifications
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The test ran; see ok/error for what the receiver did.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No notification target with that name is configured.
+        '501':
+          description: Notification delivery is not wired in this deployment.
+      x-scope: admin
   /auth/callback:
     get:
       summary: OIDC authorization-code callback
@@ -4706,6 +5714,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /auth/local/totp:
+    post:
+      summary: Local login, second factor (TOTP)
+      description: 'Step two of local login when GPM_LOCAL_ADMIN_TOTP_SECRET is set. Form fields: `pending`
+        (the single-use token issued by POST /auth/local), `code` (6-digit TOTP), `return`. Same-origin
+        only. A wrong code counts toward the SAME per-client-IP lockout as a wrong password, and the pending
+        token is consumed either way.'
+      tags:
+      - Auth
+      responses:
+        '302':
+          description: Redirect to the return path, with the session cookie set.
+        '403':
+          description: Cross-origin request blocked (failed the same-origin guard).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many recent failed attempts from this client IP.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Wrong, expired or already-used code, or an expired/unknown pending token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       security: []
       requestBody:
         required: true
@@ -4713,11 +5751,18 @@ paths:
           application/x-www-form-urlencoded:
             schema:
               type: object
+              required:
+              - pending
+              - code
               properties:
-                username:
+                pending:
                   type: string
-                password:
+                  description: The single-use pending-login token issued by POST /auth/local. Consumed
+                    whether or not the code verifies.
+                code:
                   type: string
+                  description: The 6-digit TOTP code from the authenticator app.
+                  pattern: '^[0-9]{6}$'
                 return:
                   type: string
                   description: Same-site path to redirect to on success.

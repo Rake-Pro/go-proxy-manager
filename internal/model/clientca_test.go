@@ -241,10 +241,10 @@ func TestClientCertAuthModeValidation(t *testing.T) {
 			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}), ""},
 		{"allowFrom in oidc mode", mw(AuthMiddleware{Mode: AuthModeOIDC,
 			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}),
-			"only supported in auth-request and client-cert modes"},
+			"only supported in auth-request, client-cert and basic modes"},
 		{"allowFrom in forward-auth mode", mw(AuthMiddleware{Mode: AuthModeForwardAuth,
 			IdentityProvider: "authentik", AllowFrom: []string{"10.0.0.0/8"}}),
-			"only supported in auth-request and client-cert modes"},
+			"only supported in auth-request, client-cert and basic modes"},
 		{"bad allowFrom CIDR in client-cert mode", mw(AuthMiddleware{Mode: AuthModeClientCert,
 			AllowFrom: []string{"10.0.0.0/33"}}), "invalid CIDR/IP"},
 	}

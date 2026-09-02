@@ -14,8 +14,11 @@ import (
 // TestStaticBundleHasThemeToggle checks that app.js defines the light/dark
 // toggle (persisted under the gpm.theme localStorage key and applied via
 // documentElement's data-theme attribute) and that index.html's <head> applies
-// a saved choice before first paint via an inline (non-module) script, so a
-// saved theme never flashes the other palette on load.
+// a saved choice before first paint via a plain (non-module, non-inline)
+// script, so a saved theme never flashes the other palette on load. It must be
+// a FILE and not an inline block: the admin listener sends
+// Content-Security-Policy "script-src 'self'", which blocks inline execution,
+// so an inline guard silently never runs.
 func TestStaticBundleHasThemeToggle(t *testing.T) {
 	js, err := staticFS.ReadFile("static/app.js")
 	if err != nil {
@@ -42,23 +45,30 @@ func TestStaticBundleHasThemeToggle(t *testing.T) {
 	if !ok {
 		t.Fatalf("index.html has no </head>")
 	}
-	if !strings.Contains(head, "<script>") {
-		t.Fatalf("index.html <head> has no inline <script> (a data-theme flash guard must run before first paint)")
+	if strings.Contains(head, "<script>") {
+		t.Fatalf("index.html <head> has an inline <script>; script-src 'self' blocks it, so it would never run")
 	}
-	if !strings.Contains(head, "gpm.theme") || !strings.Contains(head, "data-theme") {
-		t.Fatalf("index.html <head> script does not look like it sets data-theme from the gpm.theme choice")
+	if !strings.Contains(head, `<script src="theme-init.js"></script>`) {
+		t.Fatalf("index.html <head> no longer loads theme-init.js (the data-theme flash guard must run before first paint)")
+	}
+	guard, err := staticFS.ReadFile("static/theme-init.js")
+	if err != nil {
+		t.Fatalf("read theme-init.js: %v", err)
+	}
+	if !strings.Contains(string(guard), "gpm.theme") || !strings.Contains(string(guard), "data-theme") {
+		t.Fatalf("theme-init.js does not look like it sets data-theme from the gpm.theme choice")
 	}
 	// The head's inline script must precede app.css's <link> and app.js's
 	// <script type="module">: both are what determine first paint, so the
 	// data-theme attribute has to land before either loads or the flash guard
 	// is pointless.
-	scriptIdx := strings.Index(head, "<script>")
+	scriptIdx := strings.Index(head, `<script src="theme-init.js">`)
 	cssIdx := strings.Index(head, `<link rel="stylesheet" href="app.css"`)
 	if cssIdx == -1 {
 		t.Fatalf("index.html <head> has no app.css link to compare ordering against")
 	}
 	if scriptIdx > cssIdx {
-		t.Fatalf("index.html's inline theme script must come before the app.css <link>, or the flash guard can lose the race")
+		t.Fatalf("index.html's theme-init.js <script> must come before the app.css <link>, or the flash guard can lose the race")
 	}
 	if !strings.Contains(rest, `<script type="module" src="app.js">`) {
 		t.Fatalf("index.html no longer loads app.js as a module script after </head>")

@@ -108,6 +108,18 @@ type Server struct {
 	// per accepted connection (never cached in the listener), so a settings
 	// change applies to the next connection with no listener restart. nil = off.
 	proxyProto atomic.Pointer[proxyProtoConfig]
+
+	// httpListening/httpsListening flip true once the respective net.Listen call
+	// in Start succeeds, for the GET /api/health probe. A bind failure that
+	// aborts startup leaves the corresponding flag false.
+	httpListening  atomic.Bool
+	httpsListening atomic.Bool
+}
+
+// ListenerStatus reports whether the HTTP and HTTPS data-plane listeners are
+// currently bound, for the GET /api/health probe.
+func (s *Server) ListenerStatus() (httpsListening, httpListening bool) {
+	return s.httpsListening.Load(), s.httpListening.Load()
 }
 
 // Config holds the data plane's bind addresses, cert directory, and the optional
@@ -270,11 +282,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("http listener: %w", err)
 	}
+	s.httpListening.Store(true)
 	httpsLn, err := net.Listen("tcp", s.httpsAddr)
 	if err != nil {
 		_ = httpLn.Close()
+		s.httpListening.Store(false)
 		return fmt.Errorf("https listener: %w", err)
 	}
+	s.httpsListening.Store(true)
 	httpLn = wrapProxyProtocol(httpLn, s.currentProxyProtocol)
 	httpsLn = wrapProxyProtocol(httpsLn, s.currentProxyProtocol)
 

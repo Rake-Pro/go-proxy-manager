@@ -120,6 +120,7 @@ func (c Config) Validate() error {
 		for _, a := range h.AccessLists {
 			checkRef(&errs, "proxy host", h.Name, "accessList", a, als)
 		}
+		checkInlineAuth(&errs, "proxy host", h.Name, h.Auth, idps, idpTypes)
 		for _, l := range h.Locations {
 			checkGroupRef(h.Name+" location "+l.Path, l.UpstreamGroupRef)
 			for _, m := range l.Middlewares {
@@ -128,6 +129,7 @@ func (c Config) Validate() error {
 			for _, a := range l.AccessLists {
 				checkRef(&errs, "proxy host", h.Name+" location "+l.Path, "accessList", a, als)
 			}
+			checkInlineAuth(&errs, "proxy host", h.Name+" location "+l.Path, l.Auth, idps, idpTypes)
 		}
 	}
 	for _, h := range c.RedirectHosts {
@@ -294,7 +296,7 @@ func (c Config) Validate() error {
 	for _, m := range c.Middlewares {
 		if m.Auth != nil {
 			checkRef(&errs, "middleware", m.Name, "identityProvider", m.Auth.IdentityProvider, idps)
-			checkAuthAllowFromMode(&errs, m, idpTypes)
+			checkAuthAllowFromMode(&errs, fmt.Sprintf("middleware %q", m.Name), *m.Auth, idpTypes)
 		}
 	}
 
@@ -338,22 +340,126 @@ func checkRef(errs *[]error, ownerKind, ownerName, refKind, ref string, set map[
 // the operator believes the LAN is exempt, every LAN client is challenged instead,
 // and nothing anywhere says why. An unresolvable provider is refused for the same
 // reason - the effective mode cannot be established, so neither can the promise.
-func checkAuthAllowFromMode(errs *[]error, m Middleware, idpTypes map[string]string) {
-	if len(m.Auth.AllowFrom) == 0 || m.Auth.Mode != "" {
-		return // explicit modes are settled by Middleware.Validate
+// owner is the already-quoted owner phrase ("middleware \"sso\"", "proxy host
+// \"app\"", ...), so an inline auth block on a host or location is held to the
+// same rule and reads the same way when it fails.
+func checkAuthAllowFromMode(errs *[]error, owner string, a AuthMiddleware, idpTypes map[string]string) {
+	if len(a.AllowFrom) == 0 || a.Mode != "" {
+		return // explicit modes are settled by the per-object validator
 	}
-	t, ok := idpTypes[m.Auth.IdentityProvider]
+	t, ok := idpTypes[a.IdentityProvider]
 	if !ok {
 		// The dangling-reference error above already names the missing provider;
 		// this adds why it matters for allowFrom specifically.
-		*errs = append(*errs, fmt.Errorf("middleware %q: auth.allowFrom needs a known auth mode, but auth.mode is unset and identityProvider %q does not resolve, so the effective mode cannot be determined - set auth.mode explicitly",
-			m.Name, m.Auth.IdentityProvider))
+		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom needs a known auth mode, but auth.mode is unset and identityProvider %q does not resolve, so the effective mode cannot be determined - set auth.mode explicitly",
+			owner, a.IdentityProvider))
 		return
 	}
 	switch t {
 	case IdPTypeAuthRequest:
 	default:
-		*errs = append(*errs, fmt.Errorf("middleware %q: auth.allowFrom is only supported in auth-request and client-cert modes; auth.mode is unset, so it defaults to identityProvider %q's type (%q), where the exemption would be silently ignored - set auth.mode explicitly or remove auth.allowFrom",
-			m.Name, m.Auth.IdentityProvider, t))
+		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom is only supported in auth-request and client-cert modes; auth.mode is unset, so it defaults to identityProvider %q's type (%q), where the exemption would be silently ignored - set auth.mode explicitly or remove auth.allowFrom",
+			owner, a.IdentityProvider, t))
 	}
+}
+
+// checkInlineAuth applies the auth middleware's cross-object rules to an INLINE
+// auth block on a proxy host or location: the identity provider must resolve
+// (the block is the whole gate, so a dangling reference is the same load-time
+// error a middleware's would be), and an allowFrom with no explicit mode is
+// checked against the provider's type exactly as checkAuthAllowFromMode does for
+// a middleware. A nil block is absent and checks nothing.
+func checkInlineAuth(errs *[]error, ownerKind, ownerName string, a *AuthMiddleware, idps map[string]bool, idpTypes map[string]string) {
+	if a == nil {
+		return
+	}
+	checkRef(errs, ownerKind, ownerName, "identityProvider", a.IdentityProvider, idps)
+	checkAuthAllowFromMode(errs, fmt.Sprintf("%s %q", ownerKind, ownerName), *a, idpTypes)
+}
+
+// certCovers reports whether a certificate's domain list covers name, using the
+// same rule the data plane's SNI resolver uses (exact match, or a "*.parent"
+// wildcard one label up). See internal/dataplane/cert.go.
+func certCovers(domains []string, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	parent := ""
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		parent = name[i+1:]
+	}
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == name {
+			return true
+		}
+		if parent != "" && strings.HasPrefix(d, "*.") && d[2:] == parent {
+			return true
+		}
+	}
+	return false
+}
+
+// Warnings lists non-fatal config smells the operator should see in the startup
+// log. Unlike Validate, nothing here blocks a load or a commit: every item is a
+// configuration that works, just not the way the field name suggests.
+//
+// Today it reports exactly one: an L7 host (proxy, redirect or parked) whose
+// tls.certificateRef names a certificate that does not cover any of the host's
+// domains. For those kinds the ref is a documentation-only intent record - the
+// data plane picks the certificate by SNI across ALL certificates - so this
+// config serves a DIFFERENT certificate than the field implies, or fails the
+// handshake outright when no certificate covers the domain. (tls.certificateRef
+// is authoritative only for stream hosts in terminate mode.)
+func (c Config) Warnings() []string {
+	byName := map[string][]string{}
+	for _, ct := range c.Certificates {
+		byName[ct.Name] = ct.Domains
+	}
+	var out []string
+	check := func(kind, name, ref string, domains []string) {
+		if ref == "" {
+			return
+		}
+		certDomains, ok := byName[ref]
+		if !ok {
+			return // a dangling ref is already a hard Validate error
+		}
+		for _, d := range domains {
+			if certCovers(certDomains, d) {
+				return
+			}
+		}
+		out = append(out, fmt.Sprintf("%s %q sets tls.certificateRef to certificate %q, which covers none of its domains (%s); %s certificates are selected by SNI across every certificate, so this ref changes nothing and the host will be served by whichever certificate covers its domain - or fail the handshake if none does",
+			kind, name, ref, strings.Join(domains, ", "), kind))
+	}
+	for _, h := range c.ProxyHosts {
+		check("proxy host", h.Name, h.TLS.CertificateRef, h.Domains)
+	}
+	for _, h := range c.RedirectHosts {
+		check("redirect host", h.Name, h.TLS.CertificateRef, h.Domains)
+	}
+	for _, h := range c.ParkedHosts {
+		check("parked host", h.Name, h.TLS.CertificateRef, h.Domains)
+	}
+	// Deprecated access-list basic auth. It still works, so this is a warning and
+	// not a validation error, but it is the one login mechanism living in the
+	// IP/geo tier and it is removed in v2 - name the lists so an operator can see
+	// which files need migrating without grepping the config tree.
+	var legacyBasic []string
+	for _, a := range c.AccessLists {
+		if len(a.BasicAuth) > 0 {
+			legacyBasic = append(legacyBasic, a.Name)
+		}
+	}
+	if len(legacyBasic) > 0 {
+		out = append(out, fmt.Sprintf("access list(s) %s still use the deprecated basicAuth/satisfyAny fields; move the users to an auth middleware with mode: basic (POST /api/access-lists/{name}/migrate-basic-auth does it in one commit). They keep working now and are removed in v2",
+			strings.Join(legacyBasic, ", ")))
+	}
+	// Unknown YAML keys Store.Load found and silently ignored (see
+	// ConfigWarnings and UnknownYAMLKeys) - a config a newer gpm wrote, now
+	// loaded by an older one.
+	out = append(out, c.ConfigWarnings...)
+	return out
 }
