@@ -292,10 +292,27 @@ func (s *Server) observe(next http.Handler) http.Handler {
 	})
 }
 
-// clientIPOf resolves the real client IP using the live router's XFF-aware
-// resolver, falling back to the connection peer.
+// clientIPOf is the client IP the log records: the one the dispatch derived from
+// the matched host's trusted-proxy set (so the log agrees, byte for byte, with
+// what the access list and the rate limiter compared), or - for a request that
+// matched no proxy host, e.g. a 404, a redirect or a parked host - the
+// fleet-wide resolver, and finally the connection peer.
 func (s *Server) clientIPOf(r *http.Request) net.IP {
-	if rt := s.current(); rt != nil && rt.clientIP != nil {
+	if info, ok := clientIPInfoOf(r); ok {
+		return info.ip
+	}
+	rt := s.current()
+	if rt == nil {
+		return peerIP(r)
+	}
+	// The observer wraps the dispatch, so it holds the request as it ARRIVED,
+	// before dispatch stashed the derived value on a child context. Re-derive it
+	// from the same host's set with the same (pure) function, so the logged
+	// address is identical to the one every gate compared.
+	if hh, ok := rt.lookup(r.Host); ok {
+		return deriveClientIP(r, hh.trustedProxies).ip
+	}
+	if rt.clientIP != nil {
 		if ip := rt.clientIP(r); ip != nil {
 			return ip
 		}

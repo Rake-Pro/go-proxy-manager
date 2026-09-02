@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/discovery"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
 )
@@ -25,13 +25,15 @@ var ErrReconcileInProgress = errors.New("ingress discovery: a reconcile is alrea
 // and poll queues behind it. It is a var only so the tests can shorten it.
 var listDeadline = 2 * time.Minute
 
-// Per-host outcomes reported in Status.Hosts.
+// Per-host outcomes reported in Status.Hosts. They are the shared planner's
+// (internal/discovery), re-exported here so this package's callers and tests do
+// not have to know where the reconcile engine lives.
 const (
-	ActionCreated   = "created"
-	ActionUpdated   = "updated"
-	ActionUnchanged = "unchanged"
-	ActionDeleted   = "deleted"
-	ActionSkipped   = "skipped"
+	ActionCreated   = discovery.ActionCreated
+	ActionUpdated   = discovery.ActionUpdated
+	ActionUnchanged = discovery.ActionUnchanged
+	ActionDeleted   = discovery.ActionDeleted
+	ActionSkipped   = discovery.ActionSkipped
 )
 
 // HostResult is what one reconcile decided about one derived (or previously
@@ -82,7 +84,7 @@ type Status struct {
 }
 
 // Applier commits one reconcile's worth of changes as a SINGLE revision: every
-// upsert and every delete in one commit. See docs/design/ingress-discovery.md §2
+// upsert and every delete in one commit. See docs/design/ingress-discovery.md section 2
 // for why granularity is per-reconcile rather than per-object. It returns the
 // commit hash, or "" when there was nothing to write.
 type Applier func(ctx context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error)
@@ -98,6 +100,12 @@ type Discoverer struct {
 	// publishes no DNS records itself - there is one DNS code path, and it is
 	// phase 1's.
 	onChange func(commit string)
+
+	// onFreeze, if set (via SetOnFreeze), is called whenever a reconcile fails
+	// at or past the freeze boundary - see fail() - for optional alerting
+	// (internal/notify.EventDiscoveryFrozen). Best-effort, never touches
+	// discovery state itself.
+	onFreeze func(err error)
 
 	// newClient is the client constructor, swapped by the tests. Production
 	// always uses NewClient.
@@ -128,6 +136,19 @@ type Discoverer struct {
 // apply performs the batched write; onChange may be nil.
 func New(load func(context.Context) (model.Config, model.Settings, error), apply Applier, onChange func(commit string)) *Discoverer {
 	return &Discoverer{load: load, apply: apply, onChange: onChange, newClient: NewClient}
+}
+
+// SetOnFreeze installs the callback fired whenever a reconcile fails (see
+// fail()), for optional notify wiring. A setter rather than a New parameter
+// so it does not disturb the existing constructor signature; nil detaches it.
+// Safe to call at any time.
+func (d *Discoverer) SetOnFreeze(fn func(err error)) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.onFreeze = fn
+	d.mu.Unlock()
 }
 
 // Status returns a snapshot of the last reconcile result.
@@ -305,7 +326,11 @@ func (d *Discoverer) fail(now time.Time, enabled bool, err error) error {
 		Managed:     prev.Managed,
 		Hosts:       prev.Hosts,
 	}
+	onFreeze := d.onFreeze
 	d.mu.Unlock()
+	if onFreeze != nil {
+		onFreeze(err)
+	}
 	return err
 }
 
@@ -424,300 +449,70 @@ type reconcilePlan struct {
 	results      []HostResult
 }
 
-// managedHost reports whether a proxy host is one discovery owns: it carries
-// managed-by under conf's CURRENT annotation prefix. When
-// conf.AnnotationPrefixMigrate is set, a host still carrying managed-by under
-// a DIFFERENT (older) prefix is ALSO recognised, so it is treated as owned for
-// this run rather than skipped as hand-written - which is what lets its normal
-// derive/update path (in planReconcile below) relabel it onto the current
-// prefix, since derive() always stamps a fresh Labels map under the current
-// prefix.
-func managedHost(h model.ProxyHost, conf model.IngressDiscoverySettings) bool {
-	if h.Labels[conf.ManagedByLabel()] == model.ManagedByIngressDiscovery {
-		return true
+// ownership projects the discovery settings onto the shared planner's view of
+// which proxy hosts this reconciler owns and how to name itself in
+// operator-facing text. The label VALUE ("ingress-discovery") is what keeps it
+// from ever seeing - let alone deleting - a host owned by Docker discovery,
+// which stamps the same key with "docker-discovery".
+func ownership(conf model.IngressDiscoverySettings) discovery.Ownership {
+	return discovery.Ownership{
+		Subsystem:        "ingress discovery",
+		SourceKind:       "Ingress",
+		ManagedByKey:     conf.ManagedByLabel(),
+		DisabledByKey:    conf.DisabledByLabel(),
+		Value:            model.ManagedByIngressDiscovery,
+		Migrate:          conf.AnnotationPrefixMigrate,
+		HasStaleManaged:  conf.HasStaleManagedByLabel,
+		HasStaleDisabled: conf.HasStaleDisabledByLabel,
+		StripStale:       conf.StripStaleDiscoveryLabels,
 	}
-	return conf.AnnotationPrefixMigrate && conf.HasStaleManagedByLabel(h.Labels)
 }
 
-// operatorDisabled reports whether a managed host's Disabled: true was set by
-// the OPERATOR rather than by discovery's own fail-closed revocation path (see
-// IngressDiscoverySettings.DisabledByLabel). Discovery must never re-enable a
-// host it did not disable itself - that would turn a hand-disable, the obvious
-// move when an app has to come offline now, into a no-op on the very next
-// poll. During an AnnotationPrefixMigrate relabel, a disabled-by label under a
-// stale prefix is ALSO recognised as discovery's own, for the same reason
-// managedHost widens above.
-func operatorDisabled(cur model.ProxyHost, conf model.IngressDiscoverySettings) bool {
-	if !cur.Disabled {
-		return false
-	}
-	if cur.Labels[conf.DisabledByLabel()] == model.DisabledByIngressDiscovery {
-		return false
-	}
-	if conf.AnnotationPrefixMigrate && conf.HasStaleDisabledByLabel(cur.Labels) {
-		return false
-	}
-	return true
-}
-
-// cloneLabels copies a label map so a write through the copy can never mutate
-// the map the caller's ProxyHost still shares (Go maps are reference types, and
-// `off := cur` only shallow-copies the struct).
-func cloneLabels(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m)+1)
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-// planReconcile computes the whole reconcile without performing any I/O, which
-// is what makes every ownership and freeze rule directly testable.
+// planReconcile derives every annotated Ingress and hands the derived set to
+// the shared full-state planner (internal/discovery), which owns every
+// ownership, freeze and carry-forward rule. Everything above the handover is
+// Kubernetes-specific: the opt-in annotation gate, the derived name, and what a
+// derive failure means. Everything below it is shared with Docker discovery, so
+// the rules with security consequences exist exactly once.
 func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingresses []Ingress) reconcilePlan {
-	var p reconcilePlan
-
-	current := map[string]model.ProxyHost{} // every proxy host, by name
-	managed := map[string]model.ProxyHost{} // only the ones discovery owns
-	for _, h := range cfg.ProxyHosts {
-		current[h.Name] = h
-		if managedHost(h, conf) {
-			managed[h.Name] = h
-		}
-	}
-
-	desired := map[string]model.ProxyHost{}
-	source := map[string]string{}
-	// profile records which settings profile each desired host resolved to, so
-	// the status can say what chain a host actually got.
-	profile := map[string]string{}
-	// protected holds names that must NOT be deleted even though they are absent
-	// from the desired set: their Ingress IS annotated but could not be derived.
-	// Deletion follows from absence in a healthy list, never from a parse failure -
-	// one bad manifest edit must not take a host offline.
-	protected := map[string]bool{}
-	// disable holds managed hosts this run must FAIL CLOSED on: their Ingress
-	// names a profile that no longer resolves, so the chain they are still serving
-	// is one nobody can point at any more (see the switch below).
-	disable := map[string]model.ProxyHost{}
-
+	items := make([]discovery.Item, 0, len(ingresses))
 	for _, ing := range ingresses {
 		if ing.Metadata.Annotations[conf.AnnotationManaged()] != "true" {
 			continue // opt-in only: absent or any other value means invisible
 		}
-		p.discovered++
-		ref := ing.Metadata.Namespace + "/" + ing.Metadata.Name
 		name, host, prof, err := derive(ing, conf)
-		if err != nil {
-			if name != "" {
-				protected[name] = true
-			}
-			// Two derive failures, two opposite safe answers.
-			//
-			// A MALFORMED Ingress (bad hostname, unusable derived name) is a tenant
-			// typo against a chain the operator still sanctions: the host on disk is
-			// the last good rendering of a policy that has not changed, so freezing it
-			// keeps a working service up while the manifest is fixed. Failing closed
-			// there would let any tenant take their own service offline with a
-			// one-character edit, and would do nothing for security.
-			//
-			// An UNRESOLVABLE PROFILE is the opposite: the chain that host is serving
-			// is one the operator has just tightened, renamed or retired, or one the
-			// tenant is pointing away from. Freezing would let a tenant pin a revoked
-			// chain forever simply by flipping the annotation to a name that does not
-			// exist - the security property would hold for creating a host but not for
-			// REVOKING one. So the host is disabled instead: the object is preserved
-			// (nothing is destroyed, the operator can re-add the profile and the very
-			// next reconcile re-enables it), but it stops serving the revoked chain.
-			if cur, ok := managed[name]; ok && isUnknownProfile(err) && !cur.Disabled {
-				off := cur
-				off.Disabled = true
-				// Mark the disable as DISCOVERY's own, so the next reconcile that
-				// resolves cleanly is free to clear it - an operator's own disable
-				// (no label, or a different one) never gets this treatment. off.Labels
-				// aliases cur.Labels (off := cur is a shallow copy), so it is cloned
-				// before being written to, or this would mutate cur - and, through it,
-				// the config the caller still holds - out from under the read.
-				off.Labels = cloneLabels(cur.Labels)
-				// During an AnnotationPrefixMigrate relabel, cur may only carry a
-				// STALE prefix's labels (that is how it got into managed[] above); strip
-				// them so the host ends up with exactly the current prefix's pair,
-				// rather than old and new keys both lingering.
-				if conf.AnnotationPrefixMigrate {
-					conf.StripStaleDiscoveryLabels(off.Labels)
-				}
-				off.Labels[conf.ManagedByLabel()] = model.ManagedByIngressDiscovery
-				off.Labels[conf.DisabledByLabel()] = model.DisabledByIngressDiscovery
-				disable[name] = off
-				p.updated++
-				p.results = append(p.results, HostResult{Name: name, Ingress: ref, Domains: cur.Domains,
-					Action: ActionUpdated, Profile: prof,
-					Reason: "disabled (fails closed rather than keep serving a chain that no longer resolves): " + err.Error()})
-				log.Warn().Str("host", name).Str("ingress", ref).Err(err).
-					Msg("ingress discovery: profile no longer resolves; disabling the derived host rather than leaving it serving the old chain")
-				continue
-			}
-			p.skipped++
-			p.results = append(p.results, HostResult{Name: name, Ingress: ref, Action: ActionSkipped, Profile: prof, Reason: err.Error()})
-			log.Warn().Str("ingress", ref).Err(err).Msg("ingress discovery: skipping annotated Ingress")
-			continue
-		}
-		if prev, dup := source[name]; dup {
-			p.skipped++
-			p.results = append(p.results, HostResult{Name: name, Ingress: ref, Action: ActionSkipped, Profile: prof,
-				Reason: "derived name collides with Ingress " + prev})
-			log.Warn().Str("ingress", ref).Str("other", prev).Msg("ingress discovery: two Ingresses derive the same host name")
-			continue
-		}
-		desired[name] = host
-		source[name] = ref
-		profile[name] = prof
+		items = append(items, discovery.Item{
+			Ref:            ing.Metadata.Namespace + "/" + ing.Metadata.Name,
+			Name:           name,
+			Host:           host,
+			Profile:        prof,
+			Err:            err,
+			UnknownProfile: isUnknownProfile(err),
+		})
 	}
 
-	// Which managed hosts this run would remove. Needed before the domain gate
-	// below: a host on its way out must not keep claiming its domains, or a
-	// renamed Ingress could never hand its hostname over.
-	doomed := map[string]bool{}
-	for name := range managed {
-		if _, want := desired[name]; !want && !protected[name] {
-			doomed[name] = true
-		}
+	res := discovery.Plan(cfg, ownership(conf), items)
+	p := reconcilePlan{
+		upserts:      res.Upserts,
+		deletes:      res.Deletes,
+		discovered:   res.Discovered,
+		created:      res.Created,
+		updated:      res.Updated,
+		skipped:      res.Skipped,
+		managedAfter: res.ManagedAfter,
+		results:      make([]HostResult, 0, len(res.Hosts)),
 	}
-
-	// The DOMAIN ownership gate. Ownership of the derived NAME is not enough:
-	// hosts are routed by domain, and the router's per-domain maps are filled in
-	// config load order, so a derived host whose name sorts late would silently
-	// take over an operator host's hostname (and its TLS/mTLS pinning with it)
-	// without ever colliding on a name. Every domain already claimed by a host
-	// this reconcile is not rewriting is off limits; a derived host that wants one
-	// is skipped and reported, exactly like a name collision.
-	claimed := map[string]string{}
-	claim := func(owner string, domains []string) {
-		for _, dom := range domains {
-			key := domainKey(dom)
-			if key == "" {
-				continue
-			}
-			if _, taken := claimed[key]; !taken {
-				claimed[key] = owner
-			}
-		}
-	}
-	for _, h := range cfg.ProxyHosts {
-		// A managed host that this run rewrites or removes releases its domains;
-		// everything else - every operator-authored host, and every managed host
-		// being kept as-is - holds on to them.
-		if managedHost(h, conf) {
-			if _, rewritten := desired[h.Name]; rewritten || doomed[h.Name] {
-				continue
-			}
-		}
-		claim(h.Name, h.Domains)
-	}
-	for _, h := range cfg.RedirectHosts {
-		claim(h.Name, h.Domains)
-	}
-	for _, h := range cfg.ParkedHosts {
-		claim(h.Name, h.Domains)
-	}
-
-	for _, name := range sortedKeys(desired) {
-		want := desired[name]
-		cur, exists := current[name]
-		// A skipped host leaves whatever is on disk in place, so it must re-assert
-		// that object's domains: otherwise a later-sorted derived host could claim
-		// one and produce a duplicate the config validator would reject, failing the
-		// whole batch.
-		skip := func(reason string) {
-			p.skipped++
-			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains,
-				Action: ActionSkipped, Profile: profile[name], Reason: reason})
-			if exists {
-				claim(name, cur.Domains)
-			}
-		}
-		if conflict, owner := firstClaimed(want.Domains, claimed); conflict != "" {
-			skip(fmt.Sprintf("domain %q is already claimed by proxy host %q, which ingress discovery does not own", conflict, owner))
-			log.Warn().Str("host", name).Str("ingress", source[name]).
-				Str("domain", conflict).Str("owner", owner).
-				Msg("ingress discovery: an existing host already serves this domain; refusing to shadow it")
-			continue
-		}
-		switch {
-		case exists && !managedHost(cur, conf):
-			// Somebody hand-wrote a host with this name. Overwriting it is exactly
-			// what the ownership rule forbids, so skip and say so - the same
-			// skip-and-warn the Pi-hole and Cloudflare backends do for a record they
-			// do not own.
-			skip("a proxy host with this name exists and is not managed by ingress discovery")
-			log.Warn().Str("host", name).Str("ingress", source[name]).
-				Msg("ingress discovery: name is taken by an operator-authored proxy host; leaving it alone")
-		case !exists:
-			claim(name, want.Domains)
-			p.upserts = append(p.upserts, want)
-			p.created++
-			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionCreated, Profile: profile[name]})
-		default:
-			claim(name, want.Domains)
-			// Carry the original creation timestamp so an update does not rewrite it.
-			want.CreatedAt = cur.CreatedAt
-			// maintenance is OPERATOR-owned runtime state, like disabled below. No
-			// Ingress annotation derives it, so derive() always produces false - and
-			// without carrying the stored value forward the next poll would quietly
-			// put a host back into service while someone is still working on its
-			// backend, which is the exact failure the flag exists to prevent.
-			want.Maintenance = cur.Maintenance
-			// disabled: true is OPERATOR-owned state once discovery did not set it
-			// itself: a hand-disabled host must not be re-enabled by the next poll
-			// just because its Ingress still derives cleanly. A host discovery
-			// disabled (gpm.rake.pro/disabled-by: ingress-discovery) is exempt - that
-			// disable is discovery's own fail-closed hold, and a clean derive is
-			// exactly the signal that lifts it (want.Disabled is already false here,
-			// and want carries no disabled-by label, so it clears on its own).
-			reenable := false
-			if operatorDisabled(cur, conf) {
-				want.Disabled = true
-			} else if cur.Disabled {
-				reenable = true
-			}
-			if sameHost(cur, want) {
-				p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionUnchanged, Profile: profile[name]})
-				continue
-			}
-			p.upserts = append(p.upserts, want)
-			p.updated++
-			reason := ""
-			switch {
-			case operatorDisabled(cur, conf):
-				reason = "operator-disabled host: other fields refreshed, disabled state preserved"
-			case reenable:
-				reason = "profile resolves again: re-enabling the host discovery had disabled"
-			}
-			p.results = append(p.results, HostResult{Name: name, Ingress: source[name], Domains: want.Domains, Action: ActionUpdated, Profile: profile[name], Reason: reason})
-		}
-	}
-
-	// The fail-closed writes. They are plain upserts of an existing managed object
-	// with disabled: true, so they go through the same ownership guard and the same
-	// single commit as everything else. Their domains were already re-asserted by
-	// the claim loop above (the host is neither rewritten nor doomed), so a
-	// later-sorted derived host cannot pick up a hostname a disabled host is
-	// holding - the disable is a hold, not a handover.
-	for _, name := range sortedKeys(disable) {
-		p.upserts = append(p.upserts, disable[name])
-	}
-
-	for _, name := range sortedKeys(managed) {
-		if !doomed[name] {
-			continue
-		}
-		p.deletes = append(p.deletes, name)
-		p.results = append(p.results, HostResult{Name: name, Domains: managed[name].Domains, Action: ActionDeleted})
-		log.Warn().Str("host", name).Msg("ingress discovery: no annotated Ingress derives this managed host any more; removing it")
-	}
-
-	p.managedAfter = len(managed) + p.created - len(p.deletes)
-	if p.results == nil {
-		p.results = []HostResult{}
+	// The shared planner speaks of a generic source "ref"; this package's status
+	// payload has always called it "ingress", and that is a published wire shape.
+	for _, h := range res.Hosts {
+		p.results = append(p.results, HostResult{
+			Name:    h.Name,
+			Ingress: h.Ref,
+			Domains: h.Domains,
+			Action:  h.Action,
+			Profile: h.Profile,
+			Reason:  h.Reason,
+		})
 	}
 	return p
 }
@@ -734,38 +529,6 @@ func ellipsize(s string, max int) string {
 		cut--
 	}
 	return s[:cut] + "..."
-}
-
-// domainKey normalises a configured domain for comparison, matching the key the
-// config validator and the router's per-domain maps use.
-func domainKey(d string) string { return strings.ToLower(strings.TrimSpace(d)) }
-
-// firstClaimed returns the first of domains already claimed by another host, and
-// that host's name, or ("", "") when none is.
-func firstClaimed(domains []string, claimed map[string]string) (string, string) {
-	for _, d := range domains {
-		if owner, taken := claimed[domainKey(d)]; taken {
-			return domainKey(d), owner
-		}
-	}
-	return "", ""
-}
-
-func sortedKeys[T any](m map[string]T) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// sameHost compares a stored host with a freshly derived one, ignoring the
-// store-maintained timestamps, so a steady-state reconcile writes nothing.
-func sameHost(a, b model.ProxyHost) bool {
-	a.CreatedAt, a.UpdatedAt = time.Time{}, time.Time{}
-	b.CreatedAt, b.UpdatedAt = time.Time{}, time.Time{}
-	return reflect.DeepEqual(a, b)
 }
 
 // unknownProfileError marks the one derive failure planReconcile treats
@@ -908,10 +671,11 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 			Labels:      map[string]string{conf.ManagedByLabel(): model.ManagedByIngressDiscovery},
 			Tags:        append([]string(nil), tmpl.Tags...),
 		},
-		Domains:           domains,
-		Upstream:          tmpl.Upstream,
-		UpstreamGroupRef:  tmpl.UpstreamGroupRef,
-		TLS:               tlsSettings,
+		Domains:          domains,
+		Upstream:         tmpl.Upstream,
+		UpstreamGroupRef: tmpl.UpstreamGroupRef,
+		TLS:              tlsSettings,
+		//lint:ignore SA1019 compat copy of deprecated WebsocketsUpgrade so a pre-deprecation template still produces byte-identical derived hosts
 		WebsocketsUpgrade: tmpl.WebsocketsUpgrade,
 		RobotsNoIndex:     tmpl.RobotsNoIndex,
 		Timeouts:          timeouts,

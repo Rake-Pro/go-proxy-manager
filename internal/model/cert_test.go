@@ -126,11 +126,65 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 func TestDNSProviderValidate(t *testing.T) {
 	withToken := map[string]Secret{"apiToken": "${ENV:DNS_TOKEN}"}
 
+	// One minimal valid config per known provider. A new provider without an
+	// entry here fails the loop, so the table cannot silently fall behind.
+	validConfigs := map[string]map[string]Secret{
+		DNSProviderCloudflare:   withToken,
+		DNSProviderDigitalOcean: withToken,
+		DNSProviderHetzner:      withToken,
+		DNSProviderDesec:        withToken,
+		DNSProviderRFC2136: {
+			"server":      "ns1.example.com",
+			"zone":        "example.com",
+			"tsigKeyName": "gpm-key",
+			"tsigSecret":  "${ENV:GPM_TSIG_SECRET}",
+		},
+		DNSProviderACMEDNS: {
+			"baseURL":   "https://acme-dns.example.com",
+			"username":  "user",
+			"password":  "${ENV:ACME_DNS_PASSWORD}",
+			"subdomain": "d420c923-0000-4000-8000-000000000002",
+		},
+	}
 	for _, provider := range KnownDNSProviders {
-		p := DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: provider, Config: withToken}
+		cfg, ok := validConfigs[provider]
+		if !ok {
+			t.Errorf("provider %q has no valid config in this test; add one", provider)
+			continue
+		}
+		p := DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: provider, Config: cfg}
 		if err := p.Validate(); err != nil {
 			t.Errorf("provider %q: Validate() = %v, want nil", provider, err)
 		}
+	}
+
+	rfc2136 := func(overrides map[string]Secret) DNSProvider {
+		cfg := map[string]Secret{}
+		for k, v := range validConfigs[DNSProviderRFC2136] {
+			cfg[k] = v
+		}
+		for k, v := range overrides {
+			if v == "" {
+				delete(cfg, k)
+				continue
+			}
+			cfg[k] = v
+		}
+		return DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: DNSProviderRFC2136, Config: cfg}
+	}
+	acmeDNS := func(overrides map[string]Secret) DNSProvider {
+		cfg := map[string]Secret{}
+		for k, v := range validConfigs[DNSProviderACMEDNS] {
+			cfg[k] = v
+		}
+		for k, v := range overrides {
+			if v == "" {
+				delete(cfg, k)
+				continue
+			}
+			cfg[k] = v
+		}
+		return DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: DNSProviderACMEDNS, Config: cfg}
 	}
 
 	cases := []struct {
@@ -152,6 +206,66 @@ func TestDNSProviderValidate(t *testing.T) {
 			name:    "missing api token",
 			p:       DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: "hetzner"},
 			wantErr: "config.apiToken is required",
+		},
+		{
+			name:    "rfc2136 missing server",
+			p:       rfc2136(map[string]Secret{"server": ""}),
+			wantErr: "config.server is required for provider rfc2136",
+		},
+		{
+			name:    "rfc2136 missing zone",
+			p:       rfc2136(map[string]Secret{"zone": ""}),
+			wantErr: "config.zone is required for provider rfc2136",
+		},
+		{
+			name:    "rfc2136 missing tsig key name",
+			p:       rfc2136(map[string]Secret{"tsigKeyName": ""}),
+			wantErr: "config.tsigKeyName is required",
+		},
+		{
+			name:    "rfc2136 missing tsig secret",
+			p:       rfc2136(map[string]Secret{"tsigSecret": ""}),
+			wantErr: "config.tsigSecret is required",
+		},
+		{
+			name:    "rfc2136 hmac-md5 refused",
+			p:       rfc2136(map[string]Secret{"tsigAlgorithm": "hmac-md5"}),
+			wantErr: "hmac-md5 is refused",
+		},
+		{
+			name:    "rfc2136 unknown algorithm",
+			p:       rfc2136(map[string]Secret{"tsigAlgorithm": "hmac-sha3"}),
+			wantErr: "config.tsigAlgorithm must be one of",
+		},
+		{
+			name:    "rfc2136 bad transport",
+			p:       rfc2136(map[string]Secret{"transport": "quic"}),
+			wantErr: "config.transport must be tcp or udp",
+		},
+		{
+			name:    "rfc2136 bad ttl",
+			p:       rfc2136(map[string]Secret{"ttl": "0"}),
+			wantErr: "config.ttl must be a whole number",
+		},
+		{
+			name:    "rfc2136 bad timeout",
+			p:       rfc2136(map[string]Secret{"timeout": "30"}),
+			wantErr: "config.timeout must be a positive Go duration",
+		},
+		{
+			name:    "acme-dns missing subdomain",
+			p:       acmeDNS(map[string]Secret{"subdomain": ""}),
+			wantErr: "config.subdomain is required for provider acme-dns",
+		},
+		{
+			name:    "acme-dns missing password",
+			p:       acmeDNS(map[string]Secret{"password": ""}),
+			wantErr: "config.password is required",
+		},
+		{
+			name:    "acme-dns bad base url",
+			p:       acmeDNS(map[string]Secret{"baseURL": "acme-dns.example.com"}),
+			wantErr: "config.baseURL must be an http or https URL",
 		},
 	}
 	for _, tc := range cases {

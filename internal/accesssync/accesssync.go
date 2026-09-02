@@ -109,7 +109,8 @@ type Syncer struct {
 	// fetch. It is what makes an unchanged feed cost no git commit: the ledger's
 	// fetchedAt only advances when the set actually changed (writing it on every
 	// no-op would commit a timestamp-only diff every interval, forever), so
-	// without this every poll would re-fetch every source. See docs/deployment.md.
+	// without this every poll would re-fetch every source. See
+	// docs/reference/config/settings/access-list-sync.md.
 	attempts map[string]time.Time
 
 	// single serialises reconciles so two runs never race the same ledger.

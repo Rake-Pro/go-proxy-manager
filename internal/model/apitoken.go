@@ -21,7 +21,7 @@ const ScopeMetricsRead = "metrics:read"
 // ScopePlurals is the central list of scope subjects. Every entry is either a
 // REST resource plural (the path segment under /api/) or a pseudo-resource for a
 // non-CRUD endpoint group ("settings", "dns-sync", "ingress-discovery",
-// "metrics").
+// "docker-discovery", "metrics").
 // APIToken.Validate checks
 // every configured scope against this list, so a typo is rejected at write time
 // instead of silently granting nothing.
@@ -41,6 +41,7 @@ var ScopePlurals = []string{
 	"settings",
 	"dns-sync",
 	"ingress-discovery",
+	"docker-discovery",
 	"metrics",
 }
 

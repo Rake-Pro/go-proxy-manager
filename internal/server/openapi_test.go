@@ -134,6 +134,13 @@ func registeredRoutes(t *testing.T) []route {
 	for _, m := range handleFuncRe.FindAllStringSubmatch(apiSrc, -1) {
 		routes = append(routes, route{method: m[1], path: "/api" + m[2]})
 	}
+	// runtime.go registers the read-only runtime probe and the webhook
+	// status/test routes on the same mux, so it is scraped too - otherwise a route
+	// escapes the coverage gate simply by living in a second file.
+	runtimeSrc := readSourceFile(t, "../api/runtime.go")
+	for _, m := range handleFuncRe.FindAllStringSubmatch(runtimeSrc, -1) {
+		routes = append(routes, route{method: m[1], path: "/api" + m[2]})
+	}
 	for _, m := range registerRe.FindAllStringSubmatch(apiSrc, -1) {
 		plural := m[1]
 		base := "/api/" + plural

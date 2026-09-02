@@ -9,7 +9,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// authMiddlewareHandler gates a proxied host behind an identity provider.
+// authHandler gates a proxied host behind an identity provider. It is the ONE
+// compiler for the auth chain position: a `type: auth` middleware and the inline
+// `auth` block on a proxy host or location both come through here, so the gate,
+// its metrics, its error pages and its denial counting are identical.
 //
 //   - forward-auth: accept a trusted forward-auth identity (header-spoof safe),
 //     map groups to a role, and enforce the middleware's RequiredRoles.
@@ -19,6 +22,9 @@ import (
 //   - client-cert: admit only requests whose TLS handshake verified a client
 //     certificate, optionally mapping its subject to a role, with the same
 //     AllowFrom network exemption auth-request has (see clientCertGate).
+//   - basic: HTTP basic auth against the middleware's own username/bcrypt-hash
+//     set, no identity provider involved, with the same AllowFrom exemption
+//     (see basicAuthGate). This replaces the deprecated AccessList.basicAuth.
 //
 // domains are the gated host's configured domains; the OIDC gate validates the
 // request Host against them before caching a per-Host relying-party client.
@@ -29,19 +35,23 @@ import (
 // auth backend failure produces - renders through it, falling back to the same
 // plain-text body as before when nothing is configured. Redirects into a sign-in
 // flow and responses proxied from the IdP are deliberately untouched.
-func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, domains []string, clientIP func(*http.Request) net.IP, ep *compiledErrorPages, next http.Handler) http.Handler {
-	// client-cert takes its identity from the TLS handshake, so it is handled
-	// before the identity-provider lookup - it is the one mode with no IdP.
-	if mw.Auth.Mode == model.AuthModeClientCert {
-		return clientCertGate(*mw.Auth, clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, ep, next)
+func authHandler(a model.AuthMiddleware, reg *registry, hostName string, domains []string, clientIP func(*http.Request) net.IP, ep *compiledErrorPages, next http.Handler) http.Handler {
+	// client-cert takes its identity from the TLS handshake and basic from a
+	// local credential set, so both are handled before the identity-provider
+	// lookup - they are the two modes with no IdP.
+	if a.Mode == model.AuthModeClientCert {
+		return clientCertGate(a, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
 	}
-	idpName := mw.Auth.IdentityProvider
+	if a.Mode == model.AuthModeBasic {
+		return basicAuthGate(a, hostName, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
+	}
+	idpName := a.IdentityProvider
 	idp, ok := reg.idps[idpName]
 	if !ok {
 		return failClosed(hostName, "auth references unknown identity provider "+idpName, ep)
 	}
 
-	mode := mw.Auth.Mode
+	mode := a.Mode
 	if mode == "" {
 		mode = idp.Type // default the mode from the IdP type
 	}
@@ -52,7 +62,7 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 			return failClosed(hostName, "forward-auth mode requires a forward-auth identity provider", ep)
 		}
 		fa := auth.CompileForwardAuth(*idp.ForwardAuth, idpName)
-		return forwardAuthGate(fa, idp.RoleMapping, mw.Auth.RequiredRoles, hostName, ep, next)
+		return forwardAuthGate(fa, idp.RoleMapping, a.RequiredRoles, hostName, ep, next)
 	case model.AuthModeAuthRequest:
 		if idp.AuthRequest == nil {
 			return failClosed(hostName, "auth-request mode requires an auth-request identity provider", ep)
@@ -61,12 +71,12 @@ func authMiddlewareHandler(mw model.Middleware, reg *registry, hostName string, 
 		if err != nil {
 			return failClosed(hostName, "auth-request: "+err.Error(), ep)
 		}
-		return arp.handler(clientIP, allowFromNets(mw.Auth.AllowFrom), hostName, ep, next)
+		return arp.handler(clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {
 			return failClosed(hostName, "oidc mode requires an oidc identity provider", ep)
 		}
-		gate, err := compileDataOIDC(idp, mw.Auth.RequiredRoles, hostName, domains)
+		gate, err := compileDataOIDC(idp, a.RequiredRoles, hostName, domains)
 		if err != nil {
 			return failClosed(hostName, "oidc: "+err.Error(), ep)
 		}

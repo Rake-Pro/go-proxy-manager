@@ -1025,3 +1025,101 @@ func TestLegacyDeadHostsDirectoryIsRefused(t *testing.T) {
 		t.Fatalf("renamed directory did not load as parked hosts: %+v", cfg.ParkedHosts)
 	}
 }
+
+// TestLoadWarnsOnUnknownKeysInObjectFile is the store-level regression test for
+// the rollback problem docs/operations/upgrading.md#rollback describes: a
+// config a NEWER gpm wrote, loaded by this one, must still start - but say what
+// it silently dropped. A key an older struct does not know about is written
+// straight onto a proxy-host file (as a newer gpm's own write would produce,
+// not going through Save so the object is otherwise entirely valid) and Load
+// must both succeed and surface exactly one warning naming the file, the key
+// and the rollback doc anchor.
+func TestLoadWarnsOnUnknownKeysInObjectFile(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Save(ctx, sampleHost("app"), Author{Name: "admin", Email: "admin@example.com"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	path := filepath.Join(st.Dir(), "proxy-hosts", "app.yaml")
+	appendYAMLLine(t, path, "futureField: true")
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load must still succeed on an unknown key, got: %v", err)
+	}
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].Name != "app" {
+		t.Fatalf("expected the host to still load, got %+v", cfg.ProxyHosts)
+	}
+
+	warnings := cfg.Warnings()
+	want := "config: proxy-hosts/app.yaml: unknown keys ignored: futureField - written by a newer gpm? see docs/operations/upgrading.md#rollback"
+	if !containsString(warnings, want) {
+		t.Fatalf("Warnings() = %v, want it to contain %q", warnings, want)
+	}
+}
+
+// TestLoadWarnsOnUnknownKeysInSettings is the settings.yaml analogue of
+// TestLoadWarnsOnUnknownKeysInObjectFile.
+func TestLoadWarnsOnUnknownKeysInSettings(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	path := filepath.Join(st.Dir(), "settings.yaml")
+	appendYAMLLine(t, path, "notifications:\n  futureChannel: true")
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load must still succeed on an unknown key, got: %v", err)
+	}
+
+	warnings := cfg.Warnings()
+	want := "config: settings.yaml: unknown keys ignored: notifications.futureChannel - written by a newer gpm? see docs/operations/upgrading.md#rollback"
+	if !containsString(warnings, want) {
+		t.Fatalf("Warnings() = %v, want it to contain %q", warnings, want)
+	}
+}
+
+// TestLoadNoUnknownKeyWarningOnCleanConfig is the negative control: a config
+// with nothing unrecognised in it must not carry an unknown-key warning.
+func TestLoadNoUnknownKeyWarningOnCleanConfig(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Save(ctx, sampleHost("app"), Author{Name: "admin", Email: "admin@example.com"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, w := range cfg.Warnings() {
+		if strings.Contains(w, "unknown keys ignored") {
+			t.Errorf("unexpected unknown-key warning on a clean config: %q", w)
+		}
+	}
+}
+
+// appendYAMLLine appends a raw line (or block) to the end of the YAML file at
+// path, simulating a field a newer gpm wrote that this one's struct does not
+// know about.
+func appendYAMLLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o640)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("\n" + line + "\n"); err != nil {
+		t.Fatalf("append to %s: %v", path, err)
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

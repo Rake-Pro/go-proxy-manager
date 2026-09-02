@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -25,6 +26,68 @@ type AdminAuthSettings struct {
 	SSOOnly bool `json:"ssoOnly,omitempty" yaml:"ssoOnly,omitempty"`
 }
 
+// AdminLoginProviderTypes are the IdentityProvider types that can actually
+// produce a sign-in button on the admin login page (see
+// internal/auth.Authenticator.LoginOptions). A forward-auth or auth-request
+// provider authenticates DATA-PLANE traffic through a middleware; it renders
+// nothing on the panel's own login page, so naming one in adminAuth.providers
+// grants no way in.
+var AdminLoginProviderTypes = []string{IdPTypeOIDC}
+
+// adminLoginCapable reports whether an IdentityProvider of this type renders an
+// admin sign-in button.
+func adminLoginCapable(idpType string) bool {
+	for _, t := range AdminLoginProviderTypes {
+		if idpType == t {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateRefs cross-checks adminAuth.providers against the identity providers
+// that actually EXIST, and is the anti-lockout guard Validate cannot be: a
+// Settings value on its own knows only that the provider list is non-empty.
+//
+// With ssoOnly the local password form is gone, so the SSO buttons are the only
+// door. LoginOptions renders a button only for a name that resolves to an
+// IdentityProvider of a type in AdminLoginProviderTypes, which means a typo
+// ("authentik" for an object actually named "authentik-oidc") or a forward-auth
+// provider yields a login page with zero buttons and no form - a total lockout
+// recoverable only by editing git and redeploying. Landing the error on the
+// settings write instead is the difference between a typo and an outage.
+//
+// Without ssoOnly the local form remains, so an unresolved name is a dead
+// button rather than a lockout and is left to the operator.
+func (a AdminAuthSettings) ValidateRefs(cfg Config) error {
+	if !a.SSOOnly {
+		return nil
+	}
+	types := map[string]string{}
+	for _, p := range cfg.IdentityProviders {
+		types[p.Name] = p.Type
+	}
+	var errs []error
+	usable := 0
+	for _, name := range a.Providers {
+		t, ok := types[name]
+		switch {
+		case !ok:
+			errs = append(errs, fmt.Errorf("settings: adminAuth.providers names identityProvider %q, which does not exist; with adminAuth.ssoOnly there is no local password form either, so this would leave the login page with no way in at all (fix the name or turn ssoOnly off)", name))
+		case !adminLoginCapable(t):
+			errs = append(errs, fmt.Errorf("settings: adminAuth.providers names identityProvider %q, whose type is %q; only %s providers render an admin sign-in button (a %q provider gates proxy hosts through an auth middleware instead), so with adminAuth.ssoOnly this would leave the login page with no way in at all", name, t, strings.Join(AdminLoginProviderTypes, ", "), t))
+		default:
+			usable++
+		}
+	}
+	if len(errs) == 0 && usable == 0 {
+		// Reachable only when Providers is empty, which Validate already refuses;
+		// kept so a future caller cannot get a silent pass out of this function.
+		errs = append(errs, errors.New("settings: adminAuth.ssoOnly needs at least one adminAuth.providers entry that resolves to an "+IdPTypeOIDC+" identity provider"))
+	}
+	return errors.Join(errs...)
+}
+
 // WebhookConfig is a single outbound lifecycle webhook: gpm POSTs a small JSON
 // event to URL after every successful config change (create/update/delete,
 // restore, revert, settings). Dispatch is asynchronous and best-effort, so a slow
@@ -39,6 +102,145 @@ type WebhookConfig struct {
 	Secret Secret `json:"secret,omitempty" yaml:"secret,omitempty"`
 	// Disabled keeps the target in config without firing it.
 	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+}
+
+// Notification target types (NotificationTarget.Type).
+const (
+	NotificationTypeNtfy    = "ntfy"
+	NotificationTypeDiscord = "discord"
+	NotificationTypeGeneric = "generic"
+)
+
+// Notification event kinds (NotificationTarget.Events, DefaultNotificationEvents).
+const (
+	EventCertRenewalFailed = "cert.renewal_failed"
+	EventCertExpiring      = "cert.expiring"
+	EventCertExpired       = "cert.expired"
+	EventUpstreamUnhealthy = "upstream.unhealthy"
+	EventUpstreamRecovered = "upstream.recovered"
+	EventACMEAccountError  = "acme.account_error"
+	EventDiscoveryFrozen   = "discovery.frozen"
+	EventConfigChanged     = "config.changed"
+)
+
+// notificationEventKinds is every event kind a target may subscribe to. Order
+// matches the list above; used for validation and for DefaultNotificationEvents.
+var notificationEventKinds = []string{
+	EventCertRenewalFailed, EventCertExpiring, EventCertExpired,
+	EventUpstreamUnhealthy, EventUpstreamRecovered,
+	EventACMEAccountError, EventDiscoveryFrozen, EventConfigChanged,
+}
+
+// DefaultNotificationEvents is the event set a target subscribes to when its
+// own Events list is empty. EventConfigChanged is deliberately excluded: it
+// fires on every save, which is noisy by default and opt-in per target.
+func DefaultNotificationEvents() []string {
+	out := make([]string, 0, len(notificationEventKinds)-1)
+	for _, k := range notificationEventKinds {
+		if k != EventConfigChanged {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func isNotificationEventKind(k string) bool {
+	for _, known := range notificationEventKinds {
+		if k == known {
+			return true
+		}
+	}
+	return false
+}
+
+// NotificationTarget is a single outbound alert receiver: gpm POSTs a
+// formatted message when an enabled, subscribed event fires (renewal failure,
+// approaching/actual cert expiry, upstream health flap, ACME account error,
+// a frozen discovery reconciler, or an opt-in config change). Delivery is
+// asynchronous and best-effort, mirroring WebhookConfig - see internal/notify.
+type NotificationTarget struct {
+	// Name is a stable identifier for the target (shown in logs and status).
+	Name string `json:"name" yaml:"name"`
+	// Type selects the payload shape and how Secret is used: "ntfy" (topic URL,
+	// optional bearer access token), "discord" (webhook URL, Secret unused),
+	// "generic" (JSON envelope, optional bearer token).
+	Type string `json:"type" yaml:"type"`
+	// URL is the absolute http(s) endpoint that receives the notification: an
+	// ntfy topic URL, a Discord webhook URL (must contain "/api/webhooks/"), or
+	// any http(s) endpoint for "generic".
+	URL string `json:"url" yaml:"url"`
+	// Secret, if set, authenticates the call: an ntfy access token or a generic
+	// bearer token, sent as "Authorization: Bearer <value>". Unused for discord
+	// (the webhook URL itself is the credential). Stored as a placeholder,
+	// resolved at dispatch.
+	Secret Secret `json:"secret,omitempty" yaml:"secret,omitempty"`
+	// Disabled keeps the target in config without firing it.
+	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	// Events is the subset of notification kinds this target receives. Empty
+	// selects DefaultNotificationEvents().
+	Events []string `json:"events,omitempty" yaml:"events,omitempty"`
+}
+
+// NotificationsSettings configures outbound alerting (settings.notifications).
+// The zero value (no targets) is inert: nothing is sent, matching every
+// existing deployment before this feature.
+type NotificationsSettings struct {
+	// Targets are the configured receivers.
+	Targets []NotificationTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
+	// ExpiringThresholdDays is how close to expiry an ACME certificate must be
+	// before it appears in the daily cert.expiring digest. 0 selects
+	// DefaultExpiringThresholdDays.
+	ExpiringThresholdDays int `json:"expiringThresholdDays,omitempty" yaml:"expiringThresholdDays,omitempty"`
+}
+
+// DefaultExpiringThresholdDays is ExpiringThresholdDays' fallback: two weeks'
+// notice before an ACME certificate expires, which is comfortably inside the
+// 30-day renewal window (see DefaultRenewBefore in internal/acme) so an
+// operator sees the digest before a stuck renewal becomes an outage.
+const DefaultExpiringThresholdDays = 14
+
+// ExpiringThreshold returns the configured digest threshold, or
+// DefaultExpiringThresholdDays when unset.
+func (n NotificationsSettings) ExpiringThreshold() int {
+	if n.ExpiringThresholdDays <= 0 {
+		return DefaultExpiringThresholdDays
+	}
+	return n.ExpiringThresholdDays
+}
+
+func (n NotificationsSettings) validate() error {
+	seen := map[string]struct{}{}
+	for i, t := range n.Targets {
+		if err := ValidateName(t.Name); err != nil {
+			return fmt.Errorf("settings: notifications.targets[%d]: %w", i, err)
+		}
+		if _, dup := seen[t.Name]; dup {
+			return fmt.Errorf("settings: duplicate notification target name %q", t.Name)
+		}
+		seen[t.Name] = struct{}{}
+		switch t.Type {
+		case NotificationTypeNtfy, NotificationTypeDiscord, NotificationTypeGeneric:
+		default:
+			return fmt.Errorf("settings: notification target %q: type must be one of %s/%s/%s, got %q",
+				t.Name, NotificationTypeNtfy, NotificationTypeDiscord, NotificationTypeGeneric, t.Type)
+		}
+		u, err := url.Parse(t.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("settings: notification target %q: url must be an absolute http(s) URL, got %q", t.Name, t.URL)
+		}
+		if t.Type == NotificationTypeDiscord && !strings.Contains(t.URL, "/api/webhooks/") {
+			return fmt.Errorf("settings: notification target %q: a discord url must contain \"/api/webhooks/\"", t.Name)
+		}
+		for _, ev := range t.Events {
+			if !isNotificationEventKind(ev) {
+				return fmt.Errorf("settings: notification target %q: unknown event kind %q", t.Name, ev)
+			}
+		}
+	}
+	if n.ExpiringThresholdDays < 0 {
+		return fmt.Errorf("settings: notifications.expiringThresholdDays must not be negative, got %d", n.ExpiringThresholdDays)
+	}
+	return nil
 }
 
 // DefaultProxyProtocolTimeout bounds how long a trusted peer has to deliver a
@@ -114,6 +316,45 @@ func (p *ProxyProtocolSettings) validate() error {
 		}
 	}
 	return nil
+}
+
+// ValidateTrustedProxies checks that every entry of a trustedProxies list parses
+// as a CIDR or a bare IP. field names the YAML key, so the same validator serves
+// settings.trustedProxies and a proxy host's override.
+//
+// A wildcard entry (0.0.0.0/0, ::/0) is NOT an error - an operator on a closed
+// network may genuinely mean it - but it makes the client IP entirely
+// client-controlled, so callers warn about it; see TrustedProxyWildcards.
+func ValidateTrustedProxies(field string, entries []string) error {
+	for i, c := range entries {
+		if strings.TrimSpace(c) == "" {
+			return fmt.Errorf("%s[%d]: empty entry", field, i)
+		}
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			if net.ParseIP(c) == nil {
+				return fmt.Errorf("%s: invalid cidr/ip %q (expected a CIDR like 10.0.0.0/8 or a bare address)", field, c)
+			}
+		}
+	}
+	return nil
+}
+
+// TrustedProxyWildcards returns the entries of a trustedProxies list whose mask
+// covers the whole address space (0.0.0.0/0 or ::/0). Trusting every peer means
+// believing any X-Forwarded-For, which hands every client control of the IP that
+// access lists, geo, rate limits and every allowFrom exemption compare.
+func TrustedProxyWildcards(entries []string) []string {
+	var out []string
+	for _, c := range entries {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // ErrorPagesConfig configures custom HTML pages served for errors gpm ITSELF
@@ -292,7 +533,8 @@ func (v SecurityHeaderValue) MarshalYAML() (interface{}, error) {
 // deployment is never surprised by a new header. Content-Security-Policy
 // (frame-ancestors) and Permissions-Policy are placed at scope generated-only:
 // safe on gpm's own pages but liable to break a proxied app that ships none of
-// its own (see docs/configuration.md). The rest are scope all.
+// its own (see docs/reference/config/settings/security-headers.md). The rest
+// are scope all.
 var RecommendedSecurityHeaders = map[string]SecurityHeaderValue{
 	"X-Content-Type-Options":  {Value: "nosniff", Scope: SecurityScopeAll},
 	"Referrer-Policy":         {Value: "strict-origin-when-cross-origin", Scope: SecurityScopeAll},
@@ -491,6 +733,12 @@ type Settings struct {
 	// Webhooks are outbound lifecycle notifications fired after every config change.
 	Webhooks []WebhookConfig `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
 
+	// Notifications configures outbound alert targets (ntfy/Discord/generic) for
+	// operational events - renewal failure, cert expiry, upstream health flaps,
+	// ACME account errors, a frozen discovery reconciler, and (opt-in) config
+	// changes. Empty (default) sends nothing; see internal/notify.
+	Notifications NotificationsSettings `json:"notifications,omitempty" yaml:"notifications,omitempty"`
+
 	// DNSSync configures the optional local/public DNS record reconcilers that
 	// publish CNAMEs for proxy hosts opted in via their dns policy.
 	DNSSync DNSSyncSettings `json:"dnsSync,omitempty" yaml:"dnsSync,omitempty"`
@@ -499,10 +747,39 @@ type Settings struct {
 	// (see ProxyProtocolSettings). nil or disabled leaves them untouched.
 	ProxyProtocol *ProxyProtocolSettings `json:"proxyProtocol,omitempty" yaml:"proxyProtocol,omitempty"`
 
+	// TrustedProxies is the fleet-wide set of L7 reverse proxies (CIDRs or bare
+	// IPs) whose X-Forwarded-For gpm believes. It is the SINGLE source of truth
+	// for "what is the client IP": when the connection peer is inside this set,
+	// the client IP is the rightmost X-Forwarded-For entry that is not itself a
+	// trusted proxy; otherwise it is the peer address. That one derived value is
+	// what every IP-comparing control uses - access-list rules and sources, geo,
+	// rate limits, guard/auth-request/client-cert/bouncer allowFrom exemptions,
+	// the basic-auth lockout key, the access log, and the X-Forwarded-For /
+	// X-Real-IP gpm sends upstream.
+	//
+	// Empty (the default) trusts NOBODY: X-Forwarded-For is ignored entirely and
+	// the connection peer is the client, which is the only safe default when gpm
+	// is the internet-facing edge. A ProxyHost's own trustedProxies REPLACES this
+	// list for that host.
+	//
+	// This is the L7 tier of a three-tier trust model and is deliberately
+	// separate from the other two: proxyProtocol.trustedCIDRs is the L4 tier
+	// (which peers may rewrite RemoteAddr itself, evaluated first), and
+	// identityProvider.forwardAuth.trustedProxies is the identity tier (which
+	// peers may assert Remote-User and friends). None of them substitutes for
+	// another.
+	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
+
 	// IngressDiscovery configures the optional read-only Kubernetes Ingress
 	// reconciler that derives managed proxy hosts from annotated cluster
 	// Ingresses, which then feed DNSSync above.
 	IngressDiscovery IngressDiscoverySettings `json:"ingressDiscovery,omitempty" yaml:"ingressDiscovery,omitempty"`
+
+	// DockerDiscovery configures the optional read-only Docker reconciler that
+	// derives managed proxy hosts from labelled containers - the same machinery
+	// as IngressDiscovery above (same template type, same profiles, same
+	// ownership rules), pointed at the Engine API instead of a cluster.
+	DockerDiscovery DockerDiscoverySettings `json:"dockerDiscovery,omitempty" yaml:"dockerDiscovery,omitempty"`
 
 	// AccessListSync configures the fetcher that keeps AccessList sources (remote
 	// IP feeds) up to date. The zero value is ENABLED: a list that declares no
@@ -642,13 +919,24 @@ func (s Settings) Validate() error {
 	if err := s.ProxyProtocol.validate(); err != nil {
 		return err
 	}
+	if err := ValidateTrustedProxies("settings.trustedProxies", s.TrustedProxies); err != nil {
+		return err
+	}
 	if err := s.DNSSync.Validate(); err != nil {
 		return err
 	}
 	if err := s.IngressDiscovery.Validate(); err != nil {
 		return err
 	}
+	// Validated through the resolver, so the profile set it inherits from
+	// ingressDiscovery is held to the same standard as one it defines itself.
+	if err := s.DockerDiscoveryResolved().Validate(); err != nil {
+		return err
+	}
 	if err := s.AccessListSync.Validate(); err != nil {
+		return err
+	}
+	if err := s.Notifications.validate(); err != nil {
 		return err
 	}
 	if err := s.ErrorPages.validate(); err != nil {

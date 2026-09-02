@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -26,7 +27,7 @@ const (
 	MWTypeHeaders   = "headers"
 	MWTypeGuard     = "guard"
 	MWTypeRateLimit = "rate-limit" // per-host, per-client-IP token bucket
-	MWTypeRewrite   = "rewrite"    // exact-match upstream-facing request-path replacement
+	MWTypeRewrite   = "rewrite"    // upstream-facing request-path replacement (exact, prefix or regex)
 	MWTypeBouncer   = "bouncer"    // deny hook: ask an external bouncer/WAF about the client IP
 )
 
@@ -70,19 +71,24 @@ const (
 	AuthModeForwardAuth = "forward-auth" // accept a trusted forward-auth identity
 	AuthModeAuthRequest = "auth-request" // delegate to an external auth_request endpoint
 	AuthModeClientCert  = "client-cert"  // gate on a verified mTLS client certificate
+	AuthModeBasic       = "basic"        // HTTP basic auth against a local username/bcrypt-hash set
 )
+
+// authModeList is the human-readable mode list every "unknown mode" error and
+// the docs quote, kept next to the constants so the two cannot drift.
+const authModeList = "oidc|forward-auth|auth-request|client-cert|basic"
 
 // AuthMiddleware gates requests through a named IdentityProvider and, optionally,
 // requires the resolved identity to hold one of RequiredRoles.
 type AuthMiddleware struct {
 	IdentityProvider string   `json:"identityProvider" yaml:"identityProvider"`
-	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth | auth-request (defaults from IdP type)
+	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"` // oidc | forward-auth | auth-request | client-cert | basic (defaults from IdP type)
 	RequiredRoles    []string `json:"requiredRoles,omitempty" yaml:"requiredRoles,omitempty"`
 	// AllowFrom lists client CIDRs that bypass authentication entirely and are
 	// proxied straight through (no auth subrequest, no certificate requirement,
 	// no identity headers). An any-of, network-exempt bypass so trusted networks
-	// (e.g. the LAN) can skip SSO or mTLS. Applies to auth-request and
-	// client-cert modes; it is refused in oidc and forward-auth mode, where the
+	// (e.g. the LAN) can skip SSO, mTLS or a password. Applies to auth-request,
+	// client-cert and basic modes; it is refused in oidc and forward-auth mode, where the
 	// gate has no bypass to honour and a silently ignored exemption would read
 	// like a security control that is not there. With Mode unset the effective
 	// mode comes from the referenced provider's type, so that case is settled by
@@ -91,7 +97,7 @@ type AuthMiddleware struct {
 	// The exemption is matched against the client IP the HOST resolves, which
 	// honours X-Forwarded-For only from that host's own trusted proxies - and a
 	// client-cert middleware contributes none, because it has no identity
-	// provider. See the allowFrom notes in docs/configuration.md before putting
+	// provider. See the allowFrom notes in docs/reference/config/middleware.md before putting
 	// a proxy address inside one of these networks.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 	// ClientCertRoles maps a verified client certificate to a role in client-cert
@@ -99,6 +105,85 @@ type AuthMiddleware struct {
 	// "CN=ops,O=Corp") or its bare common name, the value is the role name
 	// RequiredRoles is checked against. Empty means cert presence alone passes.
 	ClientCertRoles map[string]string `json:"clientCertRoles,omitempty" yaml:"clientCertRoles,omitempty"`
+	// Basic is the credential set for `mode: basic` - HTTP basic auth against
+	// local username/bcrypt-hash pairs, with no identity provider involved. It
+	// is required in that mode and refused in every other one.
+	//
+	// This is the supported home for username/password gating; the identical
+	// users on an AccessList (AccessList.BasicAuth) are deprecated.
+	Basic *BasicAuthSpec `json:"basic,omitempty" yaml:"basic,omitempty"`
+}
+
+// validate checks one auth spec. owner is the already-quoted owner phrase the
+// error is prefixed with ("middleware \"sso\"", "proxy host \"app\"", ...), so a
+// `type: auth` middleware and the identical inline block on a host or location
+// are held to exactly the same rules and read the same way when they fail.
+func (a *AuthMiddleware) validate(owner string) error {
+	// client-cert takes its identity from the TLS handshake and basic from a
+	// local credential set, so they are the two auth modes with no identity
+	// provider to name.
+	if a.Mode != AuthModeClientCert && a.Mode != AuthModeBasic && a.IdentityProvider == "" {
+		return fmt.Errorf("%s: auth.identityProvider is required", owner)
+	}
+	switch mode := a.Mode; mode {
+	case AuthModeOIDC, AuthModeForwardAuth:
+		// The oidc and forward-auth gates have no network bypass, so an
+		// allowFrom here would be silently ignored - refuse it rather than
+		// let a config claim an exemption that does not exist. Mode "" is
+		// left alone: it defaults from the IdP type, which is not resolvable
+		// here, and it may resolve to auth-request.
+		if len(a.AllowFrom) > 0 {
+			return fmt.Errorf("%s: auth.allowFrom is only supported in auth-request, client-cert and basic modes, not %q", owner, mode)
+		}
+	case "":
+	case AuthModeBasic:
+		// The credential set IS the identity source, so naming a provider here
+		// would claim an SSO relationship the gate never uses.
+		if a.IdentityProvider != "" {
+			return fmt.Errorf("%s: auth.identityProvider is not used in basic mode (auth.basic.users is the credential source)", owner)
+		}
+		// Basic auth resolves a username, never a role: there is no group claim
+		// and no roleMapping to derive one from, so requiredRoles could only ever
+		// deny every request.
+		if len(a.RequiredRoles) > 0 {
+			return fmt.Errorf("%s: auth.requiredRoles is not supported in basic mode (a username/password carries no roles; put the users who may reach this host in auth.basic.users)", owner)
+		}
+		if a.Basic == nil {
+			return fmt.Errorf("%s: auth.basic is required in basic mode", owner)
+		}
+		if err := a.Basic.validate(owner); err != nil {
+			return err
+		}
+	case AuthModeClientCert:
+		if a.IdentityProvider != "" {
+			return fmt.Errorf("%s: auth.identityProvider is not used in client-cert mode (the TLS handshake is the identity source)", owner)
+		}
+		// requiredRoles with no mapping could never match, silently denying
+		// every request; reject it rather than compile a dead gate.
+		if len(a.RequiredRoles) > 0 && len(a.ClientCertRoles) == 0 {
+			return fmt.Errorf("%s: auth.requiredRoles in client-cert mode needs auth.clientCertRoles to map a subject to a role", owner)
+		}
+	case AuthModeAuthRequest:
+		if len(a.RequiredRoles) > 0 {
+			return fmt.Errorf("%s: auth.requiredRoles is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", owner)
+		}
+	default:
+		return fmt.Errorf("%s: auth.mode must be %s, got %q", owner, authModeList, mode)
+	}
+	if len(a.ClientCertRoles) > 0 && a.Mode != AuthModeClientCert {
+		return fmt.Errorf("%s: auth.clientCertRoles is only used in client-cert mode", owner)
+	}
+	// A basic block outside basic mode is a credential set nothing reads: the
+	// gate would be an SSO/mTLS gate and the users would silently admit nobody.
+	if a.Basic != nil && a.Mode != AuthModeBasic {
+		return fmt.Errorf("%s: auth.basic is only used in basic mode (set auth.mode: basic)", owner)
+	}
+	for _, c := range a.AllowFrom {
+		if !validCIDROrIP(c) {
+			return fmt.Errorf("%s: auth.allowFrom has invalid CIDR/IP %q", owner, c)
+		}
+	}
+	return nil
 }
 
 // HeadersMiddleware mutates request/response headers declaratively (security
@@ -188,10 +273,70 @@ func (r RateLimitMiddleware) RateAndDefaultBurst() (rate float64, defaultBurst i
 	return rate, burst
 }
 
+// validate checks one rate-limit spec. owner is the already-quoted owner phrase
+// the error is prefixed with, so a `type: rate-limit` middleware and the
+// identical inline block on a host or location share one set of rules.
+func (r *RateLimitMiddleware) validate(owner string) error {
+	legacySet := r.RequestsPerSecond > 0
+	windowSet := r.usesWindow()
+	switch {
+	case legacySet && windowSet:
+		return fmt.Errorf("%s: rateLimit must set either requestsPerSecond or requests+window, not both", owner)
+	case !legacySet && !windowSet:
+		return fmt.Errorf("%s: rateLimit.requestsPerSecond must be > 0 (or set requests+window)", owner)
+	case windowSet:
+		if r.Requests <= 0 {
+			return fmt.Errorf("%s: rateLimit.requests must be > 0", owner)
+		}
+		d, err := time.ParseDuration(r.Window)
+		if err != nil {
+			return fmt.Errorf("%s: rateLimit.window must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.Window, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("%s: rateLimit.window must be > 0, got %q", owner, r.Window)
+		}
+	}
+	for _, c := range r.AllowFrom {
+		if !validCIDROrIP(c) {
+			return fmt.Errorf("%s: rateLimit.allowFrom has invalid CIDR/IP %q", owner, c)
+		}
+	}
+	if r.BlockFor != "" {
+		d, err := time.ParseDuration(r.BlockFor)
+		if err != nil {
+			return fmt.Errorf("%s: rateLimit.blockFor must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.BlockFor, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("%s: rateLimit.blockFor must be > 0, got %q", owner, r.BlockFor)
+		}
+	}
+	return nil
+}
+
+// validateInline validates an optional inline auth block on a host or location.
+// A nil block is simply absent, which is why it is separate from validate: a
+// `type: auth` middleware with no spec is an error, an unset host field is not.
+func (a *AuthMiddleware) validateInline(owner string) error {
+	if a == nil {
+		return nil
+	}
+	return a.validate(owner)
+}
+
+// validateInline validates an optional inline rateLimit block on a host or
+// location; nil means the block is absent.
+func (r *RateLimitMiddleware) validateInline(owner string) error {
+	if r == nil {
+		return nil
+	}
+	return r.validate(owner)
+}
+
 // RewriteMiddleware rewrites the request path before proxying to the upstream.
-// It is exact-match only (no regex): each key is a full request path that, when
-// it equals the incoming path exactly, is replaced by its value. Exact matching
-// avoids the path-confusion and ReDoS classes that pattern rewrites invite.
+// Three rule kinds are evaluated in a fixed order - exact (ReplacePath), then
+// prefix (PrefixRules, longest first), then regex (RegexRules, in order) - and
+// the FIRST match wins; no rule ever sees another rule's output, so rules cannot
+// chain into a path the operator did not write.
 //
 // The rewrite is internal - it mutates the proxied request path in place,
 // preserving the method and body; it is never an HTTP redirect, so the client
@@ -200,7 +345,129 @@ func (r RateLimitMiddleware) RateAndDefaultBurst() (rate float64, defaultBurst i
 // and access lists all evaluate the ORIGINAL client path - a rewrite can never
 // move a request past a path-scoped security control.
 type RewriteMiddleware struct {
+	// ReplacePath maps a full request path to its replacement. The incoming path
+	// must equal the key exactly; no prefix or pattern matching.
 	ReplacePath map[string]string `json:"replacePath,omitempty" yaml:"replacePath,omitempty"`
+
+	// PrefixRules replace a matched path PREFIX. Matching is boundary-aware, the
+	// same way a location matches (the path equals From, or begins with From plus
+	// "/"), so "/reports" never captures "/reports-evil". The longest matching
+	// From wins.
+	PrefixRules []RewriteRule `json:"prefixRules,omitempty" yaml:"prefixRules,omitempty"`
+
+	// RegexRules replace the span a Go regexp matches at the START of the path
+	// (the pattern is implicitly anchored with "^"); anything after the match is
+	// appended unchanged. To may reference capture groups as $1, ${name}.
+	// Patterns are compiled once at config load, so a bad pattern is a validation
+	// error rather than a request-time failure.
+	RegexRules []RewriteRule `json:"regexRules,omitempty" yaml:"regexRules,omitempty"`
+}
+
+// MaxRewriteRules caps how many prefix or regex rules one rewrite middleware may
+// carry. Rules are evaluated linearly per request, and an unbounded list is a
+// per-request cost an operator cannot see; 32 is far above any real config.
+const MaxRewriteRules = 32
+
+// MaxRewritePatternLen caps a regex rule's pattern length. Combined with the
+// rule cap it bounds the compiled program size, which is the practical lever on
+// pathological backtracking cost (Go's RE2 engine is already linear-time, so
+// this is a resource bound, not a ReDoS fix).
+const MaxRewritePatternLen = 256
+
+// RewriteRule is one ordered prefix or regex rewrite: From is the path prefix or
+// the regular expression, To the replacement path.
+type RewriteRule struct {
+	From string `json:"from" yaml:"from"`
+	To   string `json:"to" yaml:"to"`
+}
+
+// validateRewriteTarget checks one rewrite target path. A rewrite runs INSIDE
+// the security tiers, closest to the upstream, and its output is what gpm sends
+// on - so a "to" carrying a dot segment or a backslash climbs straight out of
+// the base path an operator pinned the backend into (Upstream.Path is validated
+// against exactly this, see validateUpstreamPath) and lands on whatever the
+// backend re-collapses it to. The rewrite scope is narrower than the proxy-host
+// scope, so this is also a privilege boundary, not only a hygiene rule.
+//
+// A regex replacement template is held to the same rules: "$1" may expand to
+// anything at request time, so the template is checked statically here AND the
+// composed path is re-cleaned at request time (see dataplane's rewritePath).
+func validateRewriteTarget(owner, field, to string) error {
+	if to == "" || !strings.HasPrefix(to, "/") {
+		return fmt.Errorf("middleware %q: %s %q must be an absolute path (start with %q)", owner, field, to, "/")
+	}
+	if strings.ContainsAny(to, "?#") {
+		return fmt.Errorf("middleware %q: %s %q must not contain a query string or fragment", owner, field, to)
+	}
+	if strings.ContainsAny(to, `\;`) {
+		return fmt.Errorf("middleware %q: %s %q must not contain %q or %q", owner, field, to, `\`, ";")
+	}
+	for _, seg := range strings.Split(to, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("middleware %q: %s %q must not contain %q or %q segments", owner, field, to, ".", "..")
+		}
+	}
+	return nil
+}
+
+func (rw RewriteMiddleware) validate(owner string) error {
+	if len(rw.ReplacePath) == 0 && len(rw.PrefixRules) == 0 && len(rw.RegexRules) == 0 {
+		return fmt.Errorf("middleware %q: rewrite requires at least one replacePath, prefixRules or regexRules entry", owner)
+	}
+	for k, v := range rw.ReplacePath {
+		if k == "" || !strings.HasPrefix(k, "/") {
+			return fmt.Errorf("middleware %q: rewrite.replacePath key %q must be an absolute path (start with %q)", owner, k, "/")
+		}
+		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.replacePath[%q] target", k), v); err != nil {
+			return err
+		}
+		if k == v {
+			return fmt.Errorf("middleware %q: rewrite.replacePath[%q] rewrites a path to itself (no-op)", owner, k)
+		}
+	}
+	if len(rw.PrefixRules) > MaxRewriteRules {
+		return fmt.Errorf("middleware %q: rewrite.prefixRules has %d rules, at most %d are allowed", owner, len(rw.PrefixRules), MaxRewriteRules)
+	}
+	for i, r := range rw.PrefixRules {
+		if r.From == "" || !strings.HasPrefix(r.From, "/") {
+			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d].from %q must be an absolute path (start with %q)", owner, i, r.From, "/")
+		}
+		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.prefixRules[%d].to", i), r.To); err != nil {
+			return err
+		}
+		if r.From == r.To {
+			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d] rewrites %q to itself (no-op)", owner, i, r.From)
+		}
+	}
+	if len(rw.RegexRules) > MaxRewriteRules {
+		return fmt.Errorf("middleware %q: rewrite.regexRules has %d rules, at most %d are allowed", owner, len(rw.RegexRules), MaxRewriteRules)
+	}
+	for i, r := range rw.RegexRules {
+		if r.From == "" {
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from must not be empty", owner, i)
+		}
+		if len(r.From) > MaxRewritePatternLen {
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from is %d characters, at most %d are allowed", owner, i, len(r.From), MaxRewritePatternLen)
+		}
+		if _, err := regexp.Compile(AnchorRewritePattern(r.From)); err != nil {
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from %q is not a valid regular expression: %w", owner, i, r.From, err)
+		}
+		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.regexRules[%d].to", i), r.To); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AnchorRewritePattern returns the pattern a regex rewrite rule is actually
+// compiled from: implicitly anchored at the start of the path, so a rule can
+// only ever replace a leading span and never float into the middle of a path.
+// An operator-written leading "^" is not doubled.
+func AnchorRewritePattern(pattern string) string {
+	if strings.HasPrefix(pattern, "^") {
+		return pattern
+	}
+	return "^" + pattern
 }
 
 // BouncerMiddleware is a deny hook: before a request reaches authentication, gpm
@@ -324,45 +591,8 @@ func (m Middleware) Validate() error {
 		if m.Auth == nil {
 			return fmt.Errorf("middleware %q: auth spec required", m.Name)
 		}
-		// client-cert mode authenticates from the TLS handshake, so it is the one
-		// auth mode with no identity provider to name.
-		if m.Auth.Mode != AuthModeClientCert && m.Auth.IdentityProvider == "" {
-			return fmt.Errorf("middleware %q: auth.identityProvider is required", m.Name)
-		}
-		switch mode := m.Auth.Mode; mode {
-		case AuthModeOIDC, AuthModeForwardAuth:
-			// The oidc and forward-auth gates have no network bypass, so an
-			// allowFrom here would be silently ignored - refuse it rather than
-			// let a config claim an exemption that does not exist. Mode "" is
-			// left alone: it defaults from the IdP type, which is not resolvable
-			// here, and it may resolve to auth-request.
-			if len(m.Auth.AllowFrom) > 0 {
-				return fmt.Errorf("middleware %q: auth.allowFrom is only supported in auth-request and client-cert modes, not %q", m.Name, mode)
-			}
-		case "":
-		case AuthModeClientCert:
-			if m.Auth.IdentityProvider != "" {
-				return fmt.Errorf("middleware %q: auth.identityProvider is not used in client-cert mode (the TLS handshake is the identity source)", m.Name)
-			}
-			// requiredRoles with no mapping could never match, silently denying
-			// every request; reject it rather than compile a dead gate.
-			if len(m.Auth.RequiredRoles) > 0 && len(m.Auth.ClientCertRoles) == 0 {
-				return fmt.Errorf("middleware %q: auth.requiredRoles in client-cert mode needs auth.clientCertRoles to map a subject to a role", m.Name)
-			}
-		case AuthModeAuthRequest:
-			if len(m.Auth.RequiredRoles) > 0 {
-				return fmt.Errorf("middleware %q: auth.requiredRoles is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", m.Name)
-			}
-		default:
-			return fmt.Errorf("middleware %q: auth.mode must be oidc|forward-auth|auth-request|client-cert, got %q", m.Name, mode)
-		}
-		if len(m.Auth.ClientCertRoles) > 0 && m.Auth.Mode != AuthModeClientCert {
-			return fmt.Errorf("middleware %q: auth.clientCertRoles is only used in client-cert mode", m.Name)
-		}
-		for _, c := range m.Auth.AllowFrom {
-			if !validCIDROrIP(c) {
-				return fmt.Errorf("middleware %q: auth.allowFrom has invalid CIDR/IP %q", m.Name, c)
-			}
+		if err := m.Auth.validate(fmt.Sprintf("middleware %q", m.Name)); err != nil {
+			return err
 		}
 	case MWTypeHeaders:
 		if m.Headers == nil {
@@ -384,54 +614,18 @@ func (m Middleware) Validate() error {
 		if m.RateLimit == nil {
 			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0", m.Name)
 		}
-		rl := m.RateLimit
-		legacySet := rl.RequestsPerSecond > 0
-		windowSet := rl.Requests > 0 || rl.Window != ""
-		switch {
-		case legacySet && windowSet:
-			return fmt.Errorf("middleware %q: rateLimit must set either requestsPerSecond or requests+window, not both", m.Name)
-		case !legacySet && !windowSet:
-			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0 (or set requests+window)", m.Name)
-		case windowSet:
-			if rl.Requests <= 0 {
-				return fmt.Errorf("middleware %q: rateLimit.requests must be > 0", m.Name)
-			}
-			d, err := time.ParseDuration(rl.Window)
-			if err != nil {
-				return fmt.Errorf("middleware %q: rateLimit.window must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", m.Name, rl.Window, err)
-			}
-			if d <= 0 {
-				return fmt.Errorf("middleware %q: rateLimit.window must be > 0, got %q", m.Name, rl.Window)
-			}
-		}
-		for _, c := range m.RateLimit.AllowFrom {
-			if !validCIDROrIP(c) {
-				return fmt.Errorf("middleware %q: rateLimit.allowFrom has invalid CIDR/IP %q", m.Name, c)
-			}
-		}
-		if rl.BlockFor != "" {
-			d, err := time.ParseDuration(rl.BlockFor)
-			if err != nil {
-				return fmt.Errorf("middleware %q: rateLimit.blockFor must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", m.Name, rl.BlockFor, err)
-			}
-			if d <= 0 {
-				return fmt.Errorf("middleware %q: rateLimit.blockFor must be > 0, got %q", m.Name, rl.BlockFor)
-			}
+		if err := m.RateLimit.validate(fmt.Sprintf("middleware %q", m.Name)); err != nil {
+			return err
 		}
 	case MWTypeRewrite:
-		if m.Rewrite == nil || len(m.Rewrite.ReplacePath) == 0 {
-			return fmt.Errorf("middleware %q: rewrite requires at least one replacePath entry", m.Name)
+		// A nil spec is the same defect as an empty one - no rules - so both take
+		// the "needs at least one rule" path rather than two different errors.
+		var rw RewriteMiddleware
+		if m.Rewrite != nil {
+			rw = *m.Rewrite
 		}
-		for k, v := range m.Rewrite.ReplacePath {
-			if k == "" || !strings.HasPrefix(k, "/") {
-				return fmt.Errorf("middleware %q: rewrite.replacePath key %q must be an absolute path (start with %q)", m.Name, k, "/")
-			}
-			if v == "" || !strings.HasPrefix(v, "/") {
-				return fmt.Errorf("middleware %q: rewrite.replacePath[%q] target %q must be an absolute path (start with %q)", m.Name, k, v, "/")
-			}
-			if k == v {
-				return fmt.Errorf("middleware %q: rewrite.replacePath[%q] rewrites a path to itself (no-op)", m.Name, k)
-			}
+		if err := rw.validate(m.Name); err != nil {
+			return err
 		}
 	case MWTypeBouncer:
 		if m.Bouncer == nil {

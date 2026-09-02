@@ -191,15 +191,16 @@ func TestIdentityTrustNotSharedAcrossHosts(t *testing.T) {
 
 func TestAccessListTrustedProxyXFF(t *testing.T) {
 	// Client-IP resolution for an access list honours X-Forwarded-For only from a
-	// proxy THIS host trusts, and that trust is per-host: the trusted-proxy set is
-	// the forward-auth TrustedProxies of the IdPs the host references, not a global
-	// union across every IdP (GPM-L4).
+	// proxy THIS host trusts, and that trust is per-host: the set is the host's own
+	// trustedProxies override (settings.trustedProxies when it declares none).
 	//
-	// Two hosts share the allow-only-9.9.9.9 access list. Host "app-auth" references
-	// a forward-auth IdP trusting 10/8, so 10/8 is its trusted proxy; host "app-open"
-	// references no IdP, so it trusts no proxy. The access list runs ahead of auth
-	// (GPM-L1), so its verdict is visible as 403 (denied) vs a later 401 (allowed by
-	// the list, then rejected by auth for lack of identity).
+	// Two hosts share the allow-only-9.9.9.9 access list. Host "app-auth" declares
+	// trustedProxies 10/8; host "app-open" declares none and, with no fleet-wide
+	// list installed, trusts nothing. Both reference the SAME forward-auth IdP
+	// whose forwardAuth.trustedProxies also names 10/8 - which must NOT grant
+	// client-IP trust, only identity-header trust. The access list runs ahead of
+	// auth (GPM-L1), so its verdict is visible as 403 (denied) vs a later 401
+	// (allowed by the list, then rejected by auth for lack of identity).
 	up, closeFn := backendUpstream(t, okHandler())
 	defer closeFn()
 
@@ -221,16 +222,18 @@ func TestAccessListTrustedProxyXFF(t *testing.T) {
 		}},
 		ProxyHosts: []model.ProxyHost{
 			{
-				ObjectMeta:  model.ObjectMeta{Name: "app-auth"},
-				Domains:     []string{"auth.example.com"},
-				Upstream:    up,
-				Middlewares: []string{"sso"},
-				AccessLists: []string{"only-bob"},
+				ObjectMeta:     model.ObjectMeta{Name: "app-auth"},
+				Domains:        []string{"auth.example.com"},
+				Upstream:       up,
+				Middlewares:    []string{"sso"},
+				AccessLists:    []string{"only-bob"},
+				TrustedProxies: &[]string{"10.0.0.0/8"},
 			},
 			{
 				ObjectMeta:  model.ObjectMeta{Name: "app-open"},
 				Domains:     []string{"open.example.com"},
 				Upstream:    up,
+				Middlewares: []string{"sso"},
 				AccessLists: []string{"only-bob"},
 			},
 		},
@@ -261,9 +264,10 @@ func TestAccessListTrustedProxyXFF(t *testing.T) {
 	if code := serve("auth.example.com", "203.0.113.1:1", "9.9.9.9"); code != http.StatusForbidden {
 		t.Fatalf("forged XFF from untrusted peer must be denied, got %d", code)
 	}
-	// app-open trusts no proxy: the SAME 10.0.0.1+XFF=9.9.9.9 is no longer honoured
-	// (no global union), so the peer 10.0.0.1 is denied by the access list.
+	// app-open declares no trustedProxies, and forwardAuth.trustedProxies does NOT
+	// stand in for one: the SAME 10.0.0.1+XFF=9.9.9.9 is not honoured, so the peer
+	// 10.0.0.1 is denied by the access list.
 	if code := serve("open.example.com", "10.0.0.1:1", "9.9.9.9"); code != http.StatusForbidden {
-		t.Fatalf("host with no trusted proxy must ignore XFF and deny the peer, got %d", code)
+		t.Fatalf("forwardAuth.trustedProxies must not grant client-IP trust, got %d", code)
 	}
 }

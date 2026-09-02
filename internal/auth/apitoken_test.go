@@ -172,7 +172,7 @@ func TestBearerTokenSkipsCSRF(t *testing.T) {
 func TestBearerTokenNeverFallsThroughToCookie(t *testing.T) {
 	a := NewAuthenticator(Options{Store: testStore(t)})
 	a.SetTokenSource(func() []model.APIToken { return nil })
-	sess, err := a.LocalLogin(t.Context(), "", "")
+	sess, _, err := a.LocalLogin(t.Context(), "", "")
 	if err == nil {
 		t.Fatalf("unexpected session %v", sess)
 	}

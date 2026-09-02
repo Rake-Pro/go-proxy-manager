@@ -25,7 +25,8 @@ func baseSettings(f *fakeAPI) model.IngressDiscoverySettings {
 		AllowedDomainSuffixes: []string{"example.com"},
 		Template: model.IngressHostTemplate{
 			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
-			TLS:      model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
+			//lint:ignore SA1019 compat read of deprecated TLSSettings.HTTP2 in test fixture
+			TLS: model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
 		},
 	}
 }
@@ -76,7 +77,8 @@ func managedHostFixture(name string, domains ...string) model.ProxyHost {
 		},
 		Domains:  domains,
 		Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
-		TLS:      model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
+		//lint:ignore SA1019 compat read of deprecated TLSSettings.HTTP2 in test fixture
+		TLS: model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
 	}
 }
 
@@ -1174,7 +1176,8 @@ func profileSettings(f *fakeAPI) model.IngressDiscoverySettings {
 	s := baseSettings(f)
 	s.Profiles = map[string]model.IngressHostTemplate{
 		"public-ratelimited": {
-			Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			Upstream: model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+			//lint:ignore SA1019 compat read of deprecated TLSSettings.HTTP2 in test fixture
 			TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, HTTP2: true},
 			Middlewares: []string{"rate-limit"},
 		},
@@ -1276,6 +1279,7 @@ func TestReconcileAppliesTheNamedProfileVerbatim(t *testing.T) {
 	if h.UpstreamGroupRef != "k8s-nodes" || h.Upstream != (model.Upstream{}) {
 		t.Fatalf("upstream = %+v / group = %q, want the profile's group and no single upstream", h.Upstream, h.UpstreamGroupRef)
 	}
+	//lint:ignore SA1019 compat read of deprecated ProxyHost.WebsocketsUpgrade in test fixture
 	if !h.WebsocketsUpgrade {
 		t.Fatal("websocketsUpgrade must come from the profile")
 	}

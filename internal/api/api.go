@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
+	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/clientcert"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
+	"github.com/Rake-Pro/go-proxy-manager/internal/docker"
 	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -60,6 +62,30 @@ type Deps struct {
 	// UpstreamHealth, if set, returns the live per-group upstream health payload
 	// (marshalled as-is) for GET /upstream-health. May be nil.
 	UpstreamHealth func() any
+	// UpstreamGroupSummary, if set, returns the healthy/unhealthy upstream count
+	// per group for GET /health. May be nil (reported as an empty list). Kept
+	// separate from UpstreamHealth (which the daemon derives it from) so this
+	// package never has to import internal/dataplane's per-upstream type.
+	UpstreamGroupSummary func() []UpstreamGroupHealth
+	// ACMEObservations, if set, returns the ACME manager's per-certificate
+	// expiry, failure count and last error, for the status GET /certificates
+	// decorates onto each object and for GET /health. May be nil (a follower:
+	// only the leader runs the ACME manager, so it is not the issuer and has
+	// nothing to report).
+	ACMEObservations func() []acme.CertObservation
+	// ACMERenewNow, if set, forces an immediate ACME order for one certificate
+	// (POST /certificates/{name}/renew), ignoring the normal renewal window. It
+	// returns acme.ErrCertNotFound, acme.ErrNotACME or acme.ErrRenewInFlight for
+	// the handler to map onto the right HTTP status. May be nil (endpoint
+	// responds 501; true on a follower, which does not run the ACME manager).
+	ACMERenewNow func(ctx context.Context, cfg model.Config, name string) error
+	// ACMELastRun, if set, returns when the ACME renewal loop last ran, for
+	// GET /health. May be nil (reported as never run).
+	ACMELastRun func() time.Time
+	// DataPlaneListening, if set, reports whether the HTTPS and HTTP data-plane
+	// listeners are currently bound, for GET /health. May be nil (both reported
+	// not listening).
+	DataPlaneListening func() (httpsListening, httpListening bool)
 	// RevokeSSOSessions, if set, invalidates every outstanding data-plane SSO
 	// session (POST /sso/revoke). May be nil (endpoint responds 501).
 	RevokeSSOSessions func() error
@@ -100,6 +126,19 @@ type Deps struct {
 	// /ingress-discovery/plan), without changing anything. Mirrors DNSSyncPlan.
 	// May be nil (501).
 	IngressDiscoveryPlan func(context.Context) (any, error)
+	// DockerDiscoveryReconcile, if set, runs a full Docker-discovery reconcile
+	// synchronously (POST /docker-discovery/reconcile). May be nil (501).
+	DockerDiscoveryReconcile func(context.Context) error
+	// DockerDiscoveryStatus, if set, returns the last reconcile result
+	// (marshalled as-is) for GET /docker-discovery/status. May be nil (501).
+	DockerDiscoveryStatus func() any
+	// DockerDiscoveryPlan, if set, returns the read-only preview of what a
+	// reconcile WOULD create, update, delete and skip (GET
+	// /docker-discovery/plan), without changing anything. May be nil (501).
+	DockerDiscoveryPlan func(context.Context) (any, error)
+	// DockerDiscoveryEnabled, if set, reports whether container discovery is
+	// configured, for the capability probe. May be nil (reported disabled).
+	DockerDiscoveryEnabled func() bool
 	// AccessListSourceStatus, if set, returns the last access-list source fetch
 	// result (marshalled as-is) for GET /access-list-sources/status. May be nil (501).
 	AccessListSourceStatus func() any
@@ -123,6 +162,42 @@ type Deps struct {
 	// a ClientCA's cert-store-relative caKeyFile when issuing a client
 	// certificate; every other path in this package is store-relative.
 	CertDir string
+	// Runtime carries the flag/env-derived startup facts reported by
+	// GET /runtime. The daemon fills it once; the handler never reads the
+	// environment itself, so the probe describes THIS process.
+	Runtime RuntimeConfig
+	// AccessLogEnabled, if set, reports whether data-plane request capture is
+	// currently on (it is a live toggle, see PUT /logs). May be nil (off).
+	AccessLogEnabled func() bool
+	// WebhookStatus, if set, returns the per-target last-delivery state
+	// (marshalled as-is) for GET /webhooks/status. May be nil (empty list).
+	WebhookStatus func() any
+	// WebhookTest, if set, POSTs a synthetic test event to one webhook target
+	// and waits for the outcome (POST /webhooks/{name}/test). It returns
+	// webhook.ErrUnknownTarget for a name that is not configured; a refused or
+	// timed-out delivery is reported in the result, not as an error. May be nil
+	// (endpoint responds 501).
+	WebhookTest func(ctx context.Context, name string) (any, error)
+	// NotificationStatus, if set, returns the per-target last-delivery state
+	// (marshalled as-is) for GET /notifications/status. May be nil (empty list).
+	NotificationStatus func() any
+	// NotificationTest, if set, sends a synthetic event to one notification
+	// target and waits for the outcome (POST /notifications/{name}/test). It
+	// returns notify.ErrUnknownTarget for a name that is not configured; a
+	// refused or timed-out delivery is reported in the result, not as an
+	// error. May be nil (endpoint responds 501).
+	NotificationTest func(ctx context.Context, name string) (any, error)
+	// NoAdminLogin reports the bootstrap failure state: no usable local admin
+	// credential AND no admin SSO provider that can render a sign-in button, so
+	// the login page cannot succeed for anyone. Surfaced in the capability probe
+	// (and on the login page itself) instead of only in one startup log line.
+	NoAdminLogin func() bool
+
+	// CookieSecureState reports how the admin session cookie was decided for THIS
+	// request: "secure", "insecure-private" or "insecure-public" (see
+	// internal/auth). The SPA turns the last one into a banner. Empty when the
+	// daemon did not wire it.
+	CookieSecureState func(*http.Request) string
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -133,9 +208,11 @@ type capabilities struct {
 	APITokens        apiTokenCapability         `json:"apiTokens"`
 	DNSSync          dnsSyncCapability          `json:"dnsSync"`
 	IngressDiscovery ingressDiscoveryCapability `json:"ingressDiscovery"`
+	DockerDiscovery  dockerDiscoveryCapability  `json:"dockerDiscovery"`
 	HA               haCapability               `json:"ha"`
 	Metrics          metricsCapability          `json:"metrics"`
 	Maintenance      maintenanceCapability      `json:"maintenance"`
+	AdminLogin       adminLoginCapability       `json:"adminLogin"`
 	// ScopeSubjects is model.ScopePlurals, served so the SPA renders the token
 	// form from the authoritative list instead of a hand-maintained copy. The
 	// copy drifted the moment ingress-discovery was added, granting the UI no
@@ -168,6 +245,13 @@ type ingressDiscoveryCapability struct {
 	Enabled bool `json:"enabled"`
 }
 
+type dockerDiscoveryCapability struct {
+	// Enabled reports that Docker container discovery is wired AND turned on in
+	// settings. The SPA uses it to show the status panel rather than offering a
+	// control that cannot work.
+	Enabled bool `json:"enabled"`
+}
+
 type metricsCapability struct {
 	// Enabled reports that GET /metrics is mounted on the admin listener
 	// (-metrics / GPM_METRICS=1). The SPA greys the settings-page link out when
@@ -182,6 +266,23 @@ type maintenanceCapability struct {
 	// than showing a per-host toggle that appears to be off while the host is in
 	// fact down.
 	GlobalEnabled bool `json:"globalEnabled"`
+}
+
+type adminLoginCapability struct {
+	// Configured is false in the bootstrap failure state: no local admin
+	// credential AND no admin SSO provider that renders a sign-in button, so the
+	// login page cannot succeed for anyone. It used to be visible only as a
+	// single warn line in the daemon's startup log.
+	Configured bool `json:"configured"`
+	// TOTP reports that the local admin must present a TOTP code after their
+	// password (GPM_LOCAL_ADMIN_TOTP_SECRET is set). It says nothing about SSO
+	// logins, whose MFA belongs to the IdP.
+	TOTP bool `json:"totp"`
+	// CookieSecure says how the admin session cookie was issued for this request:
+	// "secure", "insecure-private" (plain HTTP from loopback or an RFC 1918 / ULA
+	// address - the ordinary bootstrap case) or "insecure-public" (plain HTTP
+	// from a routable address, which the SPA flags). Empty when unwired.
+	CookieSecure string `json:"cookieSecure,omitempty"`
 }
 
 type haCapability struct {
@@ -230,6 +331,17 @@ func (d Deps) scope(w http.ResponseWriter, r *http.Request, required string) boo
 	return true
 }
 
+// allows reports whether the caller holds required, without writing a response.
+// It exists for payloads that must be NARROWED for a caller rather than refused
+// outright (see GET /config). With no RequireScope wired it allows, exactly like
+// scope() above.
+func (d Deps) allows(r *http.Request, required string) bool {
+	if d.RequireScope == nil {
+		return true
+	}
+	return d.RequireScope(r, required) == nil
+}
+
 // scoped wraps h in the scope gate for required.
 func (d Deps) scoped(required string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -269,9 +381,15 @@ func New(d Deps) http.Handler {
 		list: func(c model.Config) []model.ProxyHost { return c.ProxyHosts },
 		decode: func(b []byte, name string) (model.ProxyHost, error) {
 			var v model.ProxyHost
-			err := json.Unmarshal(b, &v)
+			if err := json.Unmarshal(b, &v); err != nil {
+				return v, err
+			}
 			v.Name = name
-			return v, err
+			// An inline `auth` block in `mode: basic`, on the host or on any of
+			// its locations, may carry plaintext passwords the stored object has
+			// no field for; hash them here on exactly the terms a `type: auth`
+			// middleware write gets.
+			return v, applyHostBasicAuthPasswords(b, &v)
 		},
 	})
 	register(mux, d, "redirect-hosts", resource[model.RedirectHost]{
@@ -313,7 +431,16 @@ func New(d Deps) http.Handler {
 			v.Name = name
 			return v, err
 		},
+		// decorate attaches the read-only expiry/issuer/renewal status GET
+		// /certificates and GET /certificates/{name} report (see certhealth.go).
+		// It is runtime state derived from the cert store on disk, never part of
+		// the stored object.
+		decorate: d.decorateCertificate,
 	})
+	// Force an immediate ACME order for one certificate, bypassing the normal
+	// 30-day renewal window. See certhealth.go.
+	mux.HandleFunc("POST /certificates/{name}/renew", d.scoped("certificates:write", d.handleRenewCertificate))
+
 	register(mux, d, "client-cas", resource[model.ClientCA]{
 		kind: "ClientCA",
 		list: func(c model.Config) []model.ClientCA { return c.ClientCAs },
@@ -345,6 +472,13 @@ func New(d Deps) http.Handler {
 	// reissues one of them under the same identity with a new key and serial.
 	mux.HandleFunc("GET /client-cas/{name}/certificates", d.scoped("client-cas:read", d.handleListClientCerts(clientCertLedger)))
 	mux.HandleFunc("POST /client-cas/{name}/certificates/{serial}/renew", d.scoped("client-cas:write", d.handleRenewClientCert(clientCertLedger)))
+
+	// Aggregate runtime health: data-plane listeners, certificate expiry counts,
+	// upstream-group health, ACME renewal loop status, HA role and the current
+	// config HEAD. See certhealth.go. Same "*:read" scope as GET /upstream-health
+	// and GET /config: no secret is in the payload, only counts and booleans an
+	// operator already sees spread across other pages.
+	mux.HandleFunc("GET /health", d.scoped("*:read", d.handleHealth))
 
 	register(mux, d, "dns-providers", resource[model.DNSProvider]{
 		kind: "DNSProvider",
@@ -386,14 +520,26 @@ func New(d Deps) http.Handler {
 			return v, err
 		},
 	})
+	// One-shot migration off the deprecated AccessList.basicAuth/satisfyAny: it
+	// creates an auth middleware with mode basic from the list's users, attaches
+	// it wherever the list is referenced, and clears the fields - in a single
+	// commit. "?plan=1" is the dry run. Admin-scoped because one call rewrites
+	// access lists, middlewares and proxy hosts together (see the handler).
+	mux.HandleFunc("POST /access-lists/{name}/migrate-basic-auth", d.scoped(model.ScopeAdmin, d.handleMigrateBasicAuth))
+
 	register(mux, d, "middlewares", resource[model.Middleware]{
 		kind: "Middleware",
 		list: func(c model.Config) []model.Middleware { return c.Middlewares },
 		decode: func(b []byte, name string) (model.Middleware, error) {
 			var v model.Middleware
-			err := json.Unmarshal(b, &v)
+			if err := json.Unmarshal(b, &v); err != nil {
+				return v, err
+			}
 			v.Name = name
-			return v, err
+			// A `mode: basic` write may carry plaintext passwords the stored
+			// object has no field for; hash them here so only passwordHash is
+			// ever validated, committed or echoed back.
+			return v, applyBasicAuthPasswords(b, v.Auth)
 		},
 	})
 
@@ -431,6 +577,10 @@ func New(d Deps) http.Handler {
 		if d.DNSSyncEnabled != nil {
 			pihole, cloudflare = d.DNSSyncEnabled()
 		}
+		var cookieSecure string
+		if d.CookieSecureState != nil {
+			cookieSecure = d.CookieSecureState(r)
+		}
 		writeJSON(w, http.StatusOK, capabilities{
 			GeoIP:     geoIPCapability{DBLoaded: d.GeoDBLoaded != nil && d.GeoDBLoaded()},
 			APITokens: apiTokenCapability{Enabled: d.RequireScope != nil},
@@ -438,9 +588,17 @@ func New(d Deps) http.Handler {
 			IngressDiscovery: ingressDiscoveryCapability{
 				Enabled: d.IngressDiscoveryEnabled != nil && d.IngressDiscoveryEnabled(),
 			},
-			HA:            haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
-			Metrics:       metricsCapability{Enabled: d.MetricsEnabled},
-			Maintenance:   maintenanceCapability{GlobalEnabled: d.MaintenanceGlobal != nil && d.MaintenanceGlobal()},
+			DockerDiscovery: dockerDiscoveryCapability{
+				Enabled: d.DockerDiscoveryEnabled != nil && d.DockerDiscoveryEnabled(),
+			},
+			HA:          haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
+			Metrics:     metricsCapability{Enabled: d.MetricsEnabled},
+			Maintenance: maintenanceCapability{GlobalEnabled: d.MaintenanceGlobal != nil && d.MaintenanceGlobal()},
+			AdminLogin: adminLoginCapability{
+				Configured:   d.NoAdminLogin == nil || !d.NoAdminLogin(),
+				TOTP:         d.Runtime.LocalAdminTOTP,
+				CookieSecure: cookieSecure,
+			},
 			ScopeSubjects: model.ScopePlurals,
 		})
 	})
@@ -586,6 +744,58 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, plan)
 	}))
 
+	// Docker container discovery: reconcile labelled containers into
+	// template-derived, managed-labelled proxy hosts (which then feed DNS sync),
+	// and report the last run. The Engine API is read strictly read-only, and
+	// writes are ownership-gated on a label value this reconciler alone uses, so
+	// it can never touch a host Ingress discovery owns. See
+	// docs/design/docker-discovery.md.
+	mux.HandleFunc("POST /docker-discovery/reconcile", d.scoped("docker-discovery:write", func(w http.ResponseWriter, r *http.Request) {
+		if d.DockerDiscoveryReconcile == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))
+			return
+		}
+		if err := d.DockerDiscoveryReconcile(r.Context()); err != nil {
+			// Same reasoning as the DNS and Ingress reconcile routes: an in-flight
+			// run is a conflict, not a backend failure.
+			if errors.Is(err, docker.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if d.DockerDiscoveryStatus != nil {
+			writeJSON(w, http.StatusOK, d.DockerDiscoveryStatus())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
+	}))
+	mux.HandleFunc("GET /docker-discovery/status", d.scoped("docker-discovery:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.DockerDiscoveryStatus == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))
+			return
+		}
+		writeJSON(w, http.StatusOK, d.DockerDiscoveryStatus())
+	}))
+	// Dry run, mirroring GET /ingress-discovery/plan exactly.
+	mux.HandleFunc("GET /docker-discovery/plan", d.scoped("docker-discovery:read", func(w http.ResponseWriter, r *http.Request) {
+		if d.DockerDiscoveryPlan == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))
+			return
+		}
+		plan, err := d.DockerDiscoveryPlan(r.Context())
+		if err != nil {
+			if errors.Is(err, docker.ErrReconcileInProgress) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, plan)
+	}))
+
 	// Live upstream-group health (read-only): which upstreams each group currently
 	// considers healthy, for the UI status view and operational checks.
 	mux.HandleFunc("GET /upstream-health", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
@@ -619,8 +829,20 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
+		// API tokens are credentials, not configuration. A caller who may not
+		// list them at GET /api-tokens must not get the same rows here by asking
+		// for the whole tree instead - which is exactly what the read-only `user`
+		// role does. Narrow the payload rather than refuse it: everything else in
+		// the config is legitimately readable. A caller that DOES hold
+		// api-tokens:read (any admin, and any token granted it explicitly or via
+		// *:read) sees the unchanged payload.
+		if !d.allows(r, "api-tokens:read") {
+			cfg.APITokens = nil
+		}
 		writeJSON(w, http.StatusOK, cfg)
 	}))
+	// Sidebar object counts without the whole config graph - see summary.go.
+	mux.HandleFunc("GET /config/summary", d.scoped("*:read", d.handleConfigSummary))
 	mux.HandleFunc("GET /history", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		commits, err := d.Store.RepoHistory(r.Context(), 100)
 		if err != nil {
@@ -644,7 +866,7 @@ func New(d Deps) http.Handler {
 			Hash string `json:"hash"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		sha, err := d.Store.Revert(r.Context(), req.Hash, d.author(r))
@@ -749,7 +971,7 @@ func New(d Deps) http.Handler {
 		}
 		var settings model.Settings
 		if err := json.Unmarshal(body, &settings); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		sha, err := d.Store.SaveSettings(r.Context(), settings, d.author(r))
@@ -763,6 +985,8 @@ func New(d Deps) http.Handler {
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, settings)
 	}))
+
+	registerRuntime(mux, d)
 
 	if d.Role.IsFollower() {
 		return followerReadOnly(mux)
@@ -812,7 +1036,9 @@ type resource[T model.Object] struct {
 
 	// decorate, if set, projects an object for GET responses (list and single),
 	// e.g. to attach runtime-only fields that are not part of the stored object.
-	decorate func(T) any
+	// It sees the request so it can vary what it attaches by caller scope (e.g.
+	// certStatusError, which only shows an admin caller the raw ACME error).
+	decorate func(T, *http.Request) any
 }
 
 func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res resource[T]) {
@@ -824,9 +1050,9 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 	if writeScope == "" {
 		writeScope = plural + ":write"
 	}
-	project := func(v T) any {
+	project := func(v T, r *http.Request) any {
 		if res.decorate != nil {
-			return res.decorate(v)
+			return res.decorate(v, r)
 		}
 		return v
 	}
@@ -840,7 +1066,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		src := res.list(cfg)
 		items := make([]any, 0, len(src))
 		for _, it := range src {
-			items = append(items, project(it))
+			items = append(items, project(it, r))
 		}
 		writeJSON(w, http.StatusOK, items)
 	}))
@@ -854,11 +1080,11 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		for _, it := range res.list(cfg) {
 			if it.GetMeta().Name == name {
-				writeJSON(w, http.StatusOK, project(it))
+				writeJSON(w, http.StatusOK, project(it, r))
 				return
 			}
 		}
-		writeErr(w, http.StatusNotFound, errors.New(res.kind+" "+name+" not found"))
+		writeErr(w, http.StatusNotFound, errNotFound(res.kind, name))
 	}))
 
 	mux.HandleFunc("PUT "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
@@ -874,7 +1100,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		obj, err := res.decode(body, name)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		var extra map[string]any
@@ -918,7 +1144,14 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		}
 		sha, err := d.Store.Delete(r.Context(), res.kind, name, d.author(r))
 		if err != nil {
-			writeErr(w, deleteStatus(err), err)
+			// Map the status from the SENTINEL first: store.Delete wraps the Go
+			// kind name into its not-found text, and the human noun replaces the
+			// message only after deleteStatus has read the wrapped error.
+			status := deleteStatus(err)
+			if errors.Is(err, store.ErrNotFound) {
+				err = errNotFound(res.kind, name)
+			}
+			writeErr(w, status, err)
 			return
 		}
 		if !d.applyChange(w, "delete", res.kind, name, sha) {
@@ -961,7 +1194,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			Hash string `json:"hash"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
+			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
 		sha, err := d.Store.RevertObject(r.Context(), res.kind, name, req.Hash, d.author(r))
@@ -1016,7 +1249,7 @@ func mintTokenSecret(r *http.Request, cfg model.Config, obj model.APIToken) (mod
 // decorateToken attaches the in-memory last-use timestamp to an API token in GET
 // responses. The value is runtime-only (see Authenticator.TokenLastUsed): it is
 // never written back to the git-backed store.
-func (d Deps) decorateToken(t model.APIToken) any {
+func (d Deps) decorateToken(t model.APIToken, _ *http.Request) any {
 	out, err := mergeExtra(t, nil)
 	if err != nil {
 		return t

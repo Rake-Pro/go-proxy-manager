@@ -102,6 +102,11 @@ func secretPath(path, name string) string {
 	return path + "." + name
 }
 
+// SecretFileRoots reports the directories a ${FILE:...} secret may be read
+// from, so the daemon can surface the effective allowlist (GET /api/runtime)
+// instead of leaving an operator to guess why a secret path is refused.
+func SecretFileRoots() []string { return secretFileRoots() }
+
 // secretFileRoots are the directories a ${FILE:...} secret may be read from.
 // It defaults to the Docker secret mount; override with GPM_SECRET_FILE_ROOTS,
 // a list of absolute directories separated by the OS path-list separator.
@@ -145,6 +150,7 @@ func allowedSecretFile(ref string) error {
 // secret posted to an attacker-chosen URL). Resolving these always fails.
 var reservedSecretEnv = map[string]bool{
 	"GPM_LOCAL_ADMIN_PASSWORD_HASH": true,
+	"GPM_LOCAL_ADMIN_TOTP_SECRET":   true,
 	"GPM_SSO_SIGNING_KEY":           true,
 }
 

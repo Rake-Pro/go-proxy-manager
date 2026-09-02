@@ -1,8 +1,11 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
 // The settings PUT is a FULL REPLACEMENT of the ingressDiscovery block, but the
@@ -102,11 +105,11 @@ func TestSecurityHeadersEditorRenders(t *testing.T) {
 		`class="field mono sh-scope"`,
 		`class="icon-btn sh-del"`,
 		// Settings page: container, add button, wiring
-		`<div id="set-secheaders"></div>`,
+		`<div id="set-secheaders" data-hint="settings.securityHeaders" data-path="securityHeaders"></div>`,
 		`id="set-secheaders-add"`,
 		"const secHdrCtl = makeSecurityHeaderRows($('#set-secheaders'), s.securityHeaders);",
 		// host editor: container, add button, wiring
-		`<div id="f-secheaders"></div>`,
+		`<div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>`,
 		`id="f-secheaders-add"`,
 		"const secHdrCtl = makeSecurityHeaderRows($('#f-secheaders'), h.securityHeaders);",
 	} {
@@ -202,10 +205,10 @@ func TestStripResponseHeadersEditorRenders(t *testing.T) {
 
 	for _, want := range []string{
 		// Settings page: chip container + wiring
-		`<div class="chip-input" id="set-striphdrs"></div>`,
+		`<div class="chip-input" id="set-striphdrs" data-hint="settings.stripResponseHeaders" data-path="stripResponseHeaders"></div>`,
 		"const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');",
 		// host editor: chip container + wiring
-		`<div class="chip-input" id="f-striphdrs"></div>`,
+		`<div class="chip-input" id="f-striphdrs" data-hint="proxyHost.stripResponseHeaders" data-path="stripResponseHeaders"></div>`,
 		"const stripCtl = makeChipInput($('#f-striphdrs'), arr(h.stripResponseHeaders), 'add header...');",
 	} {
 		if !strings.Contains(js, want) {
@@ -261,12 +264,16 @@ func TestStripResponseHeadersEditorSerialization(t *testing.T) {
 }
 
 // The same failure mode again, one level down: the proxy-host editor rebuilds
-// its `locations` array from the DOM, one loc-row per Location. A Location
+// its `locations` array from the DOM, one block per Location. A Location
 // carries middlewares/accessLists (and any field added later) that a rebuild
 // with only path/upstream/upstreamGroupRef would silently drop on every save
 // of a host whose locations were authored outside the UI (git/import). The
-// save handler must merge each rebuilt location over its original, matched by
-// path, the same way the tls block above is merged rather than rebuilt.
+// save handler must merge each rebuilt location over its original, the same way
+// the tls block above is merged rather than rebuilt.
+//
+// Identity for that merge is the ROW (the loaded object stashed on it), not the
+// path: keying by path meant renaming a location dropped every field the editor
+// does not render, which is the very bug the merge exists to prevent.
 func TestHostSaveMergesLocations(t *testing.T) {
 	b, err := staticFS.ReadFile("static/app.js")
 	if err != nil {
@@ -275,18 +282,22 @@ func TestHostSaveMergesLocations(t *testing.T) {
 	js := string(b)
 
 	for _, want := range []string{
-		// original locations indexed by path, for the merge below
-		"arr(h.locations).forEach((ol) => { if (ol && ol.path) origLocs[ol.path] = ol; });",
+		// the loaded location, stashed on the row that renders it
+		"div._orig = loc;",
+		"const ctl = {\n      div, p, _orig: loc,",
 		// merge over the original location instead of a bare rebuild
-		"const orig = Object.assign({}, origLocs[path]);",
+		"const orig = Object.assign({}, ctl._orig);",
 		"locs.push(Object.assign(orig, loc));",
+		// the fold-owned keys must be cleared from the original first, or an
+		// off fold could never actually remove a stored block
+		"delete orig.auth; delete orig.rateLimit; delete orig.stripPrefix;",
 		// per-location middleware/access-list pickers, round-tripped like the
 		// host-level ones
 		"loc-mw",
 		"loc-al",
 	} {
 		if !strings.Contains(js, want) {
-			t.Fatalf("app.js no longer merges locations by path (%q not found); a host save now strips location fields the editor doesn't render", want)
+			t.Fatalf("app.js no longer merges each location over the object it loaded (%q not found); a host save now strips location fields the editor doesn't render", want)
 		}
 	}
 }
@@ -309,18 +320,19 @@ func TestHostEditorRendersMTLSControls(t *testing.T) {
 	}
 	for _, want := range []string{
 		// enable switch, CA picker, mode picker
-		`switchHtml('f-mtls', mtlsOn, 'Client certificates')`,
+		`switchHtml('f-mtls', mtlsOn, 'Client certificates', 'proxyHost.tls.clientAuth')`,
 		`id="f-mtls-ca"`,
 		`id="f-mtls-mode"`,
-		`<option value="require"`,
-		`<option value="optional"`,
+		// the two modes come from the shared enum-label map, so the select shows
+		// a human label with the raw token beside it rather than a bare token
+		`enumOptions('mtlsMode', ['require', 'optional']`,
 		// the picker is populated from the client-cas list, loaded like the other
 		// object pickers this editor already fetches (its three loading states are
 		// pinned by TestHostEditorClientCAPickerStates)
 		"caList.map((ca) =>",
 		// identity passthrough is nested inside the enabled state
 		`id="mtls-fields"`,
-		`switchHtml('f-certid', certIDOn, 'Identity passthrough')`,
+		`switchHtml('f-certid', certIDOn, 'Identity passthrough', 'proxyHost.tls.clientAuth.identityHeaders')`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("host editor mTLS block missing %q", want)
@@ -446,17 +458,18 @@ func TestHostEditorGatesMTLSPreconditions(t *testing.T) {
 func TestHostEditorClientCAPickerStates(t *testing.T) {
 	js := readHostEditorJS(t)
 
-	// A failed fetch must NOT read as "no client CAs defined".
-	if !strings.Contains(js, "api('/api/client-cas').catch(() => null),") {
+	// A failed fetch must NOT read as "no client CAs defined". refList() is the
+	// shared three-state loader every reference list now goes through: it
+	// resolves to null on failure, never to an empty array.
+	if !strings.Contains(js, "refList('/api/client-cas', 'client CAs'),") {
 		t.Error("a failed client-cas fetch is collapsed into an empty list again - the picker would state a falsehood and every mTLS save would bail")
 	}
 	for _, want := range []string{
-		"const clientCAs = ccaR === null ? null : arr(ccaR.data);",
 		"const caListOK = clientCAs !== null;",
 		"const caUsable = caList.some((ca) => !ca.disabled);",
 		"Client CA list unavailable",
 		// the select itself is disabled in that state
-		`id="f-mtls-ca"${caListOK ? '' : ' disabled'}`,
+		`id="f-mtls-ca" data-hint="proxyHost.tls.clientAuth.caRef" data-path="tls.clientAuth.caRef"${caListOK ? '' : ' disabled'}`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("client CA list state handling missing %q", want)
@@ -512,8 +525,8 @@ func TestErrorPagesHasItsOwnSection(t *testing.T) {
 	js := readHostEditorJS(t)
 
 	for _, want := range []string{
-		"{ id: 'errorpages', label: 'Error pages', icon: ICON.headers },",
-		"errorpages: 'Error pages',",
+		"{ id: 'errorpages', label: 'Error Pages', icon: ICON.headers },",
+		"errorpages: 'Error Pages',",
 		"case 'errorpages': await viewErrorPages(c); break;",
 		"async function viewErrorPages(c) {",
 	} {
@@ -582,4 +595,154 @@ func TestSettingsPageDroppedErrorPagesBlock(t *testing.T) {
 	if !strings.Contains(js, `<a href="#/errorpages">Error pages</a>`) {
 		t.Error("the Settings page does not point at the new Error pages section")
 	}
+}
+
+// The whole-object failure mode one level up from
+// TestSettingsSaveSendsEveryFlatTemplateField: PUT /api/settings replaces the
+// ENTIRE Settings object, so any top-level field the Settings page neither
+// renders nor carries forward is silently wiped on every save made there. That
+// has already shipped twice (appName and accessListSync), so the invariant is
+// enforced structurally: every json tag on model.Settings must appear somewhere
+// in the save-body region of the Settings page.
+//
+// Reflection over model.Settings is what makes it carry forward - a field added
+// to the struct later fails this test until it is either edited or explicitly
+// carried forward by the save handler.
+//
+// A field that is deliberately not UI-editable belongs in notEditable below WITH
+// a reason, and its value must still be carried forward verbatim from the loaded
+// settings object so a save never drops it.
+func TestSettingsSaveSendsEveryTopLevelSettingsField(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	const start = "$('#set-save').addEventListener"
+	const end = "const r = await api('/api/settings', { method: 'PUT', body });"
+	i := strings.Index(js, start)
+	if i < 0 {
+		t.Fatalf("app.js no longer has the Settings save handler (%q not found)", start)
+	}
+	rel := strings.Index(js[i:], end)
+	if rel < 0 {
+		t.Fatalf("app.js Settings save handler no longer PUTs /api/settings (%q not found after the handler)", end)
+	}
+	region := js[i : i+rel]
+
+	// Top-level Settings fields with no control on the Settings page. Each one
+	// must still appear in the region (as a carry-forward from the loaded `s`),
+	// so this map documents WHY there is no editor rather than exempting the
+	// field from the check.
+	// Every entry has a REAL editor on another page. None is a gap: the Settings
+	// save carries the loaded value forward verbatim so a save here cannot wipe
+	// what that page owns, and that page's own save does the same in reverse.
+	notEditable := map[string]string{
+		"errorPages":      "edited in the Error pages section (#/errorpages), carried forward here",
+		"dnsSync":         "edited on the Integrations page, DNS sync card, carried forward here",
+		"dockerDiscovery": "edited on the Integrations page, Docker discovery card, carried forward here",
+		"accessListSync":  "edited on the Integrations page, Access-list sync card, carried forward here",
+		"webhooks":        "edited on the Integrations page, Lifecycle webhooks card, carried forward here",
+		"notifications":   "edited on the Integrations page, Notifications card, carried forward here",
+	}
+
+	rt := reflect.TypeOf(model.Settings{})
+	for f := 0; f < rt.NumField(); f++ {
+		tag := strings.Split(rt.Field(f).Tag.Get("json"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if strings.Contains(region, tag) {
+			continue
+		}
+		why := notEditable[tag]
+		if why == "" {
+			why = "add a control for it, or carry it forward from the loaded settings object"
+		}
+		t.Errorf("settings save body does not mention model.Settings field %q (%s); a Settings save wipes it", tag, why)
+	}
+}
+
+// Docker discovery renders the SAME IngressHostTemplate as the Kubernetes card,
+// so it inherits both merge invariants. Without them a Settings save from the
+// Docker card would strip clientAuth / minTLSVersion / hsts from the docker
+// template and from every docker profile, and the next reconcile would push that
+// silent downgrade onto every container-derived host.
+func TestIntegrationsSaveMergesDockerTemplate(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	for _, want := range []string{
+		// the docker `template` block
+		"tls: Object.assign({}, ddt.tls, {",
+		"timeouts: timeoutsPayload(ddt.timeouts,",
+		// flat template fields: rendered, then sent
+		"switchHtml('set-dkr-robots'",
+		"robotsNoIndex: isOn('set-dkr-robots')",
+		"$('#set-dkr-tags')",
+		"tags: dkrTagCtl.get()",
+		"stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,",
+		// each named docker profile row
+		"switchHtml('dpf-robots-' + i",
+		"robotsNoIndex: isOn('dpf-robots-' + uid)",
+		"div.querySelector('.dpf-tags')",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js no longer round-trips a docker discovery template field (%q not found); a settings save now clears it", want)
+		}
+	}
+}
+
+// The Integrations page owns six settings blocks and renders none of the rest,
+// so its save MUST start from the settings object as loaded. Rebuilding the body
+// from the form would wipe appName, adminAuth, trustedProxies, securityHeaders,
+// maintenance, proxyProtocol and errorPages on every save made there.
+func TestIntegrationsSaveCarriesSettingsForward(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	const start = "async function saveIntegrations(btn) {"
+	const end = "const r = await api('/api/settings', { method: 'PUT', body });"
+	i := strings.Index(js, start)
+	if i < 0 {
+		t.Fatalf("app.js no longer has the Integrations save handler (%q not found)", start)
+	}
+	rel := strings.Index(js[i:], end)
+	if rel < 0 {
+		t.Fatalf("the Integrations save handler no longer PUTs /api/settings (%q not found after it)", end)
+	}
+	region := js[i : i+rel]
+	if !strings.Contains(region, "const body = Object.assign({}, s);") {
+		t.Fatal("the Integrations save no longer starts from the loaded settings object; a save there would wipe every field Settings owns")
+	}
+	// Sanity: the blocks this page DOES own are overlaid onto that copy.
+	for _, want := range []string{"body.dnsSync =", "body.ingressDiscovery =", "body.dockerDiscovery =", "body.accessListSync =", "body.webhooks =", "body.notifications ="} {
+		if !strings.Contains(region, want) {
+			t.Errorf("the Integrations save no longer writes %q", want)
+		}
+	}
+}
+
+// The "Load recommended" button pastes model.RecommendedSecurityHeaders into the
+// editor. The API does not expose that map, so app.js carries a copy - and a
+// copy that drifts is worse than no button at all, since it would recommend a
+// header set the project does not document. Reflect over the Go value and
+// require every name, value and scope to appear in the JS literal.
+func TestRecommendedSecurityHeadersMirrored(t *testing.T) {
+	js := readHostEditorJS(t)
+
+	if !strings.Contains(js, "const RECOMMENDED_SECURITY_HEADERS = {") {
+		t.Fatal("app.js no longer carries a copy of model.RecommendedSecurityHeaders")
+	}
+	for name, v := range model.RecommendedSecurityHeaders {
+		want := "'" + name + "': { value: " + jsString(v.Value) + ", scope: '" + string(v.Scope) + "' }"
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js RECOMMENDED_SECURITY_HEADERS drifted from model.RecommendedSecurityHeaders: missing %s", want)
+		}
+	}
+}
+
+// jsString renders a Go string as the JS literal the app.js map uses: single
+// quotes normally, double quotes when the value itself contains a single quote
+// (Content-Security-Policy's frame-ancestors 'none').
+func jsString(s string) string {
+	if strings.Contains(s, "'") {
+		return `"` + s + `"`
+	}
+	return "'" + s + "'"
 }

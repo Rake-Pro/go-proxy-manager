@@ -45,6 +45,9 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	mux.HandleFunc("GET /auth/login", s.handleLogin)
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	mux.Handle("POST /auth/local", sameOriginGuard(http.HandlerFunc(s.handleLocalLogin)))
+	// Step two of local login when GPM_LOCAL_ADMIN_TOTP_SECRET is set. Same
+	// guard and same per-IP lockout as the password step.
+	mux.Handle("POST /auth/local/totp", sameOriginGuard(http.HandlerFunc(s.handleLocalTOTP)))
 	mux.Handle("POST /auth/logout", sameOriginGuard(http.HandlerFunc(s.handleLogout)))
 
 	// Current principal (user-level): proves the session/role gate.
@@ -57,11 +60,19 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	// exact path, exactly like /api/me does.
 	mux.Handle("GET /api/openapi.yaml", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleOpenAPISpec)))
 
-	// REST CRUD API (admin-only). The more specific /api/me above takes
-	// precedence over this subtree for that exact path. RequireRole enforces the
-	// CSRF token on mutating methods; sameOriginGuard is the outer belt.
+	// REST CRUD API. The more specific /api/me above takes precedence over this
+	// subtree for that exact path. RequireRole enforces the CSRF token on
+	// mutating methods; sameOriginGuard is the outer belt.
+	//
+	// The role gate is RoleUser, not RoleAdmin: the `user` role is a real
+	// read-only viewer. Writes are refused twice over - requireWriteRole below
+	// rejects every unsafe METHOD for a non-admin, and the per-route scope gate
+	// (auth.RequireScope, which limits the role to "*:read") rejects every write
+	// SCOPE. The method check is the one that holds even where the scope gate is
+	// not wired, so neither is load-bearing alone.
 	if apiHandler != nil {
-		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleAdmin, http.StripPrefix("/api", apiHandler))))
+		mux.Handle("/api/", sameOriginGuard(s.authn.RequireRole(auth.RoleUser,
+			requireWriteRole(http.StripPrefix("/api", apiHandler)))))
 	}
 
 	// Prometheus exposition, opt-in (-metrics / GPM_METRICS). It is on the admin
@@ -113,6 +124,23 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	return s
 }
 
+// requireWriteRole refuses every state-changing method for a principal whose
+// role is not admin. It is the method-level half of the read-only `user` role:
+// the scope gate already refuses each write scope, but this holds even for a
+// route (or a deployment) where the scope gate is not wired, so "a viewer can
+// never write" does not depend on per-route annotation being complete.
+func requireWriteRole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !safeMethod(r.Method) {
+			if p, ok := auth.PrincipalFrom(r.Context()); ok && p.Role != auth.RoleAdmin {
+				http.Error(w, "the \"user\" role is read-only", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireAdminScope refuses an API-token principal that does not hold the admin
 // scope. Every token principal is admin-ROLE by construction (the coarse gate is
 // satisfied and the real authorization is the per-route scope check), so the
@@ -148,13 +176,15 @@ func requireScope(scope string, next http.Handler) http.Handler {
 // owns the Strict-Transport-Security header for the host. Emitting it here too
 // produced a duplicate HSTS header on the proxied admin path. The CSP pins
 // script execution to 'self' as an XSS backstop behind the SPA's esc()
-// discipline. Policy constraints: the SPA renders inline style="" attributes
-// (style-src 'unsafe-inline') and loads Space Grotesk/Inter/JetBrains Mono
-// from Google Fonts (style-src googleapis, font-src gstatic).
+// discipline, and has NO external origin: Space Grotesk, Inter and JetBrains
+// Mono are vendored into the binary under internal/ui/static/fonts, so the
+// admin panel makes no third-party request at all. The single relaxation is
+// 'unsafe-inline' on style-src, which the SPA's inline style="" attributes
+// require; there are no inline <style> blocks and no inline event handlers.
 func securityHeaders(next http.Handler) http.Handler {
 	const csp = "default-src 'self'; script-src 'self'; " +
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-		"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"font-src 'self'; img-src 'self' data:; " +
 		"connect-src 'self'; object-src 'none'; base-uri 'none'; " +
 		"form-action 'self'; frame-ancestors 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
