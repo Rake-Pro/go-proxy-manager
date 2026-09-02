@@ -17,9 +17,8 @@ import (
 // anchor is a "Learn more" link to a 404. So the coupling is a test.
 
 type hintEntry struct {
-	Text    string   `json:"text"`
-	Bullets []string `json:"bullets"`
-	Doc     string   `json:"doc"`
+	Text string `json:"text"`
+	Doc  string `json:"doc"`
 }
 
 // Controls that deliberately carry no data-hint. Each key is a substring unique
@@ -104,9 +103,9 @@ func TestHintIDsExistInRegistry(t *testing.T) {
 }
 
 // (b) Every registry entry is reachable from the UI. Most ids appear as a
-// data-hint literal; page and glossary ids reach the UI as plain string
-// literals (PAGE_HINT, GLOSSARY, aboutPageHtml calls), and a few are threaded
-// through switchHtml's hint argument, so a quoted occurrence counts too.
+// data-hint literal; glossary ids reach the UI as plain string literals
+// (GLOSSARY), and a few are threaded through switchHtml's hint argument, so a
+// quoted occurrence counts too.
 func TestNoDeadHintEntries(t *testing.T) {
 	reg := loadHintRegistry(t)
 	js := loadAppJS(t)

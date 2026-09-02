@@ -516,7 +516,7 @@ profile}`, first match wins, evaluated before the annotation) plus
 rule matches. Profiles are, as anticipated, the substrate the selector layer
 sits on: a rule can only route to `template` or a profile written here, never
 describe a chain of its own. See
-[Settings: Kubernetes Ingress discovery](../reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules).
+[Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules).
 
 #### Resolution rules
 
@@ -753,18 +753,18 @@ repo entirely rather than relying on placeholder discipline.
   `Reconcile` would take, without ever calling `Applier`, built on top of the
   reconciler's existing plan/apply split exactly as anticipated here, and wired
   into the settings UI as **Preview changes** next to the manual reconcile.
-  See [Settings: Kubernetes Ingress discovery](../reference/config/settings/ingress-discovery.md).
+  See [Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md).
 - ~~Operator-side profile selection~~ **Shipped** as option C in section 5a:
   `ingressDiscovery.profileRules` (ordered `{namespace?, matchLabels?, profile}`,
   first match wins, evaluated before the annotation) plus `profileSelection:
   "rules-only"` to stop reading the annotation at all. Profiles remained the
   substrate it sits on, exactly as anticipated. See
-  [Settings: Kubernetes Ingress discovery](../reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules).
+  [Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules).
 - ~~Per-profile `allowedDomainSuffixes`~~ **Shipped.**
   `IngressHostTemplate.AllowedDomainSuffixes` narrows the global list for a
   template/profile; `Settings.Validate` rejects one that is not a **subset** of
   the global list, so a profile can only shrink the domains a tenant may
-  publish, never grow them. See [Settings: Kubernetes Ingress discovery](../reference/config/settings/ingress-discovery.md#per-profile-alloweddomainsuffixes).
+  publish, never grow them. See [Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md#per-profile-alloweddomainsuffixes).
 - **`locations` on a template/profile** (section 5, "`locations` is deliberately not a
   template field"). Not a gap: locations are per-service path routing, and
   discovery forwards everything to the cluster ingress controller by vhost so the
