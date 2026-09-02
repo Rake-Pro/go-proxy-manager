@@ -1,10 +1,12 @@
 # go-proxy-manager
 
-A reverse-proxy manager written in Go: a single static binary that terminates
-TLS for many domains, reverse-proxies them to your backends, issues and renews
-Let's Encrypt certificates over DNS-01 or HTTP-01, and gates access with IP access lists,
-forward-auth, and OpenID Connect single sign-on. Configuration is declarative,
-git-backed YAML; there is a REST API and an embedded web UI.
+A reverse-proxy manager written in Go: 
+- A single static binary that terminates TLS for many domains
+- Reverse-proxies them to your backends
+- Issues renews Let's Encrypt certificates over DNS-01 or HTTP-01
+- Gates access with IP access lists
+- Forward-auth, and OpenID Connect single sign-on.
+- Configuration is declarative, git-backed YAML; there is a REST API and an embedded web UI.
 
 It is a clean-room reimplementation of the ideas behind
 [Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager)
