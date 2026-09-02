@@ -407,6 +407,21 @@ earlier tiers or duplicating work (see "Architecture for extension").
   `{{.StatusText}}` `{{.Host}}` `{{.RequestID}}`; a host override wins over the
   settings-level pages; parse errors fail the config reload with a clear
   message; unconfigured behaviour is byte-identical to before this shipped.
+- **Access-list remote sources + path-scoped rules** ★ (shipped): an `AccessList`
+  rule can be scoped to exact `paths` and `methods` (default `GET`/`HEAD`) and
+  can draw its networks from a named remote feed (`sources[].url`, https only)
+  instead of a literal `cidr`. Closes the gap a purely ANDed allow-list could not
+  express: a monitoring provider's published prober addresses reach only the
+  health endpoints of a host that is otherwise LAN/VPN-only. A leader-only
+  fetcher (`internal/accesssync`) keeps the sets in the committed singleton
+  `config/access-list-sources.yaml`, failing closed at every step (https-only,
+  SSRF-guarded dialer refusing loopback/link-local/private/multicast, 1 MiB body
+  cap, whole-fetch refusal on non-200 / empty / over-`maxEntries` / any
+  unparseable line, previous set kept). An unchanged feed writes nothing, so
+  there is no commit churn. `settings.accessListSync` (on by default) tunes the
+  poll; `GET /api/access-list-sources/status` and
+  `POST /api/access-list-sources/reconcile` expose it. Refused for a `StreamHost`
+  the same way a `basicAuth` list is - there is no request path at L4.
 - **Security response headers** ★ (shipped): `settings.securityHeaders` (fleet
   default) and a per-`ProxyHost` `securityHeaders` that merges over it per key.
   Each header carries a **scope** - `all` (default), `generated-only` or

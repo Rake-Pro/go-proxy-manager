@@ -367,6 +367,7 @@ function gateControl(el, available, reason) {
 const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '[data-revert]', '[data-revert-obj]',
   '.tok-rotate', '#restoreBtn', '#set-save', '#errp-save', '#set-sso-revoke', '#set-dns-run', '#set-id-run',
+  '#ed-src-reconcile',
 ].join(', ');
 function applyReadOnlyGating(container) {
   if (!container || !hasCapability('ha.readOnly')) return;
@@ -2334,6 +2335,7 @@ async function accessEditor(c, name) {
   const geoAvailable = hasCapability('geoip.dbLoaded');
   const geoReason = 'GeoIP database not loaded (set GPM_GEOIP_DB) - geo rules are unavailable.';
   const geo = o.geo || {};
+  const listName = name || o.name || '';
   c.innerHTML = editorHead('access', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Policy</p>
@@ -2344,7 +2346,15 @@ async function accessEditor(c, name) {
     </div>
     <div class="card form-section"><p class="section-label">IP rules</p><div id="ed-rules"></div>
       <button class="btn ghost sm" id="ed-addrule" type="button" style="margin-top:6px">${ICON.plus}Add rule</button>
-      <div class="hint" style="margin-top:6px">Evaluated top-down. CIDR or bare IP.</div>
+      <div class="hint" style="margin-top:6px">Evaluated top-down, first match wins. Match a literal CIDR/IP, or a named source declared below. Paths (comma-separated, each must start with "/") narrow a rule to exact request paths; methods (comma-separated, upper-cased) only apply alongside paths and default to GET, HEAD when left blank.</div>
+    </div>
+    <div class="card form-section"><p class="section-label">Sources</p><div id="ed-sources"></div>
+      <button class="btn ghost sm" id="ed-addsource" type="button" style="margin-top:6px">${ICON.plus}Add source</button>
+      <div class="hint" style="margin-top:6px">Remote IP feeds a rule above can reference by name. URL must be https. Interval blank = 24h (below 1h refused); max entries blank = 10000.</div>
+    </div>
+    <div class="card form-section" id="ed-src-status-card" style="display:none"><p class="section-label">Source sync status</p>
+      <div id="ed-src-status"></div>
+      <button class="btn ghost sm" id="ed-src-reconcile" type="button" style="margin-top:6px">Reconcile now</button>
     </div>
     <div class="card form-section" id="ed-geo-card"><p class="section-label">Geo rules</p>
       ${geoAvailable ? '' : `<div class="field-group"><div class="hint warn" id="ed-geo-hint">${esc(geoReason)}</div></div>`}
@@ -2365,16 +2375,76 @@ async function accessEditor(c, name) {
     </div>
   </div></div>` + saveBar('access', isNew, meta.addLabel);
   const rulesWrap = $('#ed-rules');
+  const sourcesWrap = $('#ed-sources');
+
+  // Sources this list declares, read live off the DOM so a rule's source
+  // dropdown always reflects rows added/renamed/removed in this same edit.
+  function currentSourceNames() {
+    const names = [];
+    sourcesWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+      const n = r.querySelector('.src-name').value.trim();
+      if (n && names.indexOf(n) === -1) names.push(n);
+    });
+    return names;
+  }
+  // Rebuilds one rule row's source <select>, keeping its current selection even
+  // if that name is not (or not yet) a declared source - same round-trip
+  // guarantee as the middleware editor's RL_WINDOWS/RL_BLOCKS presets, so a
+  // rule referencing a source authored in git before this UI existed still
+  // shows its real value instead of silently resetting to blank.
+  function populateSourceSelect(sel, selected) {
+    const cur = selected != null ? selected : sel.value;
+    const names = currentSourceNames();
+    if (cur && names.indexOf(cur) === -1) names.push(cur);
+    sel.innerHTML = `<option value="">select source...</option>` +
+      names.map((n) => `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}</option>`).join('');
+  }
+  function refreshSourceSelects() {
+    rulesWrap.querySelectorAll('.rule-source').forEach((sel) => populateSourceSelect(sel, sel.value));
+  }
+
   function ruleRow(r) {
     r = r || {}; const d = document.createElement('div'); d.className = 'loc-row';
-    d.innerHTML = `<select class="field mono rule-action" style="flex:0 0 100px">${['allow', 'deny'].map((a) => `<option value="${a}"${r.action === a ? ' selected' : ''}>${a}</option>`).join('')}</select>
-      <input class="field mono rule-cidr" style="flex:1 1 160px" value="${esc(r.cidr || '')}" placeholder="10.0.0.0/8" aria-label="CIDR" />
+    const isSource = !!r.source;
+    d.innerHTML = `<select class="field mono rule-action" style="flex:0 0 90px">${['allow', 'deny'].map((a) => `<option value="${a}"${r.action === a ? ' selected' : ''}>${a}</option>`).join('')}</select>
+      <select class="field mono rule-match" style="flex:0 0 90px" aria-label="Match">
+        <option value="cidr"${isSource ? '' : ' selected'}>cidr</option>
+        <option value="source"${isSource ? ' selected' : ''}>source</option>
+      </select>
+      <input class="field mono rule-cidr" style="flex:1 1 150px;${isSource ? 'display:none' : ''}" value="${esc(r.cidr || '')}" placeholder="10.0.0.0/8" aria-label="CIDR" />
+      <select class="field mono rule-source" style="flex:1 1 150px;${isSource ? '' : 'display:none'}" aria-label="Source"></select>
+      <input class="field mono rule-paths" style="flex:1 1 170px" value="${esc(arr(r.paths).join(', '))}" placeholder="/health, /status (optional)" aria-label="Paths" />
+      <input class="field mono rule-methods" style="flex:1 1 130px" value="${esc(arr(r.methods).join(', '))}" placeholder="GET, HEAD (optional)" aria-label="Methods" />
       <button class="icon-btn rule-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    const matchSel = d.querySelector('.rule-match');
+    const cidrInput = d.querySelector('.rule-cidr');
+    const sourceSel = d.querySelector('.rule-source');
+    matchSel.addEventListener('change', () => {
+      const src = matchSel.value === 'source';
+      cidrInput.style.display = src ? 'none' : '';
+      sourceSel.style.display = src ? '' : 'none';
+    });
     d.querySelector('.rule-del').addEventListener('click', () => d.remove());
     rulesWrap.appendChild(d);
+    populateSourceSelect(sourceSel, r.source || '');
   }
   arr(o.rules).forEach(ruleRow);
   $('#ed-addrule').addEventListener('click', () => ruleRow({ action: 'allow' }));
+
+  function sourceRow(s) {
+    s = s || {}; const d = document.createElement('div'); d.className = 'loc-row';
+    d.innerHTML = `<input class="field mono src-name" style="flex:1 1 130px" value="${esc(s.name || '')}" placeholder="name" aria-label="Source name" />
+      <input class="field mono src-url" style="flex:2 1 230px" value="${esc(s.url || '')}" placeholder="https://example.com/ips.txt" aria-label="Source URL" />
+      <input class="field mono src-interval" style="flex:0 1 90px" value="${esc(s.interval || '')}" placeholder="24h" aria-label="Interval" />
+      <input class="field mono src-maxentries" type="number" min="0" style="flex:0 1 110px" value="${s.maxEntries ? esc(s.maxEntries) : ''}" placeholder="10000" aria-label="Max entries" />
+      <button class="icon-btn src-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    d.querySelector('.src-del').addEventListener('click', () => { d.remove(); refreshSourceSelects(); });
+    d.querySelector('.src-name').addEventListener('input', refreshSourceSelects);
+    sourcesWrap.appendChild(d);
+  }
+  arr(o.sources).forEach(sourceRow);
+  $('#ed-addsource').addEventListener('click', () => sourceRow({}));
+
   const basicWrap = $('#ed-basic');
   function basicRow(u) {
     u = u || {}; const d = document.createElement('div'); d.className = 'loc-row';
@@ -2397,17 +2467,97 @@ async function accessEditor(c, name) {
   gateControl($('#ed-geo-deny'), geoAvailable, geoReason);
   gateControl($('#ed-geo-unknown'), geoAvailable, geoReason);
 
+  // Access-list source sync status + manual reconcile. GET /api/access-list-sources/status
+  // reports every list's sources at once, so filter to this one by name. Shown
+  // only once there is something to say: this list declares sources, or the
+  // (possibly cross-list) status response already names one for it.
+  async function renderAccessSourceStatus() {
+    const card = $('#ed-src-status-card'); const el = $('#ed-src-status');
+    if (!card || !el) return;
+    if (!listName) { card.style.display = 'none'; return; }
+    try {
+      const st = (await api('/api/access-list-sources/status')).data || {};
+      const mine = arr(st.sources).filter((s) => s.list === listName);
+      if (!arr(o.sources).length && !mine.length) { card.style.display = 'none'; return; }
+      card.style.display = '';
+      el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
+        <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
+        <span class="muted" style="font-size:11px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + (s.entryCount || 0) + ' entries' : 'never fetched'}</span>
+        ${s.lastError ? `<span class="muted" style="font-size:11px;color:var(--warn)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
+        : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
+    } catch (e) {
+      card.style.display = arr(o.sources).length ? '' : 'none';
+      el.innerHTML = `<p class="hint" style="margin:0">${e && e.status === 501 ? 'Access-list source sync is not wired in this deployment.' : esc('Status unavailable: ' + (e.message || e))}</p>`;
+    }
+  }
+  if (!isNew) renderAccessSourceStatus();
+  else $('#ed-src-status-card').style.display = 'none';
+
+  $('#ed-src-reconcile').addEventListener('click', async () => {
+    const btn = $('#ed-src-reconcile'); btn.disabled = true;
+    try {
+      await api('/api/access-list-sources/reconcile', { method: 'POST' });
+      toast('Reconciled', 'Access-list sources are back in sync.', 'ok');
+    } catch (e) { toastErr(e); }
+    await renderAccessSourceStatus();
+    btn.disabled = false;
+  });
+
   wireEditor('access', 'access-lists', meta, isNew, name || o.name, () => {
     const body = {};
     if (isOn('ed-satisfy')) body.satisfyAny = true;
     body.defaultAction = $('#ed-default').value;
-    const rules = [];
+    const rules = []; let ruleErr = '';
     rulesWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
-      const cidr = r.querySelector('.rule-cidr').value.trim();
-      if (!cidr) return;
-      rules.push({ action: r.querySelector('.rule-action').value, cidr });
+      if (ruleErr) return;
+      const action = r.querySelector('.rule-action').value;
+      const isSource = r.querySelector('.rule-match').value === 'source';
+      const rule = { action };
+      if (isSource) {
+        const src = r.querySelector('.rule-source').value.trim();
+        if (!src) return; // empty new row, drop silently like an empty CIDR row
+        rule.source = src;
+      } else {
+        const cidr = r.querySelector('.rule-cidr').value.trim();
+        if (!cidr) return;
+        rule.cidr = cidr;
+      }
+      const paths = r.querySelector('.rule-paths').value.split(',').map((p) => p.trim()).filter(Boolean);
+      if (paths.length) {
+        const bad = paths.find((p) => !p.startsWith('/'));
+        if (bad) { ruleErr = `Rule path "${bad}" must start with "/".`; return; }
+        rule.paths = paths;
+      }
+      const methods = r.querySelector('.rule-methods').value.split(',').map((m) => m.trim().toUpperCase()).filter(Boolean);
+      if (methods.length) {
+        if (!paths.length) { ruleErr = 'Rule methods only apply alongside paths - add a path, or clear methods.'; return; }
+        rule.methods = methods;
+      }
+      rules.push(rule);
     });
+    if (ruleErr) { toast('Rule invalid', ruleErr, 'err'); return null; }
     if (rules.length) body.rules = rules;
+    const sources = []; let srcErr = '';
+    sourcesWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
+      if (srcErr) return;
+      const nm = r.querySelector('.src-name').value.trim();
+      const url = r.querySelector('.src-url').value.trim();
+      const interval = r.querySelector('.src-interval').value.trim();
+      const maxRaw = r.querySelector('.src-maxentries').value.trim();
+      if (!nm && !url && !interval && !maxRaw) return; // fully empty row, drop silently
+      if (!nm) { srcErr = 'Every source needs a name.'; return; }
+      if (!/^https:\/\//.test(url)) { srcErr = `Source "${nm}" needs an https:// URL.`; return; }
+      const src = { name: nm, url };
+      if (interval) src.interval = interval;
+      if (maxRaw) {
+        const n = parseInt(maxRaw, 10);
+        if (!Number.isFinite(n) || n < 0) { srcErr = `Source "${nm}": max entries must be a non-negative number.`; return; }
+        if (n) src.maxEntries = n;
+      }
+      sources.push(src);
+    });
+    if (srcErr) { toast('Source invalid', srcErr, 'err'); return null; }
+    if (sources.length) body.sources = sources;
     const basic = []; let bad = false;
     basicWrap.querySelectorAll(':scope > .loc-row').forEach((r) => {
       const u = r.querySelector('.basic-user').value.trim(); const h = r.querySelector('.basic-hash').value.trim();
