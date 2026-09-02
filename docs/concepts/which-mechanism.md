@@ -16,7 +16,7 @@ overlap disappears.
 
 An access list decides who is admitted. An exemption lets a network skip one
 specific control, never the access list. Trusted proxies decide which address
-both of those compare against - see
+both of those compare against: see
 [Client IP and the three trust tiers](request-pipeline.md#client-ip-and-the-three-trust-tiers).
 
 **"Only the LAN may reach this host" is an access list**, not an `allowFrom`.
@@ -66,7 +66,7 @@ never clobbering the app's own. `stripResponseHeaders` removes headers the
 upstream sent. A `headers` middleware is the escape hatch for anything path- or
 middleware-scoped. `hsts` is separate because it is HTTPS-only.
 
-Every page gpm serves itself - maintenance, parked, denied, upstream-down - is
+Every page gpm serves itself (maintenance, parked, denied, upstream-down) is
 the [`errorPages`](../reference/config/settings/error-pages.md) template for its
 status code.
 

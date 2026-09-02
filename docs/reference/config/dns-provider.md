@@ -4,8 +4,8 @@ Solves ACME `dns-01` challenges. Not needed for `http-01`.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="dns-provider-provider"></span>  `provider` | string | - | yes | One of the six ids in the table below. Anything else is rejected at write time. |
-| <span id="dns-provider-config"></span>  `config` | map[string]Secret | - | yes | Credential map, secret-valued. Which keys are required depends on `provider`. |
+| <span id="dns-provider-provider"></span>  `provider` | string | none | yes | One of the six ids in the table below. Anything else is rejected at write time. |
+| <span id="dns-provider-config"></span>  `config` | map[string]Secret | none | yes | Credential map, secret-valued. Which keys are required depends on `provider`. |
 
 ## Provider types
 
@@ -22,7 +22,7 @@ Solves ACME `dns-01` challenges. Not needed for `http-01`.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="dns-provider-config-api-token"></span>  `apiToken` | Secret | - | yes | The provider API token. See the credential table below. |
+| <span id="dns-provider-config-api-token"></span>  `apiToken` | Secret | none | yes | The provider API token. See the credential table below. |
 
 | `provider` | Credential |
 |------------|------------|
@@ -58,10 +58,10 @@ nameserver that accepts dynamic updates can serve `dns-01`, wildcards included.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="dns-provider-config-server"></span>  `server` | Secret | - | yes | Nameserver as `host`, `host:port` or `[v6]:port`. Port defaults to `53`. |
-| <span id="dns-provider-config-zone"></span>  `zone` | Secret | - | yes | Zone the UPDATE is addressed to, e.g. `example.com`. Leave the key out only if you want the solver to auto-detect it with SOA queries; validation requires it, so an auto-detect setup has to be written by hand. **A detected zone is accepted only when it is a suffix of the challenge name**; anything else is refused with the detected zone named. |
-| <span id="dns-provider-config-tsig-key-name"></span>  `tsigKeyName` | Secret | - | yes | Key name exactly as configured on the nameserver, e.g. `gpm-acme`. |
-| <span id="dns-provider-config-tsig-secret"></span>  `tsigSecret` | Secret | - | yes | Base64 TSIG secret, as printed by `tsig-keygen`. Use a `${ENV:...}` or `${FILE:...}` placeholder. |
+| <span id="dns-provider-config-server"></span>  `server` | Secret | none | yes | Nameserver as `host`, `host:port` or `[v6]:port`. Port defaults to `53`. |
+| <span id="dns-provider-config-zone"></span>  `zone` | Secret | none | yes | Zone the UPDATE is addressed to, e.g. `example.com`. Leave the key out only if you want the solver to auto-detect it with SOA queries; validation requires it, so an auto-detect setup has to be written by hand. **A detected zone is accepted only when it is a suffix of the challenge name**; anything else is refused with the detected zone named. |
+| <span id="dns-provider-config-tsig-key-name"></span>  `tsigKeyName` | Secret | none | yes | Key name exactly as configured on the nameserver, e.g. `gpm-acme`. |
+| <span id="dns-provider-config-tsig-secret"></span>  `tsigSecret` | Secret | none | yes | Base64 TSIG secret, as printed by `tsig-keygen`. Use a `${ENV:...}` or `${FILE:...}` placeholder. |
 | <span id="dns-provider-config-tsig-algorithm"></span>  `tsigAlgorithm` | Secret | `hmac-sha256` | no | `hmac-sha1` \| `hmac-sha224` \| `hmac-sha256` \| `hmac-sha384` \| `hmac-sha512`. `hmac-md5` is refused. |
 | <span id="dns-provider-config-ttl"></span>  `ttl` | Secret | `60` | no | TTL of the challenge TXT record, 1 to 86400 seconds. |
 | <span id="dns-provider-config-transport"></span>  `transport` | Secret | `tcp` | no | `tcp` or `udp`. UDP falls back to TCP when the reply is truncated. |
@@ -95,10 +95,10 @@ credential that can touch it, which is the point.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| <span id="dns-provider-config-base-url"></span>  `baseURL` | Secret | - | yes | acme-dns API root, e.g. `https://acme-dns.example.com`. Must be `http` or `https`. A loopback, link-local, unspecified or multicast IP literal is refused at write time, and link-local is refused again at connect time. Set `allowInsecureLocal` to permit a loopback host. |
-| <span id="dns-provider-config-username"></span>  `username` | Secret | - | yes | `username` from the acme-dns `/register` response (a UUID). |
-| <span id="dns-provider-config-password"></span>  `password` | Secret | - | yes | `password` from `/register`. Use a `${ENV:...}` or `${FILE:...}` placeholder. |
-| <span id="dns-provider-config-subdomain"></span>  `subdomain` | Secret | - | yes | `subdomain` from `/register` (a UUID); the record the CNAME points at. |
+| <span id="dns-provider-config-base-url"></span>  `baseURL` | Secret | none | yes | acme-dns API root, e.g. `https://acme-dns.example.com`. Must be `http` or `https`. A loopback, link-local, unspecified or multicast IP literal is refused at write time, and link-local is refused again at connect time. Set `allowInsecureLocal` to permit a loopback host. |
+| <span id="dns-provider-config-username"></span>  `username` | Secret | none | yes | `username` from the acme-dns `/register` response (a UUID). |
+| <span id="dns-provider-config-password"></span>  `password` | Secret | none | yes | `password` from `/register`. Use a `${ENV:...}` or `${FILE:...}` placeholder. |
+| <span id="dns-provider-config-subdomain"></span>  `subdomain` | Secret | none | yes | `subdomain` from `/register` (a UUID); the record the CNAME points at. |
 | <span id="dns-provider-config-allow-insecure-local"></span>  `allowInsecureLocal` | string | `""` | no | Set to `"true"` to allow a `baseURL` whose host is a loopback literal (an acme-dns running beside gpm). Link-local, unspecified and multicast literals are always refused. |
 
 Behaviour:

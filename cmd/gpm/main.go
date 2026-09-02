@@ -46,9 +46,6 @@ func main() {
 	// Subcommands. Default (no subcommand) runs the daemon.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "import":
-			runImport(os.Args[2:])
-			return
 		case "hashpw":
 			runHashpw(os.Args[2:])
 			return
@@ -107,7 +104,7 @@ func main() {
 		log.Info().Msg("local admin TOTP is enabled")
 	}
 
-	// HA role (docs/design/ha.md phase 1). Exactly one instance is the writer:
+	// HA role (design/ha.md phase 1). Exactly one instance is the writer:
 	// the leader runs the ACME and Ingress-discovery loops and accepts config
 	// writes; a follower does neither and pulls the leader's repo instead. An
 	// unparseable value is fatal rather than defaulting, so a typo cannot start a

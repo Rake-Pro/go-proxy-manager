@@ -8,7 +8,7 @@ where the machine-readable specification lives.
 | Credential | Header or cookie | CSRF | Governed by |
 |---|---|---|---|
 | Admin session | `gpm_session` cookie, set by the login flow | `X-CSRF-Token` from `GET /api/me` on every mutating request | The session's role (`admin` or `user`) |
-| API token | `Authorization: Bearer gpm_...` | Exempt - a bearer header is never attached automatically | The token's scopes, intersected with the admin role |
+| API token | `Authorization: Bearer gpm_...` | Exempt: a bearer header is never attached automatically | The token's scopes, intersected with the admin role |
 
 A bearer token is resolved **before** the cookie path and never falls through to
 it: an invalid token is a `401`, not an invitation to try a session cookie on the
@@ -45,7 +45,7 @@ scope. A viewer-role session and a resource-scoped token both hit this.
 
 **`GET /health` is classified for every caller, admin included.**
 `acme.lastError` is always a classification plus the certificate name, e.g.
-`certificate "app": dns-01 challenge or DNS provider failure` - never the
+`certificate "app": dns-01 challenge or DNS provider failure`, never the
 provider's raw message, whoever is asking. The full message stays on that
 certificate's own status, behind `certificates:read`.
 
@@ -53,24 +53,24 @@ certificate's own status, behind `certificates:read`.
 
 [`openapi.yaml`](../api/openapi.yaml) is an OpenAPI 3.1 specification for the whole
 admin control-plane API (config CRUD, settings, backup/restore, DNS sync,
-Ingress discovery, and the auth endpoints) - everything reachable on the admin
+Ingress discovery, and the auth endpoints), everything reachable on the admin
 listener (`:8081` by default), not the public data plane that serves proxied
 traffic.
 
 ## Reading it
 
-- **Paste it into an OpenAPI viewer** - [Swagger Editor](https://editor.swagger.io/)
+- **Paste it into an OpenAPI viewer**: [Swagger Editor](https://editor.swagger.io/)
   or [Redocly](https://redocly.github.io/redoc/) both render it with no setup.
 - **From a running instance**: `GET /api/openapi.yaml` serves the exact file
   embedded in the binary, so it always matches the code that built it. Auth is
-  the same as `GET /api/me` - any authenticated admin session or API token, no
+  the same as `GET /api/me`: any authenticated admin session or API token, no
   particular role or scope required beyond being authenticated:
 
   ```
   curl -s -H 'Authorization: Bearer gpm_...' https://<admin>/api/openapi.yaml
   ```
 - For the config **object model** (validation rules, YAML examples, cross-field
-  behaviour) see [../configuration.md](../configuration.md) - the spec documents
+  behaviour) see [../configuration.md](../configuration.md): the spec documents
   the wire shape, configuration.md documents what the fields mean and do.
 - For **auth/CSRF/scopes as a concept** (not per-endpoint) see the spec's
   top-level `info.description` and the `sessionCookie`/`bearerAuth` security
@@ -99,8 +99,8 @@ traffic.
 
 The spec is hand-authored (`internal/api/api.go` is stdlib `http.ServeMux`,
 with no framework to derive an OpenAPI document from at build time), so a
-route or a model field added to the code has to be added here too - **in the
-same change**, per this repo's `CLAUDE.md` doc-sync rule.
+route or a model field added to the code has to be added here too, **in the
+same change**, per this repo's `CONTRIBUTING.md` doc-sync rule.
 
 `go test ./internal/server` runs `TestOpenAPISpecCoversRegisteredRoutes`
 (`internal/server/openapi_test.go`), which scrapes every `mux.HandleFunc`/
@@ -108,12 +108,12 @@ same change**, per this repo's `CLAUDE.md` doc-sync rule.
 out of `internal/api/api.go` and `internal/server/server.go` and fails if any
 of them has no matching `path`+method in `openapi.yaml`. It catches a missing
 route; it does **not** catch a route whose documented request/response shape
-has drifted from the actual Go struct - review that by eye against
+has drifted from the actual Go struct; review that by eye against
 `internal/model` when a field changes.
 
 `openapi.yaml` was scaffolded once from a generator script (to keep ~100
 routes' worth of CRUD boilerplate consistent); that script isn't part of the
-repo. Going forward, edit the YAML directly - a route or field at a time is
+repo. Going forward, edit the YAML directly: a route or field at a time is
 the normal case, and `TestOpenAPISpecCoversRegisteredRoutes` is what keeps
 routes (not deep schema shape) honest as you do.
 ## API tokens (automation)
@@ -139,15 +139,15 @@ curl -s -X DELETE  https://<admin>/api/api-tokens/ci-deploy ...
 Verification: a token restricted to `proxy-hosts:read` must get `403` on
 `GET /api/settings` and on any `PUT`, and `401` once deleted or expired.
 `GET /api/api-tokens` shows each token's scopes, expiry and in-memory `lastUsed`
-(which resets on restart by design - see
+(which resets on restart by design, see
 [APIToken](config/api-token.md)).
 
 No new flags or environment variables: tokens are ordinary config objects under
-`config/api-tokens/`, so they are versioned and reviewable like everything else -
+`config/api-tokens/`, so they are versioned and reviewable like everything else,
 but deliberately **not revertible**: restoring an older token file would restore
 an older digest and revive a rotated secret, so both the scoped and the
 whole-config revert leave `api-tokens` alone. Deploy ordering note: an older binary does not know the
-`APIToken` kind, so roll the new binary **before** creating the first token -
+`APIToken` kind, so roll the new binary **before** creating the first token;
 rolling back afterwards leaves `config/api-tokens/*.yaml` on disk, which an older
 loader ignores (the directory is not in its kind map) but which will reappear the
 moment the newer binary runs again.

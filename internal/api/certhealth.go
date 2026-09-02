@@ -72,7 +72,7 @@ func certState(now, notAfter time.Time) string {
 }
 
 // truncateLastError bounds an error message to maxLastErrorLen, ASCII-only (no
-// ellipsis character - see CLAUDE.md typography rule).
+// ellipsis character: see CONTRIBUTING.md's ASCII-only convention).
 func truncateLastError(msg string) string {
 	if len(msg) <= maxLastErrorLen {
 		return msg

@@ -9,11 +9,11 @@ bind, and the subcommands the binary ships.
 |----------------|---------|-----------|
 | `:443` | Data plane HTTPS | Internet |
 | `:80` | Data plane HTTP (force-SSL redirects, plaintext hosts, ACME HTTP-01 challenges) | Internet |
-| `:8081` | Admin API + web UI | **Not the internet** - your ingress, LAN, or an SSH tunnel |
+| `:8081` | Admin API + web UI | **Not the internet**: your ingress, LAN, or an SSH tunnel |
 
 The admin plane is authenticated, but you should still keep it off the public
 internet. Bind it to loopback (`127.0.0.1:8081`) and reach it via a tunnel, or
-front it with your own authenticating ingress - including gpm itself: see
+front it with your own authenticating ingress (including gpm itself): see
 [Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md) for the recipe.
 
 If gpm's own data-plane `:80`/`:443` can't be reached from the internet at all
@@ -26,12 +26,12 @@ ports explicitly.
 
 Both data-plane listeners bind a bare `:port` by default (`GPM_HTTP_ADDR=:80`,
 `GPM_HTTPS_ADDR=:443`), which in Go binds the **IPv6 wildcard with v4-mapped
-addresses enabled** - one socket serving both families. See
+addresses enabled**: one socket serving both families. See
 [IPv6](../getting-started/install-docker.md#ipv6).
 
 A Prometheus exposition is available at `/metrics` on the **admin** listener,
 off by default (`-metrics` / `GPM_METRICS=1`) and gated like the rest of the
-admin plane - see [Metrics (Prometheus)](metrics.md) below. Unauthenticated,
+admin plane, see [Metrics (Prometheus)](metrics.md) below. Unauthenticated,
 the admin server exposes only `/healthz` and `/version`.
 
 ## Flags and environment variables
@@ -57,7 +57,7 @@ container deployments).
 | `GPM_LOG_CONSOLE`<br>`-log-console` | `false` | Human-readable console logs | Yes |
 | `GPM_ACCESS_LOG`<br>`-access-log` | `false` | Log every data-plane request. Startup default only: capture can be flipped live from the Access Logs page or `PUT /api/logs` (admin scope); the runtime toggle is never persisted, so a restart reverts to this flag | Yes |
 | `GPM_SLOW_REQUEST_MS`<br>`-slow-request-ms` | `0` (off) | Warn on requests slower than N ms | Yes |
-| `GPM_DEBUG_HEADERS`<br>`-debug-headers` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info - keep off in production) | Yes |
+| `GPM_DEBUG_HEADERS`<br>`-debug-headers` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info, keep off in production) | Yes |
 | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT`<br>`-upstream-response-header-timeout` | `0` (unbounded) | Cap time-to-first-byte from an upstream | Yes |
 | `GPM_HA_ROLE`<br>`-ha-role` | `leader` | HA role: `leader` runs ACME + Ingress/Docker discovery and accepts config writes; `follower` disables them and serves the admin API read-only (`503` on writes). See [High availability (two-node active/standby)](../operations/high-availability.md) | Yes |
 | `GPM_HA_POLL_INTERVAL`<br>`-ha-poll-interval` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved | Yes |
@@ -67,8 +67,8 @@ container deployments).
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
 preference:
-- `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` - path to a file (e.g. a Docker secret), or
-- `GPM_LOCAL_ADMIN_PASSWORD_HASH` - the hash inline.
+- `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE`: path to a file (e.g. a Docker secret), or
+- `GPM_LOCAL_ADMIN_PASSWORD_HASH`: the hash inline.
 
 Generate one with `gpm hashpw 'your-password'` (or `docker run --rm <image> hashpw ...`).
 
@@ -87,12 +87,10 @@ below exits when it is done and never starts a listener.
 | `gpm -version` | none | Prints the build version and exits. |
 | `gpm hashpw [password]` | none; the password is a positional argument, or read from stdin when omitted | Prints a bcrypt hash on stdout for `GPM_LOCAL_ADMIN_PASSWORD_HASH*`. |
 | `gpm totp-secret` | `-account` (default `GPM_LOCAL_ADMIN_USER`, else `admin`), `-issuer` (default `gpm`) | Prints a base32 TOTP secret on stdout and the `otpauth://` enrolment URI on stderr. No QR code is rendered. |
-| `gpm import` | `-npm-data <dir>` (required), `-config-dir`, `-cert-dir`, `-dry-run`, `-author` (default `npm-import`) | One-time, best-effort import of an NPM/NPMplus data directory. See [Migrate from Nginx Proxy Manager](../how-to/migrate-from-npm.md). |
 
 ```
 gpm hashpw 'your-password' > admin_hash
 gpm totp-secret -account admin -issuer gpm > admin_totp
-gpm import -npm-data /path/to/npm/data -dry-run
 ```
 
 ## Runtime facts (operations)
@@ -119,7 +117,7 @@ curl -s -b "<admin session cookie>" https://<admin>/api/runtime | jq
 | `localAdminTOTP` | Whether a TOTP second factor is configured for the local admin. |
 
 > **`paths` and `secretFileRoots` are admin-scope only.** A caller without the
-> `admin` scope - a viewer-role session, or a resource-scoped token - gets the
+> `admin` scope (a viewer-role session, or a resource-scoped token) gets the
 > payload with both fields omitted, so the deployment's filesystem layout is not
 > a read-only credential. See
 > [What a non-admin caller does not see](api.md#what-a-non-admin-caller-does-not-see).

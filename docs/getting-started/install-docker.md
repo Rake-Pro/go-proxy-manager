@@ -8,7 +8,7 @@ two data-plane ports, and keep the admin plane off the internet.
 Every image pushed by the release workflow (including the `latest` tag, which
 shares the same manifest digest as the version tags built alongside it) is
 signed keylessly with [cosign](https://docs.sigstore.dev/cosign/) via GitHub
-Actions OIDC - no key material to manage or leak. Verify before you deploy:
+Actions OIDC: no key material to manage or leak. Verify before you deploy:
 
 ```
 cosign verify \
@@ -18,7 +18,7 @@ cosign verify \
 ```
 
 A successful verification prints the signature payload and confirms the image
-was built by the `release.yml` workflow in this repository from a `v*` tag -
+was built by the `release.yml` workflow in this repository from a `v*` tag,
 not from a fork, a different workflow, or a hand-pushed image.
 
 ## Compose file
@@ -85,23 +85,23 @@ documented in the [configuration reference](../reference/config/README.md).
 (`POST /api/client-cas/{name}/generate`, or "Generate new CA" in the UI): gpm
 writes it at `0600` itself, so nothing has to be provisioned externally to get a
 working mTLS setup. A key you place here yourself (`caKeyFile` pointing anywhere
-under the cert store, for a bring-your-own CA) is the same thing by hand - give it
+under the cert store, for a bring-your-own CA) is the same thing by hand: give it
 `0600` and owner `gpm`. The alternative is `caKeyPEM` with a
 `${FILE:/run/secrets/...}` placeholder, which keeps the key in the secret mount
 instead.
 
 Either way it is a **CA private key**: back it up with the rest of `/data/certs`,
 and remember it is *not* in the git config repo, so a config-only backup does not
-carry it - restoring config alone gives you a ClientCA object pointing at a key
+carry it: restoring config alone gives you a ClientCA object pointing at a key
 that is not there. Deleting a ClientCA does **not** delete its key file (see
 [ClientCA](../reference/config/client-ca.md)), so removing a CA
 for good is a config delete plus an `rm` here. CA generation, certificate issuance
 and renewal are all `POST`s, so an HA **follower** refuses them with `503` like
-every other write - do them on the leader.
+every other write: do them on the leader.
 
 `client-certs/<ca>.json` holds the issuance records that drive the expiry warning
 and the renew action. They are runtime state, not config, so a config-only backup
-does not carry them - back them up with the rest of `/data/certs`, and share the
+does not carry them: back them up with the rest of `/data/certs`, and share the
 cert dir between HA peers (which the [HA recipe](../operations/high-availability.md) already calls for) if you
 want the follower to show the same list. Losing them loses only gpm's *memory* of
 what was issued: the certificates themselves keep working, and the CA keeps
@@ -112,7 +112,7 @@ verifying them.
 gpm listens dual-stack out of the box: a bare `:80` / `:443` bind accepts IPv4 and
 IPv6 on the same socket, the router and every middleware are address-family
 agnostic, and the client IP an access list, geo rule, rate limit or
-`X-Forwarded-For` sees is whichever address the client actually used - a v6 client
+`X-Forwarded-For` sees is whichever address the client actually used: a v6 client
 appears as its v6 address, not a v4 stand-in. There is no IPv6 toggle to set.
 
 Pinning a bind to one family is still possible and is a deliberate choice:
@@ -144,7 +144,7 @@ What usually blocks inbound IPv6 is Docker, not gpm. Standard Docker behaviour:
   binds.
 - **`userland-proxy` changes what the app sees.** With the default
   `"userland-proxy": true` the daemon's `docker-proxy` relays the connection, so
-  the container sees the *proxy's* address as the peer - the real client IP is
+  the container sees the *proxy's* address as the peer: the real client IP is
   lost for both families. Setting `"userland-proxy": false` in
   `/etc/docker/daemon.json` keeps the connection on the kernel path (iptables /
   ip6tables DNAT) so the original client address arrives intact.
@@ -154,6 +154,6 @@ What usually blocks inbound IPv6 is Docker, not gpm. Standard Docker behaviour:
   host's `:80`/`:443` and every stream port directly).
 
 If the edge in front of gpm is an L4 load balancer rather than the client, the
-client IP problem is not a Docker one - turn on
+client IP problem is not a Docker one: turn on
 [`settings.proxyProtocol`](../reference/config/settings/proxy-protocol.md)
 so gpm reads the real client address (of either family) out of the PROXY header.

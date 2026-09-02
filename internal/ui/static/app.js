@@ -151,7 +151,38 @@ function fmtTime(s) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// Date only, no time - for a compact reading next to a relative-label chip.
+// The full timestamp still goes in that chip's title tooltip via fmtTime.
+function fmtDate(s) {
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 function arr(v) { return Array.isArray(v) ? v : []; }
+
+// A label can be long enough to need to wrap, but only at a separator a reader
+// expects (a dot between two real labels), never mid-word. <wbr> after such a
+// "." gives the browser that break point explicitly; paired with
+// overflow-wrap:normal and word-break:keep-all in CSS, that stops e.g.
+// "acme-test.rake.pro" from splitting mid-label the way a bare
+// word-break:break-all would. The dot must be preceded by a label character -
+// not "*" - so a wildcard's "*." never breaks on its own, orphaned, from the
+// label it prefixes.
+function wbrLabel(s) {
+  return esc(s).replace(/([A-Za-z0-9])\./g, '$1.<wbr>');
+}
+// Renders up to `max` items (default 2) comma-joined with <wbr> break points,
+// folding the rest into "+N"; the full list is always in the title tooltip.
+// Shared by any column that can hold a long domain/SAN list.
+function domainListHtml(domains, max) {
+  domains = arr(domains);
+  if (!domains.length) return '';
+  const shown = domains.slice(0, max || 2);
+  const rest = domains.length - shown.length;
+  const html = shown.map(wbrLabel).join(', <wbr>') + (rest > 0 ? ` <span class="faint">+${rest}</span>` : '');
+  return `<span class="domain-list" title="${esc(domains.join(', '))}">${html}</span>`;
+}
 
 // ObjectMeta keys no editor renders a control for. Every PUT is a whole-object
 // replacement, so a save body built from the form alone DELETES them: labels
@@ -1864,18 +1895,51 @@ function wireUpstreamExtra(p) {
 // state (notAfter, daysRemaining, issuer, sans, state, lastError). Absent - not
 // null - on a pending or failed ACME certificate that has never been issued, so
 // every read is guarded.
+// Short relative label for the chip text - "in 84 days", "expired 3 days ago",
+// "pending", "error" - never the absolute timestamp: that used to be the chip
+// text itself, which wrapped onto two lines inside a tall pill for anything
+// with a time-of-day component. The absolute date, if a caller wants it, is a
+// separate plain-text element next to the chip (see certExpiryCellHtml).
+function certExpiryLabel(state, days) {
+  if (state === 'pending') return 'pending';
+  if (state === 'error') return 'error';
+  if (days == null) return '';
+  if (days >= 0) return `in ${days} day${days === 1 ? '' : 's'}`;
+  const ago = -days;
+  return `expired ${ago} day${ago === 1 ? '' : 's'} ago`;
+}
+// valid/pending render as a small coloured dot plus text (no border or fill),
+// so a healthy or not-yet-issued certificate stays quiet; only expiring,
+// expired and error states get the filled/bordered pill, so attention goes
+// where it matters. The state word is always in the text too, never colour
+// alone.
 function certStateChip(ct) {
   ct = ct || {};
   if (!ct.state) return '<span class="faint" title="This build of the API does not report certificate state.">-</span>';
-  const cls = { valid: 'ok', expiring: 'warn', expired: 'err', pending: 'cyan', error: 'err' }[ct.state] || '';
-  const text = ct.state === 'pending' ? 'Pending first issuance'
-    : ct.state === 'error' ? 'Error'
-      : fmtTime(ct.notAfter);
+  const state = ct.state;
+  const cls = { valid: 'ok', expiring: 'warn', expired: 'err', pending: 'muted', error: 'err' }[state] || '';
+  const flat = state === 'valid' || state === 'pending';
   const days = ct.daysRemaining;
-  const title = (ct.state === 'error' || ct.state === 'pending')
-    ? (ct.lastError || '')
-    : (days != null ? (days >= 0 ? `${days} days remaining` : `Expired ${-days} days ago`) : '');
-  return `<span class="chip ${cls}" title="${esc(title)}">${esc(text)}</span>`;
+  const label = certExpiryLabel(state, days);
+  const titleBits = [];
+  if (state === 'error' || state === 'pending') {
+    if (ct.lastError) titleBits.push(ct.lastError);
+  } else if (days != null) {
+    titleBits.push(days >= 0 ? `${days} days remaining` : `Expired ${-days} days ago`);
+  }
+  if (ct.notAfter) titleBits.push(fmtTime(ct.notAfter));
+  const title = titleBits.join('; ');
+  const chipCls = flat ? `chip flat${cls ? ' ' + cls : ''}` : `chip ${cls}`;
+  return `<span class="${chipCls}" title="${esc(title)}"><span class="dot ${cls}"></span>${esc(label)}</span>`;
+}
+// Expiry column cell: the state chip plus the plain absolute date beside it
+// (no time - the full timestamp is the chip's tooltip already). Used only
+// where there is room for both; certStateChip alone covers every other spot
+// (status card, overview widget) where the absolute date has its own field.
+function certExpiryCellHtml(ct) {
+  ct = ct || {};
+  const date = ct.notAfter ? fmtDate(ct.notAfter) : '';
+  return `<span class="cert-expiry">${certStateChip(ct)}${date ? `<span class="expiry-date" title="${esc(fmtTime(ct.notAfter))}">${esc(date)}</span>` : ''}</span>`;
 }
 // POST /api/certificates/{name}/renew starts an order and returns immediately -
 // DNS-01 propagation alone can take minutes, so there is no spinner and no poll:
@@ -3388,20 +3452,25 @@ function getStartedCardHtml(steps) {
 }
 
 async function viewOverview(c) {
-  // Four independent reads, issued together. /api/health is the only real
+  // Five independent reads, issued together. /api/health is the only real
   // liveness signal the SPA has, so a failure there degrades this page's Data
-  // plane tile rather than failing the whole view.
-  const [cfgR, , histR, healthR, setR] = await Promise.all([
+  // plane tile rather than failing the whole view. /api/certificates (not
+  // /api/config's plain stored objects) is what carries notAfter/state/
+  // daysRemaining, so the certificates card below can show real expiry instead
+  // of "-".
+  const [cfgR, , histR, healthR, setR, certsR] = await Promise.all([
     api('/api/config'),
     loadCapabilities(),
     routeHistory(),
     api('/api/health').catch(() => null),
     routeSettings(),
+    api('/api/certificates'),
   ]);
   const cfg = cfgR.data || {};
   const history = arr(histR);
   const health = (healthR && healthR.data) || null;
   const settings = setR.data || {};
+  const certsWithStatus = arr(certsR.data);
   await loadCounts();
 
   const hosts = arr(cfg.proxyHosts);
@@ -3472,7 +3541,18 @@ async function viewOverview(c) {
       </div>
     </div>`).join('') || `<div class="muted" style="font-size:13px">No commits yet.</div>`;
 
-  const certRows = certs.length ? certs.map((ct) => {
+  // Soonest-expiring first: ascending daysRemaining (negative - already
+  // expired - sorts to the very top, since that is the most urgent). A cert
+  // with no daysRemaining yet (pending, or an older API build) has no expiry
+  // to sort by, so it drops to the end, ordered by name for a stable list.
+  const certsSoonest = certsWithStatus.slice().sort((a, b) => {
+    const ad = a.daysRemaining, bd = b.daysRemaining;
+    if (ad == null && bd == null) return (a.name || '').localeCompare(b.name || '');
+    if (ad == null) return 1;
+    if (bd == null) return -1;
+    return ad - bd;
+  });
+  const certRows = certsSoonest.length ? certsSoonest.slice(0, 5).map((ct) => {
     const domains = arr(ct.domains).join(', ');
     const typ = ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : (ct.type || 'cert'));
     const detail = ct.type === 'acme'
@@ -3484,7 +3564,7 @@ async function viewOverview(c) {
         <div class="host" style="font-size:14px">${esc(ct.name)} <span class="mono muted" style="font-weight:400;font-size:12px">${esc(domains)}</span></div>
         <div class="muted" style="font-size:11.5px">${esc(typ)} &middot; ${esc(detail)}</div>
       </div>
-      <div>${certStateChip(ct)}</div>
+      <div>${certExpiryCellHtml(ct)}</div>
     </div>`;
   }).join('') : `<div class="muted" style="font-size:13px">No certificates yet.</div>`;
 
@@ -3533,9 +3613,11 @@ async function viewOverview(c) {
         <div>${feed}</div>
       </div>
       <div class="card">
-        <p class="section-label">Certificates</p>
-        ${certRows}
-        <a class="btn ghost sm" href="#/certs" style="margin-top:14px;width:100%;justify-content:center">Manage certificates</a>
+        <div class="card-head">
+          <p class="section-label" style="margin:0">Certificates</p>
+          <a class="btn ghost sm" href="#/certs">View all</a>
+        </div>
+        <div>${certRows}</div>
       </div>
     </div>`;
 
@@ -3703,12 +3785,14 @@ async function listHosts(c) {
     const auth = r.authMw
       ? `<span class="chip brand">${esc(r.authMw)}</span>`
       : (r.authInline ? `<span class="chip brand" title="Configured inline on this host, under Sign-in.">sign-in</span>` : `<span class="chip">none</span>`);
+    // live/disabled are the quiet states (dot + text, no pill); maintenance is
+    // the one that should draw the eye, so it keeps the filled/bordered pill.
     const status = r.status === 'disabled'
-      ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
+      ? `<span class="chip flat muted"><span class="dot muted"></span>disabled</span>`
       : (r.status === 'maintenance'
         ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
-        : `<span class="chip ok"><span class="dot ok"></span>live</span>`);
-    const tagChips = r.tags.map((t) => `<span class="chip" style="font-size:10px;padding:1px 6px">${esc(t)}</span>`).join(' ');
+        : `<span class="chip flat ok"><span class="dot ok"></span>live</span>`);
+    const tagChips = r.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
     return `<tr class="clickable" data-name="${esc(h.name)}">
@@ -5013,12 +5097,12 @@ async function listCerts(c) {
   };
   const COLUMNS = [
     { key: 'name', label: 'Name' },
-    { key: 'domains', label: 'Domains' },
+    { key: 'domains', label: 'Domains', cls: 'col-domains' },
     { key: null, label: 'Type' },
-    { key: null, label: 'Issuance' },
+    { key: null, label: 'Issuance', cls: 'col-issuance' },
     { key: null, label: 'Issuer' },
-    { key: 'expiry', label: 'Expiry' },
-    { key: null, label: '' },
+    { key: 'expiry', label: 'Expiry', cls: 'col-expiry' },
+    { key: null, label: '', cls: 'col-actions' },
   ];
 
   c.innerHTML = head + `
@@ -5026,7 +5110,7 @@ async function listCerts(c) {
       <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter: name, domain, provider, issuer, state..." aria-label="Filter certificates" /></div>
     </div>
     <div class="table-wrap">
-      <table>
+      <table class="certs-table">
         <thead id="certHead"></thead>
         <tbody id="certRows"></tbody>
       </table>
@@ -5034,10 +5118,11 @@ async function listCerts(c) {
 
   function headHtml() {
     return '<tr>' + COLUMNS.map((col) => {
-      if (!col.key) return `<th>${esc(col.label)}</th>`;
+      const cls = col.cls ? ` class="${col.key ? 'sortable ' : ''}${col.cls}"` : (col.key ? ' class="sortable"' : '');
+      if (!col.key) return `<th${cls}>${esc(col.label)}</th>`;
       const active = sort.key === col.key;
       const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
-      return `<th class="sortable" data-sort="${col.key}" aria-sort="${aria}" role="button" tabindex="0">${esc(col.label)}<span class="sort-mark">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></th>`;
+      return `<th${cls} data-sort="${col.key}" aria-sort="${aria}" role="button" tabindex="0">${esc(col.label)}<span class="sort-mark">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></th>`;
     }).join('') + '</tr>';
   }
 
@@ -5047,12 +5132,12 @@ async function listCerts(c) {
       : 'PEM files on the server';
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
       <td><span class="host">${esc(r.name)}</span></td>
-      <td class="mono" style="word-break:break-all">${esc(r.domains.join(', '))}</td>
+      <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type)}</span></td>
-      <td class="mono faint">${issuance}</td>
+      <td class="mono faint col-issuance">${issuance}</td>
       <td class="mono faint">${esc(r.issuer || '-')}</td>
-      <td>${certStateChip(r.ct)}</td>
-      <td style="white-space:nowrap">
+      <td class="col-expiry">${certExpiryCellHtml(r.ct)}</td>
+      <td class="col-actions">
         ${r.type === 'acme' ? `<button class="btn ghost sm ct-renew" data-name="${esc(r.ct.name)}" type="button">Renew now</button>` : ''}
         <button class="btn ghost sm ct-clone" data-name="${esc(r.ct.name)}" type="button">Clone</button>
       </td>
@@ -7369,8 +7454,10 @@ async function upstreamGroupEditor(c, name) {
     const hostPart = (u.host || '').indexOf(':') !== -1 ? `[${u.host}]` : u.host;
     const label = `${u.scheme || 'http'}://${hostPart}:${u.port}`;
     if (!(label in health)) return '';
+    // up is the quiet state (dot + text only); down gets the filled/bordered
+    // pill, so a bad backend is what catches the eye.
     return health[label]
-      ? '<span class="chip ok" style="flex:0 0 auto"><span class="dot ok"></span>up</span>'
+      ? '<span class="chip flat ok" style="flex:0 0 auto"><span class="dot ok"></span>up</span>'
       : '<span class="chip err" style="flex:0 0 auto"><span class="dot err"></span>down</span>';
   };
   c.innerHTML = editorHead('upstreams', meta, isNew, name) + `<div class="form-grid"><div class="stack">

@@ -7,6 +7,41 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 Nothing yet.
 
+## [1.2.0] - 2026-09-02
+
+> Release type: **minor** (feature removal). Label the promotion PR
+> `release:minor` so `.github/workflows/release.yml` mints `1.2.0` rather than a
+> patch.
+
+### Changed
+
+- **Status and expiry chips are quieter.** Healthy/neutral states (valid
+  certificate, live host, up upstream) now show as a coloured dot plus text
+  instead of a filled pill, the certificates list shows a short relative
+  expiry ("in 84 days") instead of a wrapping timestamp, and its Domains
+  column wraps only at "." or "," with a "+N" and tooltip for long lists.
+
+### Removed
+
+- **The one-time configuration importer and its `gpm import` subcommand.**
+  `internal/importer/` and `cmd/gpm/import.go` are gone, together with the
+  `import` case in the subcommand dispatch. gpm's configuration is its own flat
+  model; there is no migration path from another proxy manager.
+- **The parallel-run compose file** under `deploy/`, which existed only to run
+  gpm on alternate ports beside an installation being migrated away from.
+- **The migration guide** and its redirect stub under `docs/`, their `mkdocs.yml`
+  nav entries, and the `gpm import` row in
+  `docs/reference/env-vars-and-flags.md`.
+
+### Upgrade notes
+
+- **No operator action is required.** No configuration key, API route, flag or
+  environment variable changed, and existing YAML under `/data/config` loads
+  unchanged.
+- **Still need to run the importer?** Do it with **1.1.0** first, commit the
+  result, then upgrade. The subcommand does not exist in this release and will
+  not return.
+
 ## [1.1.0] - 2026-09-02
 
 ### Added
@@ -2723,7 +2758,8 @@ Nothing yet.
   - **Local-login throttling**: per-client-IP lockout after repeated failures,
     bounded pending-login/throttle maps, and sliding session expiry.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.33...v1.1.0
 [1.0.16]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.13...v1.0.15

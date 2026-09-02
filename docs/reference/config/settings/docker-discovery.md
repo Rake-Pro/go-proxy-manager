@@ -16,7 +16,7 @@ It is the same machinery as
 different source: the same `template` shape, the same profiles, the same
 ownership rules, the same freeze-on-unreadable behaviour. Only the four
 Docker-specific items below differ. Design note:
-[Design: Docker container discovery](../../../design/docker-discovery.md).
+[Design: Docker container discovery](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/docker-discovery.md).
 
 - **Same label prefix.** Keys come from `ingressDiscovery.annotationPrefix`
   (default `gpm.rake.pro`); there is no second prefix knob.
@@ -35,17 +35,17 @@ Docker-specific items below differ. Design note:
 |-----|------|---------|----------|-------------|
 | <span id="settings-docker-discovery-enabled"></span> `enabled` | bool | `false` | no | Turn container discovery on. Everything below is validated only when this is true. |
 | <span id="settings-docker-discovery-socket"></span> `socket` | string | `/var/run/docker.sock` | no | Docker Engine API unix socket, absolute path. Ignored when `host` is set. |
-| <span id="settings-docker-discovery-host"></span> `host` | string | - | no | `tcp://` or `https://` Engine endpoint used instead of the socket, e.g. `tcp://socket-proxy:2375`. Recommended - see [Discover Docker containers](../../../how-to/docker-discovery.md). |
-| <span id="settings-docker-discovery-tls-cert"></span> `tlsCert` | string | - | no | Absolute path to a client certificate for an `https://` `host`. Set with `tlsKey`. |
-| <span id="settings-docker-discovery-tls-key"></span> `tlsKey` | string | - | no | Absolute path to the client key. Set with `tlsCert`. |
-| <span id="settings-docker-discovery-tls-ca"></span> `tlsCA` | string | - | no | Absolute path to the PEM bundle verifying the endpoint. There is no skip-verify option. |
+| <span id="settings-docker-discovery-host"></span> `host` | string | none | no | `tcp://` or `https://` Engine endpoint used instead of the socket, e.g. `tcp://socket-proxy:2375`. Recommended: see [Discover Docker containers](../../../how-to/docker-discovery.md). |
+| <span id="settings-docker-discovery-tls-cert"></span> `tlsCert` | string | none | no | Absolute path to a client certificate for an `https://` `host`. Set with `tlsKey`. |
+| <span id="settings-docker-discovery-tls-key"></span> `tlsKey` | string | none | no | Absolute path to the client key. Set with `tlsCert`. |
+| <span id="settings-docker-discovery-tls-ca"></span> `tlsCA` | string | none | no | Absolute path to the PEM bundle verifying the endpoint. There is no skip-verify option. |
 | <span id="settings-docker-discovery-network"></span> `network` | string | first non-`host` network | no | Docker network whose per-container IP becomes the upstream host. Mutually exclusive with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-use-published-ports"></span> `usePublishedPorts` | bool | `false` | no | Forward to the host-published port instead of the container IP. |
 | <span id="settings-docker-discovery-published-host"></span> `publishedHost` | string | `127.0.0.1` | no | Address a published port is reached on. Only valid with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-include-stopped"></span> `includeStopped` | bool | `false` | no | List non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived. |
 | <span id="settings-docker-discovery-poll-interval"></span> `pollInterval` | duration | `1m` | no | Fallback loop interval, minimum `15s`. Events drive the normal case. |
-| <span id="settings-docker-discovery-allowed-domain-suffixes"></span> `allowedDomainSuffixes` | []string | - | **yes** | Bounds every hostname a label can publish. A derived domain must equal one of these or end in `.` + one of them. |
-| <span id="settings-docker-discovery-template"></span> `template` | IngressHostTemplate | - | **yes** | The default chain every derived host takes. Same shape and validation as `ingressDiscovery.template`, except `upstream`/`upstreamGroupRef`, which are derived per container. |
+| <span id="settings-docker-discovery-allowed-domain-suffixes"></span> `allowedDomainSuffixes` | []string | none | **yes** | Bounds every hostname a label can publish. A derived domain must equal one of these or end in `.` + one of them. |
+| <span id="settings-docker-discovery-template"></span> `template` | IngressHostTemplate | none | **yes** | The default chain every derived host takes. Same shape and validation as `ingressDiscovery.template`, except `upstream`/`upstreamGroupRef`, which are derived per container. |
 | <span id="settings-docker-discovery-profiles"></span> `profiles` | map[string]IngressHostTemplate | `ingressDiscovery.profiles` | no | Named chains a container may select by name. Empty inherits the Ingress block's set. `template` is reserved. |
 
 **`template` and every `profiles` entry carry the full ProxyHost shapes.** The
@@ -54,11 +54,11 @@ sub-key is settable and applied verbatim:
 
 | Template key | Shape | Sub-keys documented at |
 |---|---|---|
-| `template.tls` | `TLSSettings` | [ProxyHost: `tls`](../proxy-host.md#proxy-host-tls) - `certificateRef`, `forceSSL`, `minTLSVersion`, `hsts.*`, `clientAuth.*` |
-| `template.tls.hsts` | `HSTS` | [ProxyHost: `tls.hsts`](../proxy-host.md#proxy-host-tls) - `enabled`, `maxAge`, `includeSubdomains`, `preload` |
-| `template.tls.clientAuth` | `ClientAuth` | [ProxyHost: `tls.clientAuth`](../proxy-host.md#proxy-host-tls) - `caRef`, `mode`, `identityHeaders.*` |
-| `template.timeouts` | `HostTimeouts` | [ProxyHost: `timeouts`](../proxy-host.md#proxy-host-timeouts) - `connectSeconds`, `readSeconds` |
-| `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns) - `lanDirect`, `publicCname` |
+| `template.tls` | `TLSSettings` | [ProxyHost: `tls`](../proxy-host.md#proxy-host-tls): `certificateRef`, `forceSSL`, `minTLSVersion`, `hsts.*`, `clientAuth.*` |
+| `template.tls.hsts` | `HSTS` | [ProxyHost: `tls.hsts`](../proxy-host.md#proxy-host-tls): `enabled`, `maxAge`, `includeSubdomains`, `preload` |
+| `template.tls.clientAuth` | `ClientAuth` | [ProxyHost: `tls.clientAuth`](../proxy-host.md#proxy-host-tls): `caRef`, `mode`, `identityHeaders.*` |
+| `template.timeouts` | `HostTimeouts` | [ProxyHost: `timeouts`](../proxy-host.md#proxy-host-timeouts): `connectSeconds`, `readSeconds` |
+| `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
 Every other template key (`middlewares`, `accessLists`, `robotsNoIndex`, `tags`,
 `stripResponseHeaders`, `allowedDomainSuffixes`) is documented on
@@ -111,7 +111,7 @@ Two modes, one choice, decided by where gpm itself runs.
 - Every derived host carries
   `labels["gpm.rake.pro/managed-by"] = "docker-discovery"`.
 - Only objects carrying that exact label pair are created, updated or deleted. A
-  hand-written host - or an Ingress-derived one - with the same name is skipped
+  hand-written host (or an Ingress-derived one) with the same name is skipped
   with a warning, never overwritten.
 - Ownership covers the **domain** as well as the name: a derived host whose
   domains include one already claimed by a host this reconciler does not own is

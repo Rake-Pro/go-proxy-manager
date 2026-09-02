@@ -5,7 +5,7 @@ over HTTP-01 or DNS-01.
 
 ## Prerequisites
 
-- A running gpm instance you can sign in to - see
+- A running gpm instance you can sign in to: see
   [Quickstart](quickstart.md), [Install with Docker](install-docker.md) or
   [Install the binary](install-binary.md).
 - A domain whose public `A`/`AAAA` record already points at this host. gpm does
@@ -14,7 +14,7 @@ over HTTP-01 or DNS-01.
 - For HTTP-01, inbound `tcp/80` forwarded to gpm through every router,
   firewall and load balancer in front of it. Port 80 is not optional for this
   challenge, even when the host itself only serves HTTPS.
-- For DNS-01, an API token for the zone instead - no inbound port at all.
+- For DNS-01, an API token for the zone instead (no inbound port at all).
 - A backend that answers HTTP on an address gpm can reach.
 
 ## Choosing a challenge
@@ -28,7 +28,7 @@ Pick the challenge that fits the deployment:
   way to get a wildcard. Needs a DNSProvider credential
   (`cloudflare`, `digitalocean`, `hetzner`, `desec`, `rfc2136` for any
   nameserver that accepts TSIG-signed dynamic updates, or `acme-dns` for
-  anything else - see
+  anything else: see
   [DNSProvider](../reference/config/dns-provider.md) for the
   `config` keys each one takes).
 
@@ -75,7 +75,7 @@ External Account Binding (ZeroSSL, Google Public CA) takes `acme.eab.kid` +
    ```
 
 6. **Add a second host** by repeating steps 1-5, or by pointing it at a
-   wildcard certificate you already issued - one wildcard covers every
+   wildcard certificate you already issued: one wildcard covers every
    subdomain, and no per-host issuance is needed.
 
 

@@ -1,6 +1,6 @@
 # High availability (two-node active/standby)
 
-Phase 1 of [Design: High availability (gpm itself)](../design/ha.md), as shipped. Two gpm instances, one
+Phase 1 of [Design: High availability (gpm itself)](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/ha.md), as shipped. Two gpm instances, one
 floating VIP, one writer. No clustering dependency: replication is `git pull
 --ff-only` for config, a shared/replicated cert dir for secrets, and a static
 role in the environment for the writer.
@@ -29,7 +29,7 @@ role in the environment for the writer.
 | Config source | its own git repo | `git pull --ff-only` from the leader |
 
 Both nodes serve traffic-side config identically; only *who may write* differs.
-An unrecognised `GPM_HA_ROLE` is fatal at startup - a typo must never start a
+An unrecognised `GPM_HA_ROLE` is fatal at startup: a typo must never start a
 second ACME writer.
 
 A follower refuses every mutating admin/API request (`PUT`/`POST`/`DELETE`) with:
@@ -55,7 +55,7 @@ election is phase 2.
 Point public DNS and the firewall/NAT forwards for `:80`, `:443` and any
 published stream ports at the VIP, not at either node's own address. VRRP is an
 L2 same-subnet mechanism, so there is no SNAT and the real client IP still
-reaches gpm - access lists, GeoIP, rate limiting and XFF trust keep working
+reaches gpm; access lists, GeoIP, rate limiting and XFF trust keep working
 unchanged.
 
 `/etc/keepalived/keepalived.conf` on the MASTER (make it the same node as
@@ -118,7 +118,7 @@ renewal with no restart.
 
 **`GPM_SSO_SIGNING_KEY`**: set the *same* value on both nodes. Data-plane SSO
 cookies are stateless HMACs, so a shared key is what lets the survivor accept
-cookies the other node minted - without it every SSO user re-authenticates at
+cookies the other node minted; without it every SSO user re-authenticates at
 failover. Setting it explicitly also keeps the key out of the file-sync path;
 leave it unset only if `<cert-dir>` itself is shared (then `sso_signing.key` is
 the shared copy).
@@ -140,7 +140,7 @@ git clone ssh://gpm@node-a/data/config /data/config
 ```
 
 For a follower that already has its own `/data/config`, wire the same thing by
-hand (`BRANCH` is what `git -C /data/config branch --show-current` reports - gpm
+hand (`BRANCH` is what `git -C /data/config branch --show-current` reports; gpm
 creates the repo with git's default branch name):
 
 ```
@@ -154,7 +154,7 @@ Then run the follower with `GPM_HA_ROLE=follower`. Every `GPM_HA_POLL_INTERVAL`
 when HEAD actually moved**.
 
 - The follower never commits, so the repo cannot diverge by normal operation.
-- A pull that is not a clean fast-forward is refused and logged as an error - gpm
+- A pull that is not a clean fast-forward is refused and logged as an error: gpm
   never merges, rebases or resets. Fix it by hand on the follower (it keeps
   serving the last synced config meanwhile).
 - While the leader is down the pull fails every interval and is logged; the
@@ -166,7 +166,7 @@ The SSH account needs read access to the leader's `/data/config` only.
 
 | State | Behaviour at failover |
 |---|---|
-| TCP/UDP stream sessions | **dropped, client reconnects** - listeners are already bound on both nodes, so the survivor accepts immediately; a UDP client's next packet opens a fresh backend session. Same semantics as a single-node restart |
+| TCP/UDP stream sessions | **dropped, client reconnects**: listeners are already bound on both nodes, so the survivor accepts immediately; a UDP client's next packet opens a fresh backend session. Same semantics as a single-node restart |
 | Admin sessions | lost; an admin logs in again on the survivor |
 | Access-log ring | per-instance; the survivor shows only its own traffic |
 | Rate-limit buckets | per-instance; in active/standby only one node serves, so limits stay correct |
@@ -190,7 +190,7 @@ HTTP requests in flight are lost like any connection reset; browsers retry.
 ## 7. Role environment variables
 
 Two instances can run as an active/standby pair with no clustering dependency.
-The role is environment-only - it is not a config object, because it describes
+The role is environment-only: it is not a config object, because it describes
 *this process*, not the shared configuration.
 
 | Env | Default | Effect |
@@ -208,12 +208,12 @@ which is what the admin UI uses to grey out write controls on a follower.
 Both nodes must share `GPM_SSO_SIGNING_KEY` (identical value) and the ACME
 material under `<cert-dir>/acme`, and the SSO revocation watermark
 (`<cert-dir>/sso_not_before`) is re-read every 30s so a revoke propagates
-without a restart. Full recipe - keepalived VIP, shared cert dir, promotion,
-stream failover-with-reconnect - in sections 1-6 above.
+without a restart. Full recipe (keepalived VIP, shared cert dir, promotion,
+stream failover-with-reconnect) in sections 1-6 above.
 
 ## 8. Where this fits in deployment
 
 Two instances can run as an active/standby pair (keepalived VIP, one static
 leader, `git pull --ff-only` config replication, shared cert dir). The full
-recipe - keepalived config, cert-dir layout, `GPM_SSO_SIGNING_KEY` sharing,
-promotion, and what does not survive a failover - is in sections 1-6 above.
+recipe (keepalived config, cert-dir layout, `GPM_SSO_SIGNING_KEY` sharing,
+promotion, and what does not survive a failover) is in sections 1-6 above.

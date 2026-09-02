@@ -28,9 +28,9 @@ For how these files are stored, named and validated, see
 
 Every **key** row in a field table on these pages carries an explicit HTML
 anchor, so the in-app help registry and external documentation can deep-link to
-a single key and keep working across edits. Value tables - the ones whose first
+a single key and keep working across edits. Value tables (the ones whose first
 column is an enum member, a status, a mode or a provider name rather than a
-config key - carry none; they are keyed by the row above them, not by a key
+config key) carry none; they are keyed by the row above them, not by a key
 path.
 
 The anchor id is `<kind>-<key>`:
@@ -39,7 +39,7 @@ The anchor id is `<kind>-<key>`:
   table above: `proxy-host`, `redirect-host`, `stream-host`, `parked-host`,
   `upstream-group`, `certificate`, `client-ca`, `dns-provider`,
   `identity-provider`, `access-list`, `middleware`, `api-token`, `settings`.
-- `<key>` is the **full** config key path - not just the table's first column,
+- `<key>` is the **full** config key path: not just the table's first column,
   but the path from the object's root, so a nested table's rows carry their
   parent path (`locations[].path`, `tls.clientAuth.caRef`). It is lowercased,
   `[]` and `.` become `-`, camelCase boundaries are hyphenated, and every other
@@ -65,7 +65,7 @@ within a page.
 
 **Acronyms stay whole.** The camelCase split fires on a lowercase-or-digit
 followed by an uppercase only, so `trustedCIDRs` is `trusted-cidrs`, `apiURL` is
-`api-url` and `tlsCA` is `tls-ca` - never `trusted-cid-rs`.
+`api-url` and `tlsCA` is `tls-ca`: never `trusted-cid-rs`.
 
 Rules for anyone editing these pages:
 
