@@ -74,6 +74,11 @@ builds it with a narrower, more focused design:
 
 **Access control & auth**
 - IP access lists (allow/deny CIDR rules, default-deny, HTTP basic-auth)
+- **Path-scoped access-list rules + remote IP sources**: a rule can be limited to
+  exact paths and methods, and can draw its networks from a published feed that
+  gpm re-fetches on a schedule - so a monitoring provider's ~200 prober addresses
+  reach only `/api/health` on a host that is otherwise LAN/VPN-only, and stay
+  current without you pasting CIDRs
 - **OIDC** admin login (authorization code + PKCE, group→role mapping)
 - **Forward-auth** (trust upstream-asserted identity headers from trusted peers)
 - **Auth-request** (nginx `auth_request`-style subrequest to an Authentik outpost)

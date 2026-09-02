@@ -15,6 +15,62 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- **Access-list remote sources and path-scoped rules.** An `AccessList` rule can
+  now be limited to exact request paths and methods (`paths`, `methods` -
+  defaulting to `GET`/`HEAD`), and can draw its networks from a named remote feed
+  (`source`) instead of a literal `cidr`. Together they answer the case a single
+  ANDed allow-list could not express: letting a monitoring provider's published
+  prober addresses reach *only* the health endpoints of a host that is otherwise
+  LAN/VPN-only.
+
+  ```yaml
+  rules:
+    - {action: allow, cidr: 10.0.0.0/8}
+    - action: allow
+      source: uptimerobot
+      paths: [/api/health, /v1/health, /-/healthy, /status.php]
+      methods: [GET, HEAD]
+  sources:
+    - name: uptimerobot
+      url: https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt
+      interval: 24h
+  ```
+
+  Ordering is unchanged (top-down, first match wins, then geo, then
+  `defaultAction`), and a rule without `paths` behaves exactly as before, so
+  `paths` only ever narrows. Matching is against the already-normalised request
+  path, so gpm's matched path and the forwarded path stay byte-identical.
+  `paths` are **allow-only** (`action: deny` alongside them is refused at
+  validation): the match is exact, case-sensitive and does no trailing-slash
+  folding, which fails closed for an allow and would fail *open* for a deny -
+  deny-by-path stays the guard middleware's job.
+
+  A new leader-only fetcher (`internal/accesssync`) keeps the sets current on
+  `settings.accessListSync.pollInterval` (default `15m`, per-source `interval`
+  default `24h`), writing them to the committed singleton
+  `config/access-list-sources.yaml`. It fails closed throughout: `https` only,
+  no proxy honoured (a proxy would move the address the SSRF guard inspects),
+  the dialer refuses loopback/link-local/private/ULA/CGNAT/multicast and other
+  non-public destinations post-DNS, the body is capped at 1 MiB, and a non-200,
+  an empty result, more than `maxEntries` (default 10000), a *single* unparseable
+  line, or any entry that is a default route, broader than a `/8` (v4) or `/32`
+  (v6), or inside one of those non-public ranges refuses the fetch whole and
+  keeps the previously fetched set. A refused fetch is retried on the next poll
+  rather than after the source's interval. A source that has never been
+  fetched resolves to the empty set, so it matches nothing. An unchanged feed
+  writes no ledger and therefore produces no commit churn. New endpoints
+  `GET /api/access-list-sources/status` (`access-lists:read`) and
+  `POST /api/access-list-sources/reconcile` (`access-lists:write`).
+
+  Because a raw stream carries no request path and resolves no ledger, an
+  AccessList with any `sources`, or any rule carrying `paths` or `source`, is
+  refused for a `StreamHost` at validation - the same way a `basicAuth` list
+  already was.
+
+  The admin UI's access-list editor authors all of this: sources (name/url/
+  interval/maxEntries rows), a cidr-vs-source match per rule, and its `paths`/
+  `methods`, plus a per-source sync status panel and a manual reconcile button.
+
 - **Maintenance mode.** A proxy host can be taken out of service for a downtime
   window without being deleted, disabled, or losing its DNS: while
   `proxyHost.maintenance` is true gpm answers every request to that host itself
