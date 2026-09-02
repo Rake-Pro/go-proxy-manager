@@ -31,7 +31,12 @@ RUN go build \
         ./cmd/gpm
 
 # ---- final stage ----
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+# Named so the build workflows can exclude it from the layer cache
+# (no-cache-filters: final): the apk upgrade below is only worth anything if it
+# actually runs on every build. A cached layer silently pins whatever package
+# versions existed when the RUN line last changed, and the release gate then
+# fails on a CVE the repos already fixed (libexpat 2.8.3-r0 -> 2.8.4-r0, v1.0.32).
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS final
 
 # Runtime deps: app shells out to git; certs/tz for TLS and timestamps.
 # apk upgrade first: the base image is digest-pinned and its packages lag
