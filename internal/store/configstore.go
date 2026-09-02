@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -205,53 +207,77 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	var cfg model.Config
 	cfg.SchemaVersion = model.SchemaVersion
 	var err error
+	// unknownKeys collects every file's unknown-key set found while loading, so
+	// ONE warning per file can be logged and surfaced through Config.Warnings()
+	// once loading has otherwise succeeded. See loadDir and unknownKeysWarning.
+	unknownKeys := map[string][]string{}
+	var w map[string][]string
 
 	if err = s.checkLegacyKindDirs(); err != nil {
 		return cfg, model.Settings{}, err
 	}
 
-	if cfg.ProxyHosts, err = loadDir[model.ProxyHost](s.dir, "proxy-hosts"); err != nil {
+	if cfg.ProxyHosts, w, err = loadDir[model.ProxyHost](s.dir, "proxy-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.RedirectHosts, err = loadDir[model.RedirectHost](s.dir, "redirect-hosts"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.RedirectHosts, w, err = loadDir[model.RedirectHost](s.dir, "redirect-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.StreamHosts, err = loadDir[model.StreamHost](s.dir, "stream-hosts"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.StreamHosts, w, err = loadDir[model.StreamHost](s.dir, "stream-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.ParkedHosts, err = loadDir[model.ParkedHost](s.dir, "parked-hosts"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.ParkedHosts, w, err = loadDir[model.ParkedHost](s.dir, "parked-hosts"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.Certificates, err = loadDir[model.Certificate](s.dir, "certificates"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.Certificates, w, err = loadDir[model.Certificate](s.dir, "certificates"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.ClientCAs, err = loadDir[model.ClientCA](s.dir, "client-cas"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.ClientCAs, w, err = loadDir[model.ClientCA](s.dir, "client-cas"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.DNSProviders, err = loadDir[model.DNSProvider](s.dir, "dns-providers"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.DNSProviders, w, err = loadDir[model.DNSProvider](s.dir, "dns-providers"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.IdentityProviders, err = loadDir[model.IdentityProvider](s.dir, "identity-providers"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.IdentityProviders, w, err = loadDir[model.IdentityProvider](s.dir, "identity-providers"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.UpstreamGroups, err = loadDir[model.UpstreamGroup](s.dir, "upstream-groups"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.UpstreamGroups, w, err = loadDir[model.UpstreamGroup](s.dir, "upstream-groups"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.AccessLists, err = loadDir[model.AccessList](s.dir, "access-lists"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.AccessLists, w, err = loadDir[model.AccessList](s.dir, "access-lists"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.Middlewares, err = loadDir[model.Middleware](s.dir, "middlewares"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.Middlewares, w, err = loadDir[model.Middleware](s.dir, "middlewares"); err != nil {
 		return cfg, model.Settings{}, err
 	}
-	if cfg.APITokens, err = loadDir[model.APIToken](s.dir, "api-tokens"); err != nil {
+	mergeUnknownKeyWarnings(unknownKeys, w)
+	if cfg.APITokens, w, err = loadDir[model.APIToken](s.dir, "api-tokens"); err != nil {
 		return cfg, model.Settings{}, err
 	}
+	mergeUnknownKeyWarnings(unknownKeys, w)
 
 	settings := model.DefaultSettings()
 	sp := filepath.Join(s.dir, settingsFile)
 	if _, statErr := os.Stat(sp); statErr == nil {
-		if err = readYAML(sp, &settings); err != nil {
+		data, rerr := os.ReadFile(sp)
+		if rerr != nil {
+			return cfg, settings, fmt.Errorf("%s: %w", settingsFile, rerr)
+		}
+		if err = yaml.Unmarshal(data, &settings); err != nil {
 			return cfg, settings, fmt.Errorf("%s: %w", settingsFile, err)
+		}
+		if keys := model.UnknownYAMLKeys(data, &settings); len(keys) > 0 {
+			unknownKeys[settingsFile] = keys
 		}
 	}
 
@@ -261,6 +287,24 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	if err = settings.Validate(); err != nil {
 		return cfg, settings, fmt.Errorf("settings validation failed: %w", err)
 	}
+
+	// Load succeeded: collect one warning per file with unknown keys, rather
+	// than failing the load over it - a key an older gpm silently dropped is
+	// exactly the situation that must still start (see
+	// docs/operations/upgrading.md#rollback), just loudly. cfg.Warnings()
+	// (internal/model/validate.go) is what actually logs these - the same
+	// startup/reload path that already logs every other config warning - so
+	// nothing here re-logs on every read-only Load (GET /health and friends
+	// would otherwise repeat the same WARN on every poll).
+	paths := make([]string, 0, len(unknownKeys))
+	for path := range unknownKeys {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		cfg.ConfigWarnings = append(cfg.ConfigWarnings, unknownKeysWarning(path, unknownKeys[path]))
+	}
+
 	return cfg, settings, nil
 }
 
@@ -286,6 +330,12 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	if err != nil {
 		return "", err
 	}
+	meta := obj.GetMeta()
+	// Captured BEFORE withObject: upsert() below replaces a same-named element
+	// of cfg's slice in place, and withObject's shallow copy of cfg shares that
+	// slice's backing array, so cfg itself would otherwise be mutated to look
+	// like the incoming (not-yet-stamped) object by the time it is consulted.
+	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("rejecting save: %w", err)
@@ -297,10 +347,9 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
 
-	meta := obj.GetMeta()
 	now := time.Now().UTC()
 	path := filepath.Join(s.dir, dir, meta.Name+".yaml")
-	if err := writeYAML(path, stampTimes(obj, now)); err != nil {
+	if err := writeYAML(path, stampTimes(obj, existing, now)); err != nil {
 		return "", err
 	}
 	msg := fmt.Sprintf("%s %q: update", obj.Kind(), meta.Name)
@@ -354,6 +403,15 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	if err != nil {
 		return "", err
 	}
+	// Captured BEFORE the merge loop below: upsert() replaces a same-named
+	// element of a slice in place, and withObject's shallow copy shares that
+	// slice's backing array with cfg, so cfg would otherwise be mutated to
+	// look like the incoming (not-yet-stamped) objects by the time it is
+	// consulted for CreatedAt preservation.
+	existingByIndex := make([]model.Object, len(objs))
+	for i, o := range objs {
+		existingByIndex[i], _ = findObject(cfg, o.Kind(), o.GetMeta().Name)
+	}
 	merged := cfg
 	for _, o := range objs {
 		merged = withObject(&merged, o)
@@ -369,13 +427,13 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	}
 
 	now := time.Now().UTC()
-	for _, o := range objs {
+	for i, o := range objs {
 		dir, ok := kindDir[o.Kind()]
 		if !ok {
 			return "", fmt.Errorf("unknown object kind %q", o.Kind())
 		}
 		path := filepath.Join(s.dir, dir, o.GetMeta().Name+".yaml")
-		if err := writeYAML(path, stampTimes(o, now)); err != nil {
+		if err := writeYAML(path, stampTimes(o, existingByIndex[i], now)); err != nil {
 			return "", err
 		}
 	}
@@ -511,7 +569,7 @@ func restoreFiles(snaps []fileState) {
 // It exists for the Ingress-discovery reconciler, whose unit of work is a whole
 // reconcile: a poll that adds two hosts and removes one is a single revision an
 // operator can read and revert, not four commits with a reload, webhook and DNS
-// trigger apiece (see docs/design/ingress-discovery.md §2).
+// trigger apiece (see docs/design/ingress-discovery.md section 2).
 //
 // An empty batch is a no-op: it returns ("", nil) without committing, so a
 // steady-state reconcile produces no empty revisions. A delete naming an object
@@ -539,6 +597,13 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	}
 
 	applied := make([]model.Object, 0, len(upserts))
+	// appliedExisting is parallel to applied: the object on disk under the same
+	// kind/name before this batch touched it, or nil if applied[i] is new.
+	// Looked up and captured HERE, before withObject below mutates merged -
+	// which shares cfg's slice backing arrays, so cfg itself would otherwise be
+	// mutated to look like the incoming (not-yet-stamped) object by the time it
+	// is consulted for CreatedAt preservation at write time.
+	appliedExisting := make([]model.Object, 0, len(upserts))
 	var removals []string
 	merged := cfg
 	for _, o := range upserts {
@@ -548,7 +613,24 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		if _, ok := kindDir[o.Kind()]; !ok {
 			return "", fmt.Errorf("unknown object kind %q", o.Kind())
 		}
-		if existing, ok := findObject(cfg, o.Kind(), o.GetMeta().Name); ok && guard != nil {
+		existing, existsOK := findObject(cfg, o.Kind(), o.GetMeta().Name)
+		// ApplyBatch has exactly two callers, both automatic reconcilers (Ingress
+		// and Docker discovery - see cmd/gpm/main.go): every write through here is
+		// unattended, unlike Save/SaveBatch's explicit operator PUT. A file with
+		// unknown keys was written by a newer gpm (see docs/operations/upgrading.md
+		// #rollback); an unattended overwrite would silently finish dropping them
+		// the moment this object is next read and re-marshalled. Skip it instead -
+		// an operator's explicit PUT on the object is exempt from this check and
+		// can still update it.
+		if existsOK {
+			path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
+			if unknownKeysAtPath(path, existing) {
+				log.Warn().Str("kind", o.Kind()).Str("name", o.GetMeta().Name).
+					Msg("config store: batch upsert skipped, the file on disk has unknown keys from a newer gpm; an automatic writer must not risk dropping them (use an explicit API write instead)")
+				continue
+			}
+		}
+		if existsOK && guard != nil {
 			if err := guard(existing); err != nil {
 				log.Warn().Err(err).Str("kind", o.Kind()).Str("name", o.GetMeta().Name).
 					Msg("config store: batch upsert skipped, the object on disk is no longer one the caller owns")
@@ -557,6 +639,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		}
 		merged = withObject(&merged, o)
 		applied = append(applied, o)
+		appliedExisting = append(appliedExisting, existing)
 	}
 	for _, ref := range deletes {
 		if err := model.ValidateName(ref.Name); err != nil {
@@ -617,9 +700,9 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	}
 
 	now := time.Now().UTC()
-	for _, o := range applied {
+	for i, o := range applied {
 		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
-		if err := writeYAML(path, stampTimes(o, now)); err != nil {
+		if err := writeYAML(path, stampTimes(o, appliedExisting[i], now)); err != nil {
 			restoreFiles(snaps)
 			return "", err
 		}
@@ -830,6 +913,19 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 	if err := settings.IngressDiscovery.ValidateRefs(cfg); err != nil {
 		return "", err
 	}
+	// Same for the container reconciler's block, resolved so the profiles it
+	// inherits from ingressDiscovery are cross-checked too.
+	if err := settings.DockerDiscoveryResolved().ValidateRefs(cfg); err != nil {
+		return "", err
+	}
+	// Same reasoning for adminAuth: Settings.Validate can only see that the
+	// provider list is non-empty. Whether each name resolves to an identity
+	// provider that renders an admin sign-in button needs the rest of the config,
+	// and with ssoOnly a name that does not is a total lockout (no local form, no
+	// buttons) recoverable only by editing git and redeploying.
+	if err := settings.AdminAuth.ValidateRefs(cfg); err != nil {
+		return "", err
+	}
 	if lits := model.LiteralSecrets(settings); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
@@ -990,27 +1086,75 @@ func (s *Store) SaveAccessListSourceLedger(ctx context.Context, l model.AccessLi
 	return s.git.CommitAll(ctx, "Access-list source ledger: update", author)
 }
 
-func loadDir[T any](root, sub string) ([]T, error) {
+// loadDir reads every object file in root/sub and, alongside them, the set of
+// unknown YAML keys found in each (relative path -> keys), so a caller can
+// warn about a key an older struct silently dropped without failing the load.
+// See model.UnknownYAMLKeys and unknownKeysWarning.
+func loadDir[T any](root, sub string) ([]T, map[string][]string, error) {
 	dir := filepath.Join(root, sub)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	var out []T
+	var warnings map[string][]string
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
 			continue
 		}
+		rel := sub + "/" + e.Name()
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", rel, err)
+		}
 		var v T
-		if err := readYAML(filepath.Join(dir, e.Name()), &v); err != nil {
-			return nil, fmt.Errorf("%s/%s: %w", sub, e.Name(), err)
+		if err := yaml.Unmarshal(data, &v); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", rel, err)
+		}
+		if keys := model.UnknownYAMLKeys(data, &v); len(keys) > 0 {
+			if warnings == nil {
+				warnings = map[string][]string{}
+			}
+			warnings[rel] = keys
 		}
 		out = append(out, v)
 	}
-	return out, nil
+	return out, warnings, nil
+}
+
+// mergeUnknownKeyWarnings folds src into dst (both relative-path -> unknown
+// keys), for combining loadDir's per-directory result into one load-wide map.
+func mergeUnknownKeyWarnings(dst, src map[string][]string) {
+	for path, keys := range src {
+		dst[path] = keys
+	}
+}
+
+// unknownKeysAtPath reports whether the file CURRENTLY on disk at path has
+// unknown keys against sample's concrete type - the same check loadDir runs
+// at Load, re-run here at write time so an automatic writer sees the file's
+// state right now, not what a caller's plan (built seconds or minutes
+// earlier) read. A missing or unreadable file has nothing to protect.
+func unknownKeysAtPath(path string, sample any) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return len(model.UnknownYAMLKeys(data, sample)) > 0
+}
+
+// unknownKeysWarning renders one file's unknown keys as the single WARN
+// message logged for it and the string surfaced through Config.Warnings():
+// "config: <path>: unknown keys ignored: a.b, c[0].d - written by a newer
+// gpm? see docs/operations/upgrading.md#rollback".
+func unknownKeysWarning(path string, keys []string) string {
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	return fmt.Sprintf("config: %s: unknown keys ignored: %s - written by a newer gpm? see docs/operations/upgrading.md#rollback",
+		path, strings.Join(sorted, ", "))
 }
 
 // snapshotDirs reads every regular file directly under each named config

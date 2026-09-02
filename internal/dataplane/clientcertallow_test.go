@@ -139,7 +139,7 @@ func TestClientCertGateAllowFromCarriesNoIdentity(t *testing.T) {
 }
 
 // TestClientCertGateAllowFromWiredFromMiddleware proves the exemption survives
-// the normal auth-middleware dispatch, i.e. authMiddlewareHandler threads both
+// the normal auth-middleware dispatch, i.e. authHandler threads both
 // the client-IP resolver and the parsed AllowFrom nets into the gate.
 func TestClientCertGateAllowFromWiredFromMiddleware(t *testing.T) {
 	mw := model.Middleware{
@@ -150,7 +150,7 @@ func TestClientCertGateAllowFromWiredFromMiddleware(t *testing.T) {
 			AllowFrom: []string{"10.0.0.0/8"},
 		},
 	}
-	h := authMiddlewareHandler(mw, buildRegistry(model.Config{}), "m", []string{"m.example"},
+	h := authHandler(*mw.Auth, buildRegistry(model.Config{}), "m", []string{"m.example"},
 		clientIPResolver(nil), nil,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 

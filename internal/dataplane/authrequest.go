@@ -185,7 +185,10 @@ func (p *authRequestProxy) authenticate(r *http.Request) (*http.Response, error)
 	req.Header.Set("X-Forwarded-Proto", requestScheme(r))
 	req.Header.Set("X-Forwarded-Host", r.Host)
 	req.Header.Set("X-Forwarded-Uri", r.URL.RequestURI())
-	if ip := peerIP(r); ip != nil {
+	// The DERIVED client IP, not the peer: the auth server must see the same
+	// address gpm's own gates compared, or an IP-conditional policy on the
+	// outpost would disagree with the access list in front of it.
+	if ip := requestClientIP(r); ip != nil {
 		req.Header.Set("X-Forwarded-For", ip.String())
 	}
 	return p.client.Do(req)

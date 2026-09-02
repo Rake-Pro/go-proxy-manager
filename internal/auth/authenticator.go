@@ -24,13 +24,32 @@ import (
 // forward-auth that gates proxied hosts (internal/dataplane) is a separate
 // feature and is unaffected.
 type Authenticator struct {
-	store      *session.Store
-	cookieName string
-	secure     bool
-	sessionTTL time.Duration
+	store *session.Store
+	// cookieName is the bare session-cookie name and secureCookieName its
+	// __Host- prefixed twin. Which one is written is a per-request decision
+	// (see secureFor); BOTH are accepted on the way in, so a session issued in
+	// one mode survives the operator putting TLS in front of the panel.
+	cookieName       string
+	secureCookieName string
+	secureMode       CookieSecureMode
+	insecureWarn     insecureWarner
+	sessionTTL       time.Duration
 
 	localUser string
 	localHash string // bcrypt
+
+	// localTOTPSecret is the configured base32 TOTP secret for the local admin,
+	// as supplied. Its PRESENCE enables the second factor; localTOTPKey is its
+	// decoded form. An unparseable secret leaves the key nil while the secret
+	// stays set, which fails closed: TOTP is demanded and no code can satisfy it.
+	localTOTPSecret string
+	localTOTPKey    []byte
+
+	// otpmu guards otpLastCounter, the last TOTP step accepted per local user.
+	// A code is single-use: re-presenting one that has already been accepted
+	// (shoulder-surfed, or replayed off a proxied login POST) is refused.
+	otpmu          sync.Mutex
+	otpLastCounter map[string]uint64
 
 	mu       sync.RWMutex
 	baseURL  string
@@ -162,16 +181,32 @@ type pendingLogin struct {
 	verifier string
 	returnTo string
 	expires  time.Time
+	// totpUser marks a half-completed LOCAL login: the password was verified and
+	// only the TOTP code is outstanding. Non-empty exactly for those entries, so
+	// the two flows share this map's bounds and garbage collection without an
+	// OIDC state ever being redeemable as a TOTP one (or the reverse).
+	totpUser string
 }
+
+// pendingTOTPTTL is how long a password-verified login may wait for its TOTP
+// code. Short enough that a leaked pending token is near-worthless, long enough
+// to open an authenticator app.
+const pendingTOTPTTL = 5 * time.Minute
 
 // Options configures an Authenticator.
 type Options struct {
 	Store      *session.Store
 	CookieName string
-	Secure     bool // when true, the session cookie is Secure + __Host- prefixed
+	// SecureMode decides the Secure attribute on admin cookies. The zero value
+	// is CookieSecureAuto: Secure (and the __Host- name) whenever the request is
+	// TLS, forwarded as https by a trusted proxy, or externalBaseURL is https.
+	SecureMode CookieSecureMode
 	SessionTTL time.Duration
 	LocalUser  string
 	LocalHash  string // bcrypt hash of the local admin password
+	// LocalTOTPSecret is the base32 TOTP secret for the local admin
+	// (GPM_LOCAL_ADMIN_TOTP_SECRET / _FILE). Empty means no second factor.
+	LocalTOTPSecret string
 }
 
 // NewAuthenticator builds an Authenticator. Call Configure with the loaded
@@ -183,26 +218,41 @@ func NewAuthenticator(o Options) *Authenticator {
 	if o.SessionTTL == 0 {
 		o.SessionTTL = 12 * time.Hour
 	}
-	// With Secure cookies, adopt the __Host- prefix: the browser then enforces
-	// that the cookie is TLS-only, host-locked (no Domain), and Path=/ - all of
-	// which the session cookie already satisfies. Gated on Secure (which honours
-	// the operator's GPM_COOKIE_SECURE choice), so a plain-HTTP admin deployment
-	// is unaffected - a __Host- cookie requires Secure and would be rejected.
-	if o.Secure && !strings.HasPrefix(o.CookieName, "__Host-") && !strings.HasPrefix(o.CookieName, "__Secure-") {
-		o.CookieName = "__Host-" + o.CookieName
+	// A Secure cookie takes the __Host- prefix: the browser then enforces that it
+	// is TLS-only, host-locked (no Domain) and Path=/, all of which the session
+	// cookie already satisfies. A non-Secure cookie MUST keep the bare name - a
+	// browser rejects a __Host- cookie without Secure outright, which is exactly
+	// how the plain-HTTP first login used to fail silently.
+	o.CookieName = strings.TrimPrefix(strings.TrimPrefix(o.CookieName, "__Host-"), "__Secure-")
+	if o.CookieName == "" {
+		o.CookieName = "gpm_session"
+	}
+	// A malformed secret is NOT treated as "no TOTP": the key stays nil while the
+	// secret stays set, so LocalTOTPEnabled reports true and every code is
+	// refused. The daemon validates the value at startup (see cmd/gpm) and
+	// refuses to start on a bad one, so this is the belt to that braces.
+	var totpKey []byte
+	if o.LocalTOTPSecret != "" {
+		if k, err := NormalizeTOTPSecret(o.LocalTOTPSecret); err == nil {
+			totpKey = k
+		}
 	}
 	return &Authenticator{
-		store:       o.Store,
-		cookieName:  o.CookieName,
-		secure:      o.Secure,
-		sessionTTL:  o.SessionTTL,
-		localUser:   o.LocalUser,
-		localHash:   o.LocalHash,
-		idps:        map[string]model.IdentityProvider{},
-		clients:     map[string]*oidc.Client{},
-		pending:     map[string]pendingLogin{},
-		loginGate:   newRateGate(loginLockout, maxLoginFails, maxLoginGates),
-		pendingGate: newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
+		store:            o.Store,
+		cookieName:       o.CookieName,
+		secureCookieName: "__Host-" + o.CookieName,
+		secureMode:       o.SecureMode,
+		sessionTTL:       o.SessionTTL,
+		localUser:        o.LocalUser,
+		localHash:        o.LocalHash,
+		localTOTPSecret:  o.LocalTOTPSecret,
+		localTOTPKey:     totpKey,
+		otpLastCounter:   map[string]uint64{},
+		idps:             map[string]model.IdentityProvider{},
+		clients:          map[string]*oidc.Client{},
+		pending:          map[string]pendingLogin{},
+		loginGate:        newRateGate(loginLockout, maxLoginFails, maxLoginGates),
+		pendingGate:      newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
 	}
 }
 
@@ -323,13 +373,13 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo, clien
 // SetLoginStateCookie stores the login state in a short-lived, SameSite=Lax
 // cookie (Lax so it survives the top-level redirect back from the IdP). The
 // callback compares it to the state query parameter to bind the flow.
-func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, state string) {
+func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, r *http.Request, state string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookie,
 		Value:    state,
 		Path:     "/auth",
 		HttpOnly: true,
-		Secure:   a.secure,
+		Secure:   a.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
@@ -344,13 +394,13 @@ func (a *Authenticator) LoginStateCookie(r *http.Request) string {
 }
 
 // ClearLoginStateCookie expires the login-state cookie (single use).
-func (a *Authenticator) ClearLoginStateCookie(w http.ResponseWriter) {
+func (a *Authenticator) ClearLoginStateCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookie,
 		Value:    "",
 		Path:     "/auth",
 		HttpOnly: true,
-		Secure:   a.secure,
+		Secure:   a.secureFor(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
@@ -364,7 +414,10 @@ func (a *Authenticator) CompleteLogin(ctx context.Context, state, code string) (
 	p, ok := a.pending[state]
 	delete(a.pending, state)
 	a.pmu.Unlock()
-	if !ok || time.Now().After(p.expires) {
+	if !ok || p.totpUser != "" || time.Now().After(p.expires) {
+		// p.totpUser != "" is a half-finished LOCAL login being replayed at the
+		// OIDC callback. It shares this map, so refuse it explicitly rather than
+		// relying on the empty idp name failing later.
 		return nil, "", fmt.Errorf("invalid or expired login state")
 	}
 
@@ -398,26 +451,118 @@ func (a *Authenticator) CompleteLogin(ctx context.Context, state, code string) (
 
 // --- local login ----------------------------------------------------------
 
-// LocalLogin verifies local admin credentials, subject to the SSO-only policy,
-// and creates an admin session.
-func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string) (*session.Session, error) {
+// LocalLogin verifies local admin credentials, subject to the SSO-only policy.
+//
+// It returns EITHER a session (password only, no second factor configured) or a
+// pending-login token (TOTP is enabled: the password was right and the caller
+// must now present a code to CompleteTOTPLogin). Exactly one of the two is
+// non-empty on success.
+func (a *Authenticator) LocalLogin(ctx context.Context, user, pass string) (*session.Session, string, error) {
 	if !a.localAllowed() {
-		return nil, fmt.Errorf("local login is disabled")
+		return nil, "", fmt.Errorf("local login is disabled")
 	}
 	if a.localUser == "" || a.localHash == "" {
-		return nil, fmt.Errorf("no local admin configured")
+		return nil, "", fmt.Errorf("no local admin configured")
 	}
 	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.localUser)) == 1
 	passOK := bcrypt.CompareHashAndPassword([]byte(a.localHash), []byte(pass)) == nil
 	if !userOK || !passOK {
-		return nil, fmt.Errorf("invalid credentials")
+		return nil, "", fmt.Errorf("invalid credentials")
 	}
+	if a.LocalTOTPEnabled() {
+		token, err := a.startPendingTOTP()
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, token, nil
+	}
+	sess, err := a.newLocalSession(ctx, []string{"pwd"})
+	if err != nil {
+		return nil, "", err
+	}
+	return sess, "", nil
+}
+
+// LocalTOTPEnabled reports whether the local admin must present a TOTP code
+// after their password. It is on exactly when a secret was configured.
+func (a *Authenticator) LocalTOTPEnabled() bool {
+	return a.localTOTPSecret != ""
+}
+
+// startPendingTOTP mints the opaque token that carries a password-verified
+// login to its second step. It reuses the pending-login map (and therefore its
+// global cap and expiry sweep) so the two half-finished login flows share one
+// bounded, garbage-collected store.
+func (a *Authenticator) startPendingTOTP() (string, error) {
+	token, err := oidc.NewState()
+	if err != nil {
+		return "", err
+	}
+	a.pmu.Lock()
+	defer a.pmu.Unlock()
+	a.gcPendingLocked()
+	if len(a.pending) >= maxPendingLogins {
+		return "", fmt.Errorf("too many pending logins; try again shortly")
+	}
+	a.pending[token] = pendingLogin{totpUser: a.localUser, expires: time.Now().Add(pendingTOTPTTL)}
+	return token, nil
+}
+
+// CompleteTOTPLogin finishes a local login: it redeems the pending token from
+// LocalLogin and, if code is a currently-valid and not-yet-used TOTP code,
+// creates the admin session.
+//
+// The pending token is single-use whatever the outcome, so a wrong code costs a
+// fresh password submission rather than an unlimited guessing loop against one
+// token. Callers must still count the failure toward the per-IP login gate.
+func (a *Authenticator) CompleteTOTPLogin(ctx context.Context, token, code string) (*session.Session, error) {
+	a.pmu.Lock()
+	p, ok := a.pending[token]
+	delete(a.pending, token)
+	a.pmu.Unlock()
+	if !ok || p.totpUser == "" || time.Now().After(p.expires) {
+		return nil, fmt.Errorf("invalid or expired login")
+	}
+	if !a.localAllowed() {
+		return nil, fmt.Errorf("local login is disabled")
+	}
+	counter, ok := verifyTOTP(a.localTOTPKey, code, time.Now().Unix())
+	if !ok {
+		return nil, fmt.Errorf("invalid verification code")
+	}
+	if !a.acceptTOTPCounter(p.totpUser, counter) {
+		return nil, fmt.Errorf("verification code has already been used")
+	}
+	return a.newLocalSession(ctx, []string{"pwd", "otp", "mfa"})
+}
+
+// acceptTOTPCounter records a successfully verified step for user and reports
+// whether it was fresh. Replay protection is deliberately in-memory only: a
+// process restart is a far rarer event than a login, and the alternative -
+// committing a counter to the git-backed config on every sign-in - is worse.
+func (a *Authenticator) acceptTOTPCounter(user string, counter uint64) bool {
+	a.otpmu.Lock()
+	defer a.otpmu.Unlock()
+	if a.otpLastCounter == nil {
+		a.otpLastCounter = map[string]uint64{}
+	}
+	if last, seen := a.otpLastCounter[user]; seen && counter <= last {
+		return false
+	}
+	a.otpLastCounter[user] = counter
+	return true
+}
+
+// newLocalSession mints the admin session for a completed local login. amr
+// records how it was authenticated, so a downstream policy can tell a
+// password-only session from one that also cleared a second factor.
+func (a *Authenticator) newLocalSession(ctx context.Context, amr []string) (*session.Session, error) {
 	sess := &session.Session{
 		Subject:   a.localUser,
 		Name:      a.localUser,
 		Roles:     []string{string(RoleAdmin)},
 		IdP:       "local",
-		AMR:       []string{"pwd"},
+		AMR:       amr,
 		ExpiresAt: time.Now().Add(a.sessionTTL),
 	}
 	if err := a.store.Create(ctx, sess); err != nil {
@@ -496,6 +641,10 @@ type Principal struct {
 	// Scopes are the API token's granted scopes; empty for a session principal
 	// (whose access is governed by its role alone).
 	Scopes []string `json:"scopes,omitempty"`
+	// ReadOnly is true for the `user` role: every write route refuses it, so the
+	// SPA renders itself in a read-only mode (banner, Save buttons disabled)
+	// rather than offering controls whose every submission answers 403.
+	ReadOnly bool `json:"readOnly"`
 }
 
 // PrincipalFrom returns the authenticated principal, if any.
@@ -538,8 +687,16 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Pr
 	if secret, ok := bearerTokenSecret(r); ok {
 		return a.authenticateToken(secret)
 	}
-	c, err := r.Cookie(a.cookieName)
-	if err != nil {
+	c, hostPrefixed := a.sessionCookie(r)
+	if c == nil {
+		return Principal{}, false
+	}
+	// No downgrade. A __Host- cookie was minted for a Secure context; if this
+	// request would not get a Secure cookie, honouring it means the sliding
+	// re-issue would hand the same session id back without Secure. Fail closed
+	// and make the operator log in again on the channel they are actually using.
+	secure := a.secureFor(r)
+	if hostPrefixed && !secure {
 		return Principal{}, false
 	}
 	sess, err := a.store.Get(r.Context(), c.Value)
@@ -553,14 +710,37 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Pr
 		// mutating request with "invalid or missing CSRF token".
 		return Principal{}, false
 	}
-	a.maybeSlide(w, r.Context(), sess)
+	a.maybeSlide(w, r.Context(), sess, secure)
 	return principalOf(sess), true
+}
+
+// sessionCookie returns the session cookie r presents, preferring the __Host-
+// prefixed name, and reports whether that is the one found. Accepting both names
+// is what lets a live session survive the operator putting TLS in front of the
+// admin panel (or taking it away) without a forced re-login.
+func (a *Authenticator) sessionCookie(r *http.Request) (*http.Cookie, bool) {
+	if c, err := r.Cookie(a.secureCookieName); err == nil {
+		return c, true
+	}
+	if c, err := r.Cookie(a.cookieName); err == nil {
+		return c, false
+	}
+	return nil, false
+}
+
+// cookieNameFor is the __Host- name for a Secure cookie and the bare name
+// otherwise.
+func (a *Authenticator) cookieNameFor(secure bool) string {
+	if secure {
+		return a.secureCookieName
+	}
+	return a.cookieName
 }
 
 // maybeSlide extends a still-valid session whose remaining lifetime has dropped
 // below half the configured TTL, re-issuing the cookie with the new expiry. The
 // half-TTL threshold avoids a store write and Set-Cookie on every request.
-func (a *Authenticator) maybeSlide(w http.ResponseWriter, ctx context.Context, sess *session.Session) {
+func (a *Authenticator) maybeSlide(w http.ResponseWriter, ctx context.Context, sess *session.Session, secure bool) {
 	remaining := time.Until(sess.ExpiresAt)
 	if remaining <= 0 || remaining > a.sessionTTL/2 {
 		return
@@ -570,20 +750,25 @@ func (a *Authenticator) maybeSlide(w http.ResponseWriter, ctx context.Context, s
 		return
 	}
 	sess.ExpiresAt = newExp
-	session.SetSessionCookie(w, a.cookieName, sess.ID, newExp, a.secure)
+	session.SetSessionCookie(w, a.cookieNameFor(secure), sess.ID, newExp, secure)
 }
 
-// IssueCookie writes the session cookie for a freshly created session.
-func (a *Authenticator) IssueCookie(w http.ResponseWriter, sess *session.Session) {
-	session.SetSessionCookie(w, a.cookieName, sess.ID, sess.ExpiresAt, a.secure)
+// IssueCookie writes the session cookie for a freshly created session, Secure
+// (and __Host- named) or not according to how this request reached gpm.
+func (a *Authenticator) IssueCookie(w http.ResponseWriter, r *http.Request, sess *session.Session) {
+	secure := a.cookieSecure(r)
+	session.SetSessionCookie(w, a.cookieNameFor(secure), sess.ID, sess.ExpiresAt, secure)
 }
 
-// Logout clears the session and cookie.
+// Logout clears the session and BOTH cookie names: a session may have been
+// issued under either one, and leaving the other in the browser would leave a
+// dead-but-present credential behind.
 func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(a.cookieName); err == nil {
+	if c, _ := a.sessionCookie(r); c != nil {
 		_ = a.store.Delete(r.Context(), c.Value)
 	}
-	session.ClearSessionCookie(w, a.cookieName, a.secure)
+	session.ClearSessionCookie(w, a.cookieName, false)
+	session.ClearSessionCookie(w, a.secureCookieName, true)
 }
 
 // LoginOption describes an OIDC admin provider the user can click to log in.
@@ -618,6 +803,27 @@ func (a *Authenticator) LocalLoginVisible() bool {
 	return a.localUser != "" && a.localAllowed()
 }
 
+// LocalAdminConfigured reports whether a USABLE local credential exists - both
+// the username and its bcrypt hash. LocalLoginVisible only says whether the FORM
+// is rendered, which is also true for a half-configured pair (username set, hash
+// missing) whose every submission fails with "authentication failed".
+func (a *Authenticator) LocalAdminConfigured() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.localUser != "" && a.localHash != ""
+}
+
+// NoAdminLoginConfigured reports the bootstrap failure state: no usable local
+// credential that policy allows AND no SSO provider that renders a sign-in
+// button, so NOBODY can authenticate. This used to be visible only as one warn
+// line in the startup log while the login page rendered as though it worked.
+func (a *Authenticator) NoAdminLoginConfigured() bool {
+	if len(a.LoginOptions()) > 0 {
+		return false
+	}
+	return !(a.LocalAdminConfigured() && a.localAllowed())
+}
+
 // --- helpers --------------------------------------------------------------
 
 func (a *Authenticator) gcPendingLocked() {
@@ -634,7 +840,10 @@ func principalOf(s *session.Session) Principal {
 	if len(s.Roles) > 0 {
 		role = Role(s.Roles[0])
 	}
-	return Principal{Subject: s.Subject, Email: s.Email, Name: s.Name, Role: role, IdP: s.IdP, SessionID: s.ID, CSRFToken: s.CSRFToken}
+	return Principal{
+		Subject: s.Subject, Email: s.Email, Name: s.Name, Role: role, IdP: s.IdP,
+		SessionID: s.ID, CSRFToken: s.CSRFToken, ReadOnly: role == RoleUser,
+	}
 }
 
 // safeMethod reports whether m is a read-only HTTP method that needs no CSRF check.

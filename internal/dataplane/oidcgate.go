@@ -49,7 +49,8 @@ const (
 	// (silent when the IdP session is still alive) and re-checks group membership
 	// on the callback. That bounds the offboarding window - a deprivileged or
 	// disabled user loses data-plane access within 1h - without server-side
-	// session state. See the SSO session note in docs/configuration.md (GPM-L3).
+	// session state. See the session note in
+	// docs/how-to/per-host-sso.md.
 	oidcSessionTTL = 1 * time.Hour
 	oidcStateTTL   = 10 * time.Minute
 )

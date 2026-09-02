@@ -72,6 +72,7 @@ type upstreamHealth struct {
 	up     model.Upstream
 	addr   string // host:port dial target
 	label  string // scheme://host:port for logs/status
+	group  string // owning UpstreamGroup name, for the notify hook
 	weight int    // effective weight (>= 1)
 
 	healthy atomic.Bool
@@ -92,31 +93,45 @@ type upstreamHealth struct {
 
 func (u *upstreamHealth) reportSuccess() {
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	u.consecBad = 0
 	if u.healthy.Load() {
+		u.mu.Unlock()
 		return
 	}
 	u.consecOK++
-	if u.consecOK >= u.rise {
+	flipped := u.consecOK >= u.rise
+	if flipped {
 		u.consecOK = 0
 		u.healthy.Store(true)
+	}
+	u.mu.Unlock()
+	if flipped {
 		log.Info().Str("upstream", u.label).Msg("upstream recovered")
+		if h := upstreamHealthHook(); h != nil {
+			h(UpstreamHealthEvent{Group: u.group, Upstream: u.label, Healthy: true})
+		}
 	}
 }
 
 func (u *upstreamHealth) reportFailure() {
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	u.consecOK = 0
 	if !u.healthy.Load() {
+		u.mu.Unlock()
 		return
 	}
 	u.consecBad++
-	if u.consecBad >= u.fall {
+	flipped := u.consecBad >= u.fall
+	if flipped {
 		u.consecBad = 0
 		u.healthy.Store(false)
+	}
+	u.mu.Unlock()
+	if flipped {
 		log.Warn().Str("upstream", u.label).Msg("upstream marked unhealthy")
+		if h := upstreamHealthHook(); h != nil {
+			h(UpstreamHealthEvent{Group: u.group, Upstream: u.label, Healthy: false})
+		}
 	}
 }
 
@@ -329,6 +344,7 @@ func newGroupHealth(g model.UpstreamGroup) *groupHealth {
 			up:     up.Upstream,
 			addr:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 			label:  upstreamLabel(up.Upstream),
+			group:  g.Name,
 			weight: up.EffectiveWeight(),
 			rise:   g.HealthCheck.RiseCount(),
 			fall:   g.HealthCheck.FallCount(),
@@ -453,6 +469,17 @@ func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		out := req.Clone(req.Context())
 		out.URL.Scheme = u.up.Scheme
 		out.URL.Host = u.addr
+		// Each member carries its own base path and Host-header choice, applied
+		// here because only this layer knows which candidate the attempt went to.
+		// req.Clone deep-copies the URL, so every attempt composes from the same
+		// original path rather than stacking prefixes on a retry.
+		if u.up.Path != "" {
+			out.URL.Path = joinUpstreamBasePath(u.up.Path, out.URL.Path)
+			out.URL.RawPath = ""
+		}
+		if u.up.HostHeader != "" {
+			applyHostHeader(out, u.up.HostHeader, req.Host)
+		}
 		out.Body = body.next()
 		u.active.Add(1)
 		resp, err := t.base.RoundTrip(out)
@@ -546,10 +573,15 @@ func (g *groupHealth) stickyCookieFor(u *upstreamHealth, req *http.Request) *htt
 	}
 }
 
-// clientKey derives the ip-hash stickiness key from the connection peer (gpm is
-// the edge, so RemoteAddr is the real client). Port stripped so a client's
-// parallel connections hash identically.
+// clientKey derives the ip-hash stickiness key from the DERIVED client IP, not
+// from RemoteAddr: behind a trusted proxy every request shares one peer address,
+// which would pin the whole fleet to a single upstream. It falls back to the raw
+// RemoteAddr (port stripped, so a client's parallel connections hash
+// identically) only when no address can be derived at all.
 func clientKey(req *http.Request) string {
+	if ip := requestClientIP(req); ip != nil {
+		return ip.String()
+	}
 	if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 		return host
 	}

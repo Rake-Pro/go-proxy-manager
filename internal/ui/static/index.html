@@ -2,23 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<script>
-// Applies a saved explicit theme choice before first paint, so a light/dark
-// pick never flashes the other palette. "auto" (or unset) leaves no
-// data-theme attribute and app.css's prefers-color-scheme media queries
-// decide instead. Kept in sync with the gpm.theme key app.js reads/writes.
-(function () {
-  try {
-    var t = localStorage.getItem('gpm.theme');
-    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-  } catch (e) { /* ignore */ }
-})();
-</script>
+<!-- Pre-paint theme guard. A separate file, not an inline block: the admin
+     listener's Content-Security-Policy is script-src 'self', which blocks
+     inline execution outright. Must stay before the app.css <link>. -->
+<script src="theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Go Proxy Manager</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<!-- Fonts are served from this binary, never from a third party: the admin
+     panel is routinely on an isolated management VLAN with no outbound
+     internet, and a Google Fonts <link> also sent the operator's IP and
+     Referer off-box on every page view. The three faces are vendored under
+     static/fonts/ and @font-face'd from app.css, which is what lets the CSP
+     stay style-src 'self' 'unsafe-inline'; font-src 'self'. -->
+<link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="app.css" />
 </head>
 <body>

@@ -133,13 +133,16 @@ func (f *fakeIdP) signIDToken(t *testing.T) string {
 // --- test harness ----------------------------------------------------------
 
 type envOpts struct {
-	secure       bool // Secure cookies (and an https externalBaseURL)
+	secure       bool // an https externalBaseURL, which makes cookies Secure + __Host- named
 	localUser    string
 	localPass    string
 	localEnabled bool
 	ssoOnly      bool
 	noProviders  bool
 	roleMapping  *model.RoleMapping
+	// localTOTP, when set, is the base32 TOTP secret for the local admin, which
+	// turns local login into the two-step password-then-code flow.
+	localTOTP string
 }
 
 type testEnv struct {
@@ -163,7 +166,9 @@ func newTestEnv(t *testing.T, o envOpts) *testEnv {
 	if o.secure {
 		base = "https://admin.example.test"
 	}
-	ao := auth.Options{Store: st, Secure: o.secure, SessionTTL: time.Hour}
+	// SecureMode stays at its auto default: the https externalBaseURL above is
+	// what makes o.secure produce Secure, __Host- named cookies.
+	ao := auth.Options{Store: st, SessionTTL: time.Hour}
 	if o.localUser != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(o.localPass), bcrypt.MinCost)
 		if err != nil {
@@ -171,6 +176,7 @@ func newTestEnv(t *testing.T, o envOpts) *testEnv {
 		}
 		ao.LocalUser = o.localUser
 		ao.LocalHash = string(hash)
+		ao.LocalTOTPSecret = o.localTOTP
 	}
 	authn := auth.NewAuthenticator(ao)
 
@@ -706,6 +712,38 @@ func TestSecureCookiesUseHostPrefix(t *testing.T) {
 	}
 	if got := e.get("/api/me", sc).StatusCode; got != http.StatusOK {
 		t.Fatalf("/api/me with the __Host- cookie: got %d, want 200", got)
+	}
+}
+
+// TestPlainHTTPFirstLoginWorks is the quick-start regression: over
+// http://127.0.0.1:8081 with no externalBaseURL, the login POST must set a
+// usable, non-Secure, bare-named cookie and the next request must be
+// authenticated. A Secure-by-default cookie was silently dropped by the browser,
+// so the first login of a fresh install appeared to do nothing.
+func TestPlainHTTPFirstLoginWorks(t *testing.T) {
+	e := newTestEnv(t, envOpts{localUser: "admin", localPass: "s3cret", localEnabled: true, noProviders: true})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/local",
+		strings.NewReader(url.Values{"username": {"admin"}, "password": {"s3cret"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:54321"
+	res := e.do(req)
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("local login: got %d, want 302", res.StatusCode)
+	}
+	sc := mustCookie(t, res, "gpm_session")
+	if sc.Secure {
+		t.Fatalf("plain-HTTP login must issue a non-Secure cookie: %+v", sc)
+	}
+	if cookie(t, res, "__Host-gpm_session") != nil {
+		t.Fatal("a non-Secure cookie must not take the __Host- prefix")
+	}
+
+	me := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	me.RemoteAddr = "127.0.0.1:54322"
+	me.AddCookie(sc)
+	if got := e.do(me).StatusCode; got != http.StatusOK {
+		t.Fatalf("/api/me after a plain-HTTP login: got %d, want 200", got)
 	}
 }
 

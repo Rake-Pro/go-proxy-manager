@@ -16,12 +16,9 @@ const (
 	ActionDeny  = "deny"
 )
 
-// BasicAuthUser is an HTTP basic-auth credential. Only the bcrypt hash is ever
-// stored; the plaintext is hashed at the API/CLI boundary before it reaches here.
-type BasicAuthUser struct {
-	Username     string `json:"username" yaml:"username"`
-	PasswordHash string `json:"passwordHash" yaml:"passwordHash"` // bcrypt
-}
+// BasicAuthUser now lives in basicauth.go: it is shared with the auth
+// middleware's `mode: basic` block, which is where username/password gating
+// belongs (AccessList.BasicAuth below is deprecated).
 
 // IPRule is one ordered allow/deny entry evaluated top-down against the client
 // IP and, when Paths is set, the request path and method.
@@ -185,16 +182,29 @@ func (g *AccessListGeo) validate(listName string) error {
 	return nil
 }
 
-// AccessList combines HTTP basic auth, ordered IP allow/deny rules, and
-// optional GeoIP country rules. It can be attached to a host or an individual
-// location. SatisfyAny selects OR- vs AND-evaluation across the list's checks:
-// when true, passing EITHER auth or IP/geo is enough; when false both must pass.
+// AccessList is a set of ordered IP allow/deny rules and optional GeoIP country
+// rules over the resolved client IP. It can be attached to a host or an
+// individual location.
+//
+// It also still carries the deprecated BasicAuth/SatisfyAny pair, which is the
+// only login mechanism that ever lived in this tier. Use an auth middleware with
+// `mode: basic` instead (see BasicAuthSpec); POST
+// /api/access-lists/{name}/migrate-basic-auth converts a list in place.
 type AccessList struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
 
-	SatisfyAny bool            `json:"satisfyAny,omitempty" yaml:"satisfyAny,omitempty"`
-	BasicAuth  []BasicAuthUser `json:"basicAuth,omitempty" yaml:"basicAuth,omitempty"`
-	Rules      []IPRule        `json:"rules,omitempty" yaml:"rules,omitempty"`
+	// Deprecated: use an auth middleware with `mode: basic` and put these
+	// networks in its allowFrom. SatisfyAny selects OR- vs AND-evaluation across
+	// this list's checks: when true, passing EITHER BasicAuth or IP/geo is
+	// enough; when false both must pass. It is meaningless without BasicAuth,
+	// since IP and geo are already one verdict. Still honoured; removed in v2.
+	SatisfyAny bool `json:"satisfyAny,omitempty" yaml:"satisfyAny,omitempty"`
+	// Deprecated: use an auth middleware with `mode: basic` (BasicAuthSpec).
+	// Basic auth in the access-list tier is what forces the SatisfyAny flag and
+	// the "no basicAuth list on a StreamHost" special case in Config.Validate.
+	// Still honoured; removed in v2.
+	BasicAuth []BasicAuthUser `json:"basicAuth,omitempty" yaml:"basicAuth,omitempty"`
+	Rules     []IPRule        `json:"rules,omitempty" yaml:"rules,omitempty"`
 	// Sources are remote IP feeds a rule may reference by name (rule.source).
 	// The fetched sets live in the committed ledger (config/access-list-sources.yaml),
 	// never inline here, so a routine re-fetch never rewrites the operator's list.
@@ -299,7 +309,7 @@ func validateRulePaths(listName string, r IPRule) error {
 	// by "/ADMIN" either. An allow rule that misses simply falls through to the
 	// list's defaultAction (fails closed); a deny rule that misses lets the
 	// request past (fails OPEN). Deny-by-path belongs to the guard middleware,
-	// which owns that matching problem - see docs/configuration.md.
+	// which owns that matching problem - see docs/reference/config/middleware.md.
 	if r.Action == ActionDeny {
 		return fmt.Errorf("access list %q: rule paths are allow-only, got action deny: an exact path match cannot be relied on to DENY (it would miss %q and other equivalent spellings); use a guard middleware for deny-by-path", listName, r.Paths[0]+"/")
 	}
