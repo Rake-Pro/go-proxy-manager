@@ -3,7 +3,7 @@
 Require a time-based one-time password after the local admin's password.
 
 RFC 6238: SHA-1, 6 digits, 30-second step. It is off unless a secret is
-configured, and it applies to the local account only - SSO logins keep whatever
+configured, and it applies to the local account only: SSO logins keep whatever
 MFA the identity provider enforces.
 
 ## Prerequisites
@@ -58,5 +58,5 @@ MFA the identity provider enforces.
 | Every code is rejected | Server and phone clocks differ by more than 30 seconds; only one step either side is accepted | Fix time sync (NTP) on the host |
 | Every code is rejected, and the log says the secret is not usable base32 | gpm refuses to start with an unparseable secret, so this is a stale container | Regenerate with `gpm totp-secret` and restart |
 | "authentication failed" on a code that just worked | Codes are single-use: the accepted step cannot be replayed | Wait for the next 30-second step |
-| `429 too many login attempts` | Five failed attempts (wrong password **or** wrong code) from one client IP within 15 minutes | Wait 15 minutes, or restart gpm - the lockout and the used-code ledger are in memory only |
+| `429 too many login attempts` | Five failed attempts (wrong password **or** wrong code) from one client IP within 15 minutes | Wait 15 minutes, or restart gpm: the lockout and the used-code ledger are in memory only |
 | Locked out with no authenticator (phone lost) | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*` and restart to sign in with the password alone, then enrol a new secret |

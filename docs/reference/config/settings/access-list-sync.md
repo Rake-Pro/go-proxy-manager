@@ -13,7 +13,7 @@ declares in `sources` fetched into the committed ledger
 
 | Field | Type | Notes |
 |-------|------|-------|
-| <span id="settings-access-list-sync-enabled"></span> `enabled` | bool | Turn the fetcher off. **Absent means enabled** - a deployment that declares a source wants it fetched. |
+| <span id="settings-access-list-sync-enabled"></span> `enabled` | bool | Turn the fetcher off. **Absent means enabled**: a deployment that declares a source wants it fetched. |
 | <span id="settings-access-list-sync-poll-interval"></span> `pollInterval` | string | Go duration; how often the loop asks whether any source is *due*. Empty = `15m`; below `1m` is refused. |
 
 ```yaml
@@ -22,7 +22,7 @@ accessListSync:
   pollInterval: 15m
 ```
 
-`pollInterval` is not how often a feed is downloaded - each source's own
+`pollInterval` is not how often a feed is downloaded: each source's own
 `interval` (default `24h`) decides that, so polling often is cheap. A fetch is
 **refused whole**, keeping the previously fetched set, when the source answers
 anything but `200`, returns no valid entries, returns more than `maxEntries`, or

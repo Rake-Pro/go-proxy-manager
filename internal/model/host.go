@@ -106,9 +106,8 @@ type TLSSettings struct {
 	ForceSSL       bool   `json:"forceSSL,omitempty" yaml:"forceSSL,omitempty"` // redirect http->https
 	// Deprecated: no effect. HTTP/2 is always offered - the listener's ALPN is
 	// unconditionally "h2,http/1.1" (see internal/dataplane baseHostTLSConfig), so
-	// there is nothing per-host to switch. The field exists only because NPM has
-	// the checkbox and its importer round-trips it; it is still parsed so existing
-	// YAML keeps loading, and is dropped from the UI, the API docs and the config
+	// there is nothing per-host to switch. The field is retained only so existing
+	// YAML keeps loading; it is dropped from the UI, the API docs and the config
 	// reference.
 	HTTP2 bool `json:"http2,omitempty" yaml:"http2,omitempty"`
 	HSTS  HSTS `json:"hsts,omitempty" yaml:"hsts,omitempty"`
@@ -355,9 +354,8 @@ type ProxyHost struct {
 
 	// Deprecated: no effect. WebSocket upgrades always work - the reverse proxy
 	// forwards the Upgrade handshake and both the compression and
-	// strip-headers layers special-case a 101 response. The field exists only
-	// because NPM has the checkbox and its importer round-trips it; it is still
-	// parsed so existing YAML keeps loading, and is dropped from the UI, the API
+	// strip-headers layers special-case a 101 response. The field is retained
+	// only so existing YAML keeps loading; it is dropped from the UI, the API
 	// docs and the config reference.
 	WebsocketsUpgrade bool `json:"websocketsUpgrade,omitempty" yaml:"websocketsUpgrade,omitempty"`
 

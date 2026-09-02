@@ -77,7 +77,6 @@ nav:
       - Deployment shapes:
           - Admin UI behind gpm: how-to/admin-ui-behind-gpm.md
           - Tunnels and relays behind CGNAT: how-to/tunnels.md
-          - Migrate from Nginx Proxy Manager: how-to/migrate-from-npm.md
   - Reference:
       - Configuration:
           - Overview and anchors: reference/config/README.md
@@ -119,15 +118,10 @@ nav:
       - Certificate health: operations/certificate-health.md
       - Hardening: operations/hardening.md
       - Profiling with pprof: operations/pprof.md
-  - Design notes:
-      - Kubernetes Ingress discovery: design/ingress-discovery.md
-      - Docker discovery: design/docker-discovery.md
-      - High availability: design/ha.md
-      - HTTP/3, GeoIP and mTLS: design/http3-geoip-mtls.md
   - Roadmap: roadmap.md
-  - Moved pages:
-      - Configuration reference (moved): configuration.md
-      - Deployment (moved): deployment.md
-      - Architecture (moved): architecture.md
-      - High availability (moved): ha.md
-      - Migrating from NPM (moved): migrating-from-npm.md
+
+not_in_nav: |
+  configuration.md
+  deployment.md
+  architecture.md
+  ha.md

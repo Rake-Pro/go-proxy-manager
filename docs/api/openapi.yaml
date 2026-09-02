@@ -2698,7 +2698,7 @@ components:
               reason:
                 type: string
                 description: Present on a skip, and on the two updates that are not a plain derive.
-      description: Last-reconcile result. Shape mirrored from internal/docker; see docs/design/docker-discovery.md.
+      description: Last-reconcile result. Shape mirrored from internal/docker; see design/docker-discovery.md.
       additionalProperties: true
     DockerDiscoveryPlan:
       type: object

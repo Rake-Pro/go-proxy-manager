@@ -2,7 +2,7 @@
 
 Gate a host on local username/password pairs, with no identity provider. The
 supported home for this is an auth middleware in `basic` mode; the
-`AccessList.basicAuth` field is deprecated - see
+`AccessList.basicAuth` field is deprecated: see
 [Migrate access-list basic auth](migrate-basic-auth.md).
 
 ## Prerequisites
@@ -50,7 +50,7 @@ supported home for this is an auth middleware in `basic` mode; the
    the same way and creates no middleware object.
 
 4. **Drop `allowFrom` deliberately, not by accident.** It is an exemption from
-   the password, compared against the derived client IP - read
+   the password, compared against the derived client IP: read
    [Which IP `allowFrom` compares](../concepts/request-pipeline.md#which-ip-allowfrom-compares)
    before relying on it behind another proxy.
 

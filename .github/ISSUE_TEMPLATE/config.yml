@@ -5,4 +5,4 @@ contact_links:
     about: Usage questions, config help, and ideas that aren't a concrete bug or feature request yet.
   - name: Security vulnerability
     url: https://github.com/Rake-Pro/go-proxy-manager/security/advisories/new
-    about: Report privately - do not open a public issue. See SECURITY.md.
+    about: Report privately. Do not open a public issue. See SECURITY.md.

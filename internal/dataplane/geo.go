@@ -7,7 +7,7 @@ import (
 )
 
 // geoDB, set once at startup via SetGeoDB, is the GeoIP database consulted by
-// AccessList geo rules (see internal/geoip and docs/design/http3-geoip-mtls.md).
+// AccessList geo rules (see internal/geoip and design/http3-geoip-mtls.md).
 // It mirrors the ssoKeyDir pattern in oidcgate.go: a package-level handle set
 // once from main, rather than threaded through every constructor. An unset (or
 // never-loaded) database means the feature is unavailable: any AccessList that

@@ -24,14 +24,12 @@ All items from the internal review are remediated (see CHANGELOG `Security`).
 - [x] **Strip a baseline identity-header denylist** from untrusted peers
   (`Remote-User`, `X-Forwarded-User`, the `X-Auth-Request-*` / `X-Authentik-*`
   families, etc.), regardless of which IdP is configured. *(Medium)*
-- [x] **Scope identity-header trust per host/provider** - trust is now the union
+- [x] **Scope identity-header trust per host/provider**: trust is now the union
   of a host's own (and its locations') providers, not a global union. *(Medium)*
-- [x] **Bound importer resource use**: a per-table `LIMIT` / row cap
-  (`maxImportRows`) fails an over-large source loudly; dedup is map-based. *(Medium)*
 - [x] `__Host-` prefix on the session cookie whenever the cookie is issued
-  `Secure`. `GPM_COOKIE_SECURE=auto` (the default) decides per request - TLS to
+  `Secure`. `GPM_COOKIE_SECURE=auto` (the default) decides per request (TLS to
   gpm, a trusted proxy asserting `X-Forwarded-Proto: https`, or an `https://`
-  `externalBaseURL` - so a plain-HTTP bootstrap login still works and the same
+  `externalBaseURL`), so a plain-HTTP bootstrap login still works and the same
   deployment hardens itself once fronted; `1`/`0` force the decision. Both cookie
   names are accepted on the way in, so a session survives the switch. *(Low)*
 - [x] Emit baseline security headers (HSTS, `X-Content-Type-Options`,
@@ -61,7 +59,7 @@ All findings from that review are remediated in the same change (see CHANGELOG
   *(Low)*
 - [x] Manual DNS reconcile returns 409 instead of blocking on the run lock.
   *(Low)*
-- [x] `apexTarget` change orphans previously-managed records - **fixed, not just
+- [x] `apexTarget` change orphans previously-managed records: **fixed, not just
   documented**, by the ownership ledger: a record gpm created and nobody has
   touched since is still recognisably gpm's after the apex moves, so it is
   retargeted on the next reconcile instead of being orphaned. *(Low)*
@@ -108,7 +106,7 @@ All findings from that review are remediated in the same change (see CHANGELOG
   `upstream.path`.** Deliberate (the probe path is configured in full), but worth
   revisiting if operators keep writing the base path twice.
 - `IngressHostTemplate.upstream` is a plain `Upstream`, so the model carries
-  `path` / `hostHeader` there for free - only the Settings page's flat rebuild
+  `path` / `hostHeader` there for free; only the Settings page's flat rebuild
   needs the two extra fields.
 
 ### Error pages (observations from the auth-refusal review, no code changed)
@@ -119,7 +117,7 @@ error-page system; none is a regression from that change.
 - [x] **A rendered error page carries no `X-Content-Type-Options: nosniff`.**
   `serveErrorPage` sets only `Content-Type` and `Content-Length`, while the
   plain-text fallback goes through `http.Error`, which sets `nosniff` itself. So
-  configuring an error page silently *drops* a header the default response has -
+  configuring an error page silently *drops* a header the default response has,
   on every tier (access list, guard, bouncer, rate limit, proxy, parked host and
   now auth), not just auth. The bodies are `html/template`-escaped so this is
   defence in depth rather than a live hole, but the asymmetry is backwards.
@@ -133,7 +131,7 @@ error-page system; none is a regression from that change.
 - [x] **`securityHeaders` needs a per-header scope so app-breaking headers stay
   off proxied apps.** A single set-if-absent map applied to both gpm-generated
   and proxied responses cannot express "`Content-Security-Policy: frame-ancestors
-  'none'` / `Permissions-Policy` on gpm's own pages but never on a proxied app" -
+  'none'` / `Permissions-Policy` on gpm's own pages but never on a proxied app":
   set-if-absent is not enough, because the app legitimately sets none, so gpm's
   value lands and breaks it (Home Assistant relies on same-origin add-on
   iframes). *(Addressed: each header carries a `scope` of `all` (default),
@@ -144,10 +142,10 @@ error-page system; none is a regression from that change.
   next restart.** `settings.errorPages` is not compiled at write time, so a
   syntactically-broken template commits cleanly. The reload path is fail-safe
   (`cmd/gpm/main.go` logs and returns the error, leaving the previous pages
-  installed), but startup calls `log.Fatal` on the same failure - so the running
+  installed), but startup calls `log.Fatal` on the same failure, so the running
   instance is fine and the *next* restart dies. Now more reachable than before:
   the new Error pages section makes inline templates easy to author from the UI.
-  Options: compile-check in `Settings.Validate` (best - refuses the commit), or
+  Options: compile-check in `Settings.Validate` (best: refuses the commit), or
   degrade the startup failure to a warning that starts with no custom pages.
 - [ ] **Auth-gate refusals do not increment the denial metrics.** The access
   list, guard, bouncer and rate-limit tiers all call `countDenial(r, reason)`;
@@ -176,9 +174,9 @@ error-page system; none is a regression from that change.
   just that change; keep the whole-tree revert as an explicit, clearly-labeled
   separate action.
   *(Done: `Store.RevertObject(kind,name,hash)` restores a single file via
-  `git checkout <hash> -- <rel>` - rel derived from the trusted kind mapping, hash
+  `git checkout <hash> -- <rel>` (rel derived from the trusted kind mapping, hash
   validated, whole-config re-validated with HEAD rollback on failure, absent-at-
-  commit refused (no delete-on-revert); endpoint `POST /api/{kind}/{name}/revert`;
+  commit refused (no delete-on-revert)); endpoint `POST /api/{kind}/{name}/revert`;
   History view gains "revert this object" and the whole-tree action is relabeled
   "revert entire config".)*
 - [x] Full field-level forms in the UI for every object kind (redirect, stream,
@@ -219,7 +217,7 @@ error-page system; none is a regression from that change.
     is the same shape the eventual bulk enable/disable wants.
   - [ ] **Scheduled windows** were deliberately left out: a window opens and
     closes when an operator flips a switch. Revisit only if a real recurring
-    window shows up - a scheduler is a whole subsystem (timezones, overlap,
+    window shows up: a scheduler is a whole subsystem (timezones, overlap,
     what happens to a hand-flip inside a scheduled window) for something a
     deploy pipeline can already do with two API calls.
 
@@ -230,7 +228,7 @@ error-page system; none is a regression from that change.
   token header when Authentik is itself proxied through gpm, breaking every admin
   login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
 
-## Public release (deferred - owner wants this, not yet ready)
+## Public release (deferred, owner wants this, not yet ready)
 
 - [ ] **Take the repo public** once it has had a polish pass and a dedicated
   security-surface review. *(2026-08-22: review done; batches 1+2 shipped same day: 4 Med + 2 Low
@@ -244,11 +242,10 @@ error-page system; none is a regression from that change.
   +2.1 MB, 3 advisories/12 months).)* Publishing the source of the live edge proxy is a
   deliberate exposure decision: the full pre-publication pipeline applies
   (all-history secret/infra audit, author-identity normalization, tag/release
-  handling, LICENSE choice) plus items specific to this repo - a fresh look at
+  handling, LICENSE choice) plus items specific to this repo: a fresh look at
   the auth/guard code paths with "attacker can read the source" assumptions,
-  a decision on how the docs position NPM/NPMplus as references (clean-room
-  note stays), and confirmation that no deployment-specific defaults leak
-  operator detail. Do not flip until the security review is signed off.
+  a check that the docs describe gpm entirely on its own terms, and
+  confirmation that no deployment-specific defaults leak operator detail. Do not flip until the security review is signed off.
 
 ## Live-validation follow-ups
 
@@ -260,7 +257,7 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   from an external client through a published 15432 -> gpm forwarder -> backend).
 - [ ] **Per-host OIDC relying-party gating** against a real Authentik OIDC app
   (HELD 2026-08-22: only the handful of auth-request hosts fronting apps without
-  native OIDC would benefit - revisit when the outpost becomes a nuisance;
+  native OIDC would benefit; revisit when the outpost becomes a nuisance;
   shared client, one callback URI per host)
   (register the `/__gpm/oidc/callback` redirect URI, set `GPM_SSO_SIGNING_KEY`,
   walk a host through redirect -> callback -> session).
@@ -303,8 +300,8 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   `TestDerivedHostInherits...` pair. Pre-existing; deliberately left out of the
   stripping change to keep that diff to one feature.
 - [x] **No editor for `securityHeaders`.** Both the Settings page ("Response
-  security headers") and the host editor now render a row editor - header name,
-  value, and a scope select (`all` / `generated-only` / `proxied-only`) - backed
+  security headers") and the host editor now render a row editor (header name,
+  value, and a scope select (`all` / `generated-only` / `proxied-only`)) backed
   by the shared `makeSecurityHeaderRows` in `internal/ui/static/app.js`. The
   editor owns the field in both whole-object PUTs, so the old carry-forward
   guards are gone; `TestSecurityHeadersEditorRenders` and
@@ -352,10 +349,10 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
 ## DNS sync (phase 2: Kubernetes Ingress discovery)
 
 Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) and
-phase 2 (Kubernetes Ingress discovery) are both shipped - see CHANGELOG
+phase 2 (Kubernetes Ingress discovery) are both shipped: see CHANGELOG
 `Added`, [docs/configuration.md](docs/reference/config/settings/ingress-discovery.md)
 and the design record
-[docs/design/ingress-discovery.md](docs/design/ingress-discovery.md).
+[design/ingress-discovery.md](design/ingress-discovery.md).
 
 - [x] **Discover cluster Ingresses and reconcile them into managed proxy hosts.**
   Opt-in per Ingress via `gpm.rake.pro/managed: "true"` (never opt-out, never a
@@ -363,7 +360,7 @@ and the design record
   `gpm.rake.pro/public-cname` setting the derived host's `dns` policy.
   - [x] **Plain Kubernetes REST, no `client-go`** (`internal/k8s`): `net/http` +
     `encoding/json` against `/apis/networking.k8s.io/v1/ingresses`, in-cluster or
-    explicit `apiURL`/`tokenFile`/`caFile` (the latter is the real deployment  - 
+    explicit `apiURL`/`tokenFile`/`caFile` (the latter is the real deployment:
     gpm runs off-cluster on the edge host), token re-read on a TTL for projected
     SA rotation, hardened transport, bounded pagination.
   - [x] **Scoped read-only ServiceAccount**: `deploy/k8s-ingress-discovery-rbac.yaml`
@@ -376,14 +373,14 @@ and the design record
     selected with `gpm.rake.pro/profile`). One template only fits a uniform
     fleet; adopting a host with a different chain would drop its
     `sso`/`rate-limit`/login middleware or impose an access list on a host that
-    is public on purpose. The annotation carries a **name only** - the Ingress
+    is public on purpose. The annotation carries a **name only**: the Ingress
     author is untrusted, so a manifest picks among operator-authored chains and
     can never name a middleware, access list, certificate or upstream. An
     undefined name skips the Ingress rather than downgrading it to the default.
     `template` stays the default profile, so existing configs are unaffected.
   - [x] **Revocation fails closed.** An Ingress whose profile no longer resolves
     (typo, renamed profile, retired profile, profile rows cleared in the UI) has
-    its existing derived host **disabled**, not frozen - otherwise a tenant could
+    its existing derived host **disabled**, not frozen: otherwise a tenant could
     pin a chain the operator had just tightened simply by naming a profile that
     does not exist. Other derive failures still freeze.
   - [x] **Discovery refs are cross-checked at settings-write time**
@@ -391,17 +388,17 @@ and the design record
     certificate/upstreamGroup/middleware/accessList/clientCA name used to pass
     `SaveSettings` and then reject the whole reconcile batch on every poll,
     dropping every unrelated tenant's changes with it.
-  - [x] **Domain ownership, not just name ownership** - a derived host whose
+  - [x] **Domain ownership, not just name ownership**: a derived host whose
     domains are already claimed by a host discovery does not own is skipped and
     reported, and `Config.Validate` rejects two enabled hosts claiming one domain
     whatever wrote them. Ownership is re-checked under the store lock at write
     time via `Store.ApplyBatch`'s `ApplyGuard`, since the plan predates the list.
-  - [x] **Feeds the existing DNS sync** - discovery sets the `dns` policy and
+  - [x] **Feeds the existing DNS sync**: discovery sets the `dns` policy and
     reuses the phase-1 trigger, so there is one DNS code path.
   - [x] **Template/profile parity with a hand-written host** (`robotsNoIndex`,
     `timeouts`, `tags`). The template expressed the upstream, TLS, websockets,
     chains and default DNS and nothing else, so cutting a service over to
-    discovery **silently dropped** its `robotsNoIndex` - and the only way back was
+    discovery **silently dropped** its `robotsNoIndex`, and the only way back was
     a `headers` middleware setting `X-Robots-Tag`, i.e. a second mechanism for
     something the model already expresses. `timeouts` reuses `ProxyHost`'s own
     validation helper at settings-write time; all three are deep-copied per
@@ -430,13 +427,13 @@ and the design record
     construction.
 
 - [x] **Let an operator disable a discovery-managed host.** (Done 2026-08-22 via `gpm.rake.pro/disabled-by` provenance label; see CHANGELOG.) `derive()` never sets
-  `Disabled` and `sameHost` compares it, so a managed host disabled by hand - the
-  obvious move when an app has to come offline *now* - is upserted back to enabled
+  `Disabled` and `sameHost` compares it, so a managed host disabled by hand (the
+  obvious move when an app has to come offline *now*) is upserted back to enabled
   on the next poll, DNS records and all. Today's only real off-switches are
   removing the `Ingress` annotation (needs cluster access) and removing the
   `managed-by` label (no cluster access, but permanent adoption); both are
   documented in `docs/configuration.md`. Proposal: treat `disabled` as
-  operator-owned state - discovery honours an operator-set `Disabled` and only
+  operator-owned state: discovery honours an operator-set `Disabled` and only
   clears it when discovery itself set it. That needs a way to tell the two apart
   (a `gpm.rake.pro/disabled-by` label, or an annotation on the `Ingress` that
   discovery derives `Disabled` from), and it must not become a way for a cluster
@@ -452,32 +449,32 @@ one change:
 - [x] **Explicit ownership ledger** (`model.DNSLedger`, singleton
   `config/dns-ledger.yaml`) replaces target-equality inference. A record absent
   from the ledger is never deleted, whatever it points at.
-- [x] **Adopt, don't purge, on first enable** - a present record matching the
+- [x] **Adopt, don't purge, on first enable**: a present record matching the
   desired set is claimed rather than recreated; everything else is left alone and
   counted as `untouched`.
 - [x] **Dry run**: `GET /api/dns-sync/plan` (`dns-sync:read`), wired into the
   settings UI as *Preview changes*, reporting the same decisions the reconcile
   would take without writing anything.
-- [x] **Cloudflare on the same discipline** - the ledger is authoritative for
+- [x] **Cloudflare on the same discipline**: the ledger is authoritative for
   deletion, the `managed-by:gpm` comment stays as an independent second condition.
 - [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
   created and deleted.
 
 Adversarial review of that change (2026-08-01), all remediated:
 
-- [x] **Adoption was a one-way trap** - an adopted record the config later stopped
+- [x] **Adoption was a one-way trap**: an adopted record the config later stopped
   wanting was deleted. Ledger entries now record provenance (`adopted`) and an
   adopted entry is *released*, never deleted; a missing field reads as adopted so
   upgrades cannot destroy anything. *(High)*
-- [x] **A retarget deleted records gpm had only ADOPTED** - the retarget branch
+- [x] **A retarget deleted records gpm had only ADOPTED**: the retarget branch
   ignored the claim's provenance, so an `apexTarget` change destroyed an
   operator-authored record *and* re-recorded it as gpm-created, arming a later
   host removal to hard-delete it. An adopted claim whose record no longer matches
   the apex is now released, not retargeted; retarget applies only to records gpm
   created. *(Med)*
-- [x] **Pi-hole session leaked on context cancellation** - `logout` ran on the
+- [x] **Pi-hole session leaked on context cancellation**: `logout` ran on the
   caller's (cancelled) context. It now uses a detached 5s context. *(High)*
-- [x] **Retarget had no rollback** - a failed create after a successful delete
+- [x] **Retarget had no rollback**: a failed create after a successful delete
   destroyed the record and under-reported the run. The original is restored, the
   run fails loudly, and the counter increments as soon as the delete lands. *(Med)*
 - [x] **A Pi-hole API shape change read as "zero records"** and wiped the ledger.
@@ -487,7 +484,7 @@ Adversarial review of that change (2026-08-01), all remediated:
 - [x] **Ledger read-modify-write raced a concurrent Revert** (confirmed). The save
   carries the revision it read at and is refused when the tree moved; the run then
   re-writes without the claims the revert withdrew. *(Med)*
-- [x] **A revert can resurrect a stale claim** - documented beside the existing
+- [x] **A revert can resurrect a stale claim**: documented beside the existing
   revert note, and deletions now log at warn with the authorising `ledgerRev`.
   *(Med)*
 - [x] Ledger duplicate-domain validation is case-insensitive. *(Low)*
@@ -510,13 +507,13 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 
 - **`locations` on a discovery template/profile.** Decided against, not
   overlooked. Locations are **per-service path routing** with their own upstream
-  and chain; discovery's model is the opposite - every derived host forwards
+  and chain; discovery's model is the opposite: every derived host forwards
   *everything* to the cluster ingress controller, which does the path routing
   itself, from the same `Ingress` gpm read. A template-level location list would
   be stamped onto every host derived from that template or profile, so the only
   paths it could name are ones meaningful fleet-wide, which is not what locations
   are for. The useful version is per-Ingress, and per-Ingress means reading
-  paths/upstreams/chains out of an untrusted cluster manifest - the exact
+  paths/upstreams/chains out of an untrusted cluster manifest, the exact
   self-service privilege grant the annotation model forbids (`locations: [{path:
   /, middlewares: []}]` on a tenant's own Ingress would strip the operator's auth
   chain at the edge). Nothing is lost: publish a second annotated `Ingress` for
@@ -524,7 +521,7 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   host is never touched). If a need ever appears, the only shape that keeps the
   containment property is operator-side: locations written per profile in
   settings and selected by name like everything else. See
-  [docs/design/ingress-discovery.md section 5](docs/design/ingress-discovery.md).
+  [design/ingress-discovery.md section 5](design/ingress-discovery.md).
 - **Per-host ACME** for discovered names outside the wildcard's coverage. Would
   need its own rate-limit budget and a CT-disclosure note in the UI.
 - **Watch-based discovery**, if a sub-minute convergence requirement ever appears.
@@ -535,11 +532,11 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
   stronger than the annotation, and the answer to the one residual risk profiles
   carry: **every profile is selectable by every annotating Ingress**, so a tenant
   can pick the most permissive profile you defined. Until this exists, the
-  mitigation is documented policy - define only profiles you are willing for any
+  mitigation is documented policy: define only profiles you are willing for any
   tenant to choose (now stated in `docs/configuration.md` and in the settings UI).
   Cost: a settings commit per new service. Named
   profiles are the substrate it would sit on. See
-  [design/ingress-discovery.md section 5a](docs/design/ingress-discovery.md).
+  [design/ingress-discovery.md section 5a](design/ingress-discovery.md).
 - ~~**Per-profile `allowedDomainSuffixes`**~~ shipped 2026-08-22 (subset of the global list, validated at settings-write).
 - ~~**Live validation** against the real cluster~~ done (live since 2026-08-01).
 
@@ -568,8 +565,8 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 - [x] **HA support for gpm** (phase 1 shipped 2026-08-22; phase 2 sketch remains a proposal). Upstream groups remove the single-node dependency
   *behind* gpm; the gpm instance itself is still a single point of failure. Design
   and ship a supported multi-instance story.
-  - [x] **Design doc** resolving the open questions -
-    [docs/design/ha.md](docs/design/ha.md): recommends phase-1 active/standby for
+  - [x] **Design doc** resolving the open questions
+    ([design/ha.md](design/ha.md)): recommends phase-1 active/standby for
     a 2-node homelab (static leader owns ACME + admin writes; follower pulls
     config via `git pull --ff-only` and reads replicated certs; `keepalived` VRRP
     VIP; SSO watermark refresh loop; streams as failover-with-reconnect), with a
@@ -583,7 +580,7 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
 ## Roadmap
 
 See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts, backup/
-restore, rate limiting, access-log viewer, custom timeouts, load balancing - all
+restore, rate limiting, access-log viewer, custom timeouts, load balancing, all
 shipped), P2 (proxy protocol, IPv6, GeoIP geoblocking, mTLS client certs phases
 1-3 with issuance, multi-ACME EAB, gzip compression, custom error pages, cosign
 image signing, and the WAF/CrowdSec `bouncer` hook are all shipped; HTTP/3 and
@@ -593,30 +590,30 @@ OCSP, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM, MPTCP, Anubis
 
 ### Design proposals
 
-- **Kubernetes Ingress discovery**  - 
-  [docs/design/ingress-discovery.md](docs/design/ingress-discovery.md)
+- **Kubernetes Ingress discovery**:
+  [design/ingress-discovery.md](design/ingress-discovery.md)
   (implemented). Settles the certificate strategy (template wildcard ref, not
   per-host ACME), commit granularity (one per reconcile), freeze-on-error
   semantics, poll-vs-watch, and the Ingress -> ProxyHost field mapping for an
   off-cluster gpm.
-- **High availability (gpm itself)** -
-  [docs/design/ha.md](docs/design/ha.md) (phase 1 implemented 2026-08-22). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
+- **High availability (gpm itself)**:
+  [design/ha.md](design/ha.md) (phase 1 implemented 2026-08-22). Phase-1 active/standby for a 2-node homelab; phase-2 sketch for
   automatic election / active/active.
-- **HTTP/3** - [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md)
+- **HTTP/3**: [design/http3-geoip-mtls.md](design/http3-geoip-mtls.md)
   (not started). **GeoIP geoblocking** and **mTLS client certs (phase 1)**
-  from the same document are now shipped - see FEATURES.md and
+  from the same document are now shipped, see FEATURES.md and
   CHANGELOG.md. mTLS **phase 2** (CRL revocation, identity passthrough,
   `client-cert` middleware mode) shipped 2026-08-22; **phase 3** (`allowFrom`
   network exemption in `client-cert` mode, client-certificate issuance from a
   `ClientCA` signing key as a PKCS#12 download, the issuance-record ledger behind
   expiry warnings and per-certificate renewal, and UI CA generation
   (`POST /api/client-cas/{name}/generate`) so the whole mTLS path needs no
-  external tooling - `internal/clientcert`) shipped after it; OCSP deliberately
+  external tooling, `internal/clientcert`) shipped after it; OCSP deliberately
   not implemented (CRL only), see
-  [docs/design/http3-geoip-mtls.md](docs/design/http3-geoip-mtls.md) section 1.
+  [design/http3-geoip-mtls.md](design/http3-geoip-mtls.md) section 1.
 
   Follow-ups identified while shipping phase 3. (a) **A trusted-proxy source for
-  `client-cert` mode** - DONE. Client-IP trust is now one setting,
+  `client-cert` mode**: DONE. Client-IP trust is now one setting,
   `settings.trustedProxies` with a per-host `proxyHost.trustedProxies` override
   (`internal/dataplane/clientip.go`), read by every IP-comparing tier including a
   `client-cert` `allowFrom`. `forwardAuth.trustedProxies` is back to meaning only
@@ -624,22 +621,22 @@ OCSP, email notifications, SAML/LDAP, PHP/FancyIndex, ECH, ML-KEM, MPTCP, Anubis
   relying on it gets a load-time WARN carrying the YAML to add. Documented as
   docs/configuration.md, "Client IP and the three trust tiers".
   The rest, none blocking: (b) **one-click
-  revoke** - the issuance ledger now knows every serial, so "revoke this
+  revoke**: the issuance ledger now knows every serial, so "revoke this
   certificate" could append it to the CA's `crlFile` instead of the operator
   editing the CRL by hand; today renewing deliberately does NOT revoke and the
   CRL edit is manual; (c) issuance and renewal are `POST`s, so an HA follower
   refuses them with the blanket method-based read-only gate even though issuance
-  writes no config - correct-by-default, revisit only if operators hit it; (d) a
+  writes no config, correct-by-default, revisit only if operators hit it; (d) a
   `caKeyFile` is validated the first time it is used rather than at config
   validation, because the store does not know the cert-store path; (e) issuance
   records live in the cert dir, so an HA follower has its own copy unless the cert
-  dir is shared (which the HA recipe already calls for) - worth a line in ha.md if
+  dir is shared (which the HA recipe already calls for); worth a line in ha.md if
   anyone runs an unshared cert dir; (f) deleting a ClientCA leaves its generated
-  key file behind by design (see configuration.md for why) - there is no
+  key file behind by design (see configuration.md for why); there is no
   "delete the CA and its key" affordance, and an orphan key blocks re-generating
-  the same name - it is reclaimed on the next generate - but it does linger on
+  the same name (it is reclaimed on the next generate), but it does linger on
   disk holding a private key, so a UI action to clean one up is the obvious
-  follow-up; (g) **no rate limit on CA generation** - each call burns an RSA-4096
+  follow-up; (g) **no rate limit on CA generation**: each call burns an RSA-4096
   keygen, so a scripted caller with `client-cas:write` could tie up CPU. Declined
   for now to stay consistent with the rest of the API, which rate-limits nothing
   and relies on the admin-role + scope gate; revisit if the API ever grows a
@@ -656,7 +653,7 @@ UX/IA, release-hygiene passes).
   certificate editor's Account email/Directory URL/Key type, External base URL,
   the admin-authentication switches). Recommended shape: a single
   `field-path -> {short, more}` hint registry driving a `?` popover per field,
-  plus a docs-link tier and a small jargon glossary - see the UX/IA review,
+  plus a docs-link tier and a small jargon glossary, see the UX/IA review,
   section 5.3, for the four-tier design. UI-owned; write a spec to
   `ui-specs/` when picked up.
 - [x] **Docker label auto-discovery.** Shipped: `internal/docker` reads a
@@ -672,7 +669,7 @@ UX/IA, release-hygiene passes).
 - [x] **TOTP for the local admin.** Shipped: `GPM_LOCAL_ADMIN_TOTP_SECRET`
   (RFC 6238, stdlib-only) turns local login into password + 6-digit code, with
   `gpm totp-secret` for enrolment. Still open below it: WebAuthn, and more than
-  one named local admin (deliberately not planned - see
+  one named local admin (deliberately not planned, see
   docs/configuration.md#users-roles-and-audit).
 - [ ] **v2 consolidations** (breaking, batch for a major version bump):
   - **One backend "slot"**: `ProxyHost.upstream` and `.upstreamGroupRef` are
@@ -691,10 +688,10 @@ UX/IA, release-hygiene passes).
   - **Remove deprecated fields** once a major-version migration exists to
     carry old configs forward: `basicAuth`, `satisfyAny`, `http2`,
     `websocketsUpgrade`, `trustIdPMFA` (also unimplemented, see FEATURES.md
-    section 1.4), `requestsPerSecond`. `http2`, `websocketsUpgrade` and
+    design goal 4), `requestsPerSecond`. `http2`, `websocketsUpgrade` and
     `trustIdPMFA` now carry `// Deprecated:` comments and are gone from the UI,
     `docs/api/openapi.yaml` and the `docs/configuration.md` field tables; only
-    the struct fields (and the NPM importer's round-trip) remain.
+    the struct fields remain.
     `basicAuth`/`satisfyAny` have now joined them: an auth middleware with
     `mode: basic` is the replacement, `POST
     /api/access-lists/{name}/migrate-basic-auth` converts a list in one commit

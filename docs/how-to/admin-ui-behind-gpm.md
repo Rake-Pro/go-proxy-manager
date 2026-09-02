@@ -16,7 +16,7 @@ manual TLS.
 - The LAN/VPN CIDR ranges that should be allowed to reach the admin panel.
 
 > **Set `settings.trustedProxies` before you proxy the admin panel.** It must
-> list the address the admin listener sees for gpm's own data plane - for a
+> list the address the admin listener sees for gpm's own data plane, for a
 > loopback bind, `127.0.0.1/32` and/or `::1/128`. Without it every admin login
 > attempt is attributed to that one address, and the login lockout, the TOTP
 > throttle and the pending-login cap all become a single global bucket: one
@@ -38,7 +38,7 @@ manual TLS.
 ## Steps
 
 1. **Bind the admin listener to loopback.** The default `GPM_ADMIN_ADDR`
-   (`:8081`) is reachable on every interface, not just loopback - see
+   (`:8081`) is reachable on every interface, not just loopback, see
    [IPv6](../getting-started/install-docker.md#ipv6) for the same bare-`:port` behaviour on the data
    plane. Set it explicitly so the only path in is through the proxy host
    built below (or a shell on the same host/container):
@@ -49,7 +49,7 @@ manual TLS.
 
 2. **Bootstrap over the raw admin listener.** You cannot configure the proxy
    host that will front the admin UI from a UI that isn't fronted yet. Reach
-   `127.0.0.1:8081` directly - LAN, console, or an SSH tunnel:
+   `127.0.0.1:8081` directly: LAN, console, or an SSH tunnel:
 
    ```
    ssh -L 8081:127.0.0.1:8081 <host>
@@ -59,8 +59,8 @@ manual TLS.
    TLS itself). No redeploy is needed for it: with the default
    `GPM_COOKIE_SECURE=auto`, the session cookie is issued without `Secure` on
    this connection and login works. Once step 5 sets an `https://`
-   `externalBaseURL` - or the request reaches gpm over TLS, or through a
-   trusted proxy sending `X-Forwarded-Proto: https` - the same cookie is issued
+   `externalBaseURL` (or the request reaches gpm over TLS, or through a
+   trusted proxy sending `X-Forwarded-Proto: https`), the same cookie is issued
    `Secure` and `__Host-` named, again with no restart.
 
 3. **Create the certificate and the proxy host**, from inside the bootstrap
@@ -85,7 +85,7 @@ manual TLS.
    ```
 
    `upstream.host`/`upstream.port` must match whatever `GPM_ADMIN_ADDR` is
-   actually bound to (step 1). `scheme: http` is correct - the admin server
+   actually bound to (step 1). `scheme: http` is correct: the admin server
    never speaks TLS; this `ProxyHost` is what terminates it.
 
    **UI clicks:** Proxy Hosts -> New -> Domains: `gpm.example.com` -> Upstream:
@@ -94,7 +94,7 @@ manual TLS.
    `admin-lan-only` (next step).
 
 4. **Restrict it with an access list.** TLS alone does not limit who can
-   reach the admin panel - this does:
+   reach the admin panel: this does:
 
    ```yaml
    # config/access-lists/admin-lan-only.yaml
@@ -134,26 +134,26 @@ manual TLS.
 
 6. **Stop publishing `8081`.** Once `https://gpm.example.com` works end to
    end, remove any port publish/forward for `8081` beyond the host/container
-   itself - drop `"127.0.0.1:8081:8081"` from Compose entirely, or leave it
+   itself, drop `"127.0.0.1:8081:8081"` from Compose entirely, or leave it
    loopback-only for break-glass shell access. The `ProxyHost` from step 3 is
    now the only supported path in.
 
 7. **(Optional) Layer SSO in front, keep local login as the anti-lockout
    path.** Use gpm's native
    [Admin OIDC](admin-oidc-sso.md), not a second `auth`
-   middleware on this host - an outer middleware gate would take the local
+   middleware on this host: an outer middleware gate would take the local
    login page down with it if the IdP has a bad day.
 
    - Follow [Admin OIDC](admin-oidc-sso.md): create an
      `IdentityProvider` with `roleMapping.adminGroups`, list it under
      `settings.adminAuth.providers`.
-   - Keep `adminAuth.localLoginEnabled: true` - the anti-lockout path if the
+   - Keep `adminAuth.localLoginEnabled: true`, the anti-lockout path if the
      IdP is unreachable or misconfigured.
    - Flip `adminAuth.ssoOnly: true` only after a real SSO login has
      succeeded. Recovery from `ssoOnly: true` during an SSO outage is a
      redeploy, not a UI action.
    - The `admin-lan-only` access list from step 4 stays in effect underneath
-     either login method - it is a network gate, not a substitute for one.
+     either login method: it is a network gate, not a substitute for one.
 
 ## Verify
 
@@ -162,7 +162,7 @@ manual TLS.
 - Logging in and saving a config change at `https://gpm.example.com` succeeds
   and shows up under **History**.
 - `curl -fsS http://127.0.0.1:8081/healthz` (from inside the
-  host/container) still works - confirms the admin listener is still up on
+  host/container) still works, confirms the admin listener is still up on
   loopback for break-glass access.
 - No external port publish/forward for `8081` remains (step 6).
 

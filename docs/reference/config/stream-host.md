@@ -12,9 +12,9 @@ backend is dialled.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="stream-host-listen-port"></span>  `listenPort` | int | yes | 1-65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port - a bind failure is logged and that one port is skipped, never fatal. |
+| <span id="stream-host-listen-port"></span>  `listenPort` | int | yes | 1-65535. **Publish this port from the container** (compose `ports:`) so it is reachable, and avoid colliding with the data-plane 80/443 or admin port: a bind failure is logged and that one port is skipped, never fatal. |
 | <span id="stream-host-protocol"></span>  `protocol` | string | yes | `tcp`\|`udp`\|`both`. |
-| <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme - a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
+| <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme: a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | <span id="stream-host-tls"></span>  `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
 | <span id="stream-host-access-lists"></span>  `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
 
@@ -36,7 +36,7 @@ accessLists: [lan-only]
 | <span id="stream-host-forward-port"></span>  `forwardPort` | Removed, same. | Same. |
 
 A file still carrying either key is **rejected at load** with an error naming
-the new shape - it is never silently accepted with no backend. See
+the new shape: it is never silently accepted with no backend. See
 [Upgrading](../../operations/upgrading.md).
 
 ## StreamTarget (`target`)
@@ -49,10 +49,10 @@ the new shape - it is never silently accepted with no backend. See
 ## L4 access lists (`accessLists`)
 
 A stream host may reference AccessList objects, exactly like a proxy host. Only
-the **IP/CIDR rules and the geo rules** are evaluated - basic auth is an HTTP
+the **IP/CIDR rules and the geo rules** are evaluated: basic auth is an HTTP
 challenge/response with nowhere to live in a raw stream, so referencing a list
 that has (deprecated) `basicAuth` users is **rejected at validation** rather than
-silently half-applied - moving those users to an auth middleware with
+silently half-applied; moving those users to an auth middleware with
 `mode: basic` removes the conflict, since that middleware is HTTP-only and is
 never attached to a stream host. All referenced lists must allow, and the check runs **before any
 backend is dialled**, so a denied client cannot make gpm open a socket to the
@@ -63,7 +63,7 @@ a denied source creates no session and no upstream socket. Geo rules follow the
 same fail-closed rule as HTTP: with geo configured and no GeoIP database loaded,
 the port denies.
 
-Behind an L4 balancer, enable `settings.proxyProtocol` - otherwise every
+Behind an L4 balancer, enable `settings.proxyProtocol`, otherwise every
 connection looks like it came from the balancer and the rules match the wrong
 address.
 
@@ -84,7 +84,7 @@ terminate it.
 
 - **`passthrough`** peeks the ClientHello (a bounded, stdlib-only parse of the
   record, handshake and `server_name` extension), routes on the SNI, and replays
-  the peeked bytes to the backend. gpm never decrypts and never needs the key -
+  the peeked bytes to the backend. gpm never decrypts and never needs the key:
   the backend terminates, end to end.
 - **`terminate`** completes the handshake at gpm with `certificateRef` from the
   normal certificate store (custom or ACME-issued) and forwards **plaintext** to
@@ -93,7 +93,7 @@ terminate it.
   TCP protocol.
 
 **Port sharing.** Two or more enabled stream hosts may share a TCP `listenPort`
-**only if every one of them sets `sniMatch`** - that is the only thing that tells
+**only if every one of them sets `sniMatch`**: that is the only thing that tells
 their connections apart. Validation rejects a mixed or duplicate claim, so
 routing can never fall back to "whichever host compiled last". A host alone on its
 port may omit `sniMatch` and take every connection. On an SNI-routed port, a

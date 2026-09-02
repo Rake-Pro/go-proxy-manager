@@ -42,7 +42,7 @@ type route struct {
 // registers, and checks each one appears in docs/api/openapi.yaml with the
 // matching HTTP method. This is deliberately a source scrape rather than a
 // live mux walk: http.ServeMux exposes no route-enumeration API, and scraping
-// the exact two registration sites this repo's CLAUDE.md requires be kept in
+// the exact two registration sites this repo's CONTRIBUTING.md requires be kept in
 // sync with the docs is a more direct check that the docs actually describe
 // what was just edited.
 func TestOpenAPISpecCoversRegisteredRoutes(t *testing.T) {
