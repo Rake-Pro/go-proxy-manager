@@ -5,6 +5,12 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The admin UI declares a favicon (`favicon.svg`: a two-way fan-out on the
+  brand gradient tile), so browser tabs and bookmarks show the app icon
+  instead of the generic page glyph.
+
 ### Changed
 
 - The Go toolchain is pinned once, in `.go-version`: CI reads it, `make
