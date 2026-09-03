@@ -279,7 +279,7 @@ func serveApp(rt *router, remote, xff string) int {
 	return rec.Code
 }
 
-// TestAllowFromUsesDerivedClientIP is the documented mTLS/allowFrom footgun,
+// TestAllowFromUsesDerivedClientIP is the documented mTLS/allowFrom trap,
 // asserted from both ends: with gpm behind a DECLARED trusted proxy the
 // exemption follows the forwarded client, and a spoofed X-Forwarded-For from any
 // other peer is refused rather than exempted.
