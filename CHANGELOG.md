@@ -5,6 +5,11 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The sidebar wordmark uses the same fan-out glyph as the favicon; the two
+  had diverged in 1.0.2.
+
 ## [1.0.2] - 2026-09-03
 
 ### Added
