@@ -307,7 +307,7 @@ func (c Config) Validate() error {
 // ENABLED ClientCA. A missing CA fails closed (refusing every client); a disabled
 // CA is worse - it is excluded from the compiled CA pools, yielding a nil pool and
 // a hard TLS-config error that fails the entire router reload. Catching both at
-// validation turns that opaque ops footgun into a clear load-time rejection.
+// validation turns that opaque operational trap into a clear load-time rejection.
 func checkClientAuthRef(errs *[]error, ownerKind, ownerName string, tlsSettings TLSSettings, set, disabled map[string]bool) {
 	if tlsSettings.ClientAuth == nil {
 		return
