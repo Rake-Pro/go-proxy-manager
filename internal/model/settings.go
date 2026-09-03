@@ -757,7 +757,7 @@ type Settings struct {
 
 	// ExternalBaseURL is the canonical public URL of the admin panel. It is
 	// configured explicitly so OIDC redirect_uri is never derived from
-	// X-Forwarded-* headers (the port/scheme footgun that broke fork logins).
+	// X-Forwarded-* headers (the port/scheme mistake that broke fork logins).
 	ExternalBaseURL string `json:"externalBaseURL" yaml:"externalBaseURL"`
 
 	AdminAuth AdminAuthSettings `json:"adminAuth,omitempty" yaml:"adminAuth,omitempty"`
