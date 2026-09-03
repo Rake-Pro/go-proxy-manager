@@ -5,6 +5,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-03
+
 ### Added
 
 - The admin UI declares a favicon (`favicon.svg`: a two-way fan-out on the
@@ -13,6 +15,7 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Changed
 
+- Removed the unused `deploy/runbook-template.md` authoring scaffold.
 - The Go toolchain is pinned once, in `.go-version`: CI reads it, `make
   bump-go VERSION=X.Y.Z` rewrites it together with both builder images (tag
   and digest), and a test fails when any of them drift or when the docs quote
@@ -55,6 +58,7 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Rake-Pro/go-proxy-manager/releases/tag/v1.0.0
