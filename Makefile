@@ -49,3 +49,7 @@ docker:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+# Bump the pinned Go toolchain everywhere (CI, builder images): make bump-go VERSION=1.27.2
+bump-go:
+	hack/bump-go.sh $(VERSION)
