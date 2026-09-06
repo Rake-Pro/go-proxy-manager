@@ -2,9 +2,12 @@ name: Docs
 
 # Builds the MkDocs site and publishes it to GitHub Pages. The repository owner
 # must enable Pages once, with Settings -> Pages -> Source: GitHub Actions.
+# Publishes from main (the release branch; the github-pages environment only
+# allows deploys from main), so the public docs track releases. PRs to dev
+# build the site strictly without deploying.
 on:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - "docs/**"
       - "mkdocs.yml"
