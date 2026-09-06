@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // UnknownYAMLKeys parses data as YAML and reports every mapping key that has no
@@ -135,7 +135,7 @@ func yamlFieldSet(t reflect.Type) map[string]reflect.StructField {
 }
 
 // parseYAMLTag splits a yaml struct tag ("name,opt1,opt2") into its name and
-// options, the same shape gopkg.in/yaml.v3 parses internally.
+// options, the same shape go.yaml.in/yaml/v3 parses internally.
 func parseYAMLTag(tag string) (name string, opts []string) {
 	if tag == "" {
 		return "", nil
