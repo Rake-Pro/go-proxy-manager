@@ -5,6 +5,7 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+- CI: release flow renamed from `main -> prod` to `dev -> main`. `dev` is the default working branch, `main` the protected release branch; the bot PR is now "Merge dev to main". Mechanics unchanged. Pushes to `dev` now also publish `:dev` and `:dev-<sha>` images.
 ### Fixed
 
 - The sidebar wordmark uses the same fan-out glyph as the favicon; the two
