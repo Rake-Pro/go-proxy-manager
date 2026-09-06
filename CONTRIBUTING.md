@@ -81,8 +81,9 @@ before merge.
 
 ## Pull requests
 
-- Target `main`. Promotion from `main` to the `prod` release branch is
-  maintainer-run (see `.github/workflows/sync-prod.yml`); contributors do
+- Target `dev` (the default branch). Promotion from `dev` to the `main`
+  release branch is maintainer-run (see `.github/workflows/sync-main.yml`);
+  contributors do
   not need to touch it.
 - Fill in the PR template: it mirrors the docs-in-sync checklist above.
 - A PR that changes behavior without a corresponding doc/changelog update
