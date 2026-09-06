@@ -2,6 +2,7 @@
 
 // ---------- icons ----------
 const ICON = {
+  fanout: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h6M10 12c3.5 0 3.5-5 7-5h2.5M10 12c3.5 0 3.5 5 7 5h2.5M17 4.6l2.4 2.4-2.4 2.4M17 14.6l2.4 2.4-2.4 2.4"/></svg>',
   arrow: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M13 6l7 6-7 6"/></svg>',
   grid: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
   globe: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a9 9 0 100 18 9 9 0 000-18z"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>',
@@ -841,7 +842,7 @@ function buildShell() {
     <div class="app">
       <aside class="sidebar">
         <div class="wordmark">
-          <span class="logo" aria-hidden="true">${ICON.arrow}</span>
+          <span class="logo" aria-hidden="true">${ICON.fanout}</span>
           <span class="name">${esc(state.appName)}</span>
         </div>
         <nav class="nav" id="nav" aria-label="Primary">

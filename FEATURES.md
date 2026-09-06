@@ -60,7 +60,7 @@ production. These are the design north stars: the reasons this project exists.
    prompt to suppress. The field (`OIDCSpec.TrustIdPMFA`) is deprecated and gone
    from the UI, OpenAPI and the config reference.
 5. **Explicit external base URL.** Stop deriving origin from `X-Forwarded-*` (the
-   redirect_uri port/scheme footgun that broke login in an earlier iteration).
+   redirect_uri port/scheme that broke login in an earlier iteration).
    Configure the canonical public URL once.
 6. **Auth and middleware as native config, not raw config-file snippets.** A
    duplicate `location /` in an injected snippet once broke TLS while the
@@ -178,7 +178,7 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
   and the upstream `X-Forwarded-For`/`X-Real-IP` all compare. It sits alongside
   two deliberately separate tiers (`proxyProtocol.trustedCIDRs` at L4 and
   `forwardAuth.trustedProxies` for identity headers) and closes the documented
-  mTLS-bypass footgun, since a `client-cert` `allowFrom` now has a trusted-proxy
+  mTLS-bypass, since a `client-cert` `allowFrom` now has a trusted-proxy
   source it can declare without inventing a dummy identity provider.
 - Backup / export / restore (shipped: gzip-tar export + validated restore +
   config revert, with History-view UI), rate limiting (shipped: per-host,

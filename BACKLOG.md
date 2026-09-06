@@ -587,6 +587,62 @@ Deliberately deferred (Ingress discovery; not planned until a need appears):
     refresh loop -> leader/follower role gate -> follower config poll loop ->
     deploy doc).
 
+## Certificate providers (investigation 2026-09-03)
+
+gpm already accepts any ACME directory URL plus EAB, so ZeroSSL, Google Public
+CA, SSL.com and a self-hosted step-ca work today by hand. The gaps are
+convenience, DNS-01 coverage, and two protocol items. Buypass Go SSL ended
+issuance in 2025 and must not be added; Actalis is single-domain only.
+
+### Wave 1: convenience on what already works
+
+- [ ] **CA preset picker** in the certificate editor: Let's Encrypt, Let's
+  Encrypt staging, ZeroSSL, Google Public CA, SSL.com (ECC/RSA directory follows
+  `keyType`), Custom. Fills `directoryURL` and forces the EAB toggle where the
+  CA requires it. UI sugar only; the stored object stays a plain URL.
+- [ ] **ZeroSSL EAB provisioning**: optional `acme.zerossl.accessKey` (Secret);
+  on first order call `POST https://api.zerossl.com/acme/eab-credentials` and
+  keep the returned kid/hmac in the account store (the access key is the durable
+  secret, the EAB pair is derived). ZeroSSL is the only CA with an API for this.
+- [ ] **How-to per preset** (ZeroSSL, Google Public CA, SSL.com, step-ca) in the
+  fixed Prerequisites/Steps/Verify/Troubleshooting shape, plus a "registrar
+  without an API" how-to that walks Squarespace, GoDaddy and Namecheap users to
+  acme-dns CNAME delegation.
+
+### Wave 2: DNS-01 solvers, by homelab demand
+
+- [ ] **DuckDNS**: one GET (`domains`, `token`, `txt`); a single TXT per name,
+  so apex + wildcard on the same `_acme-challenge` must be serialised.
+- [ ] **Porkbun**: JSON body auth (`apikey`, `secretapikey`); fits `restAPI`
+  with a body-auth variant. API access is per-domain in their panel.
+- [ ] **Linode / Akamai**: plain token provider, same shape as Hetzner.
+- [ ] **Route53**: SigV4 signing in stdlib, `ChangeResourceRecordSets`, change
+  status polling. No SDK.
+- [ ] **Generic webhook solver** (`provider: webhook`): POST `{fqdn, value,
+  action: present|cleanup}` to an operator URL with a bearer secret over the
+  hardened client. Closes the long tail (INWX, Netcup, IONOS, Infomaniak,
+  Bunny, Njalla) without a solver each.
+- [ ] Optional REST solvers for **PowerDNS** and **Technitium** for users who
+  have not set up TSIG; `rfc2136` already covers both.
+
+### Wave 3: protocol work (separate design)
+
+- [ ] **Lifetime-relative renewal**: renew at one third of remaining lifetime
+  instead of the fixed 30-day `renewBefore`. Prerequisite for any short-lived
+  profile; today a 6-day certificate would renew on every tick.
+- [ ] **ARI (RFC 9773) and ACME profiles**: `golang.org/x/crypto/acme` v0.56.0
+  has neither. Thin wrapper (profile on newOrder, `renewalInfo` GET) or an
+  upstream contribution; then expose `acme.profile` for Let's Encrypt
+  `shortlived` / `tlsserver`.
+- [ ] **IP address certificates**: `acme.IPIDs` in orders, IP SANs in the CSR,
+  http-01 only. Depends on the short-lived profile.
+- [ ] **Cloudflare Origin CA** as `type: origin-ca`: API-issued, up to 15-year,
+  stored like a custom cert. Valid only behind Cloudflare's proxy; the UI must
+  say so at the type selector.
+- [ ] **Private CA trust**: `acme.caBundle` (PEM, `${FILE:}`-friendly) on the
+  ACME client transport so step-ca works without touching the container trust
+  store.
+
 ## Roadmap
 
 See [FEATURES.md](FEATURES.md) for P1 (redirect/stream/parked hosts, backup/
