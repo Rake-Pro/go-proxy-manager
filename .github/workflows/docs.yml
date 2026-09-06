@@ -4,13 +4,13 @@ name: Docs
 # must enable Pages once, with Settings -> Pages -> Source: GitHub Actions.
 on:
   push:
-    branches: [main]
+    branches: [dev]
     paths:
       - "docs/**"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
   pull_request:
-    branches: [main]
+    branches: [dev]
     paths:
       - "docs/**"
       - "mkdocs.yml"
