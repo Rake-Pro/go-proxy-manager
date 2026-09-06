@@ -17,7 +17,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // scopedHandler builds an API handler whose RequireScope behaves as if every

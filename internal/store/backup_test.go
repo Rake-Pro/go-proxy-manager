@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // archiveWith builds a gzip-tar restore archive from a map of config-relative
