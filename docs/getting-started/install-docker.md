@@ -12,7 +12,7 @@ Actions OIDC: no key material to manage or leak. Verify before you deploy:
 
 ```
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/Rake-Pro/go-proxy-manager/\.github/workflows/release\.yml@refs/(heads/prod|tags/v.*)$' \
+  --certificate-identity-regexp '^https://github.com/Rake-Pro/go-proxy-manager/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/rake-pro/go-proxy-manager:latest
 ```
