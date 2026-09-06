@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	openapidoc "github.com/Rake-Pro/go-proxy-manager/docs/api"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestOpenAPISpecParses checks the embedded spec is well-formed YAML with the

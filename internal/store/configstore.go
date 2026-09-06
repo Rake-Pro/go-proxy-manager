@@ -14,7 +14,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // kindDir maps an object Kind() to its subdirectory under the config repo.

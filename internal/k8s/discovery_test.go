@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // baseSettings is a minimal valid discovery configuration pointed at f.
