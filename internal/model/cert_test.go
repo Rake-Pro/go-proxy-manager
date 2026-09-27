@@ -102,6 +102,15 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, EAB: &EABSpec{KID: "k"}}),
 			wantErr: "acme.eab.hmacKey is required",
 		},
+		{
+			name: "keyType ecdsa is accepted",
+			cert: base([]string{"app.example.com"}, &ACMESpec{Email: email, KeyType: "ecdsa"}),
+		},
+		{
+			name:    "keyType rsa is rejected at validate time",
+			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, KeyType: "rsa"}),
+			wantErr: "acme.keyType \"rsa\" is not supported",
+		},
 	}
 
 	for _, tc := range cases {

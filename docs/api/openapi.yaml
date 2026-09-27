@@ -579,11 +579,10 @@ components:
           description: Default Let's Encrypt production.
         keyType:
           type: string
-          description: ecdsa (default) | rsa.
+          description: ecdsa only (default when empty); rsa is not implemented and is rejected.
           enum:
           - ''
           - ecdsa
-          - rsa
         challenge:
           type: string
           description: dns-01 is the only supported challenge.

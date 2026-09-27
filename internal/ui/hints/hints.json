@@ -336,7 +336,7 @@
     "doc": "reference/config/certificate.md#certificate-domains"
   },
   "certificate.acme.email": {
-    "text": "The contact address registered with the ACME account. The CA uses it for expiry and policy notices.",
+    "text": "The contact address registered with the ACME account. Let's Encrypt stopped sending expiration reminders in 2025; this is now only used for account and policy notices (e.g. required action, mass revocation events).",
     "doc": "reference/config/certificate.md#certificate-acme-email"
   },
   "certificate.acme.directoryURL": {
@@ -344,7 +344,7 @@
     "doc": "reference/config/certificate.md#certificate-acme-directory-url"
   },
   "certificate.acme.keyType": {
-    "text": "The key algorithm for the issued certificate. ECDSA is the default and is smaller and faster than RSA.",
+    "text": "The key algorithm for the issued certificate. Only ecdsa (P-256) is issued today; leave blank to use it.",
     "doc": "reference/config/certificate.md#certificate-acme-key-type"
   },
   "certificate.acme.challenge": {
