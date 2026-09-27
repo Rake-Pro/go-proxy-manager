@@ -78,7 +78,7 @@ type EABSpec struct {
 type ACMESpec struct {
 	Email        string `json:"email" yaml:"email"`
 	DirectoryURL string `json:"directoryURL,omitempty" yaml:"directoryURL,omitempty"` // default: LE production
-	KeyType      string `json:"keyType,omitempty" yaml:"keyType,omitempty"`           // ecdsa (default) | rsa
+	KeyType      string `json:"keyType,omitempty" yaml:"keyType,omitempty"`           // ecdsa only (default when empty); rsa is not implemented
 	Challenge    string `json:"challenge,omitempty" yaml:"challenge,omitempty"`       // dns-01 | http-01
 	// DNSProvider names a DNSProvider object used to solve dns-01 challenges.
 	DNSProvider string `json:"dnsProvider,omitempty" yaml:"dnsProvider,omitempty"`
@@ -136,6 +136,12 @@ func (c Certificate) Validate() error {
 		}
 		if c.ACME.Email == "" {
 			return fmt.Errorf("certificate %q: acme.email is required", c.Name)
+		}
+		// Only ecdsa is actually issued (see internal/acme/order.go); catching an
+		// unsupported keyType here means a config write fails immediately instead
+		// of only surfacing at the next issue/renew attempt.
+		if kt := c.ACME.KeyType; kt != "" && kt != "ecdsa" {
+			return fmt.Errorf("certificate %q: acme.keyType %q is not supported (only ecdsa is issued)", c.Name, kt)
 		}
 		if ch := c.ACME.Challenge; ch != "" && ch != ChallengeDNS01 && ch != ChallengeHTTP01 {
 			return fmt.Errorf("certificate %q: acme.challenge must be %s or %s, got %q", c.Name, ChallengeDNS01, ChallengeHTTP01, ch)
