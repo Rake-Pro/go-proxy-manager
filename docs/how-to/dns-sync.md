@@ -19,21 +19,21 @@ individual hosts in with `dns.lanDirect` / `dns.publicCname`.
 ## Steps
 
 1. **Preview before you enable.** `GET /api/dns-sync/plan` (the **Preview changes**
-button next to *Reconcile now* in the settings UI) reads both backends and the
-ownership ledger and reports exactly what a reconcile would create, adopt,
-retarget and delete, writing nothing. Do this first on any resolver that already
-holds hand-written records:
+   button next to *Reconcile now* in the settings UI) reads both backends and the
+   ownership ledger and reports exactly what a reconcile would create, adopt,
+   retarget and delete, writing nothing. Do this first on any resolver that already
+   holds hand-written records:
 
-```
-curl -s https://<admin>/api/dns-sync/plan -H 'Authorization: Bearer gpm_...' | jq
-# {"generatedAt":"...","pihole":{"enabled":true,"ok":true,"create":["app.example.com"],
-#   "adopt":["www.example.com"],"retarget":[],"delete":[],"skip":[],"untouched":19}, ...}
-```
+   ```
+   curl -s https://<admin>/api/dns-sync/plan -H 'Authorization: Bearer gpm_...' | jq
+   # {"generatedAt":"...","pihole":{"enabled":true,"ok":true,"create":["app.example.com"],
+   #   "adopt":["www.example.com"],"retarget":[],"delete":[],"skip":[],"untouched":19}, ...}
+   ```
 
    `"delete": []` is the line to check. It is empty on a first enable by
-construction: gpm deletes only records recorded in `config/dns-ledger.yaml`, which
-is empty until it has created something, so the first run can only create and
-adopt. `untouched` should equal the number of records you wrote by hand.
+   construction: gpm deletes only records recorded in `config/dns-ledger.yaml`, which
+   is empty until it has created something, so the first run can only create and
+   adopt. `untouched` should equal the number of records you wrote by hand.
 
 2. **Opt hosts in** with a `dns` block, one host at a time:
 
@@ -45,17 +45,17 @@ adopt. `untouched` should equal the number of records you wrote by hand.
 3. **Reconcile and read the result.** Reconciles also fire automatically after
    any proxy-host write, settings change, restore or whole-config revert.
 
-```
-# Trigger a reconcile and read the result.
-curl -s -X POST https://<admin>/api/dns-sync/reconcile -H 'Authorization: Bearer gpm_...' | jq
-curl -s          https://<admin>/api/dns-sync/status    -H 'Authorization: Bearer gpm_...' | jq
-# {"lastRun":"...","pihole":{"enabled":true,"ok":true,"desired":12,"managed":12,
-#   "created":0,"adopted":0,"retargeted":0,"deleted":0,"skipped":0,"untouched":19}, ...}
-```
+   ```
+   # Trigger a reconcile and read the result.
+   curl -s -X POST https://<admin>/api/dns-sync/reconcile -H 'Authorization: Bearer gpm_...' | jq
+   curl -s          https://<admin>/api/dns-sync/status    -H 'Authorization: Bearer gpm_...' | jq
+   # {"lastRun":"...","pihole":{"enabled":true,"ok":true,"desired":12,"managed":12,
+   #   "created":0,"adopted":0,"retargeted":0,"deleted":0,"skipped":0,"untouched":19}, ...}
+   ```
 
-The manual endpoint does **not** queue: while a reconcile is in flight it answers
-`409 Conflict`, so a retry loop cannot stack requests behind a slow backend
-(`/plan` answers `409` in the same situation).
+   The manual endpoint does **not** queue: while a reconcile is in flight it answers
+   `409 Conflict`, so a retry loop cannot stack requests behind a slow backend
+   (`/plan` answers `409` in the same situation).
 
 ## Verify
 

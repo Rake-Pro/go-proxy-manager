@@ -74,10 +74,9 @@ it instead of cleanly rejected:
 
 - **Upstream groups**: roll the new binary out *before* the first host
   references an `upstream-groups` entry. Full reasoning under
-  [Upstream-group health](../reference/config/upstream-group.md#watching-live-health-operations) above.
+  [Upstream-group health](../reference/config/upstream-group.md#watching-live-health-operations).
 - **API tokens**: roll the new binary out *before* creating the first
-  `api-tokens` object. Full reasoning under [API tokens](../reference/api.md#api-tokens-automation)
-  above.
+  `api-tokens` object. Full reasoning under [API tokens](../reference/api.md#api-tokens-automation).
 
 The general rule those two both follow: roll a **newer** binary out before
 adopting any config it introduces; roll an **older** binary back only after

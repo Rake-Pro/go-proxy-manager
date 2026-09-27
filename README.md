@@ -4,7 +4,7 @@ A standalone ingress and proxy manager for homelabs and small sites: TLS and
 ACME, SSO and mTLS, access control, DNS publishing, Kubernetes and Docker
 discovery, git-backed config, a REST API and a web UI, in one static binary.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/ci.yml?branch=main&label=CI)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/ci.yml?branch=dev&label=CI)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/release.yml?label=release)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/release.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-go--proxy--manager-blue?logo=docker)](https://github.com/Rake-Pro/go-proxy-manager/pkgs/container/go-proxy-manager)
 [![License](https://img.shields.io/github/license/Rake-Pro/go-proxy-manager)](LICENSE)

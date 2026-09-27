@@ -159,7 +159,7 @@ from the ledger, record left standing), never deleted. The same applies when
 released there too rather than replaced, which also stops the claim being quietly
 upgraded to "created" and arming a later deletion. Without that distinction,
 adoption was a one-way trap: turn `dns.lanDirect` on for a hand-written name, turn
-it off again, and the next reconcile deleted the operator's record - the same
+it off again, and the next reconcile deleted the operator's record: the same
 deletion regression, deferred by one config edit. An entry with no recorded
 provenance (a ledger written before the field existed) reads as adopted, the only
 reading of a missing field that cannot destroy anything on upgrade. Deletions are
@@ -807,7 +807,7 @@ effect of this defence in depth.
   falls inside an `allowFrom` network exempts every request through it, which on
   a `client-cert` host is a total mTLS bypass. The fix is to declare that proxy
   in `settings.trustedProxies` (or the host's own): one knob, every tier; see
-  docs/configuration.md, "Client IP and the three trust tiers".
+  [Client IP and the three trust tiers](request-pipeline.md#client-ip-and-the-three-trust-tiers).
   In `client-cert` mode the exemption is decided before the certificate check, so
   an exempt client is never asked for one and never role-checked, and because
   identity-passthrough headers are set only from a handshake-verified certificate,
@@ -902,9 +902,10 @@ A deliberately small, vetted set (Go 1.26, CGO disabled):
 | `golang.org/x/oauth2` | OAuth2 authorization-code flow |
 | `golang.org/x/crypto` | bcrypt, TLS helpers |
 | `rs/zerolog` | structured logging |
-| `gopkg.in/yaml.v3` | config (de)serialization |
+| `go.yaml.in/yaml/v3` | config (de)serialization |
 | `modernc.org/sqlite` | pure-Go session store (no CGO) |
 | `software.sslmate.com/src/go-pkcs12` | PKCS#12 (`.p12`) encoding for issued client certificates |
+| `oschwald/maxminddb-golang/v2` | pure-Go MaxMind `.mmdb` reader for GeoIP access-list rules |
 
 Everything else is the Go standard library.
 

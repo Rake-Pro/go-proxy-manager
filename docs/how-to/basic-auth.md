@@ -60,7 +60,7 @@ supported home for this is an auth middleware in `basic` mode; the
 |---|---|
 | `curl -sI https://<host>/` from outside `allowFrom` | `401` with `WWW-Authenticate: Basic realm="Internal"` |
 | `curl -sI -u admin:hunter2 https://<host>/` | The app's response |
-| Six wrong passwords from one IP | `429`, locked out for 15 minutes |
+| Six wrong passwords from one IP | Still `401` with the same challenge (locked out for 15 minutes; never a `429`, so the response gives no lockout oracle) |
 | `GET /api/middlewares/internal-basic` | `passwordHash` present, no plaintext password |
 
 ## Troubleshooting

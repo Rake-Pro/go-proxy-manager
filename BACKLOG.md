@@ -225,9 +225,9 @@ error-page system; none is a regression from that change.
   token header when Authentik is itself proxied through gpm, breaking every admin
   login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
 
-## Public release (deferred, owner wants this, not yet ready)
+## Public release (done)
 
-- [ ] **Take the repo public** once it has had a polish pass and a dedicated
+- [x] **Take the repo public** once it has had a polish pass and a dedicated
   security-surface review. *(2026-08-22: review done; batches 1+2 shipped same day: 4 Med + 2 Low
   security fixes, location-chain data-loss fix, HTTP-01/EAB/3 DNS providers,
   OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
@@ -242,7 +242,8 @@ error-page system; none is a regression from that change.
   handling, LICENSE choice) plus items specific to this repo: a fresh look at
   the auth/guard code paths with "attacker can read the source" assumptions,
   a check that the docs describe gpm entirely on its own terms, and
-  confirmation that no deployment-specific defaults leak operator detail. Do not flip until the security review is signed off.
+  confirmation that no deployment-specific defaults leak operator detail.
+  *(Done: repo is public.)*
 
 ## Live-validation follow-ups
 

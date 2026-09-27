@@ -187,33 +187,3 @@ HTTP requests in flight are lost like any connection reset; browsers retry.
    `"ha":{"role":"follower","readOnly":true}`; a write there returns `503`; a
    change committed on the leader appears on the follower within the poll
    interval (check the log line "HA follower: pulled and applied new config").
-## 7. Role environment variables
-
-Two instances can run as an active/standby pair with no clustering dependency.
-The role is environment-only: it is not a config object, because it describes
-*this process*, not the shared configuration.
-
-| Env | Default | Effect |
-|-----|---------|--------|
-| `GPM_HA_ROLE` | `leader` | `leader`: runs the ACME renewal loop and the Ingress/Docker discovery reconcilers, accepts admin/API writes. `follower`: those loops off, every write refused with `503`, reads unaffected. An unrecognised value is a startup error |
-| `GPM_HA_POLL_INTERVAL` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads if HEAD moved. Ignored on a leader |
-
-A follower's config arrives only by pulling the leader's repo, so it never
-commits and the two repos cannot diverge; a pull that is not a clean
-fast-forward is logged and refused, never merged or reset.
-
-`GET /api/capabilities` reports `"ha": {"role": "...", "readOnly": true|false}`,
-which is what the admin UI uses to grey out write controls on a follower.
-
-Both nodes must share `GPM_SSO_SIGNING_KEY` (identical value) and the ACME
-material under `<cert-dir>/acme`, and the SSO revocation watermark
-(`<cert-dir>/sso_not_before`) is re-read every 30s so a revoke propagates
-without a restart. Full recipe (keepalived VIP, shared cert dir, promotion,
-stream failover-with-reconnect) in sections 1-6 above.
-
-## 8. Where this fits in deployment
-
-Two instances can run as an active/standby pair (keepalived VIP, one static
-leader, `git pull --ff-only` config replication, shared cert dir). The full
-recipe (keepalived config, cert-dir layout, `GPM_SSO_SIGNING_KEY` sharing,
-promotion, and what does not survive a failover) is in sections 1-6 above.

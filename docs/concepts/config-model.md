@@ -18,8 +18,10 @@ config/
   stream-hosts/<name>.yaml
   parked-hosts/<name>.yaml
   certificates/<name>.yaml
+  client-cas/<name>.yaml
   dns-providers/<name>.yaml
   identity-providers/<name>.yaml
+  upstream-groups/<name>.yaml
   access-lists/<name>.yaml
   middlewares/<name>.yaml
   api-tokens/<name>.yaml
@@ -144,7 +146,8 @@ an arbitrary host-file read. Override the allowed roots with the
 separated by the OS path-list separator, e.g. `:` on Linux).
 
 `${ENV:...}` resolution has two guards. gpm's own sensitive process env vars
-(`GPM_SSO_SIGNING_KEY` and `GPM_LOCAL_ADMIN_PASSWORD_HASH`) are **never**
+(`GPM_SSO_SIGNING_KEY`, `GPM_LOCAL_ADMIN_PASSWORD_HASH` and
+`GPM_LOCAL_ADMIN_TOTP_SECRET`) are **never**
 resolvable via a `${ENV:...}` placeholder, so an admin-authored config value
 cannot exfiltrate them (e.g. as a webhook secret posted to an attacker URL). By
 default any other env var name resolves. To lock this down further, set

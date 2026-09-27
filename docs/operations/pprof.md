@@ -20,7 +20,8 @@ same gate as `/api/` (same-origin guard + admin-role session) **plus an `admin`
 scope check**. There is no token-in-URL or basic-auth mode: you authenticate with
 an admin browser session (`gpm_session` cookie), either on the LAN admin listener
 (`-admin-addr`, default `:8081`) or via a proxied admin domain if you've fronted
-the admin panel with a host (see "Admin OIDC" above).
+the admin panel with a host (see
+[Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
 
 An API token works too, but **only one holding the `admin` scope**: a heap dump
 and `/debug/pprof/cmdline` contain resolved backend credentials (Cloudflare,

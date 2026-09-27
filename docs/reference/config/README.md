@@ -49,7 +49,7 @@ Worked examples:
 
 | Page | Key column | Full key path | Anchor |
 |---|---|---|---|
-| `proxy-host.md` | `tls.hsts.preload` | `tls.hsts.preload` | `#proxy-host-tls-hsts-preload` |
+| `proxy-host.md` | `identityHeaders.san` (ClientCertHeaders table) | `tls.clientAuth.identityHeaders.san` | `#proxy-host-tls-client-auth-identity-headers-san` |
 | `proxy-host.md` | `upstreamGroupRef` | `upstreamGroupRef` | `#proxy-host-upstream-group-ref` |
 | `proxy-host.md` | `stripPrefix` (Location table) | `locations[].stripPrefix` | `#proxy-host-locations-strip-prefix` |
 | `middleware.md` | `passwordHash` (BasicAuthSpec table) | `auth.basic.users[].passwordHash` | `#middleware-auth-basic-users-password-hash` |
@@ -78,7 +78,7 @@ Rules for anyone editing these pages:
   [proxy-host.md](proxy-host.md)), the repeat carries no anchor: the first table
   owns the key.
 - The anchor lives in the first table cell, before the key, as
-  `<span id="proxy-host-tls-hsts-preload"></span>`.
+  `<span id="proxy-host-tls-client-auth-identity-headers-san"></span>`.
 - Headings may carry the same style of id with `attr_list`
   (`## Scopes { #api-token-scopes }`); both `attr_list` and `md_in_html` are
   enabled in `mkdocs.yml`.

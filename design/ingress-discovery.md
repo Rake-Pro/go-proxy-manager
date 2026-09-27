@@ -10,8 +10,9 @@ The `gpm.rake.pro` prefix used throughout this document is the **default**:
 annotations and the `managed-by`/`disabled-by` labels, so a deployment can avoid
 colliding with another `gpm.rake.pro`-prefixed tool in the same cluster.
 Ownership is recognised only under the *currently configured* prefix, see
-`docs/configuration.md`'s "Changing the annotation prefix" for what changing it
-requires (`annotationPrefixMigrate`). Every example below uses the default.
+[Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md)'s
+"Changing the annotation prefix" section for what changing it requires
+(`annotationPrefixMigrate`). Every example below uses the default.
 
 Phase 1 (Pi-hole + Cloudflare CNAME reconciliation for opted-in proxy hosts) is
 shipped: a proxy host carrying a `dns` policy gets its domains published to the
@@ -343,7 +344,9 @@ SANs. The two supported shapes are:
   the controller's certificate. Then SNI is that hostname, verification passes,
   and the vhost routing still keys off the forwarded `Host` header.
 
-Documented in `docs/configuration.md` so nobody discovers it via a 502.
+Documented in
+[Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md)
+so nobody discovers it via a 502.
 
 ### `spec.tls` is read but never authoritative
 
@@ -737,8 +740,8 @@ repo entirely rather than relying on placeholder discipline.
    after a successful write (no second DNS path).
 6. **API surface**: status/reconcile endpoints, scopes, capability probe.
 7. **UI**: settings block + status panel, gated on the capability.
-8. **RBAC manifest + docs**: `deploy/k8s-rbac.yaml`, configuration/deployment
-   docs, token extraction recipe.
+8. **RBAC manifest + docs**: `deploy/k8s-ingress-discovery-rbac.yaml`,
+   configuration/deployment docs, token extraction recipe.
 
 **Effort:** M. No new dependency; no data-plane change; one new store primitive.
 

@@ -13,4 +13,5 @@ canonical admin URL.
 > only** (`GPM_LOCAL_ADMIN_PASSWORD_HASH*`, `GPM_LOCAL_ADMIN_TOTP_SECRET*`);
 > they are never config fields, never committed to the git-backed config, and
 > are not resolvable through `${ENV:...}`. See
-> [Deployment](../../../how-to/totp.md).
+> [Environment variables and flags](../../env-vars-and-flags.md) and
+> [Enable TOTP for the local admin](../../../how-to/totp.md).
