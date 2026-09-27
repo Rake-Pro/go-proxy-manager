@@ -5172,7 +5172,7 @@ async function certEditor(c, name) {
           <div class="field-group"><label>Account email</label><input class="field mono" id="ct-email" data-hint="certificate.acme.email" data-path="acme.email" value="${esc(acme.email || '')}" placeholder="you@example.com" /></div>
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" data-hint="certificate.acme.directoryURL" data-path="acme.directoryURL" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
           <div class="inline-fields">
-            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="EC256" /></div>
+            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
             <div class="field-group"><label>Challenge</label>
               <select class="field mono" id="ct-challenge" data-hint="certificate.acme.challenge" data-path="acme.challenge">
                 <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>${esc(enumLabel('acmeChallenge', 'http-01'))}</option>

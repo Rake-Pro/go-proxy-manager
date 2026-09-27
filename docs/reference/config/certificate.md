@@ -11,11 +11,11 @@
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="certificate-acme-email"></span> `email` | string | yes | ACME account contact. |
+| <span id="certificate-acme-email"></span> `email` | string | yes | ACME account contact. Let's Encrypt stopped sending expiration reminders in 2025; this is used for account/policy notices only. |
 | <span id="certificate-acme-challenge"></span> `challenge` | string | no | `dns-01` or `http-01`. Default: `dns-01` when `dnsProvider` is set (so configs written before this field existed keep their behaviour), `http-01` otherwise. |
 | <span id="certificate-acme-dns-provider"></span> `dnsProvider` | string | for `dns-01` | A [DNSProvider](dns-provider.md) name. Rejected with `http-01`. |
 | <span id="certificate-acme-directory-url"></span> `directoryURL` | string | no | Defaults to Let's Encrypt production. |
-| <span id="certificate-acme-key-type"></span> `keyType` | string | no | `ecdsa` (default) \| `rsa`. |
+| <span id="certificate-acme-key-type"></span> `keyType` | string | no | `ecdsa` only (default when empty). `rsa` is not implemented and is rejected at config validation time. |
 | <span id="certificate-acme-eab"></span> `eab` | EABSpec | no | External Account Binding, for CAs that require it. |
 
 **EABSpec**: `kid` (the key id the CA issued) and `hmacKey` (Secret; base64url
