@@ -274,7 +274,7 @@ func TestCloudflareReconcileNoOpAndDelete(t *testing.T) {
 	wantLedger(t, led.cloudflare(), "app.example.com", "edge.example.com")
 }
 
-// The Pi-hole incident, replayed against Cloudflare: the comment marker already
+// The Pi-hole regression guard, replayed against Cloudflare: the comment marker already
 // made this safe, and the ledger must not have weakened it. Commented records
 // that gpm never recorded creating are not deleted either - the ledger is
 // authoritative, and the comment is only ever an additional condition.

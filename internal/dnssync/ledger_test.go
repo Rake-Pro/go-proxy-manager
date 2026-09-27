@@ -187,7 +187,7 @@ func TestLedgerNotRewrittenWhenUnchanged(t *testing.T) {
 // End to end through the real git-backed store: a reconcile records what it
 // created, a fresh syncer reading the same store knows it owns those records, and
 // the claim is durable across the restart. Without this the ledger would be
-// in-memory state and the very first restart would re-open the incident window.
+// in-memory state and the very first restart would re-open the deletion window.
 func TestLedgerSurvivesRoundTripThroughTheStore(t *testing.T) {
 	dir := t.TempDir()
 	cfgStore := store.New(dir, store.NewExecGit(dir))

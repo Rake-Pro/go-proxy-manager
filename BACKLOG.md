@@ -164,8 +164,8 @@ error-page system; none is a regression from that change.
 - [x] **Per-object revert.** Revert today is whole-tree: `Store.Revert` ->
   `RestoreTree` (`git read-tree --reset -u` + `clean -fd`) resets the entire
   config to the target commit, so reverting one object from its History view
-  silently deletes every object created after that commit (bit the operator
-  2026-07-16: reverting a proxy host wiped three newer Certificate objects).
+  silently deletes every object created after that commit (regression guard:
+  reverting a proxy host must not wipe newer Certificate objects).
   Offer a scoped revert that restores only the selected object's file from the
   target commit (`git restore --source=<hash> -- <rel>` semantics) and commits
   just that change; keep the whole-tree revert as an explicit, clearly-labeled
@@ -448,7 +448,7 @@ and the design record
   user to keep an operator-disabled host enabled. Deferred deliberately: the
   behaviour is documented rather than changed for now.
 
-### DNS record ownership (2026-08-01 incident)
+### DNS record ownership (regression guard)
 
 Enabling `dnsSync.pihole` for the first time deleted 19 hand-written LAN CNAMEs
 that pointed at the configured `apexTarget` (see CHANGELOG `Fixed`). Remediated in
@@ -468,7 +468,7 @@ one change:
 - [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
   created and deleted.
 
-Adversarial review of that change (2026-08-01), all remediated:
+Adversarial review of that change, all remediated:
 
 - [x] **Adoption was a one-way trap**: an adopted record the config later stopped
   wanting was deleted. Ledger entries now record provenance (`adopted`) and an

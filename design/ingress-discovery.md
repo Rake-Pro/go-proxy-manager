@@ -419,7 +419,7 @@ BACKLOG.md as deliberately deferred, not as a gap.
 
 ### `robotsNoIndex`, `timeouts` and `tags` *are* template fields
 
-The three that were missing and are now present. The motivating incident:
+The three that were missing and are now present. The failure mode this fixes:
 `robotsNoIndex` is a first-class `ProxyHost` field, so cutting a service over to
 discovery **silently dropped its no-index header**: the derived host simply had
 no way to express it. The available workaround, a `headers` middleware setting

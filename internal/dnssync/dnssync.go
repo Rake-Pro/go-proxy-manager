@@ -16,11 +16,12 @@
 //
 // The ledger replaces an inference that was not ownership. Pi-hole ownership used
 // to be "the CNAME target equals apexTarget", because dnsmasq CNAMEs have no
-// comment field to mark. On 2026-08-01 an operator enabled the Pi-hole backend for
-// the first time with 19 hand-written LAN CNAMEs already pointing at that same
-// edge host and no proxy host yet carrying dns.lanDirect: the desired set was
-// empty, every one of those records looked "managed", and the first reconcile
-// deleted the lot. LAN DNS broke until they were restored by hand.
+// comment field to mark. That is the regression this guards against: an operator
+// enabling the Pi-hole backend for the first time with hand-written LAN CNAMEs
+// already pointing at that same edge host and no proxy host yet carrying
+// dns.lanDirect would see the desired set come up empty, every one of those
+// records look "managed", and the first reconcile delete the lot - LAN DNS broken
+// until restored by hand.
 //
 // So ownership is now recorded, not guessed, and the first reconcile of an
 // existing deployment is an adopt-only run:
@@ -355,9 +356,9 @@ func (s *Syncer) ReconcileNow(ctx context.Context) error {
 // decisions Reconcile would take. Nothing is created, adopted or deleted, and the
 // ledger is not written.
 //
-// It exists so enabling a backend is previewable. The 2026-08-01 incident was
-// unpreviewable: the only way to find out what the first reconcile would do was
-// to run it, and by then 19 records were gone.
+// It exists so enabling a backend is previewable. The deletion regression above
+// was unpreviewable: the only way to find out what the first reconcile would do
+// was to run it, and by then the operator's records were gone.
 //
 // Like ReconcileNow it refuses rather than queues behind a run in flight - a
 // preview of a moving target is worth less than an honest 409, and Pi-hole has
@@ -589,7 +590,7 @@ func decide(backend string, desired []string, present map[string]string, apex st
 			// claimed it - and the apex has moved out from under it. Retargeting would
 			// DELETE an operator-authored record and record its replacement as
 			// gpm-created, so a later host removal would then hard-delete the name for
-			// good: adopt -> apex change -> remove host is the 2026-08-01 incident in
+			// good: adopt -> apex change -> remove host is the deletion regression in
 			// slow motion. The claim is RELEASED instead: dropped from the ledger,
 			// nothing touched in the backend. Publishing the name under the new apex
 			// needs the operator to re-point or remove their own record first. The same

@@ -23,7 +23,7 @@ import (
 // distinguishable state. Ledgers written before this field existed carry no
 // provenance at all, and the two possible readings are not equally safe: reading
 // them as "created" would let an upgrade delete records gpm had adopted (exactly
-// the incident this whole subsystem exists to prevent), while reading them as
+// the regression this whole subsystem exists to prevent), while reading them as
 // "adopted" can only ever leave a record in place. Absent therefore means
 // ADOPTED - see IsAdopted.
 type DNSLedgerEntry struct {
@@ -51,10 +51,10 @@ type DNSClaim struct {
 //
 // It exists because the Pi-hole/dnsmasq CNAME format has no comment field, so the
 // original backend used "the CNAME target equals apexTarget" as a stand-in for
-// ownership. On a shared apex that is not ownership at all: on 2026-08-01 the
-// first reconcile after enabling the Pi-hole backend deleted 19 hand-written LAN
-// CNAMEs that happened to point at the same edge host, because the desired set
-// was still empty. Ownership is now recorded explicitly instead of inferred, and
+// ownership. On a shared apex that is not ownership at all: the regression this
+// guards against is the first reconcile after enabling the Pi-hole backend
+// deleting hand-written LAN CNAMEs that happened to point at the same edge host,
+// because the desired set was still empty. Ownership is now recorded explicitly instead of inferred, and
 // a record that is not in this ledger is never deleted, whatever it points at.
 //
 // It is a singleton file rather than a CRUD object kind on purpose: it is
