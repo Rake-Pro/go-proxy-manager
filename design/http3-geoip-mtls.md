@@ -237,7 +237,9 @@ gap, some cloud/VPN ranges) cannot slip past a "these countries only" gate. Set
   existing resolver; do not add a second IP path.
 - GeoIP is advisory (VPNs, shared CGNAT, stale DB). Document it as defence-in-
   depth, not an authz boundary.
-- DB licensing + update cadence belongs in `docs/deployment.md`.
+- DB licensing + update cadence belongs in
+  [Environment variables and flags](../docs/reference/env-vars-and-flags.md)
+  (`GPM_GEOIP_DB`) and [AccessList](../docs/reference/config/access-list.md).
 - IPv6: mmdb covers it; the resolver already treats v6 like v4.
 
 **Effort:** M.

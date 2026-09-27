@@ -6,7 +6,7 @@
 #
 #   kubectl apply -f deploy/k8s-ingress-discovery-rbac.yaml
 #
-# Then extract the token and CA bundle for gpm (see docs/deployment.md). Create
+# Then extract the token and CA bundle for gpm (see docs/how-to/expose-k8s-ingress.md). Create
 # each file 0400 FIRST: a plain shell redirect would create it 0644 and leave a
 # window in which any local user can read the bearer token.
 #

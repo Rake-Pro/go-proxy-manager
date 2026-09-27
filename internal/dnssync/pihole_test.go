@@ -273,7 +273,7 @@ func TestPiholeReconcileRemovesStale(t *testing.T) {
 	wantLedger(t, led.pihole(), "app.example.com", "edge.example.com")
 }
 
-// THE 2026-08-01 INCIDENT, as a test. An operator enables the Pi-hole backend for
+// REGRESSION GUARD, as a test. An operator enables the Pi-hole backend for
 // the first time. Their resolver already holds 19 hand-written LAN CNAMEs aimed
 // at the very host apexTarget names (their LAN-direct bypass list). No proxy host
 // carries dns.lanDirect yet, so the desired set is EMPTY, and the ledger is empty
@@ -287,9 +287,9 @@ func TestPiholeReconcileRemovesStale(t *testing.T) {
 func TestPiholeFirstEnableWithSharedApexDeletesNothing(t *testing.T) {
 	var records []string
 	for _, name := range []string{
-		"plex", "argo", "cloud", "wiki", "paste", "speed", "pantry", "cdn", "go",
-		"extensions", "gamewarden", "dotfiles", "ntfy", "grafana", "jackett",
-		"qbit", "sonarr", "radarr", "nas",
+		"app1", "app2", "app3", "app4", "app5", "app6", "app7", "app8", "app9",
+		"app10", "app11", "app12", "app13", "app14", "app15",
+		"app16", "app17", "app18", "app19",
 	} {
 		records = append(records, name+".example.com,edge.example.com")
 	}
@@ -325,10 +325,10 @@ func TestPiholeFirstEnableWithSharedApexDeletesNothing(t *testing.T) {
 // and above all not deleted - and everything else stays untouched.
 func TestPiholeAdoptsMatchingRecordsOnFirstEnable(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
-		"app.example.com,edge.example.com",  // desired, right target: adopt
-		"plex.example.com,edge.example.com", // same target, NOT desired: leave alone
-		"nas.example.com,truenas.lan",       // unrelated: leave alone
-		"other.example.com,other-proxy.lan", // desired name, wrong target: skip
+		"app.example.com,edge.example.com",     // desired, right target: adopt
+		"stream1.example.com,edge.example.com", // same target, NOT desired: leave alone
+		"nas1.example.com,nas1.lan",            // unrelated: leave alone
+		"other.example.com,other-proxy.lan",    // desired name, wrong target: skip
 	}}
 	srv := startPihole(t, fake)
 
@@ -352,9 +352,9 @@ func TestPiholeAdoptsMatchingRecordsOnFirstEnable(t *testing.T) {
 	got := fake.snapshot()
 	want := []string{
 		"app.example.com,edge.example.com",
-		"nas.example.com,truenas.lan",
+		"nas1.example.com,nas1.lan",
 		"other.example.com,other-proxy.lan",
-		"plex.example.com,edge.example.com",
+		"stream1.example.com,edge.example.com",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("records = %v\nwant %v", got, want)
@@ -498,8 +498,8 @@ func TestPiholeAdoptedClaimStaysAdoptedAcrossReconciles(t *testing.T) {
 
 // The whole sequence, end to end: adopt a hand-written record, move the edge host,
 // then take dns.lanDirect off the proxy host. Each step on its own looks harmless;
-// before the release-on-retarget fix the three together reproduced the 2026-08-01
-// incident one record at a time, because step two silently re-recorded the
+// before the release-on-retarget fix the three together reproduced the deletion
+// regression one record at a time, because step two silently re-recorded the
 // operator's record as one gpm had created.
 func TestPiholeAdoptThenApexChangeThenRemovalKeepsTheOperatorsRecord(t *testing.T) {
 	const original = "app.example.com,old-edge.example.com"
@@ -552,7 +552,7 @@ func TestPiholeAdoptThenApexChangeThenRemovalKeepsTheOperatorsRecord(t *testing.
 // Cloudflare backend does).
 func TestPiholeNeverTouchesUnmanagedRecords(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
-		"nas.example.com,truenas.lan",       // someone else's entry
+		"nas1.example.com,nas1.lan",         // someone else's entry
 		"app.example.com,other-proxy.lan",   // same domain, different target
 		"legacy.example.com,edge.other.lan", // similar but not our apex
 		"stale.example.com,edge.example.com",
@@ -561,7 +561,7 @@ func TestPiholeNeverTouchesUnmanagedRecords(t *testing.T) {
 	defer srv.Close()
 
 	// stale is the only one gpm ever created, so it is the only one that can go -
-	// note that legacy and nas are NOT in the ledger and survive regardless.
+	// note that legacy and nas1 are NOT in the ledger and survive regardless.
 	led := ownsPihole("stale.example.com", "edge.example.com")
 	s := piholeSyncerWith(t, srv, []model.ProxyHost{lanHost("app", "app.example.com")}, led)
 	if err := s.Reconcile(context.Background()); err != nil {
@@ -571,7 +571,7 @@ func TestPiholeNeverTouchesUnmanagedRecords(t *testing.T) {
 	want := []string{
 		"app.example.com,other-proxy.lan",   // operator-owned: kept, and NOT shadowed
 		"legacy.example.com,edge.other.lan", // untouched
-		"nas.example.com,truenas.lan",       // untouched
+		"nas1.example.com,nas1.lan",         // untouched
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("records = %v\nwant %v", got, want)
@@ -672,7 +672,7 @@ func TestPiholeBadPasswordReported(t *testing.T) {
 // given dns.lanDirect for that same name, so gpm adopts the record. Later still
 // the flag is removed. Before this was fixed the next reconcile DELETED their
 // record: adoption had quietly converted somebody else's record into one gpm
-// believed it had made. The incident, deferred by one config edit.
+// believed it had made. The deletion regression, deferred by one config edit.
 func TestPiholeAdoptionIsNotAOneWayTrapToDeletion(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{"x.example.com,edge.example.com"}}
 	srv := startPihole(t, fake)

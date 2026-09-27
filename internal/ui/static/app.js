@@ -156,7 +156,7 @@ function arr(v) { return Array.isArray(v) ? v : []; }
 // expects (a dot between two real labels), never mid-word. <wbr> after such a
 // "." gives the browser that break point explicitly; paired with
 // overflow-wrap:normal and word-break:keep-all in CSS, that stops e.g.
-// "acme-test.rake.pro" from splitting mid-label the way a bare
+// "acme-test.example.com" from splitting mid-label the way a bare
 // word-break:break-all would. The dot must be preceded by a label character -
 // not "*" - so a wildcard's "*." never breaks on its own, orphaned, from the
 // label it prefixes.

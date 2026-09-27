@@ -62,7 +62,7 @@ frozen discovery reconciler, over ntfy, Discord or a generic JSON webhook.
 | Discord rejects the post | The URL is not a webhook URL | It must contain `/api/webhooks/`; validation refuses anything else |
 | Nothing arrives, status shows no attempt | The event kind is not in this target's `events` filter | Add the kind, or clear `events` to take the default set |
 | `config.changed` never fires | It is off by default because it is noisy | Add it to that target's `events` explicitly |
-| Events stop under load | At most 8 deliveries are in flight; an event over that bound is dropped with a `WARN` rather than queued | Fix the slow receiver: delivery is best-effort and must never block a config write |
+| Events stop under load | The delivery queue holds at most 256 pending jobs; once full, a new one is dropped with a `WARN` rather than blocking | Fix the slow receiver: delivery is best-effort and must never block a config write |
 | The status is empty after a restart | Delivery status is in-memory and per-process | Expected; it is an operational hint, not config |
 | A secret is refused at commit | Literal secret values are never accepted | Use a `${FILE:...}` or `${ENV:...}` placeholder |
 

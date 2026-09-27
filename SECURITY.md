@@ -37,7 +37,7 @@ attack surface includes:
   middleware chain, and every auth gate.
 - The control plane (admin port 8081): the REST API and web UI, which are
   **not** meant to be exposed directly to the internet: see
-  [docs/deployment.md](docs/deployment.md) and the README's Security model
+  [docs/deployment.md](docs/deployment.md) and the README's Security
   section.
 - The git-backed config store: secrets are referenced via `${ENV:}` /
   `${FILE:}` placeholders and never committed in plaintext by design; a

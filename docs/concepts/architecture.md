@@ -134,10 +134,11 @@ next to `settings.yaml`) is the subsystem's load-bearing piece, and it exists
 because the thing it replaced was not ownership at all. Pi-hole/dnsmasq CNAMEs
 carry no comment field, so the original backend inferred ownership from target
 equality: "this CNAME points at `apexTarget`, therefore gpm made it". On a shared
-apex that is simply false, and on 2026-08-01 it cost an operator 19 hand-written
-LAN CNAMEs: they enabled the backend for the first time, no host carried
-`dns.lanDirect` yet, so the desired set was empty, every one of those records
-looked managed, and the first reconcile deleted the lot. Ownership is now recorded
+apex that is simply false, and it is the regression this ledger guards against: an
+operator enabling the backend for the first time with hand-written LAN CNAMEs
+already pointing at the same edge host, and no host yet carrying
+`dns.lanDirect`, would otherwise see the desired set come up empty, every one of
+those records look managed, and the first reconcile delete the lot. Ownership is now recorded
 rather than inferred: `decide()` (in `dnssync.go`) is the single place the rules
 live, and both backends plus the dry-run planner call it, so a preview cannot
 disagree with the run it previews. Per desired name it **creates** what is absent,
@@ -158,8 +159,8 @@ from the ledger, record left standing), never deleted. The same applies when
 released there too rather than replaced, which also stops the claim being quietly
 upgraded to "created" and arming a later deletion. Without that distinction,
 adoption was a one-way trap: turn `dns.lanDirect` on for a hand-written name, turn
-it off again, and the next reconcile deleted the operator's record, which is the
-2026-08-01 incident deferred by one config edit. An entry with no recorded
+it off again, and the next reconcile deleted the operator's record: the same
+deletion regression, deferred by one config edit. An entry with no recorded
 provenance (a ledger written before the field existed) reads as adopted, the only
 reading of a missing field that cannot destroy anything on upgrade. Deletions are
 logged at warn together with the ledger revision that authorised them, since a
@@ -806,7 +807,7 @@ effect of this defence in depth.
   falls inside an `allowFrom` network exempts every request through it, which on
   a `client-cert` host is a total mTLS bypass. The fix is to declare that proxy
   in `settings.trustedProxies` (or the host's own): one knob, every tier; see
-  docs/configuration.md, "Client IP and the three trust tiers".
+  [Client IP and the three trust tiers](request-pipeline.md#client-ip-and-the-three-trust-tiers).
   In `client-cert` mode the exemption is decided before the certificate check, so
   an exempt client is never asked for one and never role-checked, and because
   identity-passthrough headers are set only from a handshake-verified certificate,
@@ -842,10 +843,10 @@ effect of this defence in depth.
   records it *recorded creating*, in the git-backed ownership ledger
   (`config/dns-ledger.yaml`); Cloudflare additionally requires its
   `managed-by:gpm` comment. Nothing is inferred from a record's target, because
-  inferring it deleted 19 of an operator's hand-written CNAMEs on 2026-08-01. A
+  target-equality inference is exactly what deletes an operator's hand-written
+  CNAMEs on a shared apex. A
   name owned by a foreign record is left alone rather than replaced, so a
-  misconfiguration cannot take an operator's zone
-  apart. Ingress and Docker discovery apply the same rule inward: only proxy hosts
+  misconfiguration cannot take an operator's zone apart. Ingress and Docker discovery apply the same rule inward: only proxy hosts
   carrying that reconciler's own managed-by label VALUE are written or deleted, and only when neither the derived
   name nor any of its domains is already claimed by a host it does not own, and it
   deletes at all only on the strength of a complete, successful cluster list
@@ -901,9 +902,10 @@ A deliberately small, vetted set (Go 1.26, CGO disabled):
 | `golang.org/x/oauth2` | OAuth2 authorization-code flow |
 | `golang.org/x/crypto` | bcrypt, TLS helpers |
 | `rs/zerolog` | structured logging |
-| `gopkg.in/yaml.v3` | config (de)serialization |
+| `go.yaml.in/yaml/v3` | config (de)serialization |
 | `modernc.org/sqlite` | pure-Go session store (no CGO) |
 | `software.sslmate.com/src/go-pkcs12` | PKCS#12 (`.p12`) encoding for issued client certificates |
+| `oschwald/maxminddb-golang/v2` | pure-Go MaxMind `.mmdb` reader for GeoIP access-list rules |
 
 Everything else is the Go standard library.
 

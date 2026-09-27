@@ -110,7 +110,7 @@ For a nameserver with no native client, see
 | `GET /api/certificates` | `state: valid`, `issuer` set, `daysRemaining` near 90 |
 | `curl -sI https://app.example.com/` | `200`/`3xx` and no TLS error |
 | `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://app.example.com/` | `308 https://app.example.com/` |
-| `GET /api/health` | `certificates.valid` includes this one |
+| `GET /api/health` | `certificates.expired` and `certificates.error` stay `0` |
 
 ## Troubleshooting
 

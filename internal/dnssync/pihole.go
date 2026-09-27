@@ -259,8 +259,8 @@ func (s *Syncer) planPihole(ctx context.Context, cfg model.Config, conf model.Pi
 // syncPihole reconciles the LAN CNAMEs and returns the ownership ledger the run
 // ended with. Ownership is the ledger and nothing else: a CNAME gpm did not
 // create is never deleted, however exactly its target matches apexTarget - which
-// is precisely the inference that cost an operator 19 hand-written records on
-// 2026-08-01.
+// is precisely the inference that can cost an operator every hand-written record
+// on a shared apex.
 //
 // The returned ledger reflects the writes that actually landed, so a run that
 // fails half way still records the records it created before failing.

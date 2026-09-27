@@ -164,8 +164,8 @@ error-page system; none is a regression from that change.
 - [x] **Per-object revert.** Revert today is whole-tree: `Store.Revert` ->
   `RestoreTree` (`git read-tree --reset -u` + `clean -fd`) resets the entire
   config to the target commit, so reverting one object from its History view
-  silently deletes every object created after that commit (bit the operator
-  2026-07-16: reverting a proxy host wiped three newer Certificate objects).
+  silently deletes every object created after that commit (regression guard:
+  reverting a proxy host must not wipe newer Certificate objects).
   Offer a scoped revert that restores only the selected object's file from the
   target commit (`git restore --source=<hash> -- <rel>` semantics) and commits
   just that change; keep the whole-tree revert as an explicit, clearly-labeled
@@ -225,9 +225,9 @@ error-page system; none is a regression from that change.
   token header when Authentik is itself proxied through gpm, breaking every admin
   login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
 
-## Public release (deferred, owner wants this, not yet ready)
+## Public release (done)
 
-- [ ] **Take the repo public** once it has had a polish pass and a dedicated
+- [x] **Take the repo public** once it has had a polish pass and a dedicated
   security-surface review. *(2026-08-22: review done; batches 1+2 shipped same day: 4 Med + 2 Low
   security fixes, location-chain data-loss fix, HTTP-01/EAB/3 DNS providers,
   OpenAPI, CI pinning + cosign + staticcheck/govulncheck, configurable
@@ -242,7 +242,8 @@ error-page system; none is a regression from that change.
   handling, LICENSE choice) plus items specific to this repo: a fresh look at
   the auth/guard code paths with "attacker can read the source" assumptions,
   a check that the docs describe gpm entirely on its own terms, and
-  confirmation that no deployment-specific defaults leak operator detail. Do not flip until the security review is signed off.
+  confirmation that no deployment-specific defaults leak operator detail.
+  *(Done: repo is public.)*
 
 ## Live-validation follow-ups
 
@@ -448,7 +449,7 @@ and the design record
   user to keep an operator-disabled host enabled. Deferred deliberately: the
   behaviour is documented rather than changed for now.
 
-### DNS record ownership (2026-08-01 incident)
+### DNS record ownership (regression guard)
 
 Enabling `dnsSync.pihole` for the first time deleted 19 hand-written LAN CNAMEs
 that pointed at the configured `apexTarget` (see CHANGELOG `Fixed`). Remediated in
@@ -468,7 +469,7 @@ one change:
 - [x] Status reports `adopted` / `retargeted` / `skipped` / `untouched` alongside
   created and deleted.
 
-Adversarial review of that change (2026-08-01), all remediated:
+Adversarial review of that change, all remediated:
 
 - [x] **Adoption was a one-way trap**: an adopted record the config later stopped
   wanting was deleted. Ledger entries now record provenance (`adopted`) and an

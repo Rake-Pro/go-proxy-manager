@@ -290,7 +290,7 @@ func TestRevertRejectsBadHashViaAPI(t *testing.T) {
 	}
 }
 
-// TestPerObjectRevertViaAPI is the incident scenario at the API boundary:
+// TestPerObjectRevertViaAPI is the regression guard scenario at the API boundary:
 // POST /proxy-hosts/{name}/revert restores only that host to a past commit and
 // leaves a host created afterwards intact.
 func TestPerObjectRevertViaAPI(t *testing.T) {

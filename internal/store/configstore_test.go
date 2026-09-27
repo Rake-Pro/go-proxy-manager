@@ -235,7 +235,7 @@ func sampleCert(name string) model.Certificate {
 	}
 }
 
-// TestRevertObjectRestoresOnlyTarget is the exact incident scenario (2026-07-16):
+// TestRevertObjectRestoresOnlyTarget is the regression guard scenario:
 // reverting one proxy host to an earlier commit must restore ONLY that host's
 // file and leave every object created after that commit intact - unlike the
 // whole-tree Revert, which would wipe the newer objects.

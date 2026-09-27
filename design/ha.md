@@ -12,7 +12,7 @@ supported multi-instance story before any code lands, per the BACKLOG item
 there: config replication, shared secrets + single-writer ACME, SSO revocation
 propagation, traffic-side failover, and stream/UDP state.
 
-The target is the real deployment: a **two-node homelab edge pair**, each an
+The target deployment is a **two-node edge pair**, each an
 instance of the single-binary/single-compose stack described in
 [Install with Docker Compose](../docs/getting-started/install-docker.md). The design is deliberately sized for that,
 not for a large fleet.

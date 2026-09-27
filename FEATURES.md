@@ -90,8 +90,8 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
 
 ### P0: must-have (shipped)
 - **Proxy hosts** for `*.example.com`, TLS termination, HTTP/2, websockets.
-- **Let's Encrypt wildcard via DNS-01** for the homelab DNS provider (the
-  `*.example.com` wildcard, like the existing wildcard cert); custom certs.
+- **Let's Encrypt wildcard via DNS-01** for the operator's DNS provider (the
+  `*.example.com` wildcard); custom certs.
 - **IP access lists** (LAN / VPN gating): keep the current allow-list model.
 - **Authentik done right** (the reason this exists): native **OIDC admin login**
   with IdP group->role mapping; **SSO-only mode** (shipped, `adminAuth.ssoOnly`)
@@ -466,5 +466,5 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
   baseline.
 - **Cloudflare-proxy interplay**: if proxied, document what it overrides; we run
   DNS-only today.
-- **DNS-01 wildcard via the homelab's existing setup** (the existing wildcard cert).
+- **DNS-01 wildcard via an operator's existing setup** (a pre-provisioned wildcard cert).
 

@@ -3,6 +3,13 @@
 Let operators sign in to the admin panel with an OIDC identity provider, with
 local login kept as the anti-lockout path.
 
+## Prerequisites
+
+- A running gpm instance with `settings.externalBaseURL` reachable from
+  wherever operators sign in.
+- An OIDC application registered at your identity provider (client id/secret,
+  and the ability to set a redirect URI).
+
 ## Steps
 
 1. Set `externalBaseURL` in `settings.yaml` to the admin panel's public URL; the
@@ -19,12 +26,23 @@ Only an `oidc` provider renders a sign-in button. A settings write that turns on
 one of type `forward-auth` / `auth-request`, is **refused**: it would leave a
 login page with no buttons and no password form.
 
-### No admin login is configured
+## Verify
+
+| Check | Expected |
+|---|---|
+| Sign-in page | An SSO button for the provider, alongside (or instead of) the local form |
+| Complete a login through the IdP | Lands on the admin panel, signed in with the mapped role |
+| `GET /api/capabilities` | `adminLogin.configured: true` |
+
+## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Login page shows a "No administrator login is configured" banner; startup log has an `error`-level line saying nobody can sign in | No usable local credential (`GPM_LOCAL_ADMIN_USER` plus a bcrypt hash) **and** no `oidc` provider listed in `adminAuth.providers` | Set the local pair (below) **or** finish the OIDC steps above, then restart |
+| Login page shows a "No administrator login is configured" banner; startup log has an `error`-level line saying nobody can sign in | No usable local credential (`GPM_LOCAL_ADMIN_USER` plus a bcrypt hash) **and** no `oidc` provider listed in `adminAuth.providers` | Set the local pair below, or finish the OIDC steps above, then restart |
 | Login form accepts a password but always answers "authentication failed" | `GPM_LOCAL_ADMIN_USER` is set but the hash is not (or is unreadable) | Generate the hash and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
+| `ssoOnly: true` write is refused | `adminAuth.providers` names a provider that does not exist, or one of type `forward-auth`/`auth-request` | Point it at an existing `oidc` provider first |
+
+To set the local anti-lockout credential:
 
 ```
 docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > ./admin_hash
@@ -33,6 +51,3 @@ docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > ./adm
 Then set `GPM_LOCAL_ADMIN_USER=admin` and
 `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE=/run/secrets/gpm_admin_hash` (the file must
 sit under an allowlisted secret root; see `GPM_SECRET_FILE_ROOTS`).
-
-The same condition is reported by `GET /api/capabilities` as
-`adminLogin.configured: false`.

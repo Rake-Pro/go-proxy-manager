@@ -15,13 +15,13 @@ func join(v []string) string { return strings.Join(v, ",") }
 // The dry run has to be exactly that: a preview that reports the decisions a
 // reconcile would take and issues not one write while doing so. That is what
 // makes enabling a backend on a resolver full of hand-written records checkable
-// BEFORE it is done - the 2026-08-01 incident was only discoverable by running it.
+// BEFORE it is done - the deletion regression was only discoverable by running it.
 func TestPlanPreviewsWithoutWriting(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
-		"app.example.com,edge.example.com",   // desired + right target, unowned: adopt
-		"plex.example.com,edge.example.com",  // same target, not desired: untouched
-		"held.example.com,other-proxy.lan",   // desired name, foreign record: skip
-		"stale.example.com,edge.example.com", // owned, no longer desired: delete
+		"app.example.com,edge.example.com",     // desired + right target, unowned: adopt
+		"stream1.example.com,edge.example.com", // same target, not desired: untouched
+		"held.example.com,other-proxy.lan",     // desired name, foreign record: skip
+		"stale.example.com,edge.example.com",   // owned, no longer desired: delete
 	}}
 	srv := startPihole(t, fake)
 
@@ -53,7 +53,7 @@ func TestPlanPreviewsWithoutWriting(t *testing.T) {
 	if join(p.Skip) != "held.example.com" {
 		t.Fatalf("skip = %v", p.Skip)
 	}
-	// plex + held are gpm's to leave alone; app and stale it has a claim on.
+	// stream1 + held are gpm's to leave alone; app and stale it has a claim on.
 	if p.Untouched != 2 {
 		t.Fatalf("untouched = %d, want 2", p.Untouched)
 	}
@@ -184,14 +184,14 @@ func TestPlanCloudflareIsReadOnly(t *testing.T) {
 	}
 }
 
-// The incident scenario, previewed: with nothing desired and nothing owned, the
+// The regression scenario, previewed: with nothing desired and nothing owned, the
 // plan must show zero deletions and report every hand-written record as left
 // alone. This is the check an operator gets to run before enabling a backend.
 func TestPlanOnFirstEnableShowsNoDeletions(t *testing.T) {
 	fake := &fakePihole{password: "secret", records: []string{
-		"plex.example.com,edge.example.com",
-		"argo.example.com,edge.example.com",
-		"wiki.example.com,edge.example.com",
+		"app1.example.com,edge.example.com",
+		"app2.example.com,edge.example.com",
+		"app3.example.com,edge.example.com",
 	}}
 	srv := startPihole(t, fake)
 

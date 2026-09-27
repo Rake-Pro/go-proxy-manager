@@ -1,10 +1,8 @@
 # Expose a Kubernetes Ingress through gpm
 
 Turn annotated cluster `Ingress` objects into managed proxy hosts, read-only
-and opt-in.
-
-Turns annotated cluster `Ingress` objects into managed proxy hosts, which then
-feed the DNS sync above. Configure it under **Integrations -> Kubernetes Ingress
+and opt-in. A derived host feeds [DNS sync](dns-sync.md) the same as a
+hand-written one. Configure it under **Integrations -> Kubernetes Ingress
 discovery** (full field reference in
 [Settings: Kubernetes Ingress discovery](../reference/config/settings/ingress-discovery.md),
 rationale in [design/ingress-discovery.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/ingress-discovery.md)).

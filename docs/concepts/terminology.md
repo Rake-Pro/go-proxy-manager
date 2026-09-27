@@ -67,16 +67,36 @@ brackets where it differs.
 
 ## UI-only labels
 
-Three settings groups and two views have no config object behind them; they are
-navigation labels, not kinds.
+Navigation labels, not object kinds. Two different things reuse some of the
+same names, worth being precise about: the **left nav** groups routes into
+sections, and the **Settings** page has its own tabs, unrelated to the nav
+groups.
 
-| UI label | What it edits |
+Left-nav groups:
+
+| Group | Routes it holds |
 |---|---|
-| **Overview** | The Settings landing view: instance identity and admin authentication. |
-| **Security** | The Settings group holding trusted proxies, security headers and header stripping. |
-| **Integrations** | The Settings group holding DNS sync, discovery, webhooks and notifications. |
-| **Advanced** | The Settings group holding maintenance, PROXY protocol and the remaining low-level keys. |
-| **Operations** | The Settings group holding runtime facts, metrics and profiling status. |
+| Hosts | Proxy Hosts, Redirects |
+| Security | Certificates, Access Lists, Identity Providers, Middleware |
+| Operations | Integrations, Access Logs, History, Settings |
+| Advanced (collapsible) | Streams, Parked Hosts, Upstream Groups, Client CAs, DNS Providers, Error Pages, API Tokens |
+
+Settings-page tabs (`#/settings/<tab>`; every tab's Save sends the whole
+settings object, since `PUT /api/settings` is a full replacement):
+
+| Tab | What it edits |
+|---|---|
+| General | Instance identity, admin sign-in, trusted proxies, TLS floor. |
+| Response headers | `settings.securityHeaders`, `settings.stripResponseHeaders`. |
+| Advanced | PROXY protocol, the discovery annotation prefix, the metrics link, HA status. |
+| Operations | Fleet-wide maintenance, per-host SSO session revocation (the "danger zone"). |
+
+Other views with no config object behind them:
+
+| View | What it shows |
+|---|---|
+| **Overview** | Dashboard: instance health, certificate status, discovery status. Not settings, despite the name. |
+| **Integrations** | `settings.dnsSync`, `settings.ingressDiscovery`, `settings.dockerDiscovery`, `settings.accessListSync`, `settings.webhooks`, `settings.notifications`. |
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |
 | **Access Logs** | The in-memory log of proxy-listener requests and its runtime toggle (`PUT /api/logs`). Not stored config. |
