@@ -104,8 +104,12 @@ jobs:
           go-version-file: .go-version
           cache: true
 
+      # staticcheck is a go.mod tool dependency (go tool) rather than `go run pkg@ver`:
+      # Go 1.27.2 backported unified V5 export data (golang/go#81188) and the x/tools
+      # bundled by staticcheck v0.8.1 cannot read it; resolving x/tools through our
+      # go.mod (>= v0.50.0) fixes the import without waiting for a staticcheck release.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        run: go tool staticcheck ./...
 
   vuln:
     name: govulncheck
