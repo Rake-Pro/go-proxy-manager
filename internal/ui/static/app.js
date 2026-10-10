@@ -28,6 +28,7 @@ const ICON = {
   trash: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   commit: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>',
   menu: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
+  contrast: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
   // Access Logs and History both used to render ICON.history, which made two
   // unrelated sections read as one. Logs is a request tape (a page of entries);
   // history stays the clock-with-arrow.
@@ -495,6 +496,9 @@ const ERROR_PATH_RE = /^([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)+)\s*:\s*/;
 function clearEditorError() {
   $$('#content .editor-error').forEach((el) => el.remove());
   $$('#content .field-flagged').forEach((el) => el.classList.remove('field-flagged'));
+  // A row error left from an earlier attempt must not win the scroll over
+  // this attempt's banner.
+  clearRowErrors($('#content'));
 }
 function errorFieldFor(msg) {
   const m = ERROR_PATH_RE.exec(String(msg || ''));
@@ -537,9 +541,19 @@ function showSaveError(e, title) {
   banner.querySelector('.ee-close').addEventListener('click', () => clearEditorError());
   const jump = banner.querySelector('#ee-jump');
   if (jump) jump.addEventListener('click', () => focusErrorField(target));
-  if (target) focusErrorField(target); else window.scrollTo(0, 0);
+  // A row error (markRowError) is already marked on its row: keep that row in
+  // view rather than jumping to the banner at the top of a long page.
+  const badRow = target ? null : c.querySelector('.row-bad');
+  if (target) focusErrorField(target);
+  else if (badRow) { try { badRow.scrollIntoView({ block: 'center' }); } catch (e2) { badRow.scrollIntoView(); } }
+  else window.scrollTo(0, 0);
   return banner;
 }
+
+// A blocking validation message is the same page state as a failed save: the
+// operator has to read it, fix a field and try again, which a 7-second toast
+// does not leave time for. So it gets the same sticky banner.
+function showInvalid(title, msg) { showSaveError(new Error(msg), title); }
 
 // ---------- inline row validation ----------
 // The row editors (locations, access-list rules, sources, basic-auth users)
@@ -644,7 +658,9 @@ function confirmModal(opts) {
     if (typedInput) typedInput.addEventListener('input', refresh);
     if (promptInput) promptInput.addEventListener('input', refresh);
     if (typedInput || promptInput) { refresh(); (promptInput || typedInput).focus(); }
-    else okBtn.focus();
+    // A destructive dialog opens on Cancel, so a stray or repeated Enter never
+    // confirms it; a non-destructive one opens on its confirm button.
+    else (opts.danger === false ? okBtn : wrap.querySelector('#cm-cancel')).focus();
   });
 }
 
@@ -665,6 +681,16 @@ function markDirty(e) {
   if (t && t.closest && t.closest('#content')) dirtyFlag = true;
 }
 function clearDirty() { dirtyFlag = false; }
+// For an action that re-renders the page itself (not through a hash change, so
+// onHashChange's guard never runs): ask before unsaved edits are thrown away.
+async function confirmDiscardEdits() {
+  if (!dirtyFlag) return true;
+  return confirmModal({
+    title: 'You have unsaved changes',
+    body: '<p>This action reloads the page and discards them.</p>',
+    confirmLabel: 'Discard and continue',
+  });
+}
 document.addEventListener('input', markDirty);
 document.addEventListener('change', markDirty);
 document.addEventListener('switchchange', markDirty);
@@ -773,7 +799,11 @@ function updateThemeBtn() {
   const btn = $('#themeBtn');
   if (!btn) return;
   const t = getTheme();
-  btn.textContent = 'Theme: ' + themeLabel(t);
+  // The label is hidden at phone width, where the icon alone stands in for
+  // it; aria-label keeps the name either way.
+  const label = 'Theme: ' + themeLabel(t);
+  btn.innerHTML = `${ICON.contrast}<span class="theme-label">${esc(label)}</span>`;
+  btn.setAttribute('aria-label', label);
   btn.title = 'Click to change (auto follows your OS)';
 }
 function setTheme(t) {
@@ -840,7 +870,7 @@ function buildShell() {
   app.innerHTML = `
     <div class="scrim" id="scrim"></div>
     <div class="app">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <div class="wordmark">
           <span class="logo" aria-hidden="true">${ICON.fanout}</span>
           <span class="name">${esc(state.appName)}</span>
@@ -850,34 +880,56 @@ function buildShell() {
         </nav>
       </aside>
       <div class="main">
-        <header class="topbar">
-          <button class="menu-btn" id="menuBtn" aria-label="Open navigation">${ICON.menu}</button>
+        <header class="topbar"><div class="topbar-inner">
+          <button class="menu-btn" id="menuBtn" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">${ICON.menu}</button>
           <h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1>
           <div class="spacer"></div>
           <button class="btn ghost sm" id="themeBtn" type="button"></button>
           <div class="ident" id="ident"></div>
-        </header>
+        </div></header>
         <main class="content" id="content"></main>
       </div>
     </div>`;
 
   $$('#nav .nav-item').forEach((b) => {
-    b.addEventListener('click', () => { location.hash = '#/' + b.dataset.view; closeNav(); });
+    b.addEventListener('click', () => {
+      location.hash = '#/' + b.dataset.view;
+      closeNav();
+      // The drawer hides with focus still inside it on phones; park focus on
+      // the page title instead.
+      const t = $('#pageTitle'); t.tabIndex = -1; t.focus();
+    });
   });
   // The collapsible group header is a real <button>, so Enter/Space and the tab
   // order come from the platform rather than from a keydown handler here.
   $$('#nav .nav-group-head').forEach((b) => {
     b.addEventListener('click', () => setNavGroupOpen(b.dataset.group, b.getAttribute('aria-expanded') !== 'true', true));
   });
-  $('#menuBtn').addEventListener('click', () => document.body.classList.add('nav-open'));
+  $('#menuBtn').addEventListener('click', () => {
+    document.body.classList.add('nav-open');
+    $('#menuBtn').setAttribute('aria-expanded', 'true');
+    // The drawer is visibility:hidden while closed (out of the tab order), so
+    // keyboard focus is moved into it on open.
+    const first = $('#nav .nav-item.active') || $('#nav .nav-item');
+    if (first) first.focus();
+  });
   $('#scrim').addEventListener('click', closeNav);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || !document.body.classList.contains('nav-open')) return;
+    closeNav();
+    $('#menuBtn').focus();
+  });
   updateThemeBtn();
   $('#themeBtn').addEventListener('click', () => {
     const order = ['auto', 'light', 'dark'];
     setTheme(order[(order.indexOf(getTheme()) + 1) % order.length]);
   });
 }
-function closeNav() { document.body.classList.remove('nav-open'); }
+function closeNav() {
+  document.body.classList.remove('nav-open');
+  const b = document.getElementById('menuBtn');
+  if (b) b.setAttribute('aria-expanded', 'false');
+}
 
 async function loadTopbar() {
   // Best-effort and each independent, so they are issued together instead of
@@ -1009,7 +1061,11 @@ function gateControl(el, available, reason) {
 // unavailable state instead of an empty one, and Save is refused until the
 // operator reloads. Same three-state contract the client CA picker has had.
 function refList(path, label) {
+  // A failure that lands after route() has moved on to another render belongs
+  // to the abandoned view, not to the list the new view is collecting.
+  const owner = state.refListFailed;
   return api(path).then((r) => arr(r.data)).catch(() => {
+    if (owner !== state.refListFailed) return null;
     if (arr(state.refListFailed).indexOf(label) === -1) state.refListFailed.push(label);
     return null;
   });
@@ -1020,14 +1076,18 @@ function resetRefListFailures() { state.refListFailed = []; }
 function applyRefListGuard(container) {
   const failed = arr(state.refListFailed);
   if (!container || !failed.length) return;
-  const msg = `Could not load ${failed.join(', ')}; save is disabled to avoid stripping references. Reload the page to try again.`;
+  // Save only: deleting an object does not depend on a reference list, and
+  // greying Delete out under a message about saving would just read as a bug.
+  // A view with no Save (a list) gets a banner that does not mention one.
+  const saves = container.querySelectorAll('#saveBtn, #ed-save, #ct-save, #set-save, .set-save, .int-save');
+  const msg = saves.length
+    ? `Could not load ${failed.join(', ')}; save is disabled to avoid stripping references. Reload the page to try again.`
+    : `Could not load ${failed.join(', ')}; some details on this page may be missing. Reload the page to try again.`;
   const banner = document.createElement('div');
   banner.className = 'ro-banner warn';
   banner.innerHTML = `<b>Reference list unavailable.</b> ${esc(msg)}`;
   container.prepend(banner);
-  // Save only: deleting an object does not depend on a reference list, and
-  // greying Delete out under a message about saving would just read as a bug.
-  container.querySelectorAll('#saveBtn, #ed-save, #set-save, .set-save, .int-save').forEach((b) => gateControl(b, false, msg));
+  saves.forEach((b) => gateControl(b, false, msg));
 }
 // The in-card note that replaces an empty picker when its list did not load.
 function refListUnavailableHtml(what) {
@@ -1196,7 +1256,9 @@ const GLOSSARY_RE = new RegExp('\\b(' + Object.keys(GLOSSARY).join('|') + ')(s?)
 function glossaryTerm(word) {
   const id = GLOSSARY[String(word).toLowerCase()];
   if (!id || !HINTS[id]) return esc(word);
-  return `<span class="gloss" data-hint="${esc(id)}" tabindex="0" role="button" aria-label="Glossary: ${esc(word)}">${esc(word)}</span>`;
+  // Not a button: nothing happens on Enter. It is a focusable term whose
+  // definition opens on focus (and hover) and is announced as its description.
+  return `<span class="gloss" data-hint="${esc(id)}" tabindex="0" role="term" aria-describedby="hint-pop">${esc(word)}</span>`;
 }
 // Runs over text that is ALREADY html-escaped (page intros, fold summaries), so
 // the spans it injects are the only markup in the result. Only the first
@@ -1264,14 +1326,46 @@ function decorateHints(root) {
       if (el.classList.contains('gloss')) return;
       const target = hintAnchorFor(el);
       if (!target) { if (!el.getAttribute('title')) el.setAttribute('title', entry.text); return; }
-      if (target.querySelector('.hint-btn')) return;
       const label = (target.textContent || el.getAttribute('aria-label') || '').trim();
+      // A <label> gets the "?" as its next sibling, not as a child: inside it,
+      // the button would be the label's labelable descendant, so a click on
+      // the label text opened the popover instead of focusing the field.
+      // Same for a fold's heading: <summary> allows phrasing content only and
+      // must not hold another interactive element, so the "?" goes right after
+      // it, at the top of the open section.
+      const after = target.tagName === 'LABEL' ? target : target.closest('summary');
+      if (after) {
+        const next = after.nextElementSibling;
+        if (next && next.classList.contains('hint-btn')) return;
+        after.insertAdjacentHTML('afterend', hintHtml(id, label));
+        return;
+      }
+      if (target.querySelector('.hint-btn')) return;
       target.insertAdjacentHTML('beforeend', hintHtml(id, label));
     });
+    labelFieldGroups(root);
   } finally {
     if (hintObserver) hintObserver.takeRecords();
     hintDecorating = false;
   }
+}
+
+// Ties each field-group's <label> to its control with for/id, so clicking the
+// label focuses the field and the control gets the label as its accessible
+// name. Only a group with exactly one control of its own is tied: a group that
+// holds a repeater, a check-list or a matrix has no single control to name, and
+// those controls carry their own aria-label or wrapping label.
+let labelSeq = 0;
+function labelFieldGroups(root) {
+  root.querySelectorAll('.field-group > label:not([for])').forEach((lab) => {
+    const fg = lab.parentElement;
+    const ctls = Array.from(fg.querySelectorAll('input:not([type="hidden"]), select, textarea'))
+      .filter((el) => el.closest('.field-group') === fg && !el.closest('label, .check-list, table'));
+    if (ctls.length !== 1) return;
+    const ctl = ctls[0];
+    if (!ctl.id) ctl.id = 'fld-' + (++labelSeq);
+    lab.htmlFor = ctl.id;
+  });
 }
 
 // ---------- help popover ----------
@@ -1374,9 +1468,13 @@ function makeChipInput(container, initial, placeholder, onChange) {
   const tokens = (initial || []).slice();
   function changed() { if (onChange) onChange(tokens.slice()); }
   function render() {
+    // Keep the input's id across re-renders (the container's own, or the one
+    // labelFieldGroups assigned), so a label's for= keeps pointing at it.
+    const prev = container.querySelector('input');
+    const inputId = (prev && prev.id) || (container.id ? container.id + '-in' : '');
     container.innerHTML = tokens.map((t, i) =>
       `<span class="chip-tok">${esc(t)} <button type="button" aria-label="Remove ${esc(t)}" data-i="${i}">&times;</button></span>`
-    ).join('') + `<input class="mono" placeholder="${esc(placeholder || 'add...')}" aria-label="${esc(placeholder || 'add')}" />`;
+    ).join('') + `<input class="mono" placeholder="${esc(placeholder || 'add...')}" ${inputId ? `id="${esc(inputId)}" ` : ''}aria-label="${esc(placeholder || 'add')}" />`;
     const input = container.querySelector('input');
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ',') {
@@ -1387,12 +1485,26 @@ function makeChipInput(container, initial, placeholder, onChange) {
         tokens.pop(); render(); container.querySelector('input').focus(); changed();
       }
     });
+    // Text typed but not committed with Enter or "," is still meant: commit it
+    // when focus leaves the box (unless it moved to one of this box's own
+    // remove buttons), and get() below includes it, so Save never drops it.
+    input.addEventListener('blur', (e) => {
+      // Moving to this box's own buttons, or straight to Save (which reads
+      // the pending text itself), must not redraw the box under the click.
+      if (e.relatedTarget && (container.contains(e.relatedTarget) || e.relatedTarget.closest('.save-bar'))) return;
+      const v = pending();
+      if (v && tokens.indexOf(v) === -1) { tokens.push(v); render(); changed(); }
+    });
     container.querySelectorAll('.chip-tok button').forEach((b) => {
       b.addEventListener('click', () => { tokens.splice(parseInt(b.dataset.i, 10), 1); render(); changed(); });
     });
   }
+  function pending() {
+    const i = container.querySelector('input');
+    return i ? i.value.trim().replace(/,$/, '') : '';
+  }
   render();
-  return { get: () => tokens.slice() };
+  return { get: () => { const v = pending(); return v && tokens.indexOf(v) === -1 ? tokens.concat(v) : tokens.slice(); } };
 }
 
 // ---------- shared value helpers ----------
@@ -1642,24 +1754,24 @@ function wireAuthBlock(p, auth, idps) {
       const certRoles = m === 'client-cert' ? certRolesCtl.get() : {};
       const where = label ? label + ': ' : '';
       if (m !== 'client-cert' && m !== 'basic' && !idp) {
-        toast('Identity provider required', where + 'Select an identity provider.', 'err'); return null;
+        showInvalid('Identity provider required', where + 'Select an identity provider.'); return null;
       }
       if (m === 'auth-request' && roles.length) {
-        toast('Roles unsupported', where + 'Required roles are not supported in auth-request mode - the auth server does authorization.', 'err'); return null;
+        showInvalid('Roles unsupported', where + 'Required roles are not supported in auth-request mode - the auth server does authorization.'); return null;
       }
       if (m === 'client-cert' && roles.length && !Object.keys(certRoles).length) {
-        toast('Mapping required', where + 'Add at least one certificate subject role, or clear the required roles.', 'err'); return null;
+        showInvalid('Mapping required', where + 'Add at least one certificate subject role, or clear the required roles.'); return null;
       }
       if (allow.length) {
         const bad = firstBadCidr(allow);
-        if (bad) { toast('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, 'err'); return null; }
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`); return null; }
         if (m === 'oidc' || m === 'forward-auth') {
-          toast('Exemption not applicable', where + 'Exempt networks apply only to auth-request, client-cert and basic modes.', 'err'); return null;
+          showInvalid('Exemption not applicable', where + 'Exempt networks apply only to auth-request, client-cert and basic modes.'); return null;
         }
         if (!m) {
           const t = (idps.find((x) => x.name === idp) || {}).type || '';
           if (t !== 'auth-request') {
-            toast('Set a mode explicitly', where + `With no mode this uses ${idp}'s type (${t || 'unknown'}), where the exemption would be ignored.`, 'err'); return null;
+            showInvalid('Set a mode explicitly', where + `With no mode this uses ${idp}'s type (${t || 'unknown'}), where the exemption would be ignored.`); return null;
           }
         }
       }
@@ -1671,10 +1783,10 @@ function wireAuthBlock(p, auth, idps) {
       if (Object.keys(certRoles).length) spec.clientCertRoles = certRoles;
       if (m === 'basic') {
         const uerr = usersCtl.error();
-        if (uerr) { toast('Credentials incomplete', where + uerr, 'err'); return null; }
+        if (uerr) { showInvalid('Credentials incomplete', where + uerr); return null; }
         const realm = $('#' + p + '-realm').value.trim();
         if (realm && (realm.length > 128 || /["\\]/.test(realm) || /[^\x20-\x7e]/.test(realm))) {
-          toast('Invalid realm', where + 'Realm must be printable ASCII without " or \\ (it is sent verbatim in the WWW-Authenticate header).', 'err'); return null;
+          showInvalid('Invalid realm', where + 'Realm must be printable ASCII without " or \\ (it is sent verbatim in the WWW-Authenticate header).'); return null;
         }
         const b = { users: usersCtl.get() };
         if (realm) b.realm = realm;
@@ -1698,8 +1810,8 @@ function rateLimitBlockHtml(p, rl) {
   return `
     <div class="field-group"><label>Rate form</label>
       <div class="seg" data-hint="middleware.rateLimit.form">
-        <button type="button" class="seg-btn${perSecond ? '' : ' on'}" id="${p}-rf-win">Per window</button>
-        <button type="button" class="seg-btn${perSecond ? ' on' : ''}" id="${p}-rf-sec">Per second</button>
+        <button type="button" class="seg-btn${perSecond ? '' : ' on'}" id="${p}-rf-win" aria-pressed="${!perSecond}">Per window</button>
+        <button type="button" class="seg-btn${perSecond ? ' on' : ''}" id="${p}-rf-sec" aria-pressed="${!!perSecond}">Per second</button>
       </div>
     </div>
     <div class="inline-fields" id="${p}-win-fields"${perSecond ? ' hidden' : ''}>
@@ -1727,6 +1839,8 @@ function wireRateLimitBlock(p, rl) {
   function pick(perSecond) {
     winBtn.classList.toggle('on', !perSecond);
     secBtn.classList.toggle('on', perSecond);
+    winBtn.setAttribute('aria-pressed', String(!perSecond));
+    secBtn.setAttribute('aria-pressed', String(perSecond));
     $('#' + p + '-win-fields').hidden = perSecond;
     $('#' + p + '-sec-fields').hidden = !perSecond;
   }
@@ -1739,13 +1853,13 @@ function wireRateLimitBlock(p, rl) {
       const spec = {};
       if (perSecond) {
         const rps = parseFloat($('#' + p + '-rps').value);
-        if (isNaN(rps) || rps <= 0) { toast('Rate required', where + 'Set a rate: requests per second, or requests plus a window.', 'err'); return null; }
+        if (isNaN(rps) || rps <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.'); return null; }
         spec.requestsPerSecond = rps;
       } else {
         const req = parseFloat($('#' + p + '-req').value);
         const win = $('#' + p + '-win').value.trim();
-        if (isNaN(req) || req <= 0) { toast('Rate required', where + 'Set a rate: requests per second, or requests plus a window.', 'err'); return null; }
-        if (!GO_DURATION_RE.test(win)) { toast('Invalid window', where + 'Window must be a duration such as 10s, 1m or 1h.', 'err'); return null; }
+        if (isNaN(req) || req <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.'); return null; }
+        if (!GO_DURATION_RE.test(win)) { showInvalid('Invalid window', where + 'Window must be a duration such as 10s, 1m or 1h.'); return null; }
         spec.requests = req;
         spec.window = win;
       }
@@ -1754,12 +1868,12 @@ function wireRateLimitBlock(p, rl) {
       const allow = allowCtl.get();
       if (allow.length) {
         const bad = firstBadCidr(allow);
-        if (bad) { toast('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, 'err'); return null; }
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`); return null; }
         spec.allowFrom = allow;
       }
       const block = $('#' + p + '-block').value.trim();
       if (block) {
-        if (!GO_DURATION_RE.test(block)) { toast('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.', 'err'); return null; }
+        if (!GO_DURATION_RE.test(block)) { showInvalid('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.'); return null; }
         spec.blockFor = block;
       }
       return spec;
@@ -1814,7 +1928,7 @@ function upstreamExtraHtml(p, up) {
   const hh = up.hostHeader || '';
   const preset = (hh === '' || hh === 'upstream') ? hh : 'custom';
   return `
-    <div class="inline-fields" style="margin-top:8px">
+    <div class="inline-fields">
       <div class="field-group"><label>Base path</label>
         <input class="field mono" id="${p}-uppath" data-hint="proxyHost.upstream.path" value="${esc(up.path || '')}" placeholder="/api" />
         <div class="hint">Prefixed to every request sent to this backend: with <span class="mono">/api</span>, a request for <span class="mono">/v1/x</span> arrives as <span class="mono">/api/v1/x</span>. Leave empty to forward the path unchanged.</div>
@@ -1852,13 +1966,13 @@ function wireUpstreamExtra(p) {
       const out = {};
       const path = $('#' + p + '-uppath').value.trim();
       const perr = upstreamPathError(path);
-      if (perr) { toast('Invalid base path', where + perr, 'err'); return null; }
+      if (perr) { showInvalid('Invalid base path', where + perr); return null; }
       if (path) out.path = path;
       if (sel.value === 'upstream') out.hostHeader = 'upstream';
       else if (sel.value === 'custom') {
         const v = $('#' + p + '-uphh-custom').value.trim();
-        if (!v) { toast('Host header required', where + 'Enter a hostname, or choose another option.', 'err'); return null; }
-        if (v.length > 253 || !HOSTHEADER_RE.test(v)) { toast('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".', 'err'); return null; }
+        if (!v) { showInvalid('Host header required', where + 'Enter a hostname, or choose another option.'); return null; }
+        if (v.length > 253 || !HOSTHEADER_RE.test(v)) { showInvalid('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".'); return null; }
         out.hostHeader = v;
       }
       return out;
@@ -2002,6 +2116,15 @@ function wireCloneButton(section, orig, btnId) {
 }
 
 // ---------- router ----------
+// Every render gets a fresh #content element, and a view that is still
+// awaiting a fetch when the operator navigates on is stopped at its next
+// render write: that write throws, and route()'s catch drops a stale render
+// quietly. Letting it write into the detached element was not enough - views
+// wire their controls through document-global $('#id'), so a stale editor of
+// the same kind would have wired itself onto the NEW page's controls (its
+// data in the new page's fields, its save handler on the new page's Save).
+let routeSeq = 0;
+const INNER_HTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
 async function route() {
   const raw = location.hash.replace(/^#/, '');
   const parts = raw.split('/').filter(Boolean);
@@ -2011,7 +2134,18 @@ async function route() {
 
   setActiveNav(section);
   $('#pageTitle').textContent = TITLES[section] || state.appName;
-  const c = $('#content');
+  const seq = ++routeSeq;
+  const prev = $('#content');
+  const c = prev.cloneNode(false);
+  prev.replaceWith(c);
+  Object.defineProperty(c, 'innerHTML', {
+    configurable: true,
+    get() { return INNER_HTML.get.call(this); },
+    set(v) {
+      if (seq !== routeSeq) throw new Error('stale render');
+      INNER_HTML.set.call(this, v);
+    },
+  });
   c.innerHTML = loadingHtml();
   window.scrollTo(0, 0);
   // Per-render bookkeeping: the shell and the view share one memo for the three
@@ -2056,6 +2190,7 @@ async function route() {
       case 'settings': await viewSettings(c, sub); break;
       default: location.hash = '#/overview'; return;
     }
+    if (seq !== routeSeq) return;
     c.classList.add('view');
     applyRefListGuard(c);
     applyMaintenanceBanner(c);
@@ -2064,14 +2199,19 @@ async function route() {
     applyInsecureCookieBanner(c);
     armDirtyTracking(c);
     decorateHints(c);
-    if (hintObserver) hintObserver.observe(c, { childList: true, subtree: true });
+    if (hintObserver) { hintObserver.disconnect(); hintObserver.observe(c, { childList: true, subtree: true }); }
   } catch (e) {
     if (e && e.message === 'Unauthorized') return;
+    if (seq !== routeSeq) return;
     c.innerHTML = inlineError(e && e.message ? e.message : String(e));
   }
 }
 function setActiveNav(section) {
-  $$('#nav .nav-item').forEach((n) => n.classList.toggle('active', n.dataset.view === section));
+  $$('#nav .nav-item').forEach((n) => {
+    const on = n.dataset.view === section;
+    n.classList.toggle('active', on);
+    if (on) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current');
+  });
   // A deep link (or the back button) into a collapsed group opens it, so the
   // active item is never highlighted inside a section the operator cannot see.
   // Not persisted: this is the app following a link, not a preference.
@@ -2173,10 +2313,12 @@ function makeEventChips(container, selected) {
   return { get: () => NOTIFY_EVENTS.map((e) => e.k).filter((k) => on.has(k)) };
 }
 
-function intSaveBar(label) {
+// Every bar saves every card on the page (one settings PUT), so every bar says
+// so rather than naming only the card it sits in.
+function intSaveBar() {
   return `<div class="panel save-bar int-save-bar">
-    <div class="save-note">${ICON.commit}Saves the whole settings object as one revision.</div>
-    <div style="display:flex;gap:10px"><button class="btn primary int-save" type="button">${esc(label || 'Save changes')}</button></div>
+    <div class="save-note">${ICON.commit}Saves every card on this page as one revision.</div>
+    <div style="display:flex;gap:10px"><button class="btn primary int-save" type="button">Save integrations</button></div>
   </div>`;
 }
 
@@ -2275,7 +2417,7 @@ async function viewIntegrations(c) {
         <button class="btn ghost sm" id="set-dns-preview" type="button" title="Read the backends and report what a reconcile would change. Nothing is written.">Preview changes</button>
         <button class="btn ghost sm" id="set-dns-run" type="button">Reconcile now</button>
       </div>
-      ${intSaveBar('Save DNS sync')}
+      ${intSaveBar()}
     </div>
 
     <div class="card form-section" style="margin-bottom:16px">
@@ -2315,7 +2457,7 @@ async function viewIntegrations(c) {
           <div>
             <div class="field-group">
               <label>Upstream (ingress controller)</label>
-              <div class="loc-row">
+              <div class="loc-row bare">
                 <select class="field mono" id="set-id-up-scheme" data-hint="settings.ingressDiscovery.template.upstream" style="flex:0 0 90px" aria-label="Upstream scheme">
                   <option value="http"${(idt.upstream.scheme || 'http') === 'http' ? ' selected' : ''}>http</option>
                   <option value="https"${idt.upstream.scheme === 'https' ? ' selected' : ''}>https</option>
@@ -2335,7 +2477,7 @@ async function viewIntegrations(c) {
             <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-id-al" data-hint="settings.ingressDiscovery.template.accessLists"></div></div>
             <div class="field-group">
               <label>Upstream timeouts (seconds)</label>
-              <div class="loc-row">
+              <div class="loc-row bare">
                 <input class="field mono" id="set-id-to-connect" data-hint="settings.ingressDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(idTo.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
                 <input class="field mono" id="set-id-to-read" data-hint="settings.ingressDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(idTo.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
               </div>
@@ -2374,7 +2516,7 @@ async function viewIntegrations(c) {
         <button class="btn ghost sm" id="set-id-preview" type="button" title="Read the cluster and report what a reconcile would create, update, delete and skip. Nothing is written.">Preview changes</button>
         <button class="btn ghost sm" id="set-id-run" type="button">Reconcile now</button>
       </div>
-      ${intSaveBar('Save Ingress discovery')}
+      ${intSaveBar()}
     </div>
 
     <div class="card form-section" style="margin-bottom:16px">
@@ -2422,7 +2564,7 @@ async function viewIntegrations(c) {
               <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-dkr-robots', !!ddt.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Upstream timeouts (seconds)</label>
-                <div class="loc-row">
+                <div class="loc-row bare">
                   <input class="field mono" id="set-dkr-to-connect" data-hint="settings.dockerDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(ddTo.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
                   <input class="field mono" id="set-dkr-to-read" data-hint="settings.dockerDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(ddTo.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
                 </div>
@@ -2449,7 +2591,7 @@ async function viewIntegrations(c) {
         <button class="btn ghost sm" id="set-dkr-preview" type="button" title="Read the Engine and report what a reconcile would change. Nothing is written.">Preview changes</button>
         <button class="btn ghost sm" id="set-dkr-run" type="button">Reconcile now</button>
       </div>
-      ${intSaveBar('Save Docker discovery')}
+      ${intSaveBar()}
     </div>
 
     <div class="card form-section" style="margin-bottom:16px">
@@ -2463,7 +2605,7 @@ async function viewIntegrations(c) {
       </div>
       <div id="int-als-status" style="margin-top:12px"></div>
       <div style="margin-top:6px"><button class="btn ghost sm" id="int-als-run" type="button">Reconcile now</button></div>
-      ${intSaveBar('Save access-list sync')}
+      ${intSaveBar()}
     </div>
 
     <div class="card form-section" style="margin-bottom:16px">
@@ -2472,7 +2614,7 @@ async function viewIntegrations(c) {
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
       <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, with the same <span class="mono">X-GPM-Webhook-Secret</span> header a real event carries.</div>
-      ${intSaveBar('Save webhooks')}
+      ${intSaveBar()}
     </div>
 
     <div class="card form-section" style="margin-bottom:16px">
@@ -2485,7 +2627,7 @@ async function viewIntegrations(c) {
       <div id="set-notifications" data-hint="settings.notifications.targets" data-path="notifications.targets" style="margin-top:10px"></div>
       <button class="btn ghost sm" id="addNotification" type="button" style="margin-top:6px">${ICON.plus}Add notification target</button>
       <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends a synthetic event to the target immediately, using the same payload shape a real alert would (plain text for ntfy, an embed for Discord, a JSON envelope for generic), bypassing this target's Events filter.</div>
-      ${intSaveBar('Save notifications')}
+      ${intSaveBar()}
     </div>`;
 
   // ----- DNS sync -----
@@ -2598,8 +2740,7 @@ async function viewIntegrations(c) {
     const to = p.timeouts || {};
     const i = ++pfSeq;
     const div = document.createElement('div');
-    div.className = 'panel id-profile';
-    div.style.cssText = 'padding:12px;margin-bottom:10px';
+    div.className = 'sub-block id-profile';
     div.innerHTML = `
       <div class="loc-row" style="margin-bottom:8px">
         <input class="field mono pf-name" data-hint="settings.ingressDiscovery.profiles.name" style="flex:1 1 180px" value="${esc(name || '')}" placeholder="profile name (e.g. sso-internal)" aria-label="Profile name" />
@@ -2609,7 +2750,7 @@ async function viewIntegrations(c) {
         <div>
           <div class="field-group">
             <label>Upstream (ingress controller)</label>
-            <div class="loc-row">
+            <div class="loc-row bare">
               <select class="field mono pf-up-scheme" data-hint="settings.ingressDiscovery.template.upstream" style="flex:0 0 90px" aria-label="Upstream scheme">
                 <option value="http"${(up.scheme || 'http') === 'http' ? ' selected' : ''}>http</option>
                 <option value="https"${up.scheme === 'https' ? ' selected' : ''}>https</option>
@@ -2627,7 +2768,7 @@ async function viewIntegrations(c) {
           <div class="field-group"><label>Access lists</label><div class="chip-input pf-al" data-hint="settings.ingressDiscovery.template.accessLists"></div><div class="hint">Leave empty for a profile that is public on purpose.</div></div>
           <div class="field-group">
             <label>Upstream timeouts (seconds)</label>
-            <div class="loc-row">
+            <div class="loc-row bare">
               <input class="field mono pf-to-connect" data-hint="settings.ingressDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(to.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
               <input class="field mono pf-to-read" data-hint="settings.ingressDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(to.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
             </div>
@@ -2766,8 +2907,7 @@ async function viewIntegrations(c) {
     const to = p.timeouts || {};
     const i = ++dpfSeq;
     const div = document.createElement('div');
-    div.className = 'panel dkr-profile';
-    div.style.cssText = 'padding:12px;margin-bottom:10px';
+    div.className = 'sub-block dkr-profile';
     div.innerHTML = `
       <div class="loc-row" style="margin-bottom:8px">
         <input class="field mono dpf-name" data-hint="settings.dockerDiscovery.profiles.name" style="flex:1 1 180px" value="${esc(name || '')}" placeholder="profile name (e.g. public-ratelimited)" aria-label="Profile name" />
@@ -2780,7 +2920,7 @@ async function viewIntegrations(c) {
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('dpf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
           <div class="field-group" style="margin-top:10px">
             <label>Upstream timeouts (seconds)</label>
-            <div class="loc-row">
+            <div class="loc-row bare">
               <input class="field mono dpf-to-connect" data-hint="settings.dockerDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(to.connectSeconds || '')}" placeholder="connect" aria-label="Connect timeout seconds" />
               <input class="field mono dpf-to-read" data-hint="settings.dockerDiscovery.template.timeouts" style="flex:1 1 90px" value="${esc(to.readSeconds || '')}" placeholder="read" aria-label="Read timeout seconds" />
             </div>
@@ -3069,11 +3209,13 @@ async function viewIntegrations(c) {
       if (!/^https?:\/\//.test(url)) { whErr = markRowError(row, 'URL must start with http:// or https://.'); return; }
       const wh = { name: nm, url };
       const secret = row.querySelector('.wh-secret').value.trim();
+      // A literal secret is redacted on read; saving it back would commit "***".
+      if (secret === '***') { whErr = markRowError(row, 'The secret reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.'); return; }
       if (secret) wh.secret = secret;
       if (row.querySelector('.wh-disabled').checked) wh.disabled = true;
       webhooks.push(wh);
     });
-    if (whErr) { toast('Webhook invalid', whErr, 'err'); return; }
+    if (whErr) { showInvalid('Webhook invalid', whErr); return; }
     if (webhooks.length) body.webhooks = webhooks; else delete body.webhooks;
 
     const targets = [];
@@ -3097,6 +3239,7 @@ async function viewIntegrations(c) {
       }
       const t = { name: nm, type, url };
       const secret = type === 'discord' ? '' : row.querySelector('.ntf-secret').value.trim();
+      if (secret === '***') { ntfErr = markRowError(row, 'The secret reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.'); return; }
       if (secret) t.secret = secret;
       if (row.querySelector('.ntf-disabled').checked) t.disabled = true;
       // Omitted when the chips are exactly the server-side default, so an
@@ -3105,7 +3248,7 @@ async function viewIntegrations(c) {
       if (!sameEventSet(ev, defaultNotifyEvents())) t.events = ev;
       targets.push(t);
     });
-    if (ntfErr) { toast('Notification target invalid', ntfErr, 'err'); return; }
+    if (ntfErr) { showInvalid('Notification target invalid', ntfErr); return; }
     const ntfDays = parseInt($('#set-ntf-days').value, 10);
     const notifications = {};
     if (targets.length) notifications.targets = targets;
@@ -3116,7 +3259,7 @@ async function viewIntegrations(c) {
     const phPw = $('#set-ph-pw').value.trim();
     if (phPw === '***') {
       // A literal secret is redacted on read; saving it back would commit "***".
-      toast('Secret masked', 'The Pi-hole app password reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.', 'err');
+      showInvalid('Secret masked', 'The Pi-hole app password reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.');
       return;
     }
     if (isOn('set-ph-on')) dnsSync.pihole.enabled = true;
@@ -3227,7 +3370,7 @@ async function viewIntegrations(c) {
       profiles[pname] = prof;
     });
     if (pfDup) {
-      toast('Duplicate profile', `Two discovery profiles are both called "${pfDup}". Profile names must be unique - an Ingress selects one by name.`, 'err');
+      showInvalid('Duplicate profile', `Two discovery profiles are both called "${pfDup}". Profile names must be unique - an Ingress selects one by name.`);
       return;
     }
     if (Object.keys(profiles).length) ingressDiscovery.profiles = profiles;
@@ -3266,14 +3409,14 @@ async function viewIntegrations(c) {
     const dkrCert = $('#set-dkr-tlscert').value.trim();
     const dkrKey = $('#set-dkr-tlskey').value.trim();
     const dkrSuffixes = dkrSuffixCtl.get();
-    if (dkrOn && !dkrSuffixes.length) { toast('Docker discovery', 'allowedDomainSuffixes is required when discovery is enabled', 'err'); return; }
-    if (dkrSocket && dkrSocket[0] !== '/') { toast('Docker discovery', 'socket must be an absolute path', 'err'); return; }
-    if (dkrHost && !/^(tcp|https):\/\//.test(dkrHost)) { toast('Docker discovery', 'host must be an absolute tcp:// or https:// URL (e.g. tcp://socket-proxy:2375)', 'err'); return; }
-    if (!!dkrCert !== !!dkrKey) { toast('Docker discovery', 'tlsCert and tlsKey must be set together', 'err'); return; }
-    if (dkrCert && !/^https:\/\//.test(dkrHost)) { toast('Docker discovery', 'tlsCert/tlsKey need an https:// host', 'err'); return; }
-    if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { toast('Docker discovery', 'publishedHost only applies with usePublishedPorts: true', 'err'); return; }
-    if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { toast('Docker discovery', 'network and usePublishedPorts are mutually exclusive', 'err'); return; }
-    if (dkrOn && !$('#set-dkr-cert').value.trim()) { toast('Docker discovery', 'template.tls.certificateRef is required when discovery is enabled', 'err'); return; }
+    if (dkrOn && !dkrSuffixes.length) { showInvalid('Docker discovery', 'allowedDomainSuffixes is required when discovery is enabled'); return; }
+    if (dkrSocket && dkrSocket[0] !== '/') { showInvalid('Docker discovery', 'socket must be an absolute path'); return; }
+    if (dkrHost && !/^(tcp|https):\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'host must be an absolute tcp:// or https:// URL (e.g. tcp://socket-proxy:2375)'); return; }
+    if (!!dkrCert !== !!dkrKey) { showInvalid('Docker discovery', 'tlsCert and tlsKey must be set together'); return; }
+    if (dkrCert && !/^https:\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'tlsCert/tlsKey need an https:// host'); return; }
+    if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'publishedHost only applies with usePublishedPorts: true'); return; }
+    if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'network and usePublishedPorts are mutually exclusive'); return; }
+    if (dkrOn && !$('#set-dkr-cert').value.trim()) { showInvalid('Docker discovery', 'template.tls.certificateRef is required when discovery is enabled'); return; }
     const dockerDiscovery = {
       socket: dkrSocket || undefined,
       host: dkrHost || undefined,
@@ -3334,13 +3477,17 @@ async function viewIntegrations(c) {
       dkrProfiles[pname] = prof;
     });
     if (dpfDup) {
-      toast('Duplicate profile', `Two Docker discovery profiles are both called "${dpfDup}". Profile names must be unique.`, 'err');
+      showInvalid('Duplicate profile', `Two Docker discovery profiles are both called "${dpfDup}". Profile names must be unique.`);
       return;
     }
     if (Object.keys(dkrProfiles).length) dockerDiscovery.profiles = dkrProfiles;
     body.dockerDiscovery = dockerDiscovery;
 
-    btn.disabled = true;
+    // All bars submit the same body, so all of them are held during the PUT
+    // (a second bar must not double-submit), then put back as they were.
+    const saveBtns = $$('.int-save');
+    const wasDisabled = saveBtns.map((b) => b.disabled);
+    saveBtns.forEach((b) => { b.disabled = true; });
     try {
       const r = await api('/api/settings', { method: 'PUT', body });
       // The per-route memo now holds a settings object this save superseded.
@@ -3356,7 +3503,7 @@ async function viewIntegrations(c) {
       await loadWebhookStatus();
       await loadNotifyStatus();
     } catch (e) { showSaveError(e, 'Could not save these integrations'); }
-    btn.disabled = false;
+    saveBtns.forEach((b, i) => { b.disabled = wasDisabled[i]; });
   }
 }
 
@@ -3408,7 +3555,7 @@ async function viewOverview(c) {
       if (ct.state === 'error') {
         errRows.push(attnRow('err', `Certificate <b>${name}</b> failed to renew`,
           [typ, domains, ct.lastError ? esc(ct.lastError) : ''].filter(Boolean).join(' &middot; '),
-          href, 'Retry now'));
+          href, 'Open'));
       } else if (ct.state === 'expired') {
         const ago = ct.daysRemaining != null ? -ct.daysRemaining : null;
         errRows.push(attnRow('err', `Certificate <b>${name}</b> has expired`,
@@ -3622,6 +3769,11 @@ async function listHosts(c) {
     .map((z) => [z, zoneCounts[z]])
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const showZones = zoneEntries.length >= 2;
+  // A zone that no longer has a host cannot be switched back on from a chip,
+  // so a stale entry is dropped instead of silently filtering forever.
+  const zonesBefore = zonesOff.size;
+  zonesOff.forEach((z) => { if (!zoneCounts[z]) zonesOff.delete(z); });
+  if (zonesOff.size !== zonesBefore) saveZonesOff();
 
   let sort = { key: 'name', dir: 1 };
   try {
@@ -3655,7 +3807,9 @@ async function listHosts(c) {
         if (!col.key) return `<th>${esc(col.label)}</th>`;
         const active = sort.key === col.key;
         const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
-        return `<th class="sortable" data-sort="${col.key}" aria-sort="${aria}" role="button" tabindex="0">${esc(col.label)}<span class="sort-mark">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></th>`;
+        // The th keeps its columnheader role (that is what aria-sort is valid
+        // on); the control inside it is a real button.
+        return `<th class="sortable" aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
       }).join('')
       + `</tr>`;
   }
@@ -3663,7 +3817,9 @@ async function listHosts(c) {
   function visible() {
     const q = (($('#hostFilter') && $('#hostFilter').value) || '').trim().toLowerCase();
     const out = recs.filter((r) => {
-      const zoneOk = r.zones.length === 0 || r.zones.some((z) => !zonesOff.has(z));
+      // With no chip row there is no control to undo a zone filter, so it
+      // does not apply.
+      const zoneOk = !showZones || r.zones.length === 0 || r.zones.some((z) => !zonesOff.has(z));
       return zoneOk && (!q || r.blob.indexOf(q) !== -1);
     });
     const get = SORTS[sort.key] || SORTS.name;
@@ -3695,7 +3851,7 @@ async function listHosts(c) {
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
-      <td><span class="host">${esc(r.domains[0] || h.name)}${esc(extra)}</span> ${managedChip}${r.display ? `<div class="faint" style="font-size:11px">${esc(r.display)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
+      <td><a class="host" href="#/hosts/${encodeURIComponent(h.name)}">${esc(r.domains[0] || h.name)}${esc(extra)}</a> ${managedChip}${r.display ? `<div class="faint" style="font-size:11px">${esc(r.display)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
       <td class="mono">${esc(r.upStr)}</td>
       <td>${tls}</td>
       <td>${auth}</td>
@@ -3707,7 +3863,7 @@ async function listHosts(c) {
 
   function zoneChipsInner() {
     return (zonesOff.size ? `<button type="button" class="chip zone all" data-zone-all="1">all</button>` : '')
-      + zoneEntries.map(([z, n]) => `<button type="button" class="chip zone${zonesOff.has(z) ? ' off' : ''}" data-zone="${esc(z)}">${esc(z)} (${n})</button>`).join('');
+      + zoneEntries.map(([z, n]) => `<button type="button" class="chip zone${zonesOff.has(z) ? ' off' : ''}" data-zone="${esc(z)}" aria-pressed="${!zonesOff.has(z)}">${esc(z)} (${n})</button>`).join('');
   }
   const zoneChipsHtml = showZones ? `<div class="chip-row" id="zoneChips">${zoneChipsInner()}</div>` : '';
 
@@ -3739,13 +3895,12 @@ async function listHosts(c) {
       b.addEventListener('click', () => runBulk(b.dataset.bulk));
     });
     // The bar is built on selection, after applyReadOnlyGating has already run
-    // over this view, so a follower's gating is re-applied here (the banner is
-    // already on the page; only the controls need it). "Clear" only deselects,
-    // so it stays live.
-    if (hasCapability('ha.readOnly')) {
-      const role = (state.capabilities && state.capabilities.ha && state.capabilities.ha.role) || 'follower';
+    // over this view, so read-only gating (an HA follower or a read-only role)
+    // is re-applied here (the banner is already on the page; only the controls
+    // need it). "Clear" only deselects, so it stays live.
+    if (isReadOnly()) {
       bulkWrap.querySelectorAll('[data-bulk]:not([data-bulk="clear"])').forEach((el) => {
-        gateControl(el, false, `This instance runs as an HA ${role} and is read-only. Make config changes on the leader.`);
+        gateControl(el, false, readOnlyReason());
       });
     }
   }
@@ -3770,22 +3925,27 @@ async function listHosts(c) {
         render();
       });
     }
-    $$('#hostHead th.sortable').forEach((th) => {
-      const apply = () => {
-        const key = th.dataset.sort;
+    $$('#hostHead .sort-btn').forEach((b) => {
+      // The cell's padding still sorts on a mouse click, as it did before the
+      // button moved inside it.
+      const th = b.closest('th');
+      th.addEventListener('click', (e) => { if (e.target === th) b.click(); });
+      b.addEventListener('click', () => {
+        const key = b.dataset.sort;
         sort = { key, dir: sort.key === key ? -sort.dir : 1 };
         try { localStorage.setItem(HOSTS_SORT_KEY, JSON.stringify(sort)); } catch (e) { /* ignore */ }
         render();
-      };
-      th.addEventListener('click', apply);
-      th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); } });
+        // The head is re-rendered: keep keyboard focus on the same column.
+        const nb = $(`#hostHead .sort-btn[data-sort="${key}"]`);
+        if (nb) nb.focus();
+      });
     });
   }
 
   function wireRows() {
     $$('#hostRows tr.clickable').forEach((tr) => {
       tr.addEventListener('click', (e) => {
-        if (e.target.closest('.host-clone') || e.target.closest('.sel-cell')) return;
+        if (e.target.closest('.host-clone') || e.target.closest('.sel-cell') || e.target.closest('a')) return;
         location.hash = '#/hosts/' + encodeURIComponent(tr.dataset.name);
       });
     });
@@ -3867,13 +4027,16 @@ async function listHosts(c) {
       } catch (e) {
         prog.done('Stopped', `${done} of ${targets.length} updated. ${h.name}: ${e && e.message ? e.message : e}`, 'err');
         refreshHeadSha();
-        await listHosts(c);
+        // Through route(), not listHosts(c): route() re-applies the shell
+        // banners and read-only gating a bare re-render would drop. Skipped
+        // when the operator has already moved to another page.
+        if (c.isConnected) await route();
         return;
       }
     }
     prog.done('Done', `${done} host${done === 1 ? '' : 's'} updated and committed.`, 'ok');
     refreshHeadSha();
-    await listHosts(c);
+    if (c.isConnected) await route();
   }
 
   const filter = $('#hostFilter');
@@ -4029,11 +4192,13 @@ async function hostEditor(c, name) {
   const alSorted = selAl.map((n) => accessLists.find((a) => a.name === n)).filter(Boolean)
     .concat(accessLists.filter((a) => selAl.indexOf(a.name) === -1));
 
+  // Same markup as the hosts list's Status column: live and disabled are the
+  // quiet .flat states, maintenance keeps the pill.
   const statusChip = h.disabled
-    ? `<span class="chip"><span class="dot" style="background:var(--faint)"></span>disabled</span>`
+    ? `<span class="chip flat muted"><span class="dot muted"></span>disabled</span>`
     : ((h.maintenance || globalMaint) && !isNew
       ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
-      : `<span class="chip ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`);
+      : `<span class="chip flat ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`);
 
   // Progressive disclosure. A proxy host has thirteen sections and a normal one
   // uses four of them, so everything optional collapses to a single line that
@@ -4122,7 +4287,7 @@ async function hostEditor(c, name) {
               <input class="field" id="f-display" data-hint="common.displayName" data-path="displayName" value="${esc(h.displayName || '')}" placeholder="optional label" />
             </div>
           </div>
-          <div class="field-group" style="margin-top:10px">
+          <div class="field-group">
             <label>Tags</label>
             <div class="chip-input" id="f-tags" data-hint="proxyHost.tags" data-path="tags"></div>
             <div class="hint">Free-form labels for grouping and filtering. Press Enter to add.</div>
@@ -4207,7 +4372,7 @@ async function hostEditor(c, name) {
             <div class="inline-fields">
               <div class="field-group"><label>Minimum bytes</label><input class="field mono" id="f-gzip-min" data-hint="proxyHost.compression.minBytes" data-path="compression.minBytes" type="number" min="0" value="${esc(comp.minBytes || '')}" placeholder="1024" /></div>
             </div>
-            <div class="field-group" style="margin-top:10px">
+            <div class="field-group">
               <label>Content types</label>
               <textarea class="field mono" id="f-gzip-types" data-hint="proxyHost.compression.types" data-path="compression.types" rows="2" placeholder="text/html, application/json, ...">${esc(arr(comp.types).join(', '))}</textarea>
               <div class="hint">Comma-separated media types. Blank uses the built-in text/JSON/JS/CSS/SVG/XML list. Never applied to websocket upgrades, streaming, or event-stream responses.</div>
@@ -4251,9 +4416,9 @@ async function hostEditor(c, name) {
           <div class="field-group">
             <label>Trusted proxies (override)</label>
             <div class="seg" id="f-tp-seg" data-hint="proxyHost.trustedProxies.mode">
-              <button type="button" class="seg-btn${tpMode === 'inherit' ? ' on' : ''}" data-tp="inherit">Inherit fleet setting</button>
-              <button type="button" class="seg-btn${tpMode === 'none' ? ' on' : ''}" data-tp="none">Trust nobody on this host</button>
-              <button type="button" class="seg-btn${tpMode === 'custom' ? ' on' : ''}" data-tp="custom">Custom list</button>
+              <button type="button" class="seg-btn${tpMode === 'inherit' ? ' on' : ''}" data-tp="inherit" aria-pressed="${tpMode === 'inherit'}">Inherit fleet setting</button>
+              <button type="button" class="seg-btn${tpMode === 'none' ? ' on' : ''}" data-tp="none" aria-pressed="${tpMode === 'none'}">Trust nobody on this host</button>
+              <button type="button" class="seg-btn${tpMode === 'custom' ? ' on' : ''}" data-tp="custom" aria-pressed="${tpMode === 'custom'}">Custom list</button>
             </div>
             <div id="f-tp-custom"${tpMode === 'custom' ? '' : ' hidden'} style="margin-top:8px">
               <div class="chip-input" id="f-trustedproxies" data-hint="proxyHost.trustedProxies" data-path="trustedProxies"></div>
@@ -4399,7 +4564,7 @@ async function hostEditor(c, name) {
     return on ? on.dataset.tp : 'inherit';
   }
   $$('#f-tp-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
-    $$('#f-tp-seg .seg-btn').forEach((x) => x.classList.toggle('on', x === b));
+    $$('#f-tp-seg .seg-btn').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
     const mode = b.dataset.tp;
     $('#f-tp-custom').hidden = mode !== 'custom';
     $('#f-trustedproxies-inherit').hidden = mode !== 'inherit';
@@ -4430,6 +4595,9 @@ async function hostEditor(c, name) {
   // capability probe is cached per page load, so a stale "not configured" would
   // otherwise outlive the fact and block a perfectly valid edit.
   await loadCapabilities();
+  // The page has been rendered and wired above; if the operator moved on
+  // during this await, everything below would look up the NEW page's ids.
+  if (!c.isConnected) return;
   const dnsHint = (id, available) => {
     const el = $(id);
     if (el) el.style.display = available ? 'none' : '';
@@ -4449,8 +4617,7 @@ async function hostEditor(c, name) {
     const lu = loc.upstream || {};
     const p = 'loc' + (++locSeq);
     const div = document.createElement('div');
-    div.className = 'panel loc-block';
-    div.style.cssText = 'padding:12px;margin-bottom:10px';
+    div.className = 'sub-block loc-block';
     div.dataset.uid = p;
     div._orig = loc;
     const groupSel = upstreamGroups.length ? `
@@ -4473,12 +4640,12 @@ async function hostEditor(c, name) {
       </div>
       <div class="hint loc-strip-preview" hidden></div>
       ${upstreamExtraHtml(p, lu)}
-      <div class="inline-fields" style="margin-top:8px">
+      <div class="inline-fields">
         <div class="field-group"><label>Middlewares</label>
-          <select multiple class="field mono loc-mw" data-hint="proxyHost.locations.middlewares" style="height:56px" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+          <select multiple class="field mono loc-mw" data-hint="proxyHost.locations.middlewares" size="4" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
         </div>
         <div class="field-group"><label>Access lists</label>
-          <select multiple class="field mono loc-al" data-hint="proxyHost.locations.accessLists" style="height:56px" aria-label="Location access lists" title="Access lists for this path only (blank = host lists apply)">${accessLists.map((a) => `<option value="${esc(a.name)}"${arr(loc.accessLists).indexOf(a.name) !== -1 ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+          <select multiple class="field mono loc-al" data-hint="proxyHost.locations.accessLists" size="4" aria-label="Location access lists" title="Access lists for this path only (blank = host lists apply)">${accessLists.map((a) => `<option value="${esc(a.name)}"${arr(loc.accessLists).indexOf(a.name) !== -1 ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
         </div>
       </div>
       ${inlineFoldHtml(p + '-auth', 'Sign-in', 'Gate this path. The host\'s own sign-in still applies here.',
@@ -4626,9 +4793,9 @@ async function hostEditor(c, name) {
     // A previous failure's banner belongs to the previous attempt.
     clearEditorError();
     const nm = isNew ? $('#f-name').value.trim() : h.name;
-    if (!nm) { toast('Name required', 'Enter an internal name for this host.', 'err'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter an internal name for this host.'); return; }
     const domains = domainsCtl.get();
-    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return; }
     // A PUT is a whole-object replacement, so every ObjectMeta key this form
     // does NOT render has to be seeded from the loaded host or the save deletes
     // it. labels is the one that bites: it carries the discovery ownership
@@ -4644,7 +4811,7 @@ async function hostEditor(c, name) {
       obj.upstreamGroupRef = curGroup();
     } else {
       const portVal = parseInt($('#f-upport').value, 10);
-      if (!$('#f-uphost').value.trim() || isNaN(portVal)) { toast('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.', 'err'); return; }
+      if (!$('#f-uphost').value.trim() || isNaN(portVal)) { showInvalid('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.'); return; }
       // MERGED over the stored upstream, never rebuilt from the three inputs:
       // Upstream also carries path and hostHeader, and a rebuild dropped both on
       // every save (silently undoing a git-authored escape hatch). The two
@@ -4698,7 +4865,7 @@ async function hostEditor(c, name) {
       if (errpDir) errp.dir = errpDir;
       if (errpInlineRaw) {
         try { errp.inline = JSON.parse(errpInlineRaw); }
-        catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
+        catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).'); return; }
       }
       if (errpIntercept.length) errp.interceptUpstream = errpIntercept;
       obj.errorPages = errp;
@@ -4711,7 +4878,7 @@ async function hostEditor(c, name) {
     // not understand verbatim, and returns null when there are no rows - which
     // leaves the key off the body entirely rather than committing an empty map.
     const secHdrErr = secHdrCtl.error();
-    if (secHdrErr) { toast('Invalid security header', secHdrErr, 'err'); return; }
+    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr); return; }
     const secHdrs = secHdrCtl.get();
     if (secHdrs) obj.securityHeaders = secHdrs;
 
@@ -4721,7 +4888,7 @@ async function hostEditor(c, name) {
     // committing an empty array.
     const stripHdrs = stripCtl.get();
     const stripErr = stripHeaderListError(stripHdrs);
-    if (stripErr) { toast('Invalid strip header', stripErr, 'err'); return; }
+    if (stripErr) { showInvalid('Invalid strip header', stripErr); return; }
     if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;
 
     // certificateRef and http2 have no control on this form any more - the L7
@@ -4765,7 +4932,7 @@ async function hostEditor(c, name) {
       delete ca.identityHeaders;
       if (caListOK) {
         const caRefSel = $('#f-mtls-ca').value;
-        if (!caRefSel) { toast('Client CA required', 'Select the client CA to verify certificates against, or turn client certificates off.', 'err'); return; }
+        if (!caRefSel) { showInvalid('Client CA required', 'Select the client CA to verify certificates against, or turn client certificates off.'); return; }
         ca.caRef = caRefSel;
         ca.mode = $('#f-mtls-mode').value;
       }
@@ -4802,9 +4969,9 @@ async function hostEditor(c, name) {
       obj.trustedProxies = [];
     } else if (tpPick === 'custom') {
       const trusted = trustedCtl.get();
-      if (!trusted.length) { toast('Trusted proxies empty', 'Add at least one CIDR or IP, or choose "Inherit fleet setting" or "Trust nobody on this host".', 'err'); return; }
+      if (!trusted.length) { showInvalid('Trusted proxies empty', 'Add at least one CIDR or IP, or choose "Inherit fleet setting" or "Trust nobody on this host".'); return; }
       const badTp = firstBadCidr(trusted);
-      if (badTp) { toast('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, 'err'); return; }
+      if (badTp) { showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`); return; }
       obj.trustedProxies = trusted;
     }
 
@@ -4871,8 +5038,10 @@ async function hostEditor(c, name) {
         Object.assign(lup, lextra);
         loc.upstream = lup;
       }
-      loc.middlewares = mwSel;
-      loc.accessLists = alSel;
+      // A picker built from a list that failed to load is empty, not a choice:
+      // carry the stored references through, as the host-level save does.
+      loc.middlewares = mwListOK ? mwSel : arr((ctl._orig || {}).middlewares);
+      loc.accessLists = alListOK ? alSel : arr((ctl._orig || {}).accessLists);
       if (isOn(ctl.p + '-strip') && path !== '/') loc.stripPrefix = true;
       if (isOn(ctl.p + '-auth-on')) {
         const la = ctl.auth.get('location ' + path);
@@ -4897,7 +5066,7 @@ async function hostEditor(c, name) {
       locs.push(Object.assign(orig, loc));
     }
     if (locAborted) return;
-    if (locErr) { toast('Location incomplete', locErr, 'err'); return; }
+    if (locErr) { showInvalid('Location incomplete', locErr); return; }
     if (locs.length) obj.locations = locs;
 
     const btn = $('#saveBtn'); btn.disabled = true;
@@ -4989,7 +5158,8 @@ async function listCerts(c) {
     name: (r) => r.name.toLowerCase(),
     domains: (r) => (r.domains[0] || '').toLowerCase(),
     // Blank expiry sorts last in either direction rather than pretending to be
-    // the earliest date, which is what an empty string would do.
+    // the earliest date, which is what an empty string would do. The '9999'
+    // only orders ascending; render() puts blanks last before applying dir.
     expiry: (r) => r.expiry || '9999',
   };
   const COLUMNS = [
@@ -5019,7 +5189,7 @@ async function listCerts(c) {
       if (!col.key) return `<th${cls}>${esc(col.label)}</th>`;
       const active = sort.key === col.key;
       const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
-      return `<th${cls} data-sort="${col.key}" aria-sort="${aria}" role="button" tabindex="0">${esc(col.label)}<span class="sort-mark">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></th>`;
+      return `<th${cls} aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
     }).join('') + '</tr>';
   }
 
@@ -5028,7 +5198,7 @@ async function listCerts(c) {
       ? `${esc(r.challenge)}${r.provider ? ' via ' + esc(r.provider) : ''}`
       : 'PEM files on the server';
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
-      <td><span class="host">${esc(r.name)}</span></td>
+      <td><a class="host" href="#/certs/${encodeURIComponent(r.ct.name)}">${esc(r.name)}</a></td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type)}</span></td>
       <td class="mono faint col-issuance">${issuance}</td>
@@ -5046,6 +5216,7 @@ async function listCerts(c) {
     const get = SORTS[sort.key] || SORTS.name;
     const rows = recs.filter((r) => !q || r.blob.indexOf(q) !== -1)
       .sort((a, b) => {
+        if (sort.key === 'expiry' && !a.expiry !== !b.expiry) return a.expiry ? -1 : 1;
         const av = get(a), bv = get(b);
         if (av === bv) return a.name.localeCompare(b.name);
         return (av < bv ? -1 : 1) * sort.dir;
@@ -5054,19 +5225,24 @@ async function listCerts(c) {
     $('#certRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
       : `<tr><td colspan="7" class="list-empty">No certificate matches this filter.</td></tr>`;
-    $$('#certHead th.sortable').forEach((th) => {
-      const apply = () => {
-        const key = th.dataset.sort;
+    $$('#certHead .sort-btn').forEach((b) => {
+      // The cell's padding still sorts on a mouse click, as it did before the
+      // button moved inside it.
+      const th = b.closest('th');
+      th.addEventListener('click', (e) => { if (e.target === th) b.click(); });
+      b.addEventListener('click', () => {
+        const key = b.dataset.sort;
         sort = { key, dir: sort.key === key ? -sort.dir : 1 };
         try { localStorage.setItem(CERTS_SORT_KEY, JSON.stringify(sort)); } catch (e) { /* ignore */ }
         render();
-      };
-      th.addEventListener('click', apply);
-      th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); apply(); } });
+        // The head is re-rendered: keep keyboard focus on the same column.
+        const nb = $(`#certHead .sort-btn[data-sort="${key}"]`);
+        if (nb) nb.focus();
+      });
     });
     $$('#certRows tr.clickable').forEach((tr) => {
       tr.addEventListener('click', (e) => {
-        if (e.target.closest('.ct-clone') || e.target.closest('.ct-renew')) return;
+        if (e.target.closest('.ct-clone') || e.target.closest('.ct-renew') || e.target.closest('a')) return;
         location.hash = '#/certs/' + encodeURIComponent(tr.dataset.name);
       });
     });
@@ -5082,7 +5258,7 @@ async function listCerts(c) {
         e.stopPropagation();
         b.disabled = true;
         try {
-          if (await renewCertificate(b.dataset.name)) await listCerts(c);
+          if (await renewCertificate(b.dataset.name) && c.isConnected) await route();
         } finally { b.disabled = false; }
       });
     });
@@ -5236,11 +5412,15 @@ async function certEditor(c, name) {
   $('#ct-save').addEventListener('click', async () => {
     clearEditorError();
     const nm = isNew ? $('#ct-name').value.trim() : ct.name;
-    if (!nm) { toast('Name required', 'Enter a certificate name.', 'err'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a certificate name.'); return; }
     const domains = domainsCtl.get();
-    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return; }
     const t = $('#ct-type').value;
-    const obj = { name: nm, type: t, domains };
+    // Whole-object PUT: carry the meta this editor renders no control for
+    // (labels, tags, displayName, disabled), or a save deletes it.
+    const obj = Object.assign({}, metaCarryForward(ct), { name: nm, type: t, domains });
+    if (ct.displayName) obj.displayName = ct.displayName;
+    if (ct.disabled) obj.disabled = true;
     if (t === 'acme') {
       const ch = $('#ct-challenge').value;
       const a = { email: $('#ct-email').value.trim(), challenge: ch };
@@ -5248,15 +5428,15 @@ async function certEditor(c, name) {
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
       if (ch === 'dns-01') {
         a.dnsProvider = $('#ct-dns').value;
-        if (!a.dnsProvider) { toast('DNS provider required', 'Select a DNS provider for dns-01.', 'err'); return; }
+        if (!a.dnsProvider) { showInvalid('DNS provider required', 'Select a DNS provider for dns-01.'); return; }
       } else if (domains.some((d) => d.startsWith('*.'))) {
-        toast('Wildcard needs dns-01', 'A wildcard domain can only be validated over dns-01.', 'err'); return;
+        showInvalid('Wildcard needs dns-01', 'A wildcard domain can only be validated over dns-01.'); return;
       }
       if (isOn('ct-eab')) {
         const kid = $('#ct-eab-kid').value.trim();
         const hmac = $('#ct-eab-hmac').value.trim();
-        if (!kid || !hmac) { toast('EAB incomplete', 'Enter both the EAB key ID and HMAC key.', 'err'); return; }
-        if (hmac === '***') { toast('Secret masked', 'The EAB HMAC key reads *** - replace it with a real value or a ${ENV:...} placeholder.', 'err'); return; }
+        if (!kid || !hmac) { showInvalid('EAB incomplete', 'Enter both the EAB key ID and HMAC key.'); return; }
+        if (hmac === '***') { showInvalid('Secret masked', 'The EAB HMAC key reads *** - replace it with a real value or a ${ENV:...} placeholder.'); return; }
         a.eab = { kid, hmacKey: hmac };
       }
       obj.acme = a;
@@ -5293,7 +5473,7 @@ async function certEditor(c, name) {
     try {
       const r = await api('/api/certificates/' + encodeURIComponent(ct.name), { method: 'DELETE' });
       toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
-      refreshHeadSha(); location.hash = '#/certs';
+      refreshHeadSha(); clearDirty(); location.hash = '#/certs';
     } catch (e) { toastErr(e); del.disabled = false; }
   });
   wireCloneButton('certs', ct, 'ct-clone');
@@ -5350,7 +5530,7 @@ const SECTION_META = {
     title: 'Redirects', sub: 'A domain that answers with a redirect instead of proxying anything - retired names, vanity hostnames, apex to www.',
     empty: 'Add the old domain, the target it should send visitors to, and whether the redirect is permanent.',
     singular: 'redirect', addLabel: 'Add redirect',
-    summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>` +
+    summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>` +
       (o.targetDomain ? `<span class="k">To</span><span class="v">${esc(((o.targetScheme && o.targetScheme !== 'auto') ? o.targetScheme + '://' : '') + o.targetDomain)}</span>` : '') +
       (o.statusCode ? `<span class="k">Code</span><span class="v">${esc(o.statusCode)}</span>` : ''),
   },
@@ -5366,7 +5546,7 @@ const SECTION_META = {
     title: 'Parked Hosts', sub: 'A domain that answers but serves nothing. Reserve a name you own, or return a clean 404 instead of falling through to another host.',
     empty: 'Add the domains to reserve. They answer 404 by default; change the status code if you want something else.',
     singular: 'parked host', addLabel: 'Add parked host',
-    summary: (o) => `<span class="k">Domains</span><span class="v">${esc(arr(o.domains).join(', '))}</span>`,
+    summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>`,
   },
   upstreams: {
     title: 'Upstream Groups', sub: 'Several backends behind one name, with health checks and a load-distribution policy. A host references the group instead of a single upstream.',
@@ -5413,9 +5593,9 @@ async function genericList(c, section) {
   const blobs = {};
   items.forEach((o) => { blobs[o.name] = objSearchBlob(o); });
   const cards = items.map((o) => `
-    <div class="card" data-name="${esc(o.name)}" role="button" tabindex="0" style="cursor:pointer">
+    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div><h3>${esc(o.name)}</h3>${o.displayName ? `<div class="faint" style="font-size:11.5px">${esc(o.displayName)}</div>` : ''}</div>
+        <div><h3><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.displayName ? `<div class="faint" style="font-size:11.5px">${esc(o.displayName)}</div>` : ''}</div>
         <div style="display:flex;gap:8px">
           <button class="btn ghost sm gs-clone" data-name="${esc(o.name)}" type="button">Clone</button>
           <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
@@ -5424,7 +5604,7 @@ async function genericList(c, section) {
       <div class="kv">${meta.summary(o)}</div>
     </div>`).join('');
   c.innerHTML = head + `
-    <div class="toolbar">
+    <div class="toolbar cards-aligned">
       <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(meta.title.toLowerCase())}..." aria-label="Filter ${esc(meta.title)}" /></div>
     </div>
     <div class="cards" id="gsCards">${cards}</div>
@@ -5446,8 +5626,10 @@ async function genericList(c, section) {
 
   $$('.cards .card[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
-    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('.gs-clone')) open(); });
-    el.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    // The name is the card's link for the keyboard and screen readers (the card
+    // itself is not a button: it holds Clone and Delete); the rest of the card
+    // stays clickable for the mouse.
+    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('.gs-clone') && !e.target.closest('a')) open(); });
   });
   $$('.gs-clone').forEach((b) => {
     b.addEventListener('click', (e) => {
@@ -5504,7 +5686,7 @@ function nameCard(obj, isNew, clonePlaceholder, foldable) {
       <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" data-hint="common.name" data-path="name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(clonePlaceholder || 'internal-name')}" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
       <div class="field-group"><label>Display name</label><input class="field" id="ed-display" data-hint="common.displayName" data-path="displayName" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
     </div>
-    <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the running proxy</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>`;
+    <div class="toggle-line"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the running proxy</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>`;
   if (!foldable) return `<div class="card form-section"><p class="section-label">Identity</p>${body}</div>`;
   const parts = [];
   if (obj.displayName) parts.push(obj.displayName);
@@ -5793,7 +5975,7 @@ function wireEditor(section, plural, meta, isNew, origName, stored, buildBody) {
   $('#ed-save').addEventListener('click', async () => {
     clearEditorError();
     const nm = isNew ? $('#ed-name').value.trim() : origName;
-    if (!nm) { toast('Name required', 'Enter a name.', 'err'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a name.'); return; }
     const body = buildBody(nm);
     if (!body) return;
     Object.assign(body, metaCarryForward(stored));
@@ -5842,7 +6024,7 @@ async function redirectEditor(c, name) {
           ${enumOptions('redirectStatus', ['301', '302', '307', '308'], String(o.statusCode || 301))}
         </select></div>
       </div>
-      <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Preserve path</div><div class="ds">Append the original request path to the target</div></div>${switchHtml('ed-preserve', !!o.preservePath, 'Preserve path', 'redirectHost.preservePath')}</div>
+      <div class="toggle-line"><div class="tl-text"><div class="nm">Preserve path</div><div class="ds">Append the original request path to the target</div></div>${switchHtml('ed-preserve', !!o.preservePath, 'Preserve path', 'redirectHost.preservePath')}</div>
     </div>
   </div><div class="stack">${tlsCard(o.tls, certs, arr(o.domains))}</div></div>` + saveBar('redirects', isNew, meta.addLabel);
   const domainsCtl = makeChipInput($('#ed-domains'), arr(o.domains), 'add domain...',
@@ -5850,9 +6032,9 @@ async function redirectEditor(c, name) {
   wireTls();
   wireEditor('redirects', 'redirect-hosts', meta, isNew, name || o.name, o, (nm) => {
     const domains = domainsCtl.get();
-    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return null; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return null; }
     const td = $('#ed-tdomain').value.trim();
-    if (!td) { toast('Target required', 'Set the target domain.', 'err'); return null; }
+    if (!td) { showInvalid('Target required', 'Set the target domain.'); return null; }
     // absent-stays-absent: both controls always SHOW a value, so sending them
     // unconditionally materialises `targetScheme: auto` / `statusCode: 301` into
     // a file that never carried the key. Send each only when it was already
@@ -5891,7 +6073,7 @@ async function streamEditor(c, name) {
     ? `${stls.mode}${arr(stls.sniMatch).length ? ', SNI ' + arr(stls.sniMatch).join(', ') : ''}${stls.certificateRef ? ', cert ' + stls.certificateRef : ''}`
     : 'none - the bytes are forwarded blind';
   const streamAlSummary = selAl.length ? selAl.join(', ') : 'none - every client IP is accepted';
-  c.innerHTML = editorHead('streams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+  c.innerHTML = editorHead('streams', meta, isNew, name) + `<div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy', true)}
     <div class="card form-section"><p class="section-label">Forwarding</p>
       <div class="inline-fields">
@@ -5900,7 +6082,7 @@ async function streamEditor(c, name) {
           ${enumOptions('streamProtocol', ['tcp', 'udp', 'both'], o.protocol || 'tcp')}
         </select></div>
       </div>
-      <div class="inline-fields" style="margin-top:14px">
+      <div class="inline-fields">
         <div class="field-group" style="flex:2"><label>Target host</label><input class="field mono" id="ed-fhost" data-hint="streamHost.target.host" value="${esc((o.target && o.target.host) || '')}" placeholder="10.0.0.5" /></div>
         <div class="field-group"><label>Target port</label><input class="field mono" id="ed-fport" data-hint="streamHost.target.port" type="number" value="${esc(o.target && o.target.port != null ? o.target.port : '')}" placeholder="53" /></div>
       </div>
@@ -5934,7 +6116,7 @@ async function streamEditor(c, name) {
   }).join('') : '<div class="check-empty">No access lists defined yet.</div>'}
       </div>
     `)}
-  </div></div>` + saveBar('streams', isNew, meta.addLabel);
+  </div>` + saveBar('streams', isNew, meta.addLabel);
   const sniCtl = makeChipInput($('#ed-sni'), arr(stls.sniMatch), 'add server name...');
   // TLS is TCP-only and the certificate applies to terminate alone, so the
   // fields that cannot apply are hidden/disabled rather than accepted and then
@@ -5955,8 +6137,8 @@ async function streamEditor(c, name) {
   $('#ed-proto').addEventListener('change', refreshStreamTLS);
   wireEditor('streams', 'stream-hosts', meta, isNew, name || o.name, o, () => {
     const lp = parseInt($('#ed-listen').value, 10); const fp = parseInt($('#ed-fport').value, 10); const fh = $('#ed-fhost').value.trim();
-    if (isNaN(lp)) { toast('Listen port required', 'Enter a listen port.', 'err'); return null; }
-    if (!fh || isNaN(fp)) { toast('Target required', 'Set target host and port.', 'err'); return null; }
+    if (isNaN(lp)) { showInvalid('Listen port required', 'Enter a listen port.'); return null; }
+    if (!fh || isNaN(fp)) { showInvalid('Target required', 'Set target host and port.'); return null; }
     const proto = $('#ed-proto').value;
     const body = { listenPort: lp, protocol: proto, target: { host: fh, port: fp } };
     const mode = $('#ed-tlsmode').value;
@@ -5965,7 +6147,7 @@ async function streamEditor(c, name) {
       const sni = sniCtl.get(); if (sni.length) tls.sniMatch = sni;
       if (mode === 'terminate') {
         const ref = $('#ed-streamcert').value;
-        if (!ref) { toast('Certificate required', 'Terminate mode needs a certificate to present.', 'err'); return null; }
+        if (!ref) { showInvalid('Certificate required', 'Terminate mode needs a certificate to present.'); return null; }
         tls.certificateRef = ref;
       }
       body.tls = tls;
@@ -5999,7 +6181,7 @@ async function parkedEditor(c, name) {
   wireTls();
   wireEditor('parked', 'parked-hosts', meta, isNew, name || o.name, o, () => {
     const domains = domainsCtl.get();
-    if (!domains.length) { toast('Domain required', 'Add at least one domain.', 'err'); return null; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return null; }
     const body = { domains };
     // absent-stays-absent: the input renders 404 when the object has no status.
     const sc = parseInt($('#ed-status').value, 10);
@@ -6060,7 +6242,7 @@ async function dnsEditor(c, name) {
   const seed = isNew ? takeCloneSeed('dns') : null;
   const o = seed ? seed.data : (isNew ? { provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } } : ((await api('/api/dns-providers/' + encodeURIComponent(name))).data || {}));
   const current = o.provider || 'cloudflare';
-  c.innerHTML = editorHead('dns', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+  c.innerHTML = editorHead('dns', meta, isNew, name) + `<div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Provider</p>
       <div class="field-group"><label>Provider</label>
@@ -6079,7 +6261,7 @@ async function dnsEditor(c, name) {
       <div class="hint" id="ed-provider-note" style="margin-top:8px"></div>
       <div class="hint" style="margin-top:8px">Use a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so no secret is committed. A masked secret reads <span class="mono">***</span>.</div>
     </div>
-  </div></div>` + saveBar('dns', isNew, meta.addLabel);
+  </div>` + saveBar('dns', isNew, meta.addLabel);
 
   const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:DNS_API_TOKEN}', true);
   $('#ed-addcfg').addEventListener('click', () => cfgCtl.addRow('', ''));
@@ -6127,7 +6309,7 @@ async function dnsEditor(c, name) {
 
   wireEditor('dns', 'dns-providers', meta, isNew, name || o.name, o, () => {
     const provId = $('#ed-provider').value.trim();
-    if (!provId) { toast('Provider required', 'Select a provider.', 'err'); return null; }
+    if (!provId) { showInvalid('Provider required', 'Select a provider.'); return null; }
     const p = dnsProvider(provId);
     let cfg;
     if (p.fields) {
@@ -6139,26 +6321,26 @@ async function dnsEditor(c, name) {
         if (v) cfg[el.dataset.key] = v;
       });
       if (Object.values(cfg).some((v) => v === '***')) {
-        toast('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', 'err'); return null;
+        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.'); return null;
       }
       if (cfg.ttl != null) {
         const n = Number(cfg.ttl);
-        if (!Number.isInteger(n) || n < 1 || n > 86400) { toast('Invalid TTL', 'config.ttl must be a whole number of seconds between 1 and 86400.', 'err'); return null; }
+        if (!Number.isInteger(n) || n < 1 || n > 86400) { showInvalid('Invalid TTL', 'config.ttl must be a whole number of seconds between 1 and 86400.'); return null; }
       }
       if (cfg.timeout && !GO_DURATION_RE.test(cfg.timeout)) {
-        toast('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.', 'err'); return null;
+        showInvalid('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.'); return null;
       }
       if (cfg.baseURL && !/^https?:\/\//.test(cfg.baseURL)) {
-        toast('Invalid base URL', 'config.baseURL must be an http or https URL.', 'err'); return null;
+        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL.'); return null;
       }
     } else {
-      if (cfgCtl.masked()) { toast('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', 'err'); return null; }
+      if (cfgCtl.masked()) { showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.'); return null; }
       cfg = cfgCtl.get();
     }
     const missing = arr(p.required).filter((k) => !cfg[k]);
     if (missing.length) {
-      if (p.missing) toast('Missing credentials', p.missing, 'err');
-      else toast('API token required', 'Every DNS provider needs a config.apiToken credential.', 'err');
+      if (p.missing) showInvalid('Missing credentials', p.missing);
+      else showInvalid('API token required', 'Every DNS provider needs a config.apiToken credential.');
       return null;
     }
     const body = { provider: provId };
@@ -6199,7 +6381,7 @@ async function accessEditor(c, name) {
     </div>
   </div>` : '';
 
-  c.innerHTML = editorHead('access', meta, isNew, name) + legacyCard + `<div class="form-grid"><div class="stack">
+  c.innerHTML = editorHead('access', meta, isNew, name) + legacyCard + `<div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Policy</p>
       <div class="field-group"><label>Default action</label><select class="field mono" id="ed-default" data-hint="accessList.defaultAction" data-path="defaultAction">
@@ -6230,7 +6412,7 @@ async function accessEditor(c, name) {
         ${enumOptions('geoUnknown', ['', 'allow', 'deny'], geo.onUnknown || '')}
       </select><div class="hint">Applied to an IP with no country in the database (private/reserved ranges, DB misses).</div></div>
     </div>
-  </div></div>` + saveBar('access', isNew, meta.addLabel);
+  </div>` + saveBar('access', isNew, meta.addLabel);
   const rulesWrap = $('#ed-rules');
   const sourcesWrap = $('#ed-sources');
 
@@ -6245,8 +6427,8 @@ async function accessEditor(c, name) {
     return names;
   }
   // Rebuilds one rule row's source <select>, keeping its current selection even
-  // if that name is not (or not yet) a declared source - same round-trip
-  // guarantee as the middleware editor's RL_WINDOWS/RL_BLOCKS presets, so a
+  // if that name is not (or not yet) a declared source - the round-trip
+  // guarantee any preset <select> needs, so a
   // rule referencing a source authored in git before this UI existed still
   // shows its real value instead of silently resetting to blank.
   function populateSourceSelect(sel, selected) {
@@ -6325,7 +6507,7 @@ async function accessEditor(c, name) {
       el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
         <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
         <span class="muted" style="font-size:11px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + (s.entryCount || 0) + ' entries' : 'never fetched'}</span>
-        ${s.lastError ? `<span class="muted" style="font-size:11px;color:var(--warn)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
+        ${s.lastError ? `<span class="muted" style="font-size:11px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
     } catch (e) {
       card.style.display = arr(o.sources).length ? '' : 'none';
@@ -6402,7 +6584,7 @@ async function accessEditor(c, name) {
       }
       rules.push(rule);
     });
-    if (ruleErr) { toast('Rule invalid', ruleErr, 'err'); return null; }
+    if (ruleErr) { showInvalid('Rule invalid', ruleErr); return null; }
     if (rules.length) body.rules = rules;
     const sources = []; let srcErr = '';
     clearRowErrors(sourcesWrap);
@@ -6424,7 +6606,7 @@ async function accessEditor(c, name) {
       }
       sources.push(src);
     });
-    if (srcErr) { toast('Source invalid', srcErr, 'err'); return null; }
+    if (srcErr) { showInvalid('Source invalid', srcErr); return null; }
     if (sources.length) body.sources = sources;
     const geoAllow = geoAllowCtl.get(); const geoDeny = geoDenyCtl.get(); const onUnknown = $('#ed-geo-unknown').value;
     const geoBody = {};
@@ -6441,6 +6623,7 @@ async function accessEditor(c, name) {
 // a time is deliberate: each migration has its own allowFrom and its own
 // warnings about rules that will NOT be carried over, and both need reading.
 async function migrateBasicAuth(listName, btn) {
+  if (!(await confirmDiscardEdits())) return;
   btn.disabled = true;
   let plan;
   try {
@@ -6547,9 +6730,9 @@ async function idpEditor(c, name) {
     const t = $('#ed-type').value; const body = { type: t };
     if (t === 'oidc') {
       const issuer = $('#oidc-issuer').value.trim(); const cid = $('#oidc-clientid').value.trim();
-      if (!issuer || !cid) { toast('OIDC incomplete', 'Issuer URL and client ID are required.', 'err'); return null; }
+      if (!issuer || !cid) { showInvalid('OIDC incomplete', 'Issuer URL and client ID are required.'); return null; }
       const sec = $('#oidc-secret').value.trim();
-      if (sec === '***') { toast('Secret masked', 'The client secret is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', 'err'); return null; }
+      if (sec === '***') { showInvalid('Secret masked', 'The client secret is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.'); return null; }
       const spec = { issuerURL: issuer, clientID: cid, usePKCE: isOn('oidc-pkce') };
       if (sec) spec.clientSecret = sec;
       const sc = scopesCtl.get(); if (sc.length) spec.scopes = sc;
@@ -6562,15 +6745,15 @@ async function idpEditor(c, name) {
       body.oidc = spec;
     } else if (t === 'forward-auth') {
       const tp = trustedCtl.get(); const uh = $('#fa-user').value.trim();
-      if (!tp.length) { toast('Trusted proxies required', 'Add at least one trusted proxy CIDR.', 'err'); return null; }
-      if (!uh) { toast('User header required', 'Set the user header.', 'err'); return null; }
+      if (!tp.length) { showInvalid('Trusted proxies required', 'Add at least one trusted proxy CIDR.'); return null; }
+      if (!uh) { showInvalid('User header required', 'Set the user header.'); return null; }
       const spec = { trustedProxies: tp, userHeader: uh };
       const fields = { emailHeader: 'fa-email', nameHeader: 'fa-name', groupsHeader: 'fa-groups', groupsDelimiter: 'fa-delim', amrHeader: 'fa-amr' };
       Object.keys(fields).forEach((k) => { const v = $('#' + fields[k]).value.trim(); if (v) spec[k] = v; });
       body.forwardAuth = spec;
     } else {
       const out = $('#ar-outpost').value.trim();
-      if (!out) { toast('Outpost URL required', 'Set the outpost URL.', 'err'); return null; }
+      if (!out) { showInvalid('Outpost URL required', 'Set the outpost URL.'); return null; }
       const spec = { outpostURL: out };
       const pp = $('#ar-prefix').value.trim(); if (pp) spec.pathPrefix = pp;
       const ap = $('#ar-authpath').value.trim(); if (ap) spec.authPath = ap;
@@ -6599,20 +6782,7 @@ async function middlewareEditor(c, name) {
   const o = seed ? seed.data : (objR.data || {}); const type = o.type || 'headers';
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
   const bo = o.bouncer || {};
-  // Populate from either form: requests+window as-is, or migrate a legacy
-  // requestsPerSecond into requests + a 1s window so saving upgrades it.
-  const rlRequests = rl.requests != null ? rl.requests : (rl.requestsPerSecond != null ? rl.requestsPerSecond : '');
-  const rlWindow = rl.window || '1s';
-  const RL_WINDOWS = ['1s', '10s', '30s', '1m', '5m', '15m', '1h'];
-  // A hand-authored window outside the presets (e.g. "2m", "90s") must round-trip:
-  // without a matching option the browser would silently fall back to 1s on save.
-  if (!RL_WINDOWS.includes(rlWindow)) RL_WINDOWS.unshift(rlWindow);
-  const rlBlockFor = rl.blockFor || '';
-  const RL_BLOCKS = ['', '10s', '30s', '1m', '5m', '15m', '1h'];
-  // Same round-trip guarantee as RL_WINDOWS: a hand-authored blockFor (e.g.
-  // "2m") must render selected, not silently reset to "none" on save.
-  if (!RL_BLOCKS.includes(rlBlockFor)) RL_BLOCKS.splice(1, 0, rlBlockFor);
-  c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="form-grid"><div class="stack">
+  c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="stack">
     ${nameCard(o, isNew, seed && seed.origName + '-copy')}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type" data-hint="middleware.type">
@@ -6641,18 +6811,7 @@ async function middlewareEditor(c, name) {
     </div>
 
     <div class="card form-section ed-sub" data-type="rate-limit" style="${type === 'rate-limit' ? '' : 'display:none'}"><p class="section-label">Rate limit</p>
-      <div class="inline-fields">
-        <div class="field-group"><label>Requests</label><input class="field mono" id="rl-requests" data-hint="middleware.rateLimit.requests" type="number" step="0.1" value="${esc(rlRequests)}" placeholder="10" /></div>
-        <div class="field-group"><label>Per</label><select class="field mono" id="rl-window" data-hint="middleware.rateLimit.window">
-          ${RL_WINDOWS.map((w) => `<option value="${esc(w)}"${rlWindow === w ? ' selected' : ''}>${esc(w)}</option>`).join('')}
-        </select></div>
-        <div class="field-group"><label>Burst</label><input class="field mono" id="rl-burst" data-hint="middleware.rateLimit.burst" type="number" value="${esc(rl.burst != null ? rl.burst : '')}" placeholder="ceil(requests)" /></div>
-        <div class="field-group"><label>Block for</label><select class="field mono" id="rl-block" data-hint="middleware.rateLimit.blockFor">
-          ${RL_BLOCKS.map((b) => `<option value="${esc(b)}"${rlBlockFor === b ? ' selected' : ''}>${b ? esc(b) : 'none'}</option>`).join('')}
-        </select></div>
-      </div>
-      <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="rl-allow" data-hint="middleware.rateLimit.allowFrom"></div></div>
-      <div class="hint">Block for: once a client exceeds the limit, further requests from it are rejected for this long, regardless of token refill. Fixed - not extended by repeat requests during the block.</div>
+      ${rateLimitBlockHtml('mwrl', rl)}
     </div>
 
     <div class="card form-section ed-sub" data-type="bouncer" style="${type === 'bouncer' ? '' : 'display:none'}"><p class="section-label">Bouncer (deny hook)</p>
@@ -6696,7 +6855,7 @@ async function middlewareEditor(c, name) {
         <button class="btn ghost sm" id="rw-regex-add" type="button" style="margin-top:6px">${ICON.plus}Add regex rule</button>
       </div>
     </div>
-  </div></div>` + saveBar('middleware', isNew, meta.addLabel);
+  </div>` + saveBar('middleware', isNew, meta.addLabel);
 
   const authCtl = wireAuthBlock('mw', auth, idps);
   const setReqCtl = makeKVRows($('#hdr-setreq'), headers.setRequest || {}, 'Header', 'value', false);
@@ -6704,7 +6863,9 @@ async function middlewareEditor(c, name) {
   const rmReqCtl = makeChipInput($('#hdr-rmreq'), arr(headers.removeRequest), 'add header...');
   const rmRespCtl = makeChipInput($('#hdr-rmresp'), arr(headers.removeResponse), 'add header...');
   const guardAllowCtl = makeChipInput($('#guard-allow'), arr(guard.allowFrom), 'add CIDR...');
-  const rlAllowCtl = makeChipInput($('#rl-allow'), arr(rl.allowFrom), 'add CIDR...');
+  // The same rate-limit block (and the same per-window / per-second forms) the
+  // host and location editors use for the same model.
+  const rlCtl = wireRateLimitBlock('mwrl', rl);
   const rwCtl = makeKVRows($('#rw-replacepath'), rewrite.replacePath || {}, '/application/o/token', '/application/o/token/', false);
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
   $('#rw-add').addEventListener('click', () => rwCtl.addRow('', ''));
@@ -6748,7 +6909,7 @@ async function middlewareEditor(c, name) {
 
   const trigWrap = $('#guard-triggers'); const trigCtls = [];
   function trigRow(t) {
-    t = t || {}; const d = document.createElement('div'); d.className = 'card form-section'; d.style.marginBottom = '8px';
+    t = t || {}; const d = document.createElement('div'); d.className = 'sub-block';
     d.innerHTML = `<div class="row-between" style="margin-bottom:8px"><span class="ci-ty">trigger</span><button class="icon-btn trig-del" type="button" aria-label="Remove trigger">${ICON.x}</button></div>
       <div class="field-group"><label>Paths</label><div class="chip-input trig-paths" data-hint="middleware.guard.triggers.paths"></div></div>
       <div class="field-group"><label>Methods</label><div class="chip-input trig-methods" data-hint="middleware.guard.triggers.methods"></div></div>
@@ -6782,7 +6943,7 @@ async function middlewareEditor(c, name) {
       // Same rule as guard and rewrite: an empty spec is a middleware that does
       // nothing, and committing `headers: {}` looks like a configured object in
       // git while changing no request at all.
-      if (!Object.keys(spec).length) { toast('Header rule required', 'Set or remove at least one request or response header.', 'err'); return null; }
+      if (!Object.keys(spec).length) { showInvalid('Header rule required', 'Set or remove at least one request or response header.'); return null; }
       body.headers = spec;
     } else if (t === 'guard') {
       const triggers = [];
@@ -6793,26 +6954,22 @@ async function middlewareEditor(c, name) {
         if (Object.keys(q).length) tr.queryEquals = q;
         if (Object.keys(tr).length) triggers.push(tr);
       });
-      if (!triggers.length) { toast('Trigger required', 'Add at least one guard trigger.', 'err'); return null; }
+      if (!triggers.length) { showInvalid('Trigger required', 'Add at least one guard trigger.'); return null; }
       const spec = { triggers };
       const allow = guardAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       const ds = parseInt($('#guard-deny').value, 10); if (!isNaN(ds)) spec.denyStatus = ds;
       body.guard = spec;
     } else if (t === 'rate-limit') {
-      const requests = parseFloat($('#rl-requests').value);
-      if (isNaN(requests) || requests <= 0) { toast('Rate required', 'Requests must be > 0.', 'err'); return null; }
-      const spec = { requests, window: $('#rl-window').value };
-      const burst = parseInt($('#rl-burst').value, 10); if (!isNaN(burst)) spec.burst = burst;
-      const allow = rlAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
-      const blockFor = $('#rl-block').value; if (blockFor) spec.blockFor = blockFor;
+      const spec = rlCtl.get();
+      if (!spec) return null;
       body.rateLimit = spec;
     } else if (t === 'bouncer') {
       const provider = $('#bo-provider').value;
       const url = $('#bo-url').value.trim();
-      if (!url) { toast('URL required', 'Enter the bouncer URL.', 'err'); return null; }
+      if (!url) { showInvalid('URL required', 'Enter the bouncer URL.'); return null; }
       const apiKey = $('#bo-apikey').value.trim();
-      if (apiKey === '***') { toast('Secret masked', 'The API key is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', 'err'); return null; }
-      if (provider === 'crowdsec' && !apiKey) { toast('API key required', 'The crowdsec provider needs an API key (cscli bouncers add gpm).', 'err'); return null; }
+      if (apiKey === '***') { showInvalid('Secret masked', 'The API key is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.'); return null; }
+      if (provider === 'crowdsec' && !apiKey) { showInvalid('API key required', 'The crowdsec provider needs an API key (cscli bouncers add gpm).'); return null; }
       const spec = { provider, url };
       if (apiKey) spec.apiKey = apiKey;
       const timeout = $('#bo-timeout').value.trim(); if (timeout) spec.timeout = timeout;
@@ -6827,8 +6984,8 @@ async function middlewareEditor(c, name) {
       const rp = rwCtl.get();
       const entries = Object.entries(rp);
       for (const [k, v] of entries) {
-        if (!k.startsWith('/') || !v.startsWith('/')) { toast('Invalid path', 'Path must be absolute (start with "/").', 'err'); return null; }
-        if (k === v) { toast('No-op rewrite', `A path cannot be rewritten to itself ("${k}").`, 'err'); return null; }
+        if (!k.startsWith('/') || !v.startsWith('/')) { showInvalid('Invalid path', 'Path must be absolute (start with "/").'); return null; }
+        if (k === v) { showInvalid('No-op rewrite', `A path cannot be rewritten to itself ("${k}").`); return null; }
       }
       // Per-row validation, so the complaint lands on the row it belongs to
       // rather than in a page-level toast the operator has to map back by hand.
@@ -6855,11 +7012,11 @@ async function middlewareEditor(c, name) {
         return err ? { err } : { out };
       }
       const pre = readRules(rwPrefix, false);
-      if (pre.err) { toast('Prefix rule invalid', pre.err, 'err'); return null; }
+      if (pre.err) { showInvalid('Prefix rule invalid', pre.err); return null; }
       const rex = readRules(rwRegex, true);
-      if (rex.err) { toast('Regex rule invalid', rex.err, 'err'); return null; }
+      if (rex.err) { showInvalid('Regex rule invalid', rex.err); return null; }
       if (!entries.length && !pre.out.length && !rex.out.length) {
-        toast('Rule required', 'Add at least one rule.', 'err'); return null;
+        showInvalid('Rule required', 'Add at least one rule.'); return null;
       }
       const spec = {};
       if (entries.length) spec.replacePath = rp;
@@ -6888,7 +7045,7 @@ async function middlewareEditor(c, name) {
 // cannot both be set. opts is [{v, label, panel}].
 function segHtml(group, opts, current) {
   const buttons = opts.map((o) =>
-    `<button type="button" class="seg-btn${o.v === current ? ' on' : ''}" data-seg="${esc(group)}" data-v="${esc(o.v)}">${esc(o.label)}</button>`).join('');
+    `<button type="button" class="seg-btn${o.v === current ? ' on' : ''}" data-seg="${esc(group)}" data-v="${esc(o.v)}" aria-pressed="${o.v === current}">${esc(o.label)}</button>`).join('');
   const panels = opts.map((o) =>
     `<div data-seg-panel="${esc(group)}" data-v="${esc(o.v)}"${o.v === current ? '' : ' hidden'}>${o.panel}</div>`).join('');
   return `<div class="seg">${buttons}</div>${panels}`;
@@ -6898,7 +7055,7 @@ function segHtml(group, opts, current) {
 function wireSegs(onChange) {
   $$('.seg-btn').forEach((b) => b.addEventListener('click', () => {
     const g = b.dataset.seg;
-    $$(`.seg-btn[data-seg="${g}"]`).forEach((x) => x.classList.toggle('on', x === b));
+    $$(`.seg-btn[data-seg="${g}"]`).forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
     $$(`[data-seg-panel="${g}"]`).forEach((p) => { p.hidden = p.dataset.v !== b.dataset.v; });
     if (onChange) onChange(g, b.dataset.v);
   }));
@@ -6925,7 +7082,7 @@ function segValue(group) {
 // is never hidden from someone scanning the page.
 function foldHtml(id, label, summary, open, body) {
   return `<details class="card form-section fold" id="${esc(id)}"${open ? ' open' : ''}>
-    <summary><p class="section-label">${esc(label)}</p><span class="fold-sum">${glossaryize(esc(summary))}</span></summary>
+    <summary><span class="section-label">${esc(label)}</span><span class="fold-sum">${glossaryize(esc(summary))}</span></summary>
     ${body}
   </details>`;
 }
@@ -7017,13 +7174,13 @@ async function clientCAEditor(c, name) {
     ${issuedCertsCard(issued)}
   </div>`;
 
-  c.innerHTML = editorHead('clientcas', meta, isNew, name) + expiryBanner(issued)
+  c.innerHTML = editorHead('clientcas', meta, isNew, name) + `<div id="issued-banner">${expiryBanner(issued)}</div>`
     + (isNew ? configStack : `<div class="form-grid">${configStack}${actionStack}</div>`)
     + saveBar('clientcas', isNew, meta.addLabel);
 
   wireEditor('clientcas', 'client-cas', meta, isNew, name || o.name, o, () => {
     const caPEM = $('#ed-capem').value.trim();
-    if (!caPEM) { toast('CA required', 'Paste the CA certificate PEM, or switch to "Generate new CA".', 'err'); return null; }
+    if (!caPEM) { showInvalid('CA required', 'Paste the CA certificate PEM, or switch to "Generate new CA".'); return null; }
     // Each either/or pair resolves through resolvePair, so only one side is ever
     // submitted AND merely toggling the picker to look at the other side is a
     // no-op. Reading the selected control alone would silently wipe the stored
@@ -7041,7 +7198,7 @@ async function clientCAEditor(c, name) {
     }
     // Checked on the RESOLVED value, so the redaction guard still fires when the
     // masked key is being carried over from the unselected side of the picker.
-    if (keyPEM === '***') { toast('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} placeholder or clear it.', 'err'); return null; }
+    if (keyPEM === '***') { showInvalid('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} placeholder or clear it.'); return null; }
     const body = { caPEM };
     if (file) body.crlFile = file;
     if (inline) body.crlPEM = inline;
@@ -7053,7 +7210,7 @@ async function clientCAEditor(c, name) {
     // about has to be sent back or a UI save silently resets it to the default.
     const warnDays = parseInt($('#ed-warndays').value, 10);
     if (!isNaN(warnDays) && warnDays !== 0) {
-      if (warnDays < 0 || warnDays > 3650) { toast('Warning window out of range', 'Expiry warning must be between 0 (default 30) and 3650 days.', 'err'); return null; }
+      if (warnDays < 0 || warnDays > 3650) { showInvalid('Warning window out of range', 'Expiry warning must be between 0 (default 30) and 3650 days.'); return null; }
       body.expiryWarningDays = warnDays;
     }
     return body;
@@ -7098,13 +7255,27 @@ function wireClientCAGenerate() {
   const btn = $('#gen-btn');
   if (!btn) return;
   btn.addEventListener('click', async () => {
+    clearEditorError();
     const nm = $('#ed-name').value.trim();
-    if (!nm) { toast('Name required', 'Enter a name for the CA first.', 'err'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a name for the CA first.'); return; }
     const days = parseInt($('#gen-days').value, 10);
-    if (isNaN(days) || days < 1 || days > 7300) { toast('Validity out of range', 'CA validity must be between 1 and 7300 days.', 'err'); return; }
+    if (isNaN(days) || days < 1 || days > 7300) { showInvalid('Validity out of range', 'CA validity must be between 1 and 7300 days.'); return; }
     const body = { validityDays: days };
     const cn = $('#gen-cn').value.trim(); if (cn) body.commonName = cn;
     const org = $('#gen-org').value.trim(); if (org) body.organization = org;
+    // POST /generate takes only the fields above. The rest of this page is
+    // hidden while generating, except the identity card: say so before its
+    // display name or disabled flag is dropped.
+    const disp = $('#ed-display');
+    if ((disp && disp.value.trim()) || isOn('ed-disabled')) {
+      const go = await confirmModal({
+        title: 'Display name and Disabled are not saved',
+        body: '<p>Generating creates the CA from its name and the fields in this panel only. Set the display name or the Disabled switch after it is created.</p>',
+        confirmLabel: 'Generate anyway',
+        danger: false,
+      });
+      if (!go) return;
+    }
     btn.disabled = true;
     try {
       const r = await api('/api/client-cas/' + encodeURIComponent(nm) + '/generate', { method: 'POST', body });
@@ -7190,7 +7361,7 @@ function issuedStatusChip(r) {
 // issuedCertsCard lists this CA's issuance records with a per-row Renew action.
 function issuedCertsCard(issued) {
   if (!issued.length) {
-    return `<div class="card form-section"><p class="section-label">Issued certificates</p>
+    return `<div class="card form-section" id="issued-card"><p class="section-label">Issued certificates</p>
       <div class="hint">None yet. Certificates issued above appear here with their expiry.</div>
     </div>`;
   }
@@ -7210,18 +7381,31 @@ function issuedCertsCard(issued) {
         <div class="field-group"><label>Validity (days)</label>
           <input class="field mono ren-days" data-hint="clientCA.renew.days" type="number" min="1" max="3650" value="365" /></div>
       </div>
-      <div style="display:flex;gap:10px;margin-top:10px">
+      <div style="display:flex;gap:10px">
         <button class="btn primary ren-go" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Confirm renewal</button>
         <button class="btn ghost ren-cancel" type="button" data-serial="${esc(r.serial)}">Cancel</button>
       </div>
       <div class="hint" style="margin-top:8px">New key and serial, same subject. Does not revoke the current certificate - every device must import the new .p12.</div>
     </td></tr>`}`).join('');
-  return `<div class="card form-section"><p class="section-label">Issued certificates</p>
-    <table class="mini-table">
+  return `<div class="card form-section" id="issued-card"><p class="section-label">Issued certificates</p>
+    <div class="table-wrap"><table class="mini-table">
       <thead><tr><th>Common name</th><th>Serial</th><th>Expires</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>
+    </table></div>
   </div>`;
+}
+
+// Repaints only the issued-certificates card and the expiry banner after an
+// issue or a renewal. A full route() would also re-render the config cards on
+// the left and throw away any unsaved edit there without asking.
+async function refreshIssuedCerts(name, hasKey) {
+  const r = await api('/api/client-cas/' + encodeURIComponent(name) + '/certificates').catch(() => ({ data: {} }));
+  const issued = arr((r.data || {}).certificates);
+  const banner = $('#issued-banner');
+  if (banner) banner.innerHTML = expiryBanner(issued);
+  const card = $('#issued-card');
+  if (card) card.outerHTML = issuedCertsCard(issued);
+  wireClientCertRenew(name, hasKey);
 }
 
 // wireClientCertRenew wires the per-row Renew action. Clicking Renew only reveals
@@ -7245,12 +7429,13 @@ function wireClientCertRenew(name, hasKey) {
   $$('.ren-go').forEach((b) => {
     if (!hasKey) { b.disabled = true; return; }
     b.addEventListener('click', async () => {
+      clearEditorError();
       const row = $('#ren-' + CSS.escape(b.dataset.serial));
       const pw = $('.ren-pw', row).value;
-      if (!pw) { toast('Password required', 'The renewed PKCS#12 bundle must be password-protected.', 'err'); return; }
-      if (pw.length < P12_MIN_PASSWORD) { toast('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, 'err'); return; }
+      if (!pw) { showInvalid('Password required', 'The renewed PKCS#12 bundle must be password-protected.'); return; }
+      if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`); return; }
       const days = parseInt($('.ren-days', row).value, 10);
-      if (isNaN(days) || days < 1 || days > 3650) { toast('Validity out of range', 'Validity must be between 1 and 3650 days.', 'err'); return; }
+      if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.'); return; }
       if (!confirm(`Renew "${b.dataset.cn}"?\n\nA NEW private key and certificate will be generated. `
         + `The download is the only copy - it is never stored and cannot be recovered.\n\n`
         + `The current certificate is NOT revoked and keeps working until it expires, and every device `
@@ -7260,7 +7445,7 @@ function wireClientCertRenew(name, hasKey) {
         await downloadP12('/api/client-cas/' + encodeURIComponent(name) + '/certificates/'
           + encodeURIComponent(b.dataset.serial) + '/renew', { password: pw, validityDays: days }, b.dataset.cn);
         toast('Certificate renewed', 'Import the new .p12 on every device using this certificate - the old one is not revoked and still works until it expires.', 'ok');
-        route();
+        await refreshIssuedCerts(name, hasKey);
       } catch (e) { toastErr(e); b.disabled = false; }
     });
   });
@@ -7276,13 +7461,14 @@ function wireClientCertIssue(name, hasKey) {
   if (!hasKey) return;
   const btn = $('#iss-btn');
   btn.addEventListener('click', async () => {
+    clearEditorError();
     const cn = $('#iss-cn').value.trim();
-    if (!cn) { toast('Common name required', 'Enter the certificate common name.', 'err'); return; }
+    if (!cn) { showInvalid('Common name required', 'Enter the certificate common name.'); return; }
     const pw = $('#iss-pw').value;
-    if (!pw) { toast('Password required', 'The PKCS#12 bundle must be password-protected.', 'err'); return; }
-    if (pw.length < P12_MIN_PASSWORD) { toast('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, 'err'); return; }
+    if (!pw) { showInvalid('Password required', 'The PKCS#12 bundle must be password-protected.'); return; }
+    if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`); return; }
     const days = parseInt($('#iss-days').value, 10);
-    if (isNaN(days) || days < 1 || days > 3650) { toast('Validity out of range', 'Validity must be between 1 and 3650 days.', 'err'); return; }
+    if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.'); return; }
     const sans = $('#iss-sans').value.split(',').map((v) => v.trim()).filter(Boolean);
     const body = { commonName: cn, validityDays: days, password: pw };
     if (sans.length) body.sans = sans;
@@ -7292,7 +7478,7 @@ function wireClientCertIssue(name, hasKey) {
       const file = await downloadP12('/api/client-cas/' + encodeURIComponent(name) + '/issue', body, cn);
       $('#iss-pw').value = '';
       toast('Certificate issued', `Downloaded ${file}. It is not stored - keep the file and its password.`, 'ok');
-      route();
+      await refreshIssuedCerts(name, hasKey);
     } catch (e) { toastErr(e); } finally { btn.disabled = false; }
   });
 }
@@ -7322,7 +7508,9 @@ async function downloadP12(path, body, cn) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // Some browsers start the download after click() returns; revoking at once
+  // can cancel it.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
   return a.download;
 }
 
@@ -7389,7 +7577,7 @@ async function upstreamGroupEditor(c, name) {
         <div class="field-group"><label>Interval (s)</label><input class="field mono" id="ed-hc-interval" data-hint="upstreamGroup.healthCheck.intervalSeconds" type="number" min="1" max="3600" value="${esc(hc.intervalSeconds || '')}" placeholder="5" /></div>
         <div class="field-group"><label>Timeout (s)</label><input class="field mono" id="ed-hc-timeout" data-hint="upstreamGroup.healthCheck.timeoutSeconds" type="number" min="1" max="60" value="${esc(hc.timeoutSeconds || '')}" placeholder="3" /></div>
       </div>
-      <div class="inline-fields" style="margin-top:8px">
+      <div class="inline-fields">
         <div class="field-group"><label>Rise</label><input class="field mono" id="ed-hc-rise" data-hint="upstreamGroup.healthCheck.rise" type="number" min="1" max="10" value="${esc(hc.rise || '')}" placeholder="2" /></div>
         <div class="field-group"><label>Fall</label><input class="field mono" id="ed-hc-fall" data-hint="upstreamGroup.healthCheck.fall" type="number" min="1" max="10" value="${esc(hc.fall || '')}" placeholder="2" /></div>
       </div>
@@ -7403,7 +7591,7 @@ async function upstreamGroupEditor(c, name) {
     u = u || {};
     const p = 'ug' + (++upSeq);
     const div = document.createElement('div');
-    div.className = 'up-block';
+    div.className = 'sub-block up-block';
     // The two escape hatches are behind a disclosure so a plain member row stays
     // one line - opened automatically when either already holds a value, so a
     // configured field is never hidden from someone scanning the page.
@@ -7456,8 +7644,8 @@ async function upstreamGroupEditor(c, name) {
       ups.push(up);
     }
     if (aborted) return null;
-    if (bad) { toast('Upstream incomplete', 'Every upstream needs a host and a port.', 'err'); return null; }
-    if (!ups.length) { toast('Upstream required', 'Add at least one upstream.', 'err'); return null; }
+    if (bad) { showInvalid('Upstream incomplete', 'Every upstream needs a host and a port.'); return null; }
+    if (!ups.length) { showInvalid('Upstream required', 'Add at least one upstream.'); return null; }
     const body = { upstreams: ups };
     const policy = $('#ed-policy').value; if (policy) body.policy = policy;
     const stickyTTL = $('#ed-sticky-ttl').value.trim();
@@ -7559,7 +7747,7 @@ function tokenExpiryLabel(t) {
 function revealToken(secret) {
   const wrap = document.createElement('div');
   wrap.className = 'card form-section';
-  wrap.style.cssText = 'border-color:var(--accent);margin-bottom:16px';
+  wrap.style.cssText = 'border-color:var(--brand);margin-bottom:16px';
   wrap.innerHTML = `
     <p class="section-label">New token - shown once</p>
     <p class="muted" style="font-size:11.5px;margin:0 0 10px">Copy this now. Only its SHA-256 digest is stored, so it cannot be shown again. Lost it? Rotate the token.</p>
@@ -7634,7 +7822,7 @@ async function viewTokens(c) {
         <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" data-hint="apiToken.name" placeholder="ci-deploy" /></div>
         <div class="field-group field-narrow"><label>Expires</label><input class="field mono" id="tok-expires" data-hint="apiToken.expiresAt" type="date" /></div>
       </div>
-      <div class="field-group" style="margin-top:10px">
+      <div class="field-group">
         <label>Scopes</label>
         <div class="toggle-line" style="padding-top:4px">
           <div class="tl-text"><div class="nm">Full admin</div><div class="ds">Every endpoint, including token management, restore and whole-config revert</div></div>
@@ -7746,10 +7934,11 @@ async function viewTokens(c) {
   }
 
   $('#tok-create').addEventListener('click', async () => {
+    clearEditorError();
     const nm = $('#tok-name').value.trim();
-    if (!nm) { toast('Name required', 'Enter a token name.', 'err'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a token name.'); return; }
     const scopes = collectScopes();
-    if (!scopes.length) { toast('Scope required', 'Pick at least one scope, or Full admin.', 'err'); return; }
+    if (!scopes.length) { showInvalid('Scope required', 'Pick at least one scope, or Full admin.'); return; }
     const body = { scopes };
     const exp = $('#tok-expires').value;
     if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
@@ -7758,7 +7947,8 @@ async function viewTokens(c) {
       const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body });
       toastSaved(r.commit); refreshHeadSha();
       const secret = r.data && r.data.token;
-      await viewTokens(c);
+      // route(), not viewTokens(c), so the shell banners and gating survive.
+      if (c.isConnected) await route();
       if (secret) revealToken(secret);
     } catch (e) { toastErr(e); btn.disabled = false; }
   });
@@ -7769,14 +7959,16 @@ async function viewTokens(c) {
       if (!confirm(`Rotate token "${nm}"? The current secret stops working immediately, and cannot be brought back - reverting an API token from history is refused so a rotation always means revocation.`)) return;
       b.disabled = true;
       const cur = tokens.find((t) => t.name === nm) || {};
-      const body = { scopes: arr(cur.scopes) };
+      // Whole-object PUT: carry the meta the rotate action has no control for.
+      const body = Object.assign(metaCarryForward(cur), { scopes: arr(cur.scopes) });
+      if (cur.displayName) body.displayName = cur.displayName;
       if (cur.expiresAt) body.expiresAt = cur.expiresAt;
       if (cur.disabled) body.disabled = true;
       try {
         const r = await api('/api/api-tokens/' + encodeURIComponent(nm) + '?rotate=1', { method: 'PUT', body });
         toastSaved(r.commit); refreshHeadSha();
         const secret = r.data && r.data.token;
-        await viewTokens(c);
+        if (c.isConnected) await route();
         if (secret) revealToken(secret);
       } catch (e) { toastErr(e); b.disabled = false; }
     });
@@ -7790,7 +7982,7 @@ async function viewTokens(c) {
       try {
         const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'DELETE' });
         toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'token removed', 'ok', { html: true });
-        refreshHeadSha(); await viewTokens(c);
+        refreshHeadSha(); if (c.isConnected) await route();
       } catch (e) { toastErr(e); b.disabled = false; }
     });
   });
@@ -7807,7 +7999,7 @@ async function viewLogs(c) {
       <td class="mono faint" style="white-space:nowrap">${esc(fmtTime(e.time))}</td>
       <td class="mono">${esc(e.method || '')}</td>
       <td class="mono">${esc(e.host || '')}</td>
-      <td class="mono" style="max-width:340px;overflow:hidden;text-overflow:ellipsis">${esc(e.path || '')}</td>
+      <td class="mono"><span style="display:block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
       <td><span class="chip ${statusClass(e.status)}">${esc(e.status)}</span></td>
       <td class="mono">${esc(e.durMs)}ms</td>
       <td class="mono faint">${esc(e.client || '')}</td>
@@ -7843,14 +8035,16 @@ async function viewLogs(c) {
       });
     });
   }
-  $('#logsRefresh').addEventListener('click', () => viewLogs(c));
+  // route(), not viewLogs(c): a bare re-render drops the shell banners and the
+  // read-only gating of "Disable capture".
+  $('#logsRefresh').addEventListener('click', () => route());
   $('#logsToggle').addEventListener('click', async () => {
     const btn = $('#logsToggle');
     btn.disabled = true;
     try {
       await api('/api/logs', { method: 'PUT', body: { enabled: !enabled } });
       toast(enabled ? 'Capture disabled' : 'Capture enabled', 'runtime only - a restart reverts to the --access-log flag', 'ok');
-      await viewLogs(c);
+      if (c.isConnected) await route();
     } catch (e) { toastErr(e); btn.disabled = false; }
   });
 }
@@ -7921,7 +8115,8 @@ async function viewHistory(c) {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error((data && data.error) || `Restore failed (${res.status})`);
       toast('Restored', data && data.commit ? `committed <span class="sha">${esc(shortSha(data.commit))}</span>` : 'configuration restored', 'ok', { html: true });
-      await viewHistory(c);
+      refreshHeadSha();
+      if (c.isConnected) await route();
     } catch (e) { toastErr(e); } finally { fileInput.value = ''; }
   });
   c.querySelectorAll('[data-revert]').forEach((el) => {
@@ -7938,7 +8133,8 @@ async function viewHistory(c) {
       try {
         const r = await api('/api/revert', { method: 'POST', body: { hash } });
         toast('Reverted', r.data && r.data.commit ? `committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : 'config reverted', 'ok', { html: true });
-        await viewHistory(c);
+        refreshHeadSha();
+        if (c.isConnected) await route();
       } catch (e) { toastErr(e); }
     });
   });
@@ -7959,7 +8155,8 @@ async function viewHistory(c) {
       try {
         const r = await api('/api/' + plural + '/' + encodeURIComponent(name) + '/revert', { method: 'POST', body: { hash } });
         toast('Reverted', r.data && r.data.commit ? `${esc(kind)} "${esc(name)}" committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : `${esc(kind)} "${esc(name)}" reverted`, 'ok', { html: true });
-        await viewHistory(c);
+        refreshHeadSha();
+        if (c.isConnected) await route();
       } catch (e) { toastErr(e); }
     });
   });
@@ -8018,7 +8215,7 @@ async function viewErrorPages(c) {
     if (dir) errp.dir = dir;
     if (inlineRaw) {
       try { errp.inline = JSON.parse(inlineRaw); }
-      catch (e) { toast('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', 'err'); return; }
+      catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).'); return; }
     }
     if (intercept.length) errp.interceptUpstream = intercept;
 
@@ -8056,6 +8253,9 @@ function showSettingsTab(id) {
     const on = b.dataset.tab === known;
     b.classList.toggle('on', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
+    // Roving tabindex: only the selected tab is a tab stop; the arrow keys
+    // move between tabs.
+    b.tabIndex = on ? 0 : -1;
   });
   $$('#content .tab-panel').forEach((p) => { p.hidden = p.dataset.tab !== known; });
 }
@@ -8147,10 +8347,10 @@ async function viewSettings(c, tab) {
   c.innerHTML = `
     <div class="view-head"><h2>Settings</h2><p>What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.</p></div>
     <div class="tabs" id="set-tabs" role="tablist">
-      ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" data-tab="${esc(t.id)}" aria-selected="false">${esc(t.label)}</button>`).join('')}
+      ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="set-tab-${esc(t.id)}" aria-controls="set-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join('')}
     </div>
 
-    <div class="tab-panel" data-tab="general" hidden>
+    <div class="tab-panel" data-tab="general" id="set-panel-general" role="tabpanel" aria-labelledby="set-tab-general" hidden>
       ${runtimeCardHtml(rt)}
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Identity</p>
@@ -8209,7 +8409,7 @@ async function viewSettings(c, tab) {
       ${settingsSaveBar('set-save')}
     </div>
 
-    <div class="tab-panel" data-tab="headers" hidden>
+    <div class="tab-panel" data-tab="headers" id="set-panel-headers" role="tabpanel" aria-labelledby="set-tab-headers" hidden>
       <div class="card form-section">
         <p class="section-label">Response security headers</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">Fleet-default response headers, applied set-if-absent so an app's own header is never clobbered. Scope selects which responses each one lands on: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Any proxy host can override a header (value and scope) in its own editor. Empty ships nothing.</p>
@@ -8233,7 +8433,7 @@ async function viewSettings(c, tab) {
       ${settingsSaveBar('set-save-headers')}
     </div>
 
-    <div class="tab-panel" data-tab="advanced" hidden>
+    <div class="tab-panel" data-tab="advanced" id="set-panel-advanced" role="tabpanel" aria-labelledby="set-tab-advanced" hidden>
       <div class="card form-section">
         <p class="section-label">PROXY protocol (inbound)</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. This is the L4 half of the same question the Client IP card answers at L7. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below. UDP stream listeners are unaffected.</p>
@@ -8272,7 +8472,7 @@ async function viewSettings(c, tab) {
       ${settingsSaveBar('set-save-advanced')}
     </div>
 
-    <div class="tab-panel" data-tab="operations" hidden>
+    <div class="tab-panel" data-tab="operations" id="set-panel-operations" role="tabpanel" aria-labelledby="set-tab-operations" hidden>
       <div class="card form-section danger-zone">
         <p class="section-label">Danger zone</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">Two actions that affect every host or every signed-in user at once. Both are deliberate, both are confirmed, and neither has a partial version.</p>
@@ -8298,6 +8498,20 @@ async function viewSettings(c, tab) {
   showSettingsTab(tab || SETTINGS_TABS[0].id);
   $$('#set-tabs .tab-btn').forEach((b) => {
     b.addEventListener('click', () => { location.hash = '#/settings/' + b.dataset.tab; });
+  });
+  $('#set-tabs').addEventListener('keydown', (e) => {
+    const tabs = $$('#set-tabs .tab-btn');
+    const i = tabs.indexOf(document.activeElement);
+    if (i === -1) return;
+    let j = -1;
+    if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = tabs.length - 1;
+    if (j === -1) return;
+    e.preventDefault();
+    tabs[j].focus();
+    tabs[j].click();
   });
 
   // Metrics endpoint: greyed out (with the reason) unless the daemon reports it
@@ -8439,7 +8653,7 @@ async function viewSettings(c, tab) {
     if (tp.length) {
       const badTp = firstBadCidr(tp);
       if (badTp) {
-        toast('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, 'err');
+        showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`);
         return;
       }
       body.trustedProxies = tp;
@@ -8457,7 +8671,7 @@ async function viewSettings(c, tab) {
     // without gaining a `maintenance: {}`.
     const maintRetry = parseInt($('#set-maint-retry').value, 10);
     if (!isNaN(maintRetry) && (maintRetry < 0 || maintRetry > 86400)) {
-      toast('Retry-After out of range', 'Maintenance Retry-After must be between 0 and 86400 seconds (24h). Leave it blank for the 300s default.', 'err');
+      showInvalid('Retry-After out of range', 'Maintenance Retry-After must be between 0 and 86400 seconds (24h). Leave it blank for the 300s default.');
       return;
     }
     const maintenance = {};
@@ -8468,7 +8682,7 @@ async function viewSettings(c, tab) {
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();
     if (isOn('set-pp-on') && !ppCidrs.length) {
-      toast('Trusted peers required', 'A PROXY header from an untrusted peer would let any client spoof its source IP. Add the CIDRs of your load balancers.', 'err');
+      showInvalid('Trusted peers required', 'A PROXY header from an untrusted peer would let any client spoof its source IP. Add the CIDRs of your load balancers.');
       return;
     }
     if (isOn('set-pp-on') || ppCidrs.length || ppTimeout) {
@@ -8486,7 +8700,7 @@ async function viewSettings(c, tab) {
     // verbatim, and returns null when there are no rows - which leaves the key
     // off the body entirely rather than committing an empty map.
     const secHdrErr = secHdrCtl.error();
-    if (secHdrErr) { toast('Invalid security header', secHdrErr, 'err'); return; }
+    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr); return; }
     const secHdrs = secHdrCtl.get();
     if (secHdrs) body.securityHeaders = secHdrs;
 
@@ -8496,7 +8710,7 @@ async function viewSettings(c, tab) {
     // the body entirely rather than committing an empty array.
     const stripHdrs = stripCtl.get();
     const stripErr = stripHeaderListError(stripHdrs);
-    if (stripErr) { toast('Invalid strip header', stripErr, 'err'); return; }
+    if (stripErr) { showInvalid('Invalid strip header', stripErr); return; }
     if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;
 
     // ingressDiscovery: this page owns only the shared annotation prefix and its
@@ -8555,7 +8769,12 @@ async function viewSettings(c, tab) {
       state.capabilities = null;
       await loadCapabilities();
       refreshShellBanners();
-    } catch (e) { showSaveError(e, 'Could not save settings'); }
+    } catch (e) {
+      // This page carries webhooks and DNS sync forward untouched and has no
+      // field for their secrets, so say where the refused literal is fixed.
+      const lit = e && e.message && e.message.indexOf('refusing to commit literal secret') !== -1;
+      showSaveError(lit ? new Error(e.message + '. Webhook, notification and DNS sync secrets are edited on the Integrations page (or in git), not here.') : e, 'Could not save settings');
+    }
     btn.disabled = false;
   }
 }
@@ -8566,7 +8785,14 @@ async function refreshHeadSha() {
     const h = (await api('/api/history')).data;
     if (Array.isArray(h) && h.length) {
       state.headSha = h[0].hash;
-      const badge = $$('.topbar .badge').find((b) => b.textContent.indexOf('config @') === 0);
+      let badge = $$('.topbar .badge').find((b) => b.textContent.indexOf('config @') === 0);
+      // A fresh install has no commit at boot, so the topbar rendered no
+      // badge: the first write creates it, where loadTopbar would have put it.
+      const principal = $('#ident .principal');
+      if (!badge && principal) {
+        principal.insertAdjacentHTML('beforebegin', '<a class="badge" href="#/history" title="Current config commit"></a>');
+        badge = principal.previousElementSibling;
+      }
       if (badge) badge.textContent = 'config @ ' + shortSha(h[0].hash);
     }
   } catch (e) { /* ignore */ }

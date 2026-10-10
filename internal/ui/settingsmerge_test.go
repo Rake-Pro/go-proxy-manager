@@ -204,7 +204,7 @@ func TestSecurityHeadersEditorSerialization(t *testing.T) {
 	for _, want := range []string{
 		"if (!HEADER_NAME_RE.test(name)) {",
 		"is listed more than once",
-		"toast('Invalid security header', secHdrErr, 'err'); return;",
+		"showInvalid('Invalid security header', secHdrErr); return;",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("the securityHeaders editor no longer validates its rows: missing %q", want)
@@ -271,7 +271,7 @@ func TestStripResponseHeadersEditorSerialization(t *testing.T) {
 		"function stripHeaderListError(names) {",
 		"if (!HEADER_NAME_RE.test(n)) return",
 		"is listed more than once (names are case-insensitive).",
-		"toast('Invalid strip header', stripErr, 'err'); return;",
+		"showInvalid('Invalid strip header', stripErr); return;",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("the stripResponseHeaders editor no longer validates its chips: missing %q", want)
@@ -429,7 +429,7 @@ func TestHostSaveRoundTripsMTLS(t *testing.T) {
 	}
 	// Refusing to save an enabled block with no CA gives a better message than
 	// the API's 400 would - but only when the list actually loaded.
-	if !strings.Contains(js, "if (!caRefSel) { toast('Client CA required'") {
+	if !strings.Contains(js, "if (!caRefSel) { showInvalid('Client CA required'") {
 		t.Error("saving mTLS with no client CA selected is no longer refused client-side")
 	}
 	if !strings.Contains(js, "      if (caListOK) {\n        const caRefSel = $('#f-mtls-ca').value;") {
