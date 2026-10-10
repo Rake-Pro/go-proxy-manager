@@ -53,7 +53,7 @@
   --r-card:12px; --r-input:8px;
   /* card grid template, shared with .toolbar.cards-aligned so a toolbar's
      first cell is exactly one card column wide */
-  --cards-cols:repeat(auto-fill,minmax(330px,1fr));
+  --cards-cols:repeat(auto-fill,minmax(min(330px,100%),1fr));
   --shadow:0 2px 4px rgba(0,0,0,.25), 0 8px 24px rgba(0,0,0,.18);
   --sidebar-w:240px;
   color-scheme:light;
@@ -228,7 +228,7 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .btn {
   display:inline-flex; align-items:center; gap:7px; font-size:13px; font-weight:600;
   padding:8px 14px; border-radius:8px; border:1px solid var(--border);
-  background:var(--raised); color:var(--text); transition:.12s;
+  background:var(--raised); color:var(--text); transition:.12s; white-space:nowrap;
 }
 .btn:hover { border-color:var(--brand); text-decoration:none; }
 .btn svg { width:15px; height:15px; }
@@ -288,14 +288,15 @@ a.badge:hover { color:var(--text); border-color:var(--brand); text-decoration:no
 .feed-row:last-child { border-bottom:0; padding-bottom:0; }
 .feed-tick { width:9px; height:9px; border-radius:50%; background:var(--brand); margin-top:5px; flex:0 0 9px; box-shadow:0 0 0 3px rgba(110,139,255,.14); }
 .feed-body { flex:1 1 auto; min-width:0; }
-.feed-meta { font-size:11.5px; color:var(--faint); font-family:var(--mono); margin-bottom:2px; }
-.feed-msg { font-size:13.5px; }
+.feed-meta { font-size:11.5px; color:var(--faint); font-family:var(--mono); margin-bottom:2px; overflow-wrap:break-word; }
+.feed-msg { font-size:13.5px; overflow-wrap:break-word; }
 .feed-msg b { font-weight:600; }
 .sha { font-family:var(--mono); font-size:11.5px; color:var(--cyan-text); }
 /* Overview "needs attention" rows: same feed-row/tick/body/msg/meta structure,
    centred (one-line detail, not a multi-line commit message) with the tick
    coloured by severity instead of the default brand dot. */
 .feed-row.attn { align-items:center; }
+.feed-row.attn > .btn { flex:none; }
 .feed-tick.err { background:var(--err); box-shadow:0 0 0 3px rgba(229,104,122,.16); }
 .feed-tick.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(232,177,76,.16); }
 /* Revert controls are <button>: they commit a config change, so they must be
@@ -325,11 +326,12 @@ tbody tr.clickable:hover { background:var(--raised); }
    content), but that lets an all-buttons Actions column get stretched wider
    than it needs under width:100% - the classic width:1% trick shrinks it back
    to content instead, and the domains column gets to keep the freed space. */
-.certs-table .col-actions { width:1%; white-space:nowrap; }
-.certs-table .col-issuance { white-space:nowrap; }
 .certs-table .col-domains { min-width:220px; }
-.certs-table td.col-domains { overflow-wrap:normal; word-break:keep-all; }
-.domain-list { overflow-wrap:normal; word-break:keep-all; }
+/* A domain list wraps BETWEEN domains, never inside one: each domain is its
+   own nowrap item, ellipsized only when a single name is wider than the
+   container (the full list is in the list's title). */
+.domain-list { white-space:normal; }
+.dl-item { display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
 .cert-expiry { display:inline-flex; align-items:center; gap:8px; white-space:nowrap; }
 .expiry-date { color:var(--faint); font-family:var(--mono); font-size:11.5px; }
 
@@ -340,6 +342,7 @@ tbody tr.clickable:hover { background:var(--raised); }
    box ends where the first card ends instead of at a fixed 360px */
 .toolbar.cards-aligned { display:grid; grid-template-columns:var(--cards-cols); gap:16px; margin-bottom:16px; }
 .toolbar.cards-aligned .search { max-width:none; }
+.search input { text-overflow:ellipsis; }
 .search svg { position:absolute; left:11px; top:50%; transform:translateY(-50%); width:15px; height:15px; color:var(--faint); }
 input.field, select.field, textarea.field {
   width:100%; background:var(--raised); border:1px solid var(--border); border-radius:var(--r-input);
@@ -390,6 +393,11 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .node .type { font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.7px; color:var(--faint); }
 .node .nm { font-size:12.5px; font-weight:600; }
 .node .nm small { display:block; font-family:var(--mono); font-size:10.5px; color:var(--muted); font-weight:400; margin-top:1px; }
+/* A node holds identifiers (middleware, certificate, upstream names): one line
+   each, ellipsized past a width that fits realistic names, full value in the
+   node's title. */
+.node { max-width:240px; }
+.node .nm, .node .nm small, .node.cap .cap-sub { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .node.cap {
   background:linear-gradient(160deg, rgba(63,208,201,.1), var(--raised));
   border-color:rgba(63,208,201,.55); box-shadow:0 0 0 1px rgba(63,208,201,.18);
@@ -470,13 +478,18 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 
 /* chips input row */
 .chip-input { display:flex; flex-wrap:wrap; gap:7px; padding:7px 8px; background:var(--raised); border:1px solid var(--border); border-radius:var(--r-input); }
-.chip-tok { display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:12px; padding:4px 8px; background:var(--panel); border:1px solid var(--border); border-radius:7px; color:var(--text); }
+.chip-tok { display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:12px; padding:4px 8px; background:var(--panel); border:1px solid var(--border); border-radius:7px; color:var(--text); max-width:100%; }
+.chip-tok-t { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chip-tok button { background:transparent; border:0; color:var(--faint); padding:0; line-height:1; font-size:14px; }
 .chip-tok button:hover { color:var(--err-text); }
 .chip-input input { flex:1; min-width:120px; background:transparent; border:0; color:var(--text); font-family:var(--mono); font-size:12.5px; outline:none; }
 
 /* save bar */
 .save-bar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:18px; padding:14px 18px; flex-wrap:wrap; }
+/* Buttons no longer wrap their labels, so the button group wraps instead on a
+   narrow screen (Clone, Delete, Cancel, Save do not fit side by side at phone
+   width). */
+.save-bar > div:last-child { flex-wrap:wrap; }
 .save-note { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
 .save-note svg { width:15px; height:15px; color:var(--cyan-text); }
 
@@ -491,7 +504,10 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 .arrow svg { width:14px; height:14px; }
 
 /* identity / mapping table */
-.kv { display:grid; grid-template-columns:auto 1fr; gap:7px 16px; font-size:13px; align-items:baseline; }
+/* minmax(0,1fr), not 1fr: a 1fr track's minimum is its content's width, so a
+   one-line (nowrap) value such as a list card's issuer URL would widen the grid
+   past its card instead of ellipsizing. */
+.kv { display:grid; grid-template-columns:auto minmax(0,1fr); gap:7px 16px; font-size:13px; align-items:baseline; }
 .kv .k { color:var(--muted); font-size:12px; }
 .kv .v { font-family:var(--mono); font-size:12.5px; overflow-wrap:anywhere; word-break:normal; }
 .mini-table { width:100%; border-collapse:collapse; margin-top:6px; min-width:0; }
@@ -516,7 +532,7 @@ a.cap-disabled, span.cap-disabled { pointer-events:none; }
 }
 .tl-item.warn::before { border-color:var(--warn); }
 .tl-meta { font-family:var(--mono); font-size:11.5px; color:var(--faint); margin-bottom:3px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.tl-msg { font-size:13.5px; margin-bottom:5px; }
+.tl-msg { font-size:13.5px; margin-bottom:5px; overflow-wrap:break-word; }
 .tl-actions { display:flex; gap:12px; align-items:center; }
 
 /* misc */
@@ -554,7 +570,7 @@ details.fold[open] > summary::after { content:"-"; }
 details.fold[open] > summary { margin-bottom:12px; }
 details.fold > summary:hover .section-label, details.fold > summary:hover::after { color:var(--muted); }
 .lock { display:inline-flex; align-items:center; gap:5px; }
-.lock svg { width:13px; height:13px; }
+.lock svg { width:13px; height:13px; flex:none; }
 .lock.ok { color:var(--ok-text); } .lock.warn { color:var(--warn-text); }
 .dim-card { border-style:dashed; background:transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:8px; color:var(--muted); min-height:160px; cursor:pointer; }
 .dim-card .plus { width:38px; height:38px; border-radius:10px; border:1px solid var(--border); display:flex; align-items:center; justify-content:center; }
@@ -605,7 +621,7 @@ details.fold > summary:hover .section-label, details.fold > summary:hover::after
   box-shadow:var(--shadow); width:100%; max-width:480px; padding:20px 22px;
   max-height:calc(100vh - 40px); overflow:auto; animation:fade .15s ease; }
 .modal-title { font-family:var(--display); font-size:16px; font-weight:600; margin-bottom:10px; }
-.modal-body { color:var(--muted); font-size:13px; line-height:1.5; }
+.modal-body { color:var(--muted); font-size:13px; line-height:1.5; overflow-wrap:break-word; }
 .modal-body p { margin:0 0 9px; }
 .modal-body b { color:var(--text); }
 .modal-typed { margin-top:14px; }
@@ -614,8 +630,8 @@ details.fold > summary:hover .section-label, details.fold > summary:hover::after
 
 /* Read-only "which certificate covers this domain" lines that replaced the
    inert certificate picker on proxy/redirect/parked hosts. */
-.cert-auto { font-size:12.5px; color:var(--muted); padding:3px 0; }
-.cert-auto .mono { color:var(--text); margin-right:6px; }
+.cert-auto { font-size:12.5px; color:var(--muted); padding:3px 0; display:flex; flex-wrap:wrap; align-items:baseline; column-gap:6px; }
+.cert-auto .mono { color:var(--text); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cert-auto b { color:var(--ok-text); font-weight:600; }
 .cert-auto.warn { color:var(--warn-text); }
 .cert-auto.warn .mono { color:var(--warn-text); }
@@ -675,6 +691,72 @@ td.sel-cell, th.sel-cell { width:30px; text-align:center; }
 .bulk-bar .bulk-count { font-size:12.5px; color:var(--muted); flex:1 1 auto; }
 .list-empty { padding:16px; font-size:13px; color:var(--muted); }
 
+/* ---------- text length and column rules ----------
+   Identifiers (domains, host and object names, certificate names, upstream
+   targets, client IDs, paths) never wrap mid-token: they stay on one line and
+   ellipsize past a width that fits a realistic value, with the full value in
+   the element's title. Free text (descriptions, messages, reasons) wraps at
+   word boundaries. Column widths come from the content class, so the same kind
+   of value lines up the same way in every table. */
+.trunc { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* A link keeps a content-sized hit area: as a block it filled the cell, so a
+   click on the empty space beside a short name navigated. */
+a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
+/* Two-line identifier cell: line 1 the name, line 2 the secondary facts (kind
+   chip, source path, tags) muted and smaller. Line 2 always renders, empty or
+   not, so every row of a table has the same shape. */
+.cell-main, .cell-sub { display:flex; align-items:center; gap:6px; min-width:0; max-width:340px; white-space:nowrap; }
+.cell-main > .trunc, .cell-sub > .trunc { flex:0 1 auto; }
+.cell-main > :not(.trunc), .cell-sub > :not(.trunc) { flex:none; }
+.cell-sub { margin-top:3px; min-height:18px; overflow:hidden; font-size:11.5px; color:var(--faint); }
+/* Line-2 chips are exactly the reserved 18px (16px line + 1px borders), so a
+   row with a kind, tag or disabled chip is as tall as one without. */
+.cell-sub .chip { padding-top:0; padding-bottom:0; line-height:16px; }
+.cell-sub .mono { font-size:11.5px; }
+/* "+N" on a folded list: a real button (touch and keyboard can open it) that
+   still reads as the quiet count it replaced. */
+.more-btn { flex:none; background:none; border:0; padding:0 2px; margin:0; font:inherit; font-size:12px;
+  color:var(--faint); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; white-space:nowrap; }
+.more-btn:hover { color:var(--text); }
+.col-domain .more-list { display:block; max-width:340px; margin-top:4px; font-size:12px; color:var(--muted); }
+.chip-row > .more-list { display:contents; }
+.col-method { white-space:nowrap; }
+.col-domain, .col-domains { min-width:200px; }
+.col-upstream { min-width:140px; }
+.col-upstream .trunc { max-width:240px; }
+.col-tls { white-space:nowrap; }
+.col-tls .lock { max-width:220px; }
+.lock .trunc { max-width:24ch; }
+.col-auth { white-space:nowrap; }
+.col-auth .chip { display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.col-status { white-space:nowrap; }
+.col-type { white-space:nowrap; }
+.col-issuer .trunc { max-width:200px; }
+.col-host .trunc { max-width:260px; }
+.col-path .trunc { max-width:340px; }
+.col-client .trunc { max-width:180px; }
+.col-name .trunc { max-width:240px; }
+.col-serial .trunc { max-width:18ch; }
+.col-actions .hint .mono { display:inline-block; max-width:18ch; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+.col-reason { min-width:160px; overflow-wrap:break-word; }
+/* Timestamps and numbers right-align and never wrap, so a mono
+   "2026-08-31 23:59" stays on one line and digits line up down the column. */
+.col-time, .col-updated, .col-num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
+.col-actions { width:1%; white-space:nowrap; text-align:right; }
+/* Every row's buttons end at the same right edge, whatever subset it shows. */
+.row-actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; }
+/* List cards: the name, display name and summary values are identifiers, so
+   one line each with the full value in the title (set when the card renders);
+   a domain list still wraps between its domains. */
+.card-head > .card-title { flex:1 1 auto; min-width:0; }
+.card-head > .card-title h3, .card-head > .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.card-head > .card-actions { display:flex; gap:8px; flex:none; }
+.cards .kv .v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cards .kv .v .domain-list, .cards .kv .v.v-list { white-space:normal; }
+/* Editor headings carry an object name, which can be a long domain. */
+.view-head > div { min-width:0; max-width:100%; }
+
 /* ---------- responsive ---------- */
 @media (max-width:920px) {
   .grid-2, .form-grid { grid-template-columns:1fr; }
@@ -694,6 +776,9 @@ td.sel-cell, th.sel-cell { width:30px; text-align:center; }
   .loc-row .arrow { display:none; }
   .inline-fields { flex-direction:column; }
   .toolbar { flex-direction:column; align-items:stretch; }
+  /* In a column the 280px flex-basis became a 280px HEIGHT, which pushed the
+     search icon (top:50%) far below its input. */
+  .toolbar .search { flex:0 0 auto; max-width:none; }
   .bulk-bar { flex-wrap:wrap; }
 }
 @media (max-width:760px) {

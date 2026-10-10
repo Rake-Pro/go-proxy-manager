@@ -153,28 +153,55 @@ function fmtDate(s) {
 }
 function arr(v) { return Array.isArray(v) ? v : []; }
 
-// A label can be long enough to need to wrap, but only at a separator a reader
-// expects (a dot between two real labels), never mid-word. <wbr> after such a
-// "." gives the browser that break point explicitly; paired with
-// overflow-wrap:normal and word-break:keep-all in CSS, that stops e.g.
-// "acme-test.example.com" from splitting mid-label the way a bare
-// word-break:break-all would. The dot must be preceded by a label character -
-// not "*" - so a wildcard's "*." never breaks on its own, orphaned, from the
-// label it prefixes.
-function wbrLabel(s) {
-  return esc(s).replace(/([A-Za-z0-9])\./g, '$1.<wbr>');
-}
-// Renders up to `max` items (default 2) comma-joined with <wbr> break points,
-// folding the rest into "+N"; the full list is always in the title tooltip.
-// Shared by any column that can hold a long domain/SAN list.
+// Renders up to `max` items (default 2) comma-joined, folding the rest into
+// "+N"; the full list is always in the title tooltip. Each domain is its own
+// nowrap item (.dl-item), so a list wraps only BETWEEN domains and a name never
+// splits mid-label. Shared by any column that can hold a long domain/SAN list.
 function domainListHtml(domains, max) {
   domains = arr(domains);
   if (!domains.length) return '';
   const shown = domains.slice(0, max || 2);
-  const rest = domains.length - shown.length;
-  const html = shown.map(wbrLabel).join(', <wbr>') + (rest > 0 ? ` <span class="faint">+${rest}</span>` : '');
+  const rest = domains.slice(shown.length);
+  const item = (d) => `<span class="dl-item">${esc(d)}</span>`;
+  let html = shown.map(item).join(', ');
+  if (rest.length) {
+    const m = moreToggle(rest, ', ' + rest.map(item).join(', '));
+    html += m.list + ' ' + m.btn;
+  }
   return `<span class="domain-list" title="${esc(domains.join(', '))}">${html}</span>`;
 }
+
+// moreToggle builds the "+N" control for a folded list: a real button, so
+// touch and keyboard users can open the rest (a title tooltip alone is
+// hover-only), plus the hidden element it reveals. The two are tied by id, not
+// by position, so a caller can place the revealed list wherever it fits (inline
+// after a domain list, or as its own block under a table cell). The title stays
+// for mouse users. One capture-phase listener below does the toggling.
+let moreSeq = 0;
+function moreToggle(rest, listHtml, block) {
+  const id = 'more-' + (++moreSeq);
+  const tag = block ? 'div' : 'span';
+  return {
+    btn: `<button type="button" class="more-btn" aria-expanded="false" aria-controls="${id}" data-label="+${rest.length}" title="${esc(rest.join(', '))}">+${rest.length}</button>`,
+    list: `<${tag} class="more-list" id="${id}" hidden>${listHtml}</${tag}>`,
+  };
+}
+// Capture phase, and the event stops here: the button sits inside clickable
+// rows and cards, which would otherwise navigate on the same click.
+document.addEventListener('click', (e) => {
+  const b = e.target && e.target.closest ? e.target.closest('.more-btn') : null;
+  if (!b) return;
+  e.stopPropagation();
+  e.preventDefault();
+  // Stopping the click here also keeps it from the document listener that
+  // closes an open hint popover, so close it explicitly.
+  closeHintPop();
+  const open = b.getAttribute('aria-expanded') !== 'true';
+  b.setAttribute('aria-expanded', String(open));
+  b.textContent = open ? 'less' : b.dataset.label;
+  const list = document.getElementById(b.getAttribute('aria-controls'));
+  if (list) list.hidden = !open;
+}, true);
 
 // ObjectMeta keys no editor renders a control for. Every PUT is a whole-object
 // replacement, so a save body built from the form alone DELETES them: labels
@@ -936,7 +963,7 @@ async function loadTopbar() {
   // one round trip after another: the shell used to wait for six sequential
   // GETs before the first view could render.
   const ident = $('#ident');
-  let verStr = '', cfgSha = '', principal = '';
+  let verStr = '', cfgSha = '', principal = '', principalTitle = '';
   const ok = (p) => p.then((r) => r, () => null);
   const [vR, hR, meR, , sR] = await Promise.all([
     ok(api('/version')),
@@ -961,6 +988,7 @@ async function loadTopbar() {
     const role = me.Role || '';
     const idp = me.IdP || '';
     principal = `<b>${esc(name)}</b>${role ? ' &middot; ' + esc(role) : ''}${idp ? ' &middot; via ' + esc(idp) : ''}`;
+    principalTitle = [name, role, idp ? 'via ' + idp : ''].filter(Boolean).join(' - ');
     state.avatarChar = (name[0] || '?').toLowerCase();
   }
 
@@ -977,10 +1005,10 @@ async function loadTopbar() {
   }
 
   ident.innerHTML = `
-    <span class="instance">${esc(state.instance)}</span>
+    <span class="instance" title="${esc(state.instance)}">${esc(state.instance)}</span>
     ${verStr ? `<span class="badge ver" title="Build version">${esc(verStr)}</span>` : ''}
     ${cfgSha ? `<a class="badge" href="#/history" title="Current config commit">config @ ${esc(cfgSha)}</a>` : ''}
-    <span class="principal">
+    <span class="principal"${principalTitle ? ` title="${esc(principalTitle)}"` : ''}>
       <span class="avatar">${esc(state.avatarChar || 'g')}</span>
       <span>${principal || 'not signed in'}</span>
     </span>
@@ -1473,7 +1501,7 @@ function makeChipInput(container, initial, placeholder, onChange) {
     const prev = container.querySelector('input');
     const inputId = (prev && prev.id) || (container.id ? container.id + '-in' : '');
     container.innerHTML = tokens.map((t, i) =>
-      `<span class="chip-tok">${esc(t)} <button type="button" aria-label="Remove ${esc(t)}" data-i="${i}">&times;</button></span>`
+      `<span class="chip-tok" title="${esc(t)}"><span class="chip-tok-t">${esc(t)}</span><button type="button" aria-label="Remove ${esc(t)}" data-i="${i}">&times;</button></span>`
     ).join('') + `<input class="mono" placeholder="${esc(placeholder || 'add...')}" ${inputId ? `id="${esc(inputId)}" ` : ''}aria-label="${esc(placeholder || 'add')}" />`;
     const input = container.querySelector('input');
     input.addEventListener('keydown', (e) => {
@@ -2328,13 +2356,16 @@ function intSaveBar() {
 const DISCOVERY_ACTION_CLASS = { created: 'ok', updated: 'cyan', unchanged: '', deleted: 'err', skipped: 'warn' };
 function discoveryCounters(st) {
   const n = (k) => (st[k] || 0);
+  // A zero count stays a plain chip: six coloured pills on every quiet run
+  // drew the eye to nothing.
+  const c = (k, cls) => `<span class="chip${n(k) ? ' ' + cls : ''}">${k} ${n(k)}</span>`;
   return `<div class="chip-row" style="margin:6px 0">
     <span class="chip">discovered ${n('discovered')}</span>
     <span class="chip">managed ${n('managed')}</span>
-    <span class="chip ok">created ${n('created')}</span>
-    <span class="chip cyan">updated ${n('updated')}</span>
-    <span class="chip err">deleted ${n('deleted')}</span>
-    <span class="chip warn">skipped ${n('skipped')}</span>
+    ${c('created', 'ok')}
+    ${c('updated', 'cyan')}
+    ${c('deleted', 'err')}
+    ${c('skipped', 'warn')}
   </div>`;
 }
 function discoveryHostsTable(hosts, secondCol, secondKey) {
@@ -2342,12 +2373,12 @@ function discoveryHostsTable(hosts, secondCol, secondKey) {
   return `<div class="table-wrap"><table class="mini-table">
     <thead><tr><th>Host</th><th>${esc(secondCol)}</th><th>Domains</th><th>Action</th><th>Profile</th><th>Reason</th></tr></thead>
     <tbody>${arr(hosts).map((h) => `<tr>
-      <td><a href="#/hosts/${encodeURIComponent(h.name || '')}" class="mono">${esc(h.name || '')}</a></td>
-      <td class="mono faint">${esc(h[secondKey] || '')}</td>
-      <td class="mono faint">${esc(arr(h.domains).join(', '))}</td>
-      <td><span class="chip ${DISCOVERY_ACTION_CLASS[h.action] || ''}">${esc(h.action || '')}</span></td>
-      <td class="mono faint">${esc(h.profile || '')}</td>
-      <td class="faint">${esc(h.reason || '')}</td>
+      <td class="col-name"><a href="#/hosts/${encodeURIComponent(h.name || '')}" class="mono trunc" title="${esc(h.name || '')}">${esc(h.name || '')}</a></td>
+      <td class="mono faint col-name"><span class="trunc" title="${esc(h[secondKey] || '')}">${esc(h[secondKey] || '')}</span></td>
+      <td class="mono faint">${domainListHtml(h.domains)}</td>
+      <td class="col-status"><span class="chip ${DISCOVERY_ACTION_CLASS[h.action] || ''}">${esc(h.action || '')}</span></td>
+      <td class="mono faint col-name"><span class="trunc" title="${esc(h.profile || '')}">${esc(h.profile || '')}</span></td>
+      <td class="faint col-reason">${esc(h.reason || '')}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
@@ -3028,13 +3059,13 @@ async function viewIntegrations(c) {
       const st = (await api('/api/access-list-sources/status')).data || {};
       const rows = arr(st.sources);
       el.innerHTML = rows.length ? `<div class="table-wrap"><table class="mini-table">
-        <thead><tr><th>Access list</th><th>Source</th><th>Fetched</th><th>Entries</th><th>Error</th></tr></thead>
+        <thead><tr><th>Access list</th><th>Source</th><th class="col-time">Fetched</th><th class="col-num">Entries</th><th>Error</th></tr></thead>
         <tbody>${rows.map((r) => `<tr>
-          <td><a class="mono" href="#/access/${encodeURIComponent(r.list || '')}">${esc(r.list || '')}</a></td>
-          <td class="mono">${esc(r.name || '')}</td>
-          <td class="faint">${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'never')}</td>
-          <td class="mono">${esc(r.entryCount || 0)}</td>
-          <td class="warn-text">${esc(r.lastError || '')}</td>
+          <td class="col-name"><a class="mono trunc" href="#/access/${encodeURIComponent(r.list || '')}" title="${esc(r.list || '')}">${esc(r.list || '')}</a></td>
+          <td class="mono col-name"><span class="trunc" title="${esc(r.name || '')}">${esc(r.name || '')}</span></td>
+          <td class="faint col-time"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'never')}</td>
+          <td class="mono col-num">${esc(r.entryCount || 0)}</td>
+          <td class="warn-text col-reason">${esc(r.lastError || '')}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="hint">No access list declares a remote source yet.</div>';
     } catch (e) {
       el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Access-list source sync is not wired in this deployment.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
@@ -3549,7 +3580,7 @@ async function viewOverview(c) {
   if (certsR.ok) {
     certsWithStatus.forEach((ct) => {
       const name = esc(ct.name);
-      const domains = esc(arr(ct.domains).join(', '));
+      const domains = domainListHtml(ct.domains);
       const typ = ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : esc(ct.type || 'cert'));
       const href = '#/certs/' + encodeURIComponent(ct.name);
       if (ct.state === 'error') {
@@ -3793,23 +3824,23 @@ async function listHosts(c) {
   const selected = new Set();
 
   const COLUMNS = [
-    { key: 'domains', label: 'Domain' },
-    { key: 'upstream', label: 'Upstream' },
-    { key: null, label: 'TLS' },
-    { key: null, label: 'Auth' },
-    { key: null, label: 'Status' },
-    { key: 'updated', label: 'Updated' },
-    { key: null, label: '' },
+    { key: 'domains', label: 'Domain', cls: 'col-domain' },
+    { key: 'upstream', label: 'Upstream', cls: 'col-upstream' },
+    { key: null, label: 'TLS', cls: 'col-tls' },
+    { key: null, label: 'Auth', cls: 'col-auth' },
+    { key: null, label: 'Status', cls: 'col-status' },
+    { key: 'updated', label: 'Updated', cls: 'col-updated' },
+    { key: null, label: '', cls: 'col-actions' },
   ];
   function headHtml() {
     return `<tr><th class="sel-cell"><input type="checkbox" id="hostSelAll" aria-label="Select all listed hosts" /></th>`
       + COLUMNS.map((col) => {
-        if (!col.key) return `<th>${esc(col.label)}</th>`;
+        if (!col.key) return `<th class="${col.cls}">${esc(col.label)}</th>`;
         const active = sort.key === col.key;
         const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
         // The th keeps its columnheader role (that is what aria-sort is valid
         // on); the control inside it is a real button.
-        return `<th class="sortable" aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
+        return `<th class="sortable ${col.cls}" aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
       }).join('')
       + `</tr>`;
   }
@@ -3832,12 +3863,14 @@ async function listHosts(c) {
 
   function rowHtml(r) {
     const h = r.h;
-    const extra = r.domains.length > 1 ? ` +${r.domains.length - 1}` : '';
+    const rest = r.domains.slice(1);
+    // The other domains open as their own block under line 2, one per line.
+    const more = rest.length ? moreToggle(rest, rest.map((d) => `<span class="trunc" title="${esc(d)}">${esc(d)}</span>`).join(''), true) : null;
     const tls = r.certRef
-      ? `<span class="lock ok">${ICON.lock}${esc(r.certRef)}</span>`
+      ? `<span class="lock ok" title="Certificate ${esc(r.certRef)}">${ICON.lock}<span class="trunc">${esc(r.certRef)}</span></span>`
       : `<span class="chip">none</span>`;
     const auth = r.authMw
-      ? `<span class="chip brand">${esc(r.authMw)}</span>`
+      ? `<span class="chip brand" title="${esc(r.authMw)}">${esc(r.authMw)}</span>`
       : (r.authInline ? `<span class="chip brand" title="Configured inline on this host, under Sign-in.">sign-in</span>` : `<span class="chip">none</span>`);
     // live/disabled are the quiet states (dot + text, no pill); maintenance is
     // the one that should draw the eye, so it keeps the filled/bordered pill.
@@ -3846,18 +3879,29 @@ async function listHosts(c) {
       : (r.status === 'maintenance'
         ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
         : `<span class="chip flat ok"><span class="dot ok"></span>live</span>`);
-    const tagChips = r.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ');
+    const tagChips = r.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join('');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
+    // Every row has the same two lines whatever it holds: the domain, then
+    // the kind chip, the source path (display name, or the object name when
+    // it differs from the domain) and the tags. The kind chip used to sit
+    // inline after the domain and dropped to its own line after a long one.
+    const primary = r.domains[0] || h.name;
+    const sub = r.display || (h.name !== primary ? h.name : '');
+    const subTitle = [mc ? mc.text : '', sub, r.tags.length ? 'tags: ' + r.tags.join(', ') : ''].filter(Boolean).join(' - ');
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
-      <td><a class="host" href="#/hosts/${encodeURIComponent(h.name)}">${esc(r.domains[0] || h.name)}${esc(extra)}</a> ${managedChip}${r.display ? `<div class="faint" style="font-size:11px">${esc(r.display)}</div>` : ''}${tagChips ? `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${tagChips}</div>` : ''}</td>
-      <td class="mono">${esc(r.upStr)}</td>
-      <td>${tls}</td>
-      <td>${auth}</td>
-      <td>${status}</td>
-      <td class="mono faint" style="white-space:nowrap">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
-      <td><button class="btn ghost sm host-clone" data-name="${esc(h.name)}" type="button">Clone</button></td>
+      <td class="col-domain">
+        <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}</div>
+        <div class="cell-sub"${subTitle ? ` title="${esc(subTitle)}"` : ''}>${managedChip}${sub ? `<span class="trunc">${esc(sub)}</span>` : ''}${tagChips}</div>
+        ${more ? more.list : ''}
+      </td>
+      <td class="mono col-upstream"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
+      <td class="col-tls">${tls}</td>
+      <td class="col-auth">${auth}</td>
+      <td class="col-status">${status}</td>
+      <td class="mono faint col-updated">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
+      <td class="col-actions"><button class="btn ghost sm host-clone" data-name="${esc(h.name)}" type="button">Clone</button></td>
     </tr>`;
   }
 
@@ -3869,7 +3913,7 @@ async function listHosts(c) {
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter: domain, upstream, certificate, tag, status..." aria-label="Filter hosts" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, auth, tag and status" aria-label="Filter hosts" /></div>
       ${zoneChipsHtml}
     </div>
     <div id="hostBulk"></div>
@@ -4062,14 +4106,15 @@ async function listHosts(c) {
 
 // ---------- HOST EDITOR ----------
 function flowNode(type, name, sub, icon, cap) {
+  const tip = [name, sub].filter(Boolean).join(' - ');
   if (cap) {
-    return `<div class="node cap">
+    return `<div class="node cap" title="${esc(tip)}">
       <span class="ico">${icon}</span>
       <span class="cap-label">${esc(name)}</span>
       <span class="cap-sub">${esc(sub || '')}</span>
     </div>`;
   }
-  return `<div class="node">
+  return `<div class="node" title="${esc(tip)}">
     <span class="ico">${icon}</span>
     <span class="type">${esc(type)}</span>
     <span class="nm">${esc(name)}${sub ? `<small>${esc(sub)}</small>` : ''}</span>
@@ -4099,7 +4144,9 @@ function renderHostFlow(rootEl, ctx) {
   if (ctx.inlineRateLimit) nodes.push(flowNode('rate-limit - inline', 'Rate limit', 'on this host', ICON.gauge, false));
   ctx.mwSelected.forEach((m) => {
     const ty = ctx.mwType[m] || 'middleware';
-    nodes.push(flowNode(`${ty}`, m, ty, mwIcon(ty), false));
+    // The type is the node's label already; repeating it as the sub line
+    // was noise.
+    nodes.push(flowNode(`${ty}`, m, '', mwIcon(ty), false));
   });
   if (ctx.inlineAuth) nodes.push(flowNode('auth - inline', 'Sign-in', ctx.inlineAuth, ICON.shieldCheck, false));
   ctx.alSelected.forEach((a) => {
@@ -4262,7 +4309,7 @@ async function hostEditor(c, name) {
     <div class="row-between view-head">
       <div>
         <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/hosts">Proxy Hosts</a> / ${isNew ? 'new' : 'edit'}</div>
-        <h2 style="font-family:var(--display)">${esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name))}</h2>
+        <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : arr(h.domains).join(', ') || h.name)}">${esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name))}</h2>
         <p>Edit routing, TLS, and the middleware chain for this host.</p>
       </div>
       ${statusChip}
@@ -5163,18 +5210,19 @@ async function listCerts(c) {
     expiry: (r) => r.expiry || '9999',
   };
   const COLUMNS = [
-    { key: 'name', label: 'Name' },
+    { key: 'name', label: 'Name', cls: 'col-name' },
     { key: 'domains', label: 'Domains', cls: 'col-domains' },
-    { key: null, label: 'Type' },
-    { key: null, label: 'Issuance', cls: 'col-issuance' },
-    { key: null, label: 'Issuer' },
-    { key: 'expiry', label: 'Expiry', cls: 'col-expiry' },
+    // Type and issuance are one fact ("acme, by dns-01 via cloudflare"), so
+    // they share a two-line cell instead of two columns.
+    { key: null, label: 'Type', cls: 'col-type' },
+    { key: null, label: 'Issuer', cls: 'col-issuer' },
+    { key: 'expiry', label: 'Expiry', cls: 'col-time' },
     { key: null, label: '', cls: 'col-actions' },
   ];
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter: name, domain, provider, issuer, state..." aria-label="Filter certificates" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter certificates..." title="Matches name, domain, type, challenge, DNS provider, issuer and state" aria-label="Filter certificates" /></div>
     </div>
     <div class="table-wrap">
       <table class="certs-table">
@@ -5198,16 +5246,21 @@ async function listCerts(c) {
       ? `${esc(r.challenge)}${r.provider ? ' via ' + esc(r.provider) : ''}`
       : 'PEM files on the server';
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
-      <td><a class="host" href="#/certs/${encodeURIComponent(r.ct.name)}">${esc(r.name)}</a></td>
+      <td class="col-name">
+        <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a></div>
+        <div class="cell-sub">${r.ct.displayName ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
+      </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
-      <td><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type)}</span></td>
-      <td class="mono faint col-issuance">${issuance}</td>
-      <td class="mono faint">${esc(r.issuer || '-')}</td>
-      <td class="col-expiry">${certExpiryCellHtml(r.ct)}</td>
-      <td class="col-actions">
+      <td class="col-type">
+        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type)}</span></div>
+        <div class="cell-sub mono">${issuance}</div>
+      </td>
+      <td class="mono faint col-issuer"><span class="trunc" title="${esc(r.issuer || '')}">${esc(r.issuer || '-')}</span></td>
+      <td class="col-time">${certExpiryCellHtml(r.ct)}</td>
+      <td class="col-actions"><div class="row-actions">
         ${r.type === 'acme' ? `<button class="btn ghost sm ct-renew" data-name="${esc(r.ct.name)}" type="button">Renew now</button>` : ''}
         <button class="btn ghost sm ct-clone" data-name="${esc(r.ct.name)}" type="button">Clone</button>
-      </td>
+      </div></td>
     </tr>`;
   }
 
@@ -5224,7 +5277,7 @@ async function listCerts(c) {
     $('#certHead').innerHTML = headHtml();
     $('#certRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
-      : `<tr><td colspan="7" class="list-empty">No certificate matches this filter.</td></tr>`;
+      : `<tr><td colspan="6" class="list-empty">No certificate matches this filter.</td></tr>`;
     $$('#certHead .sort-btn').forEach((b) => {
       // The cell's padding still sorts on a mouse click, as it did before the
       // button moved inside it.
@@ -5286,7 +5339,7 @@ function certStatusCardHtml(ct) {
       ${row('Expiry', `<span class="mono">${esc(ct.notAfter ? fmtTime(ct.notAfter) : '-')}</span>`)}
       ${row('Days remaining', `<span class="mono${days != null && days < 0 ? ' err-text' : ''}">${days != null ? esc(days) : '-'}</span>`)}
       ${row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)}
-      ${row('SANs', `<span class="mono" style="word-break:break-all">${esc(sans.join(', ') || '-')}</span>`)}
+      ${row('SANs', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')}
       ${acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : ''}
       ${acme && ct.lastError ? row('Last error', `<span class="err-text" style="word-break:break-word">${esc(ct.lastError)}</span>`) : ''}
     </div>
@@ -5313,7 +5366,7 @@ async function certEditor(c, name) {
     <div class="row-between view-head">
       <div>
         <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/certs">Certificates</a> / ${isNew ? 'new' : 'edit'}</div>
-        <h2 style="font-family:var(--display)">${esc(isNew ? 'New certificate' : ct.name)}</h2>
+        <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : ct.name)}">${esc(isNew ? 'New certificate' : ct.name)}</h2>
         <p>Terminate TLS with an ACME-issued or custom certificate.</p>
       </div>
     </div>
@@ -5505,7 +5558,7 @@ const SECTION_META = {
       (o.defaultAction ? `<span class="k">Default</span><span class="v">${esc(o.defaultAction)}</span>` : '') +
       // Surfaced on the list so an unmigrated basic-auth block is visible
       // without opening every editor.
-      (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v"><span class="chip warn">Deprecated</span> ${arr(o.basicAuth).length} basic-auth user(s)</span>` : ''),
+      (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v v-list"><span class="chip warn">Deprecated</span> ${arr(o.basicAuth).length} basic-auth user(s)</span>` : ''),
   },
   middleware: {
     title: 'Middleware', sub: 'Reusable steps any host can pick up: authentication, headers, rate limits, guards, path rewrites and deny hooks. Evaluation order is fixed, whatever order a host lists them in: rate limit -> access list -> bouncer -> auth -> guard -> headers -> rewrite -> upstream.',
@@ -5524,7 +5577,7 @@ const SECTION_META = {
     empty: 'Add the provider that hosts your zone and give it a scoped API token, as a ${ENV:...} placeholder so no secret is committed.',
     singular: 'DNS provider', addLabel: 'Add DNS provider',
     summary: (o) => `<span class="k">Provider</span><span class="v">${esc(o.provider || '')}</span>` +
-      (o.config ? `<span class="k">Config keys</span><span class="v">${esc(Object.keys(o.config).join(', '))}</span>` : ''),
+      (o.config ? `<span class="k">Config keys</span><span class="v v-list">${Object.keys(o.config).map((k) => `<span class="dl-item">${esc(k)}</span>`).join(', ')}</span>` : ''),
   },
   redirects: {
     title: 'Redirects', sub: 'A domain that answers with a redirect instead of proxying anything - retired names, vanity hostnames, apex to www.',
@@ -5552,7 +5605,7 @@ const SECTION_META = {
     title: 'Upstream Groups', sub: 'Several backends behind one name, with health checks and a load-distribution policy. A host references the group instead of a single upstream.',
     empty: 'Add two or more backends, then pick how requests are spread across them. A health check keeps a dead one out of the rotation.',
     singular: 'upstream group', addLabel: 'Add upstream group',
-    summary: (o) => `<span class="k">Upstreams</span><span class="v">${arr(o.upstreams).map((u) => esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))).join(' -> ') || '0'}</span>` +
+    summary: (o) => `<span class="k">Upstreams</span><span class="v v-list">${arr(o.upstreams).map((u) => `<span class="dl-item">${esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))}</span>`).join(' -&gt; ') || '0'}</span>` +
       `<span class="k">Policy</span><span class="v">${enumChip('loadBalance', o.policy || '')}</span>` +
       (o.stickiness && o.stickiness.ttl ? `<span class="k">Sticky</span><span class="v">${esc(o.stickiness.ttl)}</span>` : '') +
       (o.healthCheck && o.healthCheck.path ? `<span class="k">Probe</span><span class="v">GET ${esc(o.healthCheck.path)}</span>` : `<span class="k">Probe</span><span class="v">TCP</span>`),
@@ -5595,8 +5648,8 @@ async function genericList(c, section) {
   const cards = items.map((o) => `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div><h3><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.displayName ? `<div class="faint" style="font-size:11.5px">${esc(o.displayName)}</div>` : ''}</div>
-        <div style="display:flex;gap:8px">
+        <div class="card-title"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+        <div class="card-actions">
           <button class="btn ghost sm gs-clone" data-name="${esc(o.name)}" type="button">Clone</button>
           <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
         </div>
@@ -5605,10 +5658,14 @@ async function genericList(c, section) {
     </div>`).join('');
   c.innerHTML = head + `
     <div class="toolbar cards-aligned">
-      <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(meta.title.toLowerCase())}..." aria-label="Filter ${esc(meta.title)}" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(meta.title.toLowerCase())}..." title="Matches any stored value: name, display name, type, domains, targets..." aria-label="Filter ${esc(meta.title)}" /></div>
     </div>
     <div class="cards" id="gsCards">${cards}</div>
     <div class="list-empty" id="gsNone" hidden>No ${esc(meta.singular)} matches this filter.</div>`;
+
+  // Summary values are one line each (CSS ellipsizes them), so each carries
+  // its full text as a tooltip unless its markup already set one.
+  $$('#gsCards .kv .v').forEach((v) => { if (!v.title) v.title = v.textContent.trim(); });
 
   // The filter matches the object's stored values, not the summary markup the
   // card happens to render.
@@ -5657,7 +5714,7 @@ async function genericList(c, section) {
 function editorHead(section, meta, isNew, name) {
   return `<div class="row-between view-head"><div>
     <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/${section}">${esc(meta.title)}</a> / ${isNew ? 'new' : 'edit'}</div>
-    <h2 style="font-family:var(--display)">${esc(isNew ? 'New ' + meta.singular : name)}</h2>
+    <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : name)}">${esc(isNew ? 'New ' + meta.singular : name)}</h2>
     <p>${esc(meta.sub)}</p>
   </div></div>`;
 }
@@ -5733,8 +5790,8 @@ function certCoverageHtml(certs, domains) {
   return list.map((d) => {
     const ct = certForDomain(certs, d);
     return ct
-      ? `<div class="cert-auto"><span class="mono">${esc(d)}</span> Certificate: <b>${esc(ct.name)}</b> (selected automatically by domain)</div>`
-      : `<div class="cert-auto warn"><span class="mono">${esc(d)}</span> none covers ${esc(d)}</div>`;
+      ? `<div class="cert-auto" title="${esc(d)}: certificate ${esc(ct.name)}, selected automatically by domain"><span class="mono">${esc(d)}</span><span>covered by <b>${esc(ct.name)}</b></span></div>`
+      : `<div class="cert-auto warn" title="${esc(d)}"><span class="mono">${esc(d)}</span><span>no certificate covers this domain</span></div>`;
   }).join('');
 }
 
@@ -7353,7 +7410,9 @@ function issueCard() {
 // its certificate is still valid on devices that have not re-imported, but it is
 // no longer the one to act on, so it gets a neutral chip and no warning colour.
 function issuedStatusChip(r) {
-  if (r.supersededBy) return `<span class="chip">${esc(r.status)}</span>`;
+  // One "superseded" chip in the status column; the name cell used to carry a
+  // second one beside a status chip that still read "valid".
+  if (r.supersededBy) return `<span class="chip" title="${esc(r.status)}">superseded</span>`;
   const cls = r.status === 'expired' ? 'err' : (r.status === 'expiring' ? 'warn' : 'ok');
   return `<span class="chip ${cls}"><span class="dot ${cls}"></span>${esc(r.status)}</span>`;
 }
@@ -7366,12 +7425,12 @@ function issuedCertsCard(issued) {
     </div>`;
   }
   const rows = issued.map((r) => `<tr${r.supersededBy ? ' class="superseded"' : ''}>
-      <td>${esc(r.commonName)}${r.supersededBy ? ` <span class="chip">superseded</span>` : ''}</td>
-      <td class="mono">${esc(r.serial)}</td>
-      <td>${esc(fmtTime(r.notAfter))}</td>
-      <td>${issuedStatusChip(r)}</td>
-      <td style="text-align:right">${r.supersededBy
-        ? `<span class="hint">renewed as <span class="mono">${esc(r.supersededBy)}</span></span>`
+      <td class="col-name"><span class="trunc" title="${esc(r.commonName)}">${esc(r.commonName)}</span></td>
+      <td class="mono col-serial"><span class="trunc" title="${esc(r.serial)}">${esc(r.serial)}</span></td>
+      <td class="col-time">${esc(fmtTime(r.notAfter))}</td>
+      <td class="col-status">${issuedStatusChip(r)}</td>
+      <td class="col-actions">${r.supersededBy
+        ? `<span class="hint">renewed as <span class="mono" title="${esc(r.supersededBy)}">${esc(r.supersededBy)}</span></span>`
         : `<button class="btn sm ren-btn" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Renew</button>`}</td>
     </tr>
     ${r.supersededBy ? '' : `<tr class="ren-row" id="ren-${esc(r.serial)}" hidden><td colspan="5">
@@ -7389,7 +7448,7 @@ function issuedCertsCard(issued) {
     </td></tr>`}`).join('');
   return `<div class="card form-section" id="issued-card"><p class="section-label">Issued certificates</p>
     <div class="table-wrap"><table class="mini-table">
-      <thead><tr><th>Common name</th><th>Serial</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Common name</th><th>Serial</th><th class="col-time">Expires</th><th>Status</th><th class="col-actions"></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
   </div>`;
@@ -7797,17 +7856,24 @@ async function viewTokens(c) {
     const list = arr(scopes);
     if (list.length === 1 && list[0] === 'admin') return '<span class="chip brand">Full admin</span>';
     if (!list.length) return '<span class="faint">none</span>';
-    return list.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ');
+    // Three chips then "+N": a broad token used to be a wall of chips that made
+    // its row several lines tall. The full list is the cell's title.
+    const shown = list.slice(0, 3).map((s) => `<span class="chip">${esc(s)}</span>`).join('');
+    if (list.length <= 3) return shown;
+    const m = moreToggle(list.slice(3), list.slice(3).map((s) => `<span class="chip">${esc(s)}</span>`).join(''));
+    return shown + m.list + m.btn;
   };
   const rows = tokens.map((t) => `
     <tr data-name="${esc(t.name)}" data-blob="${esc([t.name, t.displayName, arr(t.scopes).join(' '), t.disabled ? 'disabled' : ''].join(' ').toLowerCase())}">
-      <td><span class="mono host">${esc(t.name)}</span>${t.disabled ? ' <span class="chip warn">disabled</span>' : ''}</td>
-      <td><div class="chip-row">${scopeChips(t.scopes)}</div></td>
-      <td class="mono faint" style="white-space:nowrap">${t.createdAt ? esc(fmtTime(t.createdAt)) : ''}</td>
-      <td class="mono" style="white-space:nowrap">${tokenExpiryLabel(t)}</td>
-      <td class="mono faint" style="white-space:nowrap">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never'}</td>
-      <td>
-        <div style="display:flex;gap:8px;justify-content:flex-end">
+      <td class="col-name">
+        <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span></div>
+        <div class="cell-sub">${t.disabled ? '<span class="chip warn">disabled</span>' : ''}${t.createdAt ? `<span class="trunc mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}</div>
+      </td>
+      <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
+      <td class="mono col-time">${tokenExpiryLabel(t)}</td>
+      <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never'}</td>
+      <td class="col-actions">
+        <div class="row-actions">
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
           <button class="btn ghost sm danger tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
         </div>
@@ -7857,10 +7923,10 @@ async function viewTokens(c) {
       </div>
     </div>` +
     (tokens.length ? `<div class="toolbar">
-        <div class="search">${ICON.search}<input class="field mono" id="tokFilter" placeholder="filter: name, scope..." aria-label="Filter tokens" /></div>
+        <div class="search">${ICON.search}<input class="field mono" id="tokFilter" placeholder="filter tokens..." title="Matches name, display name, scope and disabled" aria-label="Filter tokens" /></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+        <thead><tr><th class="col-name">Name</th><th>Scopes</th><th class="col-time">Expires</th><th class="col-time">Last used</th><th class="col-actions"></th></tr></thead>
         <tbody id="tokRows">${rows}</tbody>
       </table></div>`
       : emptyState('No API tokens yet',
@@ -7996,13 +8062,13 @@ async function viewLogs(c) {
   const statusClass = (s) => (s >= 500 ? 'err' : s >= 400 ? 'warn' : 'ok');
   const rows = entries.map((e) => `
     <tr data-blob="${esc([e.method, e.host, e.path, e.status, e.client].join(' ').toLowerCase())}">
-      <td class="mono faint" style="white-space:nowrap">${esc(fmtTime(e.time))}</td>
-      <td class="mono">${esc(e.method || '')}</td>
-      <td class="mono">${esc(e.host || '')}</td>
-      <td class="mono"><span style="display:block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
-      <td><span class="chip ${statusClass(e.status)}">${esc(e.status)}</span></td>
-      <td class="mono">${esc(e.durMs)}ms</td>
-      <td class="mono faint">${esc(e.client || '')}</td>
+      <td class="mono faint col-time">${esc(fmtTime(e.time))}</td>
+      <td class="mono col-method">${esc(e.method || '')}</td>
+      <td class="mono col-host"><span class="trunc" title="${esc(e.host || '')}">${esc(e.host || '')}</span></td>
+      <td class="mono col-path"><span class="trunc" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
+      <td class="col-status"><span class="chip ${statusClass(e.status)}">${esc(e.status)}</span></td>
+      <td class="mono col-num">${esc(e.durMs)}ms</td>
+      <td class="mono faint col-client"><span class="trunc" title="${esc(e.client || '')}">${esc(e.client || '')}</span></td>
     </tr>`).join('');
 
   c.innerHTML = `
@@ -8014,12 +8080,12 @@ async function viewLogs(c) {
       </div>
     </div>
     ${entries.length ? `<div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter: host, path, method, status, client..." aria-label="Filter log entries" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter requests..." title="Matches host, path, method, status code and client address" aria-label="Filter log entries" /></div>
     </div>` : ''}
     ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">--access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th>Duration</th><th>Client</th></tr></thead>
+        <thead><tr><th class="col-time">Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th class="col-num">Duration</th><th>Client</th></tr></thead>
         <tbody id="logRows">${rows || `<tr><td colspan="7" class="muted" style="font-size:13px;padding:14px">${enabled ? 'No requests captured yet.' : 'Nothing to show while access logging is off.'}</td></tr>`}</tbody>
       </table>
     </div>`;
@@ -8067,7 +8133,7 @@ async function viewHistory(c) {
       </div>
     </div>
     ${items.length ? `<div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="histFilter" placeholder="filter: message, author, commit..." aria-label="Filter history" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="histFilter" placeholder="filter commits..." title="Matches message, author, email and commit hash" aria-label="Filter history" /></div>
     </div>` : ''}
     <div class="card">
       ${items.length ? `<div class="timeline">${items.map((h, i) => {
@@ -8079,7 +8145,7 @@ async function viewHistory(c) {
           ? '<span class="revert disabled" title="Already the current config">current</span>'
           : `<button type="button" class="revert" data-revert="${esc(h.hash)}" title="Revert the ENTIRE config (every object) to this commit">revert entire config</button>`;
         return `<div class="tl-item" data-blob="${esc([h.message, h.author, h.email, h.hash].join(' ').toLowerCase())}">
-          <div class="tl-meta">${esc(fmtTime(h.when))} &middot; ${esc(h.author || 'unknown')}${h.email ? ` <span class="muted">&lt;${esc(h.email)}&gt;</span>` : ''}</div>
+          <div class="tl-meta">${esc(fmtTime(h.when))} &middot; <span${h.email ? ` title="${esc(h.email)}"` : ''}>${esc(h.author || 'unknown')}</span></div>
           <div class="tl-msg">${esc(h.message || '(no message)')}</div>
           <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${scoped}${whole}</div>
         </div>`;

@@ -87,6 +87,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
 - Admin UI: the stream, DNS provider, access list and middleware editors use
   the full page width instead of the left half; the Overview "Retry now"
   action, which only opened the certificate, is labelled "Open".
+- Admin UI: domains, certificate names, upstreams and other names no longer
+  break mid-word in tables and cards. They stay on one line and are cut off
+  with "..." only when unusually long, with the full value on hover. Every
+  Proxy Hosts row now has the same two lines: the domain, then the
+  ingress/docker badge, source and tags.
+- Admin UI: quieter lists. Timestamps and numbers are right-aligned, row
+  buttons line up in one column, the certificate type and issuance method
+  share one column, API tokens show three scopes plus a count (folded lists
+  open with a tap or keypress on their "+N"), a commit author's email moves
+  to a tooltip, discovery counters are only coloured when non-zero, and
+  filter boxes use short placeholders with the full hint on hover.
 
 ## [1.0.10] - 2026-09-26
 
