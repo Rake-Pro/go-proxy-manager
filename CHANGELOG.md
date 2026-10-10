@@ -5,10 +5,88 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Admin UI: on card views (identity providers, middlewares and the other
+  generic object lists) the filter box was a fixed 360px wide, a few pixels
+  wider than the card column under it. The toolbar now shares the card
+  grid's columns, so the box ends exactly where the first card ends at any
+  window width.
+- Admin UI: text typed into a chip field (domains, allow-from networks,
+  trusted proxies, scopes, tags) but not committed with Enter was silently
+  left out of the save. It is now committed when the field loses focus and
+  included in every save.
+- Admin UI: saving a certificate dropped its display name, labels, tags and
+  disabled flag, and rotating an API token dropped its display name, labels
+  and tags. Both now carry them through. A location's middleware and
+  access-list references are also kept when their list failed to load.
+- Admin UI: a zone filter remembered from an earlier visit could hide every
+  proxy host with no chip left to clear it. The filter now applies only while
+  the zone chips are shown, and zones that no longer exist are forgotten.
+- Admin UI: issuing or renewing a client certificate, migrating an access
+  list's basic auth and generating a client CA no longer throw away unsaved
+  edits on the page without asking.
+- Admin UI: navigating quickly between pages could leave the previous page's
+  content, or its "Reference list unavailable" banner, on the new page.
+- Admin UI: clicking a field's label opened its help popover instead of
+  focusing the field. Most field labels are now tied to their controls
+  (screen readers announce them), and the "?" sits beside the label. On a
+  collapsed section the "?" now appears once the section is opened.
+- Admin UI: hints, column headers, section labels and every coloured text
+  (links, warnings, error and status chips) are now at least 4.5:1 against
+  their background in both themes; the light-theme off switch and keyboard
+  focus ring are clearly visible.
+- Admin UI: layout fixes - keyboard focus no longer squares off pill switches
+  and round buttons; segmented pickers have rounded corners; the issued
+  client certificates table no longer overflows its card; inline field rows
+  keep the same 14px spacing as other fields; the Settings SSO provider list
+  matches the other check lists; discovery upstream fields line up with the
+  fields around them; the menu and row-arrow icons have a fixed size; banners,
+  nested blocks and Integrations save bars share one style; long domains no
+  longer break mid-label in list cards; long log paths are truncated with the
+  full path on hover; toasts fit a phone screen; the page title lines up with
+  the page content on wide screens and the topbar stays one line on a phone.
+- Admin UI: proxy host and certificate rows, and object cards, can now be
+  opened from the keyboard; sortable column headers keep their header
+  semantics and announce the sort order; the off-screen navigation drawer on
+  narrow screens is out of the tab order and closes on Escape; Settings tabs
+  support the arrow keys; the current page, segmented pickers and zone chips
+  expose their state to screen readers.
+- Admin UI: Enter on a card's Clone or Delete button no longer also opens the
+  object, and destructive confirm dialogs now open with Cancel focused.
+- Admin UI: the hosts bulk-edit bar is greyed out for read-only users, not
+  only on HA followers; refreshing or re-rendering the hosts, certificates,
+  tokens, access logs and history pages keeps the read-only and maintenance
+  banners and gating.
+- Admin UI: the "config @" commit badge now updates after a restore or
+  revert, and appears after the first write on a fresh install.
+- Admin UI: deleting a certificate with unsaved edits no longer raises an
+  "unsaved changes" prompt; the new-token card's border uses the accent
+  colour; the certificate expiry sort keeps certificates without an expiry
+  last in both directions; a failed DNS provider list now also disables the
+  certificate editor's Save; the client certificate download is no longer
+  cancelled in browsers that start it asynchronously.
+- Admin UI: a webhook or notification secret that reads `***` (a redacted
+  literal) is refused before saving, and the Settings page explains where to
+  fix a refused literal secret it has no field for.
+
 ### Changed
 
 - Docs accuracy and structure pass; neutralized wording in test fixtures and
   in failure-mode comments and docs. No behavior change.
+- Admin UI: blocking validation messages are shown in the sticky banner at
+  the top of the page, like a failed save, instead of a 7-second toast.
+- Admin UI: every Integrations save bar is labelled "Save integrations",
+  since each one saves every card on the page; all of them are disabled
+  while a save is in flight.
+- Admin UI: the middleware rate-limit card uses the same per-window /
+  per-second form as the host and location rate limits, with free-form
+  durations, so a middleware stored with `requestsPerSecond` keeps that form.
+  A new rate-limit middleware now defaults to a 1m window (was 1s), as host
+  and location rate limits already did.
+- Admin UI: the stream, DNS provider, access list and middleware editors use
+  the full page width instead of the left half; the Overview "Retry now"
+  action, which only opened the certificate, is labelled "Open".
 
 ## [1.0.10] - 2026-09-26
 

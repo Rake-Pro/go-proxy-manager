@@ -240,7 +240,7 @@ func TestSaveBuildersDoNotMaterialiseDefaults(t *testing.T) {
 	if !strings.Contains(js, "if (minTLS && (minTLS !== '1.2' || tls.minTLSVersion === '1.2')) tlsObj.minTLSVersion = minTLS;") {
 		t.Error("an explicitly stored tls.minTLSVersion: \"1.2\" is dropped on save again")
 	}
-	if !strings.Contains(js, "if (!Object.keys(spec).length) { toast('Header rule required'") {
+	if !strings.Contains(js, "if (!Object.keys(spec).length) { showInvalid('Header rule required'") {
 		t.Error("a headers middleware with an empty spec still commits `headers: {}` - guard and rewrite both refuse the equivalent")
 	}
 }

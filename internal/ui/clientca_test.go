@@ -188,7 +188,7 @@ func TestStaticBundleClientCAScreenLayout(t *testing.T) {
 		t.Error("the free-floating no-CRL warning paragraph is back - it belongs in the fold summary")
 	}
 	// Every section on the page uses the app-wide caps section-label treatment.
-	if !strings.Contains(js, `<summary><p class="section-label">`) {
+	if !strings.Contains(js, `<summary><span class="section-label">`) {
 		t.Error("fold sections must use the same section-label header treatment as the plain cards")
 	}
 }
