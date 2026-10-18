@@ -176,9 +176,9 @@ func requireScope(scope string, next http.Handler) http.Handler {
 // own the Strict-Transport-Security header for the host. Emitting it here too
 // produced a duplicate HSTS header on the proxied admin path. The CSP pins
 // script execution to 'self' as an XSS backstop behind the SPA's esc()
-// discipline, and has NO external origin: Space Grotesk, Inter and JetBrains
-// Mono are vendored into the binary under internal/ui/static/fonts, so the
-// admin panel makes no third-party request at all. The single relaxation is
+// discipline, and has NO external origin: Red Hat Text, Red Hat Display and
+// Red Hat Mono are vendored into the binary under internal/ui/static/fonts, so
+// the admin panel makes no third-party request at all. The single relaxation is
 // 'unsafe-inline' on style-src, which the SPA's inline style="" attributes
 // require; there are no inline <style> blocks and no inline event handlers.
 func securityHeaders(next http.Handler) http.Handler {

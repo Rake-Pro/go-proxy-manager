@@ -112,9 +112,9 @@ func TestVendoredFontsAreServed(t *testing.T) {
 		t.Fatalf("Handler: %v", err)
 	}
 	for _, f := range []string{
-		"/fonts/inter-latin.woff2",
-		"/fonts/space-grotesk-latin.woff2",
-		"/fonts/jetbrains-mono-latin.woff2",
+		"/fonts/red-hat-text-vf.woff2",
+		"/fonts/red-hat-display-vf.woff2",
+		"/fonts/red-hat-mono-vf.woff2",
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, f, nil))

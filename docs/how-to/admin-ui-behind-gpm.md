@@ -88,10 +88,11 @@ manual TLS.
    actually bound to (step 1). `scheme: http` is correct: the admin server
    never speaks TLS; this `ProxyHost` is what terminates it.
 
-   **UI clicks:** Proxy Hosts -> New -> Domains: `gpm.example.com` -> Upstream:
-   scheme `http`, host `127.0.0.1`, port `8081` -> TLS tab: pick/issue
-   `gpm-admin`, enable "Force SSL" -> Access control tab: attach
-   `admin-lan-only` (next step).
+   **UI clicks:** Proxy Hosts -> Add proxy host -> Service step: Domains
+   `gpm.example.com`, backend scheme `http`, host `127.0.0.1`, port `8081` ->
+   Certificate step: the coverage line names `gpm-admin` once it exists; turn
+   on "Force SSL" -> Access step: tick `admin-lan-only` (next step) -> Review
+   shows the YAML above -> Create host.
 
 4. **Restrict it with an access list.** TLS alone does not limit who can
    reach the admin panel: this does:
@@ -106,9 +107,9 @@ manual TLS.
      - {action: allow, cidr: 100.64.0.0/10}    # e.g. a Tailscale/CGNAT VPN
    ```
 
-   **UI clicks:** Access Lists -> New -> name `admin-lan-only` -> Default
-   action: Deny -> add allow rules for your LAN/VPN CIDRs -> Save. Full field
-   reference: [AccessList](../reference/config/access-list.md).
+   **UI clicks:** Access Lists -> Add access list -> name `admin-lan-only` ->
+   Default action: Deny -> add allow rules for your LAN/VPN CIDRs -> Save. Full
+   field reference: [AccessList](../reference/config/access-list.md).
 
    If something else proxies ahead of gpm for this host, read
    [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)
