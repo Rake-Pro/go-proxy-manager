@@ -38,6 +38,10 @@ const ICON = {
   dns: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v6"/><circle cx="12" cy="11" r="2"/><path d="M12 13v3M6 21v-3a2 2 0 012-2h8a2 2 0 012 2v3"/><circle cx="12" cy="4" r="1.6"/></svg>',
   plug: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3v6M15 3v6"/><path d="M6 9h12v3a6 6 0 01-12 0z"/><path d="M12 18v3"/></svg>',
   chevron: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+  caret: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+  sun: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  moon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg>',
+  check: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>',
 };
 
 // ---------- nav ----------
@@ -425,13 +429,18 @@ function redirectOn401(res) {
 async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || 'GET', headers: {}, credentials: 'same-origin' };
-  if (opts.body !== undefined && opts.body !== null) {
+  if (opts.raw !== undefined && opts.raw !== null) {
+    // A non-JSON body (the YAML import route), sent as-is under its own type.
+    init.headers['Content-Type'] = opts.contentType || 'text/plain';
+    init.body = String(opts.raw);
+  } else if (opts.body !== undefined && opts.body !== null) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(opts.body);
   }
   if (init.method !== 'GET' && init.method !== 'HEAD') {
     init.headers['X-CSRF-Token'] = csrfToken;
   }
+  if (opts.headers) Object.assign(init.headers, opts.headers);
   let res;
   try {
     res = await fetch(path, init);
@@ -826,12 +835,11 @@ function updateThemeBtn() {
   const btn = $('#themeBtn');
   if (!btn) return;
   const t = getTheme();
-  // The label is hidden at phone width, where the icon alone stands in for
-  // it; aria-label keeps the name either way.
-  const label = 'Theme: ' + themeLabel(t);
-  btn.innerHTML = `${ICON.contrast}<span class="theme-label">${esc(label)}</span>`;
+  // Icon only, in the masthead; the name travels in the accessible label.
+  const label = 'Theme: ' + themeLabel(t) + '. Click to change; auto follows your OS.';
+  btn.innerHTML = t === 'light' ? ICON.sun : t === 'dark' ? ICON.moon : ICON.contrast;
   btn.setAttribute('aria-label', label);
-  btn.title = 'Click to change (auto follows your OS)';
+  btn.title = label;
 }
 function setTheme(t) {
   try {
@@ -860,8 +868,11 @@ function navGroupOpen(group) {
   } catch (e) { /* ignore */ }
   return navGroupDefaultOpen(group);
 }
+// Text only: the PatternFly nav carries no per-item icon, and the group
+// headings already give the eye its anchors. The icon stays in NAV_GROUPS for
+// anything else that wants a glyph for a section.
 function navItemHtml(n) {
-  return `<button class="nav-item" data-view="${n.id}">${n.icon}${esc(n.label)}</button>`;
+  return `<button class="nav-item" data-view="${n.id}">${esc(n.label)}</button>`;
 }
 function navGroupHtml(group) {
   const items = group.items.map(navItemHtml).join('');
@@ -894,27 +905,38 @@ function setNavGroupOpen(label, open, persist) {
 
 function buildShell() {
   const app = document.getElementById('app');
+  // PatternFly page frame: the masthead spans the full width, the sidebar sits
+  // beneath it, the main column opens with a title band the views fill.
   app.innerHTML = `
-    <div class="scrim" id="scrim"></div>
     <div class="app">
-      <aside class="sidebar" id="sidebar">
-        <div class="wordmark">
+      <header class="masthead">
+        <button class="menu-btn" id="menuBtn" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">${ICON.menu}</button>
+        <a class="wordmark" href="#/overview">
           <span class="logo" aria-hidden="true">${ICON.fanout}</span>
           <span class="name">${esc(state.appName)}</span>
+        </a>
+        <div class="spacer"></div>
+        <div class="tools">
+          <button class="tool-btn" id="themeBtn" type="button"></button>
+          <button class="user-btn" id="userBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="userMenu" aria-label="Account menu"><span class="avatar" id="avatar">?</span>${ICON.caret}</button>
         </div>
-        <nav class="nav" id="nav" aria-label="Primary">
-          ${NAV_GROUPS.map(navGroupHtml).join('')}
-        </nav>
-      </aside>
-      <div class="main">
-        <header class="topbar"><div class="topbar-inner">
-          <button class="menu-btn" id="menuBtn" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">${ICON.menu}</button>
-          <h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1>
-          <div class="spacer"></div>
-          <button class="btn ghost sm" id="themeBtn" type="button"></button>
-          <div class="ident" id="ident"></div>
-        </div></header>
-        <main class="content" id="content"></main>
+        <div class="menu" id="userMenu" hidden></div>
+      </header>
+      <div class="scrim" id="scrim"></div>
+      <div class="page-body">
+        <aside class="sidebar" id="sidebar">
+          <nav class="nav" id="nav" aria-label="Primary">
+            ${NAV_GROUPS.map(navGroupHtml).join('')}
+          </nav>
+          <div class="side-foot" id="sideFoot"></div>
+        </aside>
+        <div class="main">
+          <section class="page-head" id="pageHead">
+            <div class="page-crumb" id="pageCrumb"></div>
+            <div class="head-row"><div><h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1><p class="page-sub" id="pageSub"></p><div class="head-labels" id="pageLabels"></div></div></div>
+          </section>
+          <main class="content" id="content"></main>
+        </div>
       </div>
     </div>`;
 
@@ -951,6 +973,32 @@ function buildShell() {
     const order = ['auto', 'light', 'dark'];
     setTheme(order[(order.indexOf(getTheme()) + 1) % order.length]);
   });
+  // Account menu: a PatternFly dropdown under the avatar. Click outside or
+  // Escape closes it; a chosen entry closes it too (the hash change renders).
+  const ub = $('#userBtn'), um = $('#userMenu');
+  ub.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setUserMenu(um.hidden);
+    if (!um.hidden) { const f = um.querySelector('a, button'); if (f) f.focus(); }
+  });
+  document.addEventListener('click', (e) => {
+    if (!um.hidden && !um.contains(e.target) && e.target !== ub && !ub.contains(e.target)) setUserMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !um.hidden && !e.defaultPrevented) { setUserMenu(false); ub.focus(); }
+  });
+  // Tabbing out of the menu closes it, so it never lingers over the page.
+  um.addEventListener('focusout', (e) => {
+    const to = e.relatedTarget;
+    if (to && (um.contains(to) || to === ub)) return;
+    setUserMenu(false);
+  });
+}
+function setUserMenu(open) {
+  const ub = $('#userBtn'), um = $('#userMenu');
+  if (!ub || !um) return;
+  um.hidden = !open;
+  ub.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 function closeNav() {
   document.body.classList.remove('nav-open');
@@ -962,8 +1010,7 @@ async function loadTopbar() {
   // Best-effort and each independent, so they are issued together instead of
   // one round trip after another: the shell used to wait for six sequential
   // GETs before the first view could render.
-  const ident = $('#ident');
-  let verStr = '', cfgSha = '', principal = '', principalTitle = '';
+  let verStr = '', cfgSha = '';
   const ok = (p) => p.then((r) => r, () => null);
   const [vR, hR, meR, , sR] = await Promise.all([
     ok(api('/version')),
@@ -975,20 +1022,19 @@ async function loadTopbar() {
   ]);
   const v = vR && vR.data;
   state.version = v;
-  if (v) verStr = `${v.version || ''}${v.commit ? ' - ' + shortSha(v.commit) : ''}`;
+  if (v) verStr = `${v.version ? 'Version ' + v.version : ''}${v.commit ? ' (' + shortSha(v.commit) + ')' : ''}`.trim();
 
   const h = hR && hR.data;
   if (Array.isArray(h) && h.length) { state.headSha = h[0].hash; cfgSha = shortSha(h[0].hash); }
 
   const me = meR && meR.data;
   state.me = me;
+  let name = '', role = '', idp = '';
   if (me) {
     csrfToken = me.csrfToken || '';
-    const name = me.Name || me.Subject || me.Email || 'user';
-    const role = me.Role || '';
-    const idp = me.IdP || '';
-    principal = `<b>${esc(name)}</b>${role ? ' &middot; ' + esc(role) : ''}${idp ? ' &middot; via ' + esc(idp) : ''}`;
-    principalTitle = [name, role, idp ? 'via ' + idp : ''].filter(Boolean).join(' - ');
+    name = me.Name || me.Subject || me.Email || 'user';
+    role = me.Role || '';
+    idp = me.IdP || '';
     state.avatarChar = (name[0] || '?').toLowerCase();
   }
 
@@ -1004,16 +1050,25 @@ async function loadTopbar() {
     document.title = s.appName;
   }
 
-  ident.innerHTML = `
-    <span class="instance" title="${esc(state.instance)}">${esc(state.instance)}</span>
-    ${verStr ? `<span class="badge ver" title="Build version">${esc(verStr)}</span>` : ''}
-    ${cfgSha ? `<a class="badge" href="#/history" title="Current config commit">config @ ${esc(cfgSha)}</a>` : ''}
-    <span class="principal"${principalTitle ? ` title="${esc(principalTitle)}"` : ''}>
-      <span class="avatar">${esc(state.avatarChar || 'g')}</span>
-      <span>${principal || 'not signed in'}</span>
-    </span>
-    <button class="btn ghost sm" id="logoutBtn">Log out</button>`;
+  // Who is signed in lives in the account menu, not on the masthead; the
+  // running version and the config commit live at the foot of the sidebar.
+  const av = $('#avatar');
+  if (av) av.textContent = state.avatarChar || 'g';
+  const who = me ? [role ? esc(role) : '', idp ? 'via ' + esc(idp) : ''].filter(Boolean).join(', ') : '';
+  const um = $('#userMenu');
+  um.innerHTML = `
+    <div class="m-head"><b>${esc(name || 'Not signed in')}</b>${who ? `<span>${who}</span>` : ''}${state.instance ? `<span class="mono" title="This instance">${esc(state.instance)}</span>` : ''}</div>
+    <a href="#/tokens">API tokens</a>
+    <a href="#/history">History</a>
+    ${isRoleReadOnly() ? '' : '<button type="button" id="setupBtn">Setup wizard</button>'}
+    <div class="m-sep" role="separator"></div>
+    <button type="button" id="logoutBtn">Log out</button>`;
   $('#logoutBtn').addEventListener('click', logout);
+  const sb = $('#setupBtn');
+  if (sb) sb.addEventListener('click', () => { setUserMenu(false); openSetupWizard(); });
+  um.querySelectorAll('a').forEach((a) => a.addEventListener('click', () => setUserMenu(false)));
+  $('#sideFoot').innerHTML = `<span title="Build version">${esc(verStr)}</span>`
+    + `<a href="#/history" id="sideCommit" title="Current config commit, opens history">${esc(cfgSha)}</a>`;
 }
 
 async function logout() {
@@ -1232,11 +1287,34 @@ function emptyState(title, sub, btnLabel, btnHref) {
 function inlineError(msg) {
   return `<div class="inline-error"><b>Could not load this view.</b><br/>${esc(msg)}</div>`;
 }
+// The title band above the content belongs to the shell; every view fills it
+// (title, one summary line, an optional breadcrumb) instead of rendering a
+// heading of its own, so a page title is never shown twice. Returns '' so a
+// view can drop the call into its template where the old heading stood.
+// Arguments are HTML: callers escape their data.
+// The band is written only when the view's own content lands: pageHead()
+// parks the values, and route()'s content setter applies them together with
+// the innerHTML it accepts, or drops them when it refuses a stale render. A
+// view that finished loading after the operator moved on can therefore never
+// put its title over another page.
+let pendingHead = null;
+function pageHead(titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml) {
+  pendingHead = { titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml };
+  return '';
+}
+function applyHead(h) {
+  const t = $('#pageTitle'), sb = $('#pageSub'), c = $('#pageCrumb'), l = $('#pageLabels');
+  if (t) {
+    t.innerHTML = h.titleHtml || esc(state.appName);
+    if (h.titleAttr) t.title = h.titleAttr; else t.removeAttribute('title');
+  }
+  if (sb) sb.innerHTML = h.subHtml || '';
+  if (c) c.innerHTML = h.crumbHtml || '';
+  if (l) l.innerHTML = h.labelsHtml || '';
+}
 function viewHead(title, sub, actionHtml) {
-  return `<div class="row-between view-head">
-    <div><h2>${esc(title)}</h2><p>${glossaryize(esc(sub))}</p></div>
-    ${actionHtml || ''}
-  </div>`;
+  pageHead(esc(title), glossaryize(esc(sub)));
+  return `<div class="view-head">${actionHtml || ''}</div>`;
 }
 
 // ---------- in-app help ----------
@@ -2161,7 +2239,8 @@ async function route() {
   const sub = parts[1] ? decodeURIComponent(parts[1]) : null;
 
   setActiveNav(section);
-  $('#pageTitle').textContent = TITLES[section] || state.appName;
+  pendingHead = null;
+  applyHead({ titleHtml: esc(TITLES[section] || state.appName) });
   const seq = ++routeSeq;
   const prev = $('#content');
   const c = prev.cloneNode(false);
@@ -2170,8 +2249,9 @@ async function route() {
     configurable: true,
     get() { return INNER_HTML.get.call(this); },
     set(v) {
-      if (seq !== routeSeq) throw new Error('stale render');
+      if (seq !== routeSeq) { pendingHead = null; throw new Error('stale render'); }
       INNER_HTML.set.call(this, v);
+      if (pendingHead) { applyHead(pendingHead); pendingHead = null; }
     },
   });
   c.innerHTML = loadingHtml();
@@ -3695,11 +3775,10 @@ async function viewOverview(c) {
   }
 
   c.innerHTML = `
-    <div class="view-head">
-      <h2>Overview</h2>
-      <p>Status of <span class="mono">${esc(state.instance)}</span>: what needs attention right now.</p>
-    </div>
+    ${pageHead('Overview', `Status of <span class="mono">${esc(state.instance)}</span>: what needs attention right now.`)}
+    ${setupOffered() ? setupCardHtml() : ''}
     ${body}`;
+  wireSetupCard(c);
 
   const refresh = $('#ov-refresh');
   // Through route(), not viewOverview(c) directly: route() resets the request
@@ -3747,12 +3826,14 @@ async function listHosts(c) {
 
   const head = viewHead('Proxy Hosts',
     'One public domain routed to one internal upstream, with the TLS, access and middleware chain that sits in between. This is where most day-to-day work happens.',
-    `<a class="btn primary" href="#/hosts/_new">${ICON.plus}Add proxy host</a>`);
+    `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`);
 
   if (!hosts.length) {
     c.innerHTML = head + emptyState('No proxy hosts yet',
       'Add one with the domain your visitors type and the address of the service behind it - gpm picks the certificate by domain, so TLS needs no wiring here.',
       'Add proxy host', '#/hosts/_new');
+    const es = c.querySelector('.empty-state a.btn');
+    if (es) es.setAttribute('data-wizard', 'hosts');
     return;
   }
 
@@ -4306,17 +4387,11 @@ async function hostEditor(c, name) {
     : (tpMode === 'none' ? 'trusted proxies: none (connection address only)' : 'trusted proxies inherited from Settings');
 
   c.innerHTML = `
-    <div class="row-between view-head">
-      <div>
-        <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/hosts">Proxy Hosts</a> / ${isNew ? 'new' : 'edit'}</div>
-        <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : arr(h.domains).join(', ') || h.name)}">${esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name))}</h2>
-        <p>Edit routing, TLS, and the middleware chain for this host.</p>
-      </div>
-      ${statusChip}
-    </div>
+    ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), 'Edit routing, TLS, and the middleware chain for this host.',
+      `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name), statusChip)}
 
     <div class="panel flow-panel">
-      <div class="flow-head"><h3>Request flow</h3><span class="chip cyan">left to right &middot; pipeline order</span></div>
+      <div class="flow-head"><h3>Request flow</h3><span class="chip">left to right, in pipeline order</span></div>
       <div class="flow" id="flow"></div>
     </div>
 
@@ -5363,13 +5438,8 @@ async function certEditor(c, name) {
   const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
 
   c.innerHTML = `
-    <div class="row-between view-head">
-      <div>
-        <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/certs">Certificates</a> / ${isNew ? 'new' : 'edit'}</div>
-        <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : ct.name)}">${esc(isNew ? 'New certificate' : ct.name)}</h2>
-        <p>Terminate TLS with an ACME-issued or custom certificate.</p>
-      </div>
-    </div>
+    ${pageHead(esc(isNew ? 'New certificate' : ct.name), 'Terminate TLS with an ACME-issued or custom certificate.',
+      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name)}
 
     <div class="form-grid">
       <div class="stack">
@@ -5712,11 +5782,8 @@ async function genericList(c, section) {
 
 // ---------- editor scaffolding shared by the typed object editors ----------
 function editorHead(section, meta, isNew, name) {
-  return `<div class="row-between view-head"><div>
-    <div class="muted" style="font-size:12px;margin-bottom:3px"><a href="#/${section}">${esc(meta.title)}</a> / ${isNew ? 'new' : 'edit'}</div>
-    <h2 class="trunc" style="font-family:var(--display)" title="${esc(isNew ? '' : name)}">${esc(isNew ? 'New ' + meta.singular : name)}</h2>
-    <p>${esc(meta.sub)}</p>
-  </div></div>`;
+  const crumb = `<a href="#/${section}">${esc(meta.title)}</a>${ICON.chevron}<span>${isNew ? 'new' : esc(name)}</span>`;
+  return pageHead(esc(isNew ? 'New ' + meta.singular : name), esc(meta.sub), crumb, isNew ? '' : name);
 }
 function saveBar(section, isNew, addLabel) {
   return `<div class="panel save-bar">
@@ -8072,12 +8139,10 @@ async function viewLogs(c) {
     </tr>`).join('');
 
   c.innerHTML = `
-    <div class="row-between view-head">
-      <div><h2>Access Logs</h2><p>Most recent proxied requests, newest first (in-memory buffer).</p></div>
-      <div style="display:flex;gap:10px">
-        <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
-        <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
-      </div>
+    ${pageHead('Access Logs', 'Most recent proxied requests, newest first (in-memory buffer).')}
+    <div class="view-head">
+      <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
+      <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
     </div>
     ${entries.length ? `<div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter requests..." title="Matches host, path, method, status code and client address" aria-label="Filter log entries" /></div>
@@ -8119,10 +8184,7 @@ async function viewLogs(c) {
 async function viewHistory(c) {
   const items = arr((await api('/api/history')).data);
   c.innerHTML = `
-    <div class="view-head">
-      <h2>History</h2>
-      <p>Every change is a git commit. Reviewable, attributable, and reversible.</p>
-    </div>
+    ${pageHead('History', 'Every change is a git commit. Reviewable, attributable, and reversible.')}
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Backup &amp; restore</p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -8411,7 +8473,7 @@ async function viewSettings(c, tab) {
   const stls = s.tls || {};
 
   c.innerHTML = `
-    <div class="view-head"><h2>Settings</h2><p>What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.</p></div>
+    ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.')}
     <div class="tabs" id="set-tabs" role="tablist">
       ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="set-tab-${esc(t.id)}" aria-controls="set-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join('')}
     </div>
@@ -8816,7 +8878,7 @@ async function viewSettings(c, tab) {
       if (body.externalBaseURL) {
         try { state.instance = new URL(body.externalBaseURL).host || body.externalBaseURL; }
         catch (e) { state.instance = body.externalBaseURL; }
-        const inst = $('.topbar .instance'); if (inst) inst.textContent = state.instance;
+        const inst = $('#userMenu .m-head .mono'); if (inst) inst.textContent = state.instance;
       }
       // The brand label is rendered once, at boot, into the sidebar and the
       // browser title - so an edited appName has to be pushed into both here or
@@ -8851,15 +8913,8 @@ async function refreshHeadSha() {
     const h = (await api('/api/history')).data;
     if (Array.isArray(h) && h.length) {
       state.headSha = h[0].hash;
-      let badge = $$('.topbar .badge').find((b) => b.textContent.indexOf('config @') === 0);
-      // A fresh install has no commit at boot, so the topbar rendered no
-      // badge: the first write creates it, where loadTopbar would have put it.
-      const principal = $('#ident .principal');
-      if (!badge && principal) {
-        principal.insertAdjacentHTML('beforebegin', '<a class="badge" href="#/history" title="Current config commit"></a>');
-        badge = principal.previousElementSibling;
-      }
-      if (badge) badge.textContent = 'config @ ' + shortSha(h[0].hash);
+      const sc = $('#sideCommit');
+      if (sc) sc.textContent = shortSha(h[0].hash);
     }
   } catch (e) { /* ignore */ }
 }
@@ -8888,6 +8943,656 @@ function applyNavGroupDefaults() {
     if (stored === 'open' || stored === 'closed') return;
     if (navGroupDefaultOpen(g)) setNavGroupOpen(g.label, true, false);
   });
+}
+
+
+// ---------- wizard ----------
+// PatternFly-style creation wizard: a dark title band, a numbered step list on
+// the left where a finished step summarizes what was chosen and jumps back,
+// one concern per step, Next / Back / Cancel in the footer. Every step reads
+// and writes one draft object; the primitive owns the frame, the focus trap,
+// the discard guard and the error line. Pure DOM, the same patterns as
+// confirmModal(). Resolves with onFinish's result, or null when dismissed.
+//
+//   opts.steps[i] = { id, title, render(pane, draft) -> ctl | Promise<ctl>,
+//                     validate(draft) -> '' | message, summary(draft) -> html }
+//   ctl.read(draft) copies the pane's controls into the draft.
+//   opts.onFinish(draft) performs the write; a thrown error shows in the footer.
+//   opts.importYAML(text) -> { draft, invalid, note, full } fills the steps
+//   from pasted YAML (see openHostWizard for the shape).
+function wizard(opts) {
+  return new Promise((resolve) => {
+    const steps = opts.steps;
+    let draft = opts.draft;
+    let cur = 0;
+    let ctl = null;
+    let doneUpTo = -1;
+    let dirty = false;
+    let closed = false;
+    let prompting = false;
+    const prevFocus = document.activeElement;
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-scrim';
+    wrap.innerHTML = `
+      <div class="modal wizard" role="dialog" aria-modal="true" aria-labelledby="wz-title">
+        <div class="wz-head"><div><h2 id="wz-title">${esc(opts.title)}</h2>${opts.desc ? `<p class="desc">${esc(opts.desc)}</p>` : ''}</div>
+          <button class="tool-btn" id="wz-close" type="button" aria-label="Close">${ICON.x}</button></div>
+        <div class="wz-body"><nav class="wz-nav" aria-label="Steps"><ol id="wz-steps"></ol></nav><div class="wz-main" id="wz-main"></div></div>
+        <div class="wz-foot">
+          <button class="btn primary" id="wz-next" type="button">Next</button>
+          <button class="btn ghost" id="wz-back" type="button">Back</button>
+          <button class="btn link" id="wz-cancel" type="button">Cancel</button>
+          <span class="spacer"></span>
+          ${opts.importYAML ? '<a href="#" id="wz-import">Import from YAML</a>' : ''}
+          ${opts.altLink ? `<a href="${esc(opts.altLink.href)}" id="wz-alt">${esc(opts.altLink.label)}</a>` : ''}
+          <div class="wz-err" id="wz-err" role="alert"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const main = wrap.querySelector('#wz-main');
+    const errEl = wrap.querySelector('#wz-err');
+    const nextBtn = wrap.querySelector('#wz-next');
+    const backBtn = wrap.querySelector('#wz-back');
+    // Typing clears a stale validation message; it comes back on the next Next.
+    const mark = () => { dirty = true; setErr(''); };
+    wrap.addEventListener('input', mark);
+    wrap.addEventListener('change', mark);
+    wrap.addEventListener('switchchange', mark);
+    function setErr(msg) { errEl.textContent = msg || ''; }
+    function renderNav() {
+      wrap.querySelector('#wz-steps').innerHTML = steps.map((st, i) => {
+        const done = i <= doneUpTo && i !== cur;
+        const cls = i === cur ? 'cur' : (done ? 'done' : '');
+        const sum = done && st.summary ? st.summary(draft) : '';
+        const tag = done ? 'button' : 'div';
+        return `<li><${tag} class="wz-step ${cls}"${done ? ` type="button" data-step="${i}" title="Back to ${esc(st.title)}"` : ''}${i === cur ? ' aria-current="step"' : ''}>`
+          + `<span class="n" aria-hidden="true">${done ? ICON.check : String(i + 1)}</span><span>${esc(st.title)}</span>${sum ? `<span class="sum">${sum}</span>` : ''}</${tag}></li>`;
+      }).join('');
+      wrap.querySelectorAll('.wz-step[data-step]').forEach((b) => b.addEventListener('click', () => go(parseInt(b.dataset.step, 10))));
+    }
+    async function show(i) {
+      cur = i;
+      setErr('');
+      renderNav();
+      main.innerHTML = '';
+      ctl = null;
+      nextBtn.hidden = false;
+      backBtn.hidden = i === 0;
+      nextBtn.textContent = i === steps.length - 1 ? (opts.finishLabel || 'Create') : 'Next';
+      const r = steps[i].render(main, draft);
+      const got = (r && typeof r.then === 'function') ? await r : r;
+      if (closed || cur !== i) return;
+      ctl = got || null;
+      decorateHints(main);
+      const f = main.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+      if (f) f.focus(); else nextBtn.focus();
+    }
+    function commit() { if (ctl && ctl.read) ctl.read(draft); }
+    // Moving forward validates the step; moving back keeps its edits as they are.
+    function go(i) {
+      commit();
+      if (i < cur) { show(i); return; }
+      const err = steps[cur].validate ? steps[cur].validate(draft) : '';
+      if (err) { setErr(err); return; }
+      if (cur > doneUpTo) doneUpTo = cur;
+      show(i);
+    }
+    // Every step is validated again before the write, whatever route led
+    // here (an import lands on Review without walking the steps); the first
+    // failing step is shown with its message.
+    async function finish() {
+      commit();
+      for (let i = 0; i < steps.length; i++) {
+        const err = steps[i].validate ? steps[i].validate(draft) : '';
+        if (err) { if (i !== cur) await show(i); setErr(err); return; }
+      }
+      nextBtn.disabled = true;
+      setErr('');
+      try {
+        const out = await opts.onFinish(draft);
+        close(out === undefined ? true : out);
+      } catch (e) {
+        setErr(e && e.message ? e.message : String(e));
+        nextBtn.disabled = false;
+      }
+    }
+    async function cancel() {
+      if (dirty) {
+        prompting = true;
+        let leave = false;
+        try {
+          leave = await confirmModal({ title: `Discard this ${opts.noun || 'draft'}?`, body: '<p>Nothing has been created yet. Closing throws the steps away.</p>', confirmLabel: 'Discard' });
+        } finally { prompting = false; }
+        if (!leave) return;
+      }
+      close(null);
+    }
+    function close(v) {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('hashchange', onHash);
+      wrap.remove();
+      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* ignore */ } }
+      resolve(v);
+    }
+    // The page underneath navigated (browser Back, a link in a step): the
+    // wizard does not belong over another page. Clean drafts just close;
+    // a dirty one asks first and stays if the operator declines.
+    function onHash() {
+      if (closed) return;
+      if (!dirty) { close(null); return; }
+      cancel();
+    }
+    function onKey(e) {
+      if (prompting) return; // the discard prompt on top owns the keys
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // A help popover open inside the wizard closes first, on its own.
+        const hp = document.getElementById('hint-pop');
+        if (hp && !hp.hidden) { e.stopPropagation(); closeHintPop(); return; }
+        cancel();
+        return;
+      }
+      if (e.key === 'Tab') {
+        const f = Array.from(wrap.querySelectorAll('a[href], button:not([disabled]):not([hidden]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]'))
+          .filter((el) => el.offsetParent !== null);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+    // The import pane replaces the current step until the YAML is used or the
+    // operator goes back; the step list stays as it was.
+    function showImport() {
+      commit();
+      setErr('');
+      ctl = null;
+      nextBtn.hidden = true;
+      backBtn.hidden = true;
+      main.innerHTML = `<h3>Import from YAML</h3>
+        <p class="lead">Paste one ${esc(opts.noun || 'object')} document. The steps fill in from it.</p>
+        <div class="field-group"><label for="wz-yaml">YAML</label><textarea class="field mono" id="wz-yaml" rows="14" spellcheck="false" placeholder="${esc(opts.importPlaceholder || '')}"></textarea></div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" id="wz-parse" type="button">Use this YAML</button><button class="btn link" id="wz-import-back" type="button">Back to the steps</button></div>
+        <div id="wz-import-note"></div>`;
+      const ta = main.querySelector('#wz-yaml');
+      ta.focus();
+      main.querySelector('#wz-import-back').addEventListener('click', () => show(cur));
+      main.querySelector('#wz-parse').addEventListener('click', async () => {
+        const btn = main.querySelector('#wz-parse');
+        btn.disabled = true;
+        setErr('');
+        let r;
+        try { r = await opts.importYAML(ta.value); }
+        catch (e) { setErr(e && e.message ? e.message : String(e)); btn.disabled = false; return; }
+        if (closed) return;
+        draft = r.draft;
+        dirty = true;
+        // Walk the imported draft through every step's own checks: the first
+        // step that objects is shown with its message, otherwise Review.
+        const landing = () => {
+          for (let i = 0; i < steps.length - 1; i++) {
+            const err = steps[i].validate ? steps[i].validate(draft) : '';
+            if (err) { doneUpTo = i - 1; return show(i).then(() => setErr(err)); }
+          }
+          doneUpTo = steps.length - 2;
+          return show(steps.length - 1);
+        };
+        if (r.note) {
+          const note = main.querySelector('#wz-import-note');
+          note.innerHTML = `<div class="ro-banner warn" style="margin:16px 0 0"><b>Partly covered.</b> ${esc(r.note)}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="wz-import-go" type="button">Continue in the wizard</button>${r.full ? '<button class="btn ghost" id="wz-import-full" type="button">Open the full editor with everything</button>' : ''}</div>`;
+          note.querySelector('#wz-import-go').addEventListener('click', landing);
+          const full = note.querySelector('#wz-import-full');
+          if (full) full.addEventListener('click', () => { close(null); r.full(); });
+          btn.disabled = false;
+          return;
+        }
+        await landing();
+      });
+    }
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('hashchange', onHash);
+    wrap.querySelector('#wz-close').addEventListener('click', cancel);
+    wrap.querySelector('#wz-cancel').addEventListener('click', cancel);
+    backBtn.addEventListener('click', () => go(cur - 1));
+    nextBtn.addEventListener('click', () => { if (cur === steps.length - 1) finish(); else go(cur + 1); });
+    const imp = wrap.querySelector('#wz-import');
+    if (imp) imp.addEventListener('click', (e) => { e.preventDefault(); showImport(); });
+    const alt = wrap.querySelector('#wz-alt');
+    if (alt) alt.addEventListener('click', () => close(null));
+    show(0);
+  });
+}
+
+// Light YAML colouring for the Review step: keys only, on escaped text.
+function yamlHtml(text) {
+  return esc(text).split('\n').map((line) => line.replace(/^(\s*(?:- )?)([A-Za-z0-9_.-]+)(:)(?=\s|$)/, '$1<span class="k">$2</span>$3')).join('\n');
+}
+function copyText(text, btn) {
+  const done = () => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = t; }, 1200); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => {});
+}
+
+// ---------- new proxy host wizard ----------
+// Four steps: Service, Certificate, Access, Review. The Review step asks the
+// server for a dry run (PUT ?dryRun=1), so what it prints is the exact YAML a
+// Create commits, validated by the same code. Everything the wizard does not
+// ask about keeps its default and is reachable in the editor afterwards; the
+// full editor stays one click away for the cases the steps do not cover.
+const HOST_NAME_RE = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
+function hostNameFrom(domain) {
+  // "*.example.com" names the host after the zone, not after the star.
+  const d = String(domain || '').trim().toLowerCase().replace(/^\*\./, '');
+  const label = d.split('.')[0].replace(/[^a-z0-9-]/g, '');
+  return label.replace(/^-+|-+$/g, '');
+}
+function hostWizardObject(d) {
+  const o = { name: d.name, domains: d.domains.slice(), upstream: { scheme: d.scheme, host: d.host, port: parseInt(d.port, 10) } };
+  if (d.path) o.upstream.path = d.path;
+  const tls = {};
+  if (d.forceSSL) tls.forceSSL = true;
+  if (d.hsts) tls.hsts = { enabled: true };
+  if (Object.keys(tls).length) o.tls = tls;
+  if (d.idp) o.auth = { identityProvider: d.idp };
+  if (d.accessLists.length) o.accessLists = d.accessLists.slice();
+  if (d.middlewares.length) o.middlewares = d.middlewares.slice();
+  return o;
+}
+let hostWizardBusy = false;
+async function openHostWizard() {
+  if (hostWizardBusy) return null; // a double click must not stack two wizards
+  hostWizardBusy = true;
+  try { return await runHostWizard(); } finally { hostWizardBusy = false; }
+}
+async function runHostWizard() {
+  const [certsR, idpsR, alsR, mwsR, hostsR] = await Promise.all([
+    refList('/api/certificates', 'certificates'),
+    refList('/api/identity-providers', 'identity providers'),
+    refList('/api/access-lists', 'access lists'),
+    refList('/api/middlewares', 'middlewares'),
+    refList('/api/proxy-hosts', 'proxy hosts'),
+  ]);
+  const certs = arr(certsR), idps = arr(idpsR), als = arr(alsR), mws = arr(mwsR);
+  const listsDown = [certsR, idpsR, alsR, mwsR, hostsR].some((x) => x === null);
+  // PUT is an upsert, so a name that already exists would silently replace
+  // that host. The wizard only ever creates; the editor is where edits go.
+  const existing = new Set(arr(hostsR).map((h) => h.name));
+  const draft = { name: '', domains: [], scheme: 'http', host: '', port: '', path: '', forceSSL: null, hsts: false, idp: '', accessLists: [], middlewares: [] };
+  let reviewErr = '';
+  let reviewSeq = 0;
+
+  const steps = [
+    {
+      id: 'service', title: 'Service',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Service</h3><p class="lead">The public name and the backend that answers it.</p>
+          <div class="field-group"><label>Domains</label><div class="chip-input" id="wz-domains" data-hint="proxyHost.domains"></div>
+            <div class="hint">The first domain names the host. Press Enter after each one.</div></div>
+          <div class="field-group"><label>Name</label><input class="field mono" id="wz-name" value="${esc(d.name)}" placeholder="app" autocomplete="off" spellcheck="false" data-auto="${d.name ? '0' : '1'}" data-hint="common.name" />
+            <div class="hint">Internal name and config file name, fixed after creation. Taken from the first domain; lowercase letters, digits, dots, - and _.</div></div>
+          <div class="inline-fields">
+            <div class="field-group" style="flex:0 0 130px"><label>Scheme</label><select class="field mono" id="wz-scheme" data-hint="proxyHost.upstream.scheme"><option value="http"${d.scheme !== 'https' ? ' selected' : ''}>http</option><option value="https"${d.scheme === 'https' ? ' selected' : ''}>https</option></select></div>
+            <div class="field-group"><label>Host or IP</label><input class="field mono" id="wz-host" value="${esc(d.host)}" placeholder="10.0.0.5" autocomplete="off" spellcheck="false" data-hint="proxyHost.upstream.host" /></div>
+            <div class="field-group" style="flex:0 0 120px"><label>Port</label><input class="field mono" id="wz-port" value="${esc(d.port)}" placeholder="3000" inputmode="numeric" autocomplete="off" data-hint="proxyHost.upstream.port" /></div>
+          </div>
+          <div class="hint">http is right for most apps on your LAN; gpm terminates TLS in front of it.</div>
+          ${foldHtml('wz-more-routing', 'More routing', d.path ? 'base path ' + d.path : 'base path none, host header kept, timeouts default', !!d.path,
+            `<div class="field-group"><label>Base path</label><input class="field mono" id="wz-path" value="${esc(d.path)}" placeholder="/" autocomplete="off" spellcheck="false" data-hint="proxyHost.upstream.path" />
+              <div class="hint">Prefixed to every request sent to the backend. Empty forwards the path unchanged. Host header, timeouts and path overrides are in the editor after creation.</div></div>`)}`;
+        const nameEl = pane.querySelector('#wz-name');
+        nameEl.addEventListener('input', () => { nameEl.dataset.auto = '0'; });
+        const chips = makeChipInput(pane.querySelector('#wz-domains'), d.domains, 'add domain...', (list) => {
+          if (nameEl.dataset.auto === '1') nameEl.value = hostNameFrom(list[0]);
+        });
+        return {
+          read(dd) {
+            dd.domains = chips.get().map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+            dd.name = nameEl.value.trim();
+            dd.scheme = pane.querySelector('#wz-scheme').value;
+            dd.host = pane.querySelector('#wz-host').value.trim();
+            dd.port = pane.querySelector('#wz-port').value.trim();
+            dd.path = pane.querySelector('#wz-path').value.trim();
+          },
+        };
+      },
+      validate(d) {
+        if (!d.domains.length) return 'Add at least one domain.';
+        const bad = d.domains.find((x) => !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(x));
+        if (bad) {
+          return /[^\x00-\x7f]/.test(bad)
+            ? `"${bad}" has non-ASCII characters; enter its punycode (xn--) form.`
+            : `"${bad}" is not a valid domain name.`;
+        }
+        if (!d.name) return 'Give the host a name.';
+        if (d.name.length > 253) return 'The name is too long (253 characters at most).';
+        if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
+        if (existing.has(d.name)) return `A proxy host named "${d.name}" already exists. Pick another name, or edit that host from the list.`;
+        if (!d.host) return 'Enter the backend host or IP address.';
+        const port = parseInt(d.port, 10);
+        if (isNaN(port) || port < 1 || port > 65535 || String(port) !== d.port) return 'Enter a port between 1 and 65535.';
+        if (d.path && d.path[0] !== '/') return 'A base path must start with "/".';
+        return '';
+      },
+      summary(d) {
+        const more = d.domains.length > 1 ? ` +${d.domains.length - 1}` : '';
+        return `${esc(d.domains[0])}${more} to <span class="mono">${esc(d.host)}:${esc(d.port)}</span>`;
+      },
+    },
+    {
+      id: 'cert', title: 'Certificate',
+      render(pane, d) {
+        const covered = d.domains.map((x) => certForDomain(certs, x));
+        const anyCovered = covered.some(Boolean);
+        if (d.forceSSL === null) d.forceSSL = anyCovered;
+        pane.innerHTML = `<h3>Certificate</h3><p class="lead">How ${esc(d.domains[0])} is served over HTTPS.</p>
+          <div class="field-group"><label>Coverage</label>${certCoverageHtml(certs, d.domains)}
+            <div class="hint">${CERT_AUTO_HINT}</div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Send http:// visitors to https://. ${anyCovered ? 'On because a certificate covers the domain.' : 'Off until a certificate covers the domain, so visitors are not sent to a handshake that fails.'}</div></div>${switchHtml('wz-forcessl', !!d.forceSSL, 'Force SSL', 'proxyHost.tls.forceSSL')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">HSTS</div><div class="ds">Tell browsers to use HTTPS only. Turn it on once HTTPS works for good; it is hard to undo for visitors.</div></div>${switchHtml('wz-hsts', !!d.hsts, 'HSTS', 'proxyHost.tls.hsts.enabled')}</div>
+          <p class="hint" style="margin-top:12px">Minimum TLS version and client certificates (mTLS) are in the host editor after creation.</p>`;
+        return { read(dd) { dd.forceSSL = isOn('wz-forcessl'); dd.hsts = isOn('wz-hsts'); } };
+      },
+      validate(d) {
+        if (d.hsts && !d.forceSSL) return 'HSTS needs Force SSL on, or browsers are told to use HTTPS on a host that still answers plain HTTP.';
+        return '';
+      },
+      summary(d) {
+        const ct = certForDomain(certs, d.domains[0]);
+        return `${ct ? `covered by <span class="mono">${esc(ct.name)}</span>` : 'no certificate yet'}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}`;
+      },
+    },
+    {
+      id: 'access', title: 'Access',
+      render(pane, d) {
+        const alHtml = als.length
+          ? `<div class="check-list" id="wz-als" data-hint="proxyHost.accessLists">${als.map((a) => `<label class="check-item"><input type="checkbox" value="${esc(a.name)}"${d.accessLists.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}${a.displayName ? `<span class="ci-ty">${esc(a.displayName)}</span>` : ''}</label>`).join('')}</div>`
+          : `<div class="hint">No access lists yet. Create one under <a href="#/access">Access Lists</a> to allow or deny by network or country.</div>`;
+        const mwHtml = mws.length
+          ? `<div class="check-list" id="wz-mws">${mws.map((m) => `<label class="check-item"><input type="checkbox" value="${esc(m.name)}"${d.middlewares.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>`).join('')}</div>`
+          : `<div class="hint">No middleware yet. Rate limits, headers, rewrites and reusable sign-in gates live under <a href="#/middleware">Middleware</a>.</div>`;
+        pane.innerHTML = `<h3>Access</h3><p class="lead">Who gets through, and how they prove it.</p>
+          <div class="field-group"><label>Sign-in</label><select class="field" id="wz-idp" data-hint="proxyHost.auth"><option value="">None, the app has its own login</option>${idps.map((i) => `<option value="${esc(i.name)}"${d.idp === i.name ? ' selected' : ''}>${esc(i.name)}${i.type ? ' (' + esc(i.type) + ')' : ''}</option>`).join('')}</select>
+            <div class="hint">${idps.length ? 'Visitors sign in at the identity provider before gpm forwards the request. Required roles, the mode and exempt networks are in the editor.' : 'No identity providers yet. Add one under <a href="#/identity">Identity Providers</a> to gate hosts behind a sign-in.'}</div></div>
+          <div class="field-group"><label>Access lists</label>${alHtml}${als.length ? '<div class="hint">Evaluated before sign-in. A request denied here never reaches the identity provider.</div>' : ''}</div>
+          ${foldHtml('wz-mw', 'Middleware', d.middlewares.length ? d.middlewares.join(', ') : 'none', !!d.middlewares.length, `<div class="field-group" data-hint="proxyHost.middlewares"><label>Attach</label>${mwHtml}</div>`)}`;
+        return {
+          read(dd) {
+            dd.idp = pane.querySelector('#wz-idp').value;
+            dd.accessLists = Array.from(pane.querySelectorAll('#wz-als input:checked')).map((i) => i.value);
+            dd.middlewares = Array.from(pane.querySelectorAll('#wz-mws input:checked')).map((i) => i.value);
+          },
+        };
+      },
+      validate() { return ''; },
+      summary(d) {
+        const parts = [d.idp ? `sign-in with ${esc(d.idp)}` : 'no sign-in'];
+        if (d.accessLists.length) parts.push(d.accessLists.map(esc).join(', '));
+        if (d.middlewares.length) parts.push(`${d.middlewares.length} middleware`);
+        return parts.join(', ');
+      },
+    },
+    {
+      id: 'review', title: 'Review',
+      async render(pane, d) {
+        reviewErr = '';
+        const tok = ++reviewSeq; // a reply from an earlier render is dropped
+        const ct = certForDomain(certs, d.domains[0]);
+        pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you create the host.</p>
+          <dl class="dl-h" style="margin-bottom:20px">
+            <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
+            <dt>Name</dt><dd class="mono">${esc(d.name)}</dd>
+            <dt>Backend</dt><dd class="mono">${esc(d.scheme)}://${esc(d.host)}:${esc(d.port)}${esc(d.path)}</dd>
+            <dt>Certificate</dt><dd>${ct ? `<span class="mono">${esc(ct.name)}</span>` : 'none yet'}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}</dd>
+            <dt>Sign-in</dt><dd>${d.idp ? esc(d.idp) : 'none'}</dd>
+            <dt>Access lists</dt><dd>${d.accessLists.length ? `<span class="mono">${d.accessLists.map(esc).join(', ')}</span>` : 'none'}</dd>
+            <dt>Middleware</dt><dd>${d.middlewares.length ? `<span class="mono">${d.middlewares.map(esc).join(', ')}</span>` : 'none'}</dd>
+            <dt>Everything else</dt><dd>defaults</dd>
+          </dl>
+          <div class="loading" id="wz-dry"><span class="spinner"></span>Checking with the server...</div>`;
+        try {
+          const r = await api('/api/proxy-hosts/' + encodeURIComponent(d.name) + '?dryRun=1', { method: 'PUT', body: hostWizardObject(d) });
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          const y = r.data || {};
+          const slot = pane.querySelector('#wz-dry');
+          if (!slot) return null;
+          if (y.exists) {
+            // Checked on the server, not only against the list loaded when
+            // the wizard opened: Create must never replace a stored host.
+            reviewErr = `A proxy host named "${d.name}" already exists. Pick another name on the Service step, or edit that host from the list.`;
+            slot.outerHTML = `<div class="inline-error"><b>This name is taken.</b><br/>${esc(reviewErr)}</div>`;
+            return null;
+          }
+          slot.outerHTML = `<div class="code-head"><span>${esc(y.path || '')}</span><button class="btn plain sm" type="button" id="wz-copy">Copy</button></div><pre class="code">${yamlHtml(y.yaml || '')}</pre>`;
+          pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(y.yaml || '', e.currentTarget));
+        } catch (e) {
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          reviewErr = (e && e.message) || String(e);
+          const slot = pane.querySelector('#wz-dry');
+          if (slot) slot.outerHTML = `<div class="inline-error"><b>The server rejected this host.</b><br/>${esc(reviewErr)}</div>`;
+        }
+        return null;
+      },
+      validate() { return reviewErr ? 'Fix the rejected step first: ' + reviewErr : ''; },
+    },
+  ];
+
+  const r = await wizard({
+    title: 'New proxy host',
+    desc: 'Publish a backend on a public name.',
+    noun: 'host',
+    steps, draft,
+    finishLabel: 'Create host',
+    altLink: { label: 'Open the full editor instead', href: '#/hosts/_new' },
+    importPlaceholder: 'name: app\ndomains: [app.example.com]\nupstream: { scheme: http, host: 10.0.0.5, port: 3000 }',
+    importYAML: async (text) => {
+      if (!String(text).trim()) throw new Error('Paste a YAML document first.');
+      const res = await api('/api/proxy-hosts/_parse', { method: 'POST', raw: text, contentType: 'application/yaml' });
+      const data = res.data || {};
+      const o = data.object || {};
+      const up = o.upstream || {}, tls = o.tls || {}, auth = o.auth || {};
+      const nd = {
+        name: data.name || o.name || '', domains: arr(o.domains), scheme: up.scheme || 'http', host: up.host || '',
+        port: up.port != null ? String(up.port) : '', path: up.path || '', forceSSL: !!tls.forceSSL,
+        hsts: !!(tls.hsts && tls.hsts.enabled), idp: auth.identityProvider || '',
+        accessLists: arr(o.accessLists), middlewares: arr(o.middlewares),
+      };
+      // Everything the steps do not cover is listed, so an import never
+      // silently drops a field; the full editor keeps all of them.
+      const empty = (v) => v == null || v === false || v === '' || v === 0
+        || (Array.isArray(v) ? !v.length : (typeof v === 'object' && Object.keys(v).every((k) => empty(v[k]))));
+      const skip = ['name', 'domains', 'upstream', 'tls', 'auth', 'accessLists', 'middlewares', 'createdAt', 'updatedAt', 'websocketsUpgrade'];
+      const extra = Object.keys(o).filter((k) => skip.indexOf(k) === -1 && !empty(o[k]));
+      Object.keys(up).forEach((k) => { if (['scheme', 'host', 'port', 'path'].indexOf(k) === -1 && !empty(up[k])) extra.push('upstream.' + k); });
+      Object.keys(tls).forEach((k) => { if (['forceSSL', 'hsts'].indexOf(k) === -1 && !empty(tls[k])) extra.push('tls.' + k); });
+      if (tls.hsts) Object.keys(tls.hsts).forEach((k) => { if (k !== 'enabled' && !empty(tls.hsts[k])) extra.push('tls.hsts.' + k); });
+      Object.keys(auth).forEach((k) => { if (k !== 'identityProvider' && !empty(auth[k])) extra.push('auth.' + k); });
+      const note = extra.length ? `The steps cover the basics; this YAML also sets ${extra.join(', ')}, which the wizard would leave out.` : '';
+      return {
+        draft: nd,
+        invalid: data.valid === false ? (data.error || 'The server could not validate this object.') : '',
+        note,
+        full: () => { cloneSeed = { section: 'hosts', origName: '', data: o }; location.hash = '#/hosts/_new'; },
+      };
+    },
+    onFinish: async (d) => {
+      // Create-only: the server answers 409 for a stored name instead of
+      // replacing it, whatever this wizard believed when it opened.
+      let res;
+      try {
+        res = await api('/api/proxy-hosts/' + encodeURIComponent(d.name), { method: 'PUT', body: hostWizardObject(d), headers: { 'If-None-Match': '*' } });
+      } catch (e) {
+        if (e && e.status === 409) throw new Error(`A proxy host named "${d.name}" was created in the meantime. Pick another name on the Service step.`);
+        throw e;
+      }
+      toastSaved(res.commit);
+      refreshHeadSha();
+      location.hash = '#/hosts/' + encodeURIComponent(d.name);
+      return true;
+    },
+  });
+  if (r === null && listsDown) toast('Some lists did not load', 'Certificates, identity providers, access lists or middleware could not be read; reload and try again.', 'err');
+  return r;
+}
+// Any "Add proxy host" control (the list toolbar, the empty state) opens the
+// wizard; its href stays the full editor for middle-click and no-script cases.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-wizard="hosts"]');
+  if (!b || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault();
+  openHostWizard();
+});
+
+
+// ---------- first-time setup wizard ----------
+// Offered on the Overview while the instance is fresh (no proxy host, no
+// certificate) and reachable from the account menu afterwards. Three short
+// steps on the same primitive as the host wizard: what this instance is
+// called and where it is reached, which proxies in front of it to believe for
+// client addresses, then a review. It writes settings only (the full object as
+// loaded, with these fields overlaid: PUT /api/settings replaces the whole
+// thing), and hands over to the proxy host wizard when it finishes.
+const SETUP_DONE_KEY = 'gpm.setup.done';
+function setupDismissed() {
+  try { return localStorage.getItem(SETUP_DONE_KEY) === '1'; } catch (e) { return false; }
+}
+function markSetupDone() {
+  try { localStorage.setItem(SETUP_DONE_KEY, '1'); } catch (e) { /* ignore */ }
+}
+function setupOffered() {
+  if (isRoleReadOnly() || hasCapability('ha.readOnly') || setupDismissed()) return false;
+  const c = state.counts || {};
+  return !(c.proxyHosts || 0) && !(c.certificates || 0);
+}
+let setupWizardBusy = false;
+async function openSetupWizard() {
+  if (setupWizardBusy) return null;
+  setupWizardBusy = true;
+  try { return await runSetupWizard(); } finally { setupWizardBusy = false; }
+}
+async function runSetupWizard() {
+  const [setR, rtR] = await Promise.all([
+    api('/api/settings').then((r) => r.data || {}).catch(() => null),
+    api('/api/runtime').then((r) => r.data || {}).catch(() => ({})),
+  ]);
+  if (!setR) { toast('Could not load settings', 'Reload the page and try again.', 'err'); return null; }
+  const rt = rtR || {};
+  const ls = rt.listeners || {};
+  const draft = {
+    appName: setR.appName || '',
+    externalBaseURL: setR.externalBaseURL || '',
+    trustedProxies: arr(setR.trustedProxies),
+  };
+  const steps = [
+    {
+      id: 'instance', title: 'Instance',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Welcome</h3><p class="lead">A few facts about this instance, then the first host.</p>
+          <dl class="dl-h" style="margin-bottom:20px">
+            <dt>Proxy listeners</dt><dd class="mono">${esc([ls.https, ls.http].filter(Boolean).join('  ') || 'not reported')}</dd>
+            <dt>Admin panel</dt><dd class="mono">${esc(ls.admin || 'not reported')}</dd>
+            ${rt.paths && rt.paths.configDir ? `<dt>Config repository</dt><dd class="mono">${esc(rt.paths.configDir)}</dd>` : ''}
+            <dt>Version</dt><dd class="mono">${esc(rt.version || (state.version && state.version.version) || '')}</dd>
+          </dl>
+          <div class="field-group"><label>Instance name</label><input class="field" id="su-name" value="${esc(d.appName)}" placeholder="Go Proxy Manager" autocomplete="off" data-hint="settings.appName" />
+            <div class="hint">Shown in the masthead, the browser title and the login page. Name the place, not the product: "Home edge", "Office ingress".</div></div>
+          <div class="field-group"><label>Public URL of this panel</label><input class="field mono" id="su-url" value="${esc(d.externalBaseURL)}" placeholder="https://gpm.example.com" autocomplete="off" spellcheck="false" data-hint="settings.externalBaseURL" />
+            <div class="hint">The address operators reach this panel at. Single sign-on builds its redirect from it, and an https:// URL marks the session cookie Secure. Leave it empty while you only use an IP address.</div></div>`;
+        return { read(dd) { dd.appName = pane.querySelector('#su-name').value.trim(); dd.externalBaseURL = pane.querySelector('#su-url').value.trim(); } };
+      },
+      validate(d) {
+        if (d.externalBaseURL) {
+          let u = null;
+          try { u = new URL(d.externalBaseURL); } catch (e) { u = null; }
+          if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:') || !u.host) return 'The public URL must be an absolute http:// or https:// address, or empty.';
+        }
+        return '';
+      },
+      summary(d) { return `${esc(d.appName || 'Go Proxy Manager')}${d.externalBaseURL ? `, <span class="mono">${esc(d.externalBaseURL)}</span>` : ''}`; },
+    },
+    {
+      id: 'network', title: 'Client addresses',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Client addresses</h3><p class="lead">Which proxies in front of gpm may say who the client is.</p>
+          <div class="field-group"><label>Trusted proxies</label><div class="chip-input" id="su-tp" data-hint="settings.trustedProxies"></div>
+            <div class="hint">CIDRs or addresses of load balancers or tunnels that sit in front of gpm. A request from one of them has its client address read from <span class="mono">X-Forwarded-For</span>; from anyone else the connection address is the client. Leave it empty when gpm faces the internet directly, which is the usual homelab setup.</div></div>
+          <p class="hint">Access lists, geo rules, rate limits and the access log all judge that one address, so a wrong entry here lets a visitor choose their own.</p>`;
+        const chips = makeChipInput(pane.querySelector('#su-tp'), d.trustedProxies, 'add CIDR or address...');
+        return { read(dd) { dd.trustedProxies = chips.get().map((x) => String(x).trim()).filter(Boolean); } };
+      },
+      validate(d) {
+        const bad = firstBadCidr(d.trustedProxies);
+        if (bad) return `"${bad}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`;
+        if (d.trustedProxies.some((x) => x === '0.0.0.0/0' || x === '::/0')) return 'Trusting every address lets any visitor set their own client address. Name the proxies you run.';
+        return '';
+      },
+      summary(d) { return d.trustedProxies.length ? `trusts ${d.trustedProxies.map(esc).join(', ')}` : 'gpm faces the internet directly'; },
+    },
+    {
+      id: 'review', title: 'Review',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Review</h3><p class="lead">Saved to settings as one git commit.</p>
+          <dl class="dl-h" style="margin-bottom:20px">
+            <dt>Instance name</dt><dd>${esc(d.appName || 'Go Proxy Manager')}</dd>
+            <dt>Public URL</dt><dd class="mono">${esc(d.externalBaseURL || 'none yet')}</dd>
+            <dt>Trusted proxies</dt><dd>${d.trustedProxies.length ? `<span class="mono">${d.trustedProxies.map(esc).join(', ')}</span>` : 'none, the connection address is the client'}</dd>
+          </dl>
+          <p>Next: the Proxy Hosts page opens with the host wizard, to publish your first service. Certificates are issued under Certificates (Let's Encrypt over HTTP-01 or DNS-01), and a sign-in provider goes under Identity Providers; both can wait until the host works.</p>`;
+        return null;
+      },
+      validate() { return ''; },
+    },
+  ];
+  const r = await wizard({
+    title: 'Set up this instance',
+    desc: 'Three steps; everything here can be changed later under Settings.',
+    noun: 'setup',
+    steps, draft,
+    finishLabel: 'Finish setup',
+    onFinish: async (d) => {
+      const body = Object.assign({}, setR);
+      if (d.appName) body.appName = d.appName; else delete body.appName;
+      body.externalBaseURL = d.externalBaseURL;
+      if (d.trustedProxies.length) body.trustedProxies = d.trustedProxies; else delete body.trustedProxies;
+      const res = await api('/api/settings', { method: 'PUT', body });
+      resetRouteMemo();
+      toastSaved(res.commit);
+      refreshHeadSha();
+      markSetupDone();
+      state.appName = d.appName || 'Go Proxy Manager';
+      const nm = document.querySelector('.wordmark .name');
+      if (nm) nm.textContent = state.appName;
+      document.title = state.appName;
+      if (d.externalBaseURL) {
+        try { state.instance = new URL(d.externalBaseURL).host || d.externalBaseURL; } catch (e) { state.instance = d.externalBaseURL; }
+        const inst = $('#userMenu .m-head .mono'); if (inst) inst.textContent = state.instance;
+      }
+      return true;
+    },
+  });
+  if (r) {
+    // Hand over to the host wizard once the Proxy Hosts page is in place (the
+    // hash change would otherwise close a wizard opened before it lands).
+    location.hash = '#/hosts';
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    openHostWizard();
+  }
+  return r;
+}
+// The Overview card for a fresh instance.
+function setupCardHtml() {
+  return `<div class="card" id="setup-card" style="margin-bottom:16px">
+    <h3>Welcome to ${esc(state.appName)}</h3>
+    <p class="muted" style="margin:4px 0 14px">Nothing is published yet. The setup takes three short steps and ends in the host wizard; everything it asks is editable later under Settings.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="setup-start" type="button">Set up this instance</button><button class="btn link" id="setup-skip" type="button">Skip for now</button></div>
+  </div>`;
+}
+function wireSetupCard(c) {
+  const start = c.querySelector('#setup-start');
+  if (start) start.addEventListener('click', openSetupWizard);
+  const skip = c.querySelector('#setup-skip');
+  if (skip) skip.addEventListener('click', () => { markSetupDone(); const card = c.querySelector('#setup-card'); if (card) card.remove(); });
 }
 
 // ---------- boot ----------

@@ -5,8 +5,56 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Admin UI: a first-time setup wizard. A fresh instance (no proxy host, no
+  certificate) greets the first admin on the Overview with "Set up this
+  instance": instance name, public URL of the panel and the proxies to trust
+  for client addresses, a review, then the host wizard. Skippable per browser
+  and always reachable from the account menu.
+- Admin UI: a creation wizard for proxy hosts. "Add proxy host" opens four
+  steps (Service, Certificate, Access, Review); every finished step summarizes
+  what was chosen in the step list, the Review step shows the exact YAML the
+  server would commit (through the new dry-run route) and "Import from YAML"
+  fills the steps from a pasted document (through the new parse route),
+  naming any field the wizard does not cover and offering the full editor
+  for it. The full editor stays at `#/hosts/_new`. Pure vanilla JS, no new
+  dependency.
+- API: `PUT /api/{plural}/{name}?dryRun=1` (or `dryRun=true`) runs every check
+  a real save runs and returns the YAML it would commit and the file path,
+  without writing, committing, reloading or firing a webhook. A failing check
+  is the same `400` as the real save, and an API-token dry run never mints a
+  secret. The reply also says whether the name is already stored, and
+  `If-None-Match: *` on any `PUT` makes it create-only (`409` on a stored
+  name), which is what the creation wizard sends.
+- API: `POST /api/{plural}/_parse` turns one YAML document
+  (`Content-Type: application/yaml`) into that kind's object with the same
+  decode rules as a `PUT`, and reports whether it passes validation without
+  refusing an incomplete object. Nothing is persisted; the body is capped at
+  1 MiB and excessive YAML aliasing is refused.
+
+### Changed
+
+- Admin UI: restyled on the PatternFly 4 design grammar (the system
+  Authentik's admin uses): a dark masthead across the top with the instance
+  name, a theme button and an account menu (who is signed in, API tokens,
+  History, Log out), the sidebar beneath it with text-only groups and the
+  version and config commit at its foot, a title band above the content that
+  carries each page's title and one summary line (no page shows its title
+  twice), flat square cards on a grey canvas, form controls with a darker
+  bottom edge that turns primary on focus, outline status labels, underline
+  tabs and inline alerts. Dark mode follows the same tokens on neutral greys.
+  The primary colour is `#0066cc` (the previous brand blue did not meet AA on
+  white). Fonts are now Red Hat Text, Display and Mono (OFL 1.1), vendored
+  like before, one variable file per family; the Inter, Space Grotesk and
+  JetBrains Mono files are no longer referenced.
+
 ### Fixed
 
+- HA followers answer `PUT ...?dryRun=1` and `POST .../_parse` like the leader:
+  neither writes, and a warm standby should preview exactly as the leader does.
+- Ingress discovery truncates the annotation value it logs when the value is
+  not `true` or `false`, as Docker discovery already did.
 - Admin UI: on card views (identity providers, middlewares and the other
   generic object lists) the filter box was a fixed 360px wide, a few pixels
   wider than the card column under it. The toolbar now shares the card
@@ -98,6 +146,23 @@ All notable changes to go-proxy-manager are documented here. The format follows
   open with a tap or keypress on their "+N"), a commit author's email moves
   to a tooltip, discovery counters are only coloured when non-zero, and
   filter boxes use short placeholders with the full hint on hover.
+
+### Security
+
+- The post-login return path refuses every control byte, not only CR, LF and
+  NUL: a TAB survived `http.Redirect` and browsers collapse `/\t/evil.com`
+  into an off-site `//evil.com` redirect.
+- `${FILE:...}` references can no longer read gpm's own credential files (the
+  paths behind `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE`,
+  `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` and `GPM_SSO_SIGNING_KEY_FILE`), by path
+  or through a symlink, whichever secret root they sit under.
+- mTLS: client-certificate revocation is checked on resumed TLS sessions too.
+  The stdlib skips `VerifyPeerCertificate` on resumption and TLS 1.3 renews
+  the ticket every time, so a certificate revoked after its first handshake
+  could keep access by resuming; `VerifyConnection` now re-checks it.
+- Restore counts and sizes every archive entry before deciding whether to keep
+  it, so entries it skips can no longer carry unbounded data through the
+  decompressor.
 
 ## [1.0.10] - 2026-09-26
 

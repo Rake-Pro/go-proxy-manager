@@ -94,6 +94,9 @@ const accessListSourcesFile = "access-list-sources.yaml"
 var (
 	// ErrNotFound is returned when an object does not exist.
 	ErrNotFound = errors.New("object not found")
+	// ErrExists is returned by Create when an object of that kind and name is
+	// already stored: a create-only write must never turn into an update.
+	ErrExists = errors.New("object already exists")
 	// ErrDanglingRef is returned when a delete would leave a dangling reference.
 	ErrDanglingRef = errors.New("delete would leave a dangling reference")
 	// ErrGeoDBUnavailable is returned by a write that would commit an AccessList
@@ -312,15 +315,65 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 // references, writes the object's YAML file, and commits. The commit is
 // authored by the operator who made the change.
 func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (string, error) {
+	return s.save(ctx, obj, author, false)
+}
+
+// Create is Save for a new object only: it refuses with ErrExists when an
+// object of that kind and name is already stored. Save is an upsert, which is
+// right for an editor but not for a "create" action, where a name collision
+// would silently replace another object's whole file.
+func (s *Store) Create(ctx context.Context, obj model.Object, author Author) (string, error) {
+	return s.save(ctx, obj, author, true)
+}
+
+func (s *Store) save(ctx context.Context, obj model.Object, author Author, createOnly bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := obj.Validate(); err != nil {
+	rel, out, exists, err := s.prepareSaveLocked(obj, time.Now().UTC())
+	if err != nil {
 		return "", err
+	}
+	if createOnly && exists {
+		return "", fmt.Errorf("%s %q: %w", obj.Kind(), obj.GetMeta().Name, ErrExists)
+	}
+	if err := writeYAML(filepath.Join(s.dir, rel), out); err != nil {
+		return "", err
+	}
+	msg := fmt.Sprintf("%s %q: update", obj.Kind(), obj.GetMeta().Name)
+	return s.git.CommitAll(ctx, msg, author)
+}
+
+// DryRun runs exactly the checks Save runs and returns the object's path
+// relative to the config dir (slash-separated, e.g. "proxy-hosts/app.yaml") and
+// the YAML bytes Save would write there. It writes and commits nothing.
+func (s *Store) DryRun(ctx context.Context, obj model.Object) (string, []byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rel, out, exists, err := s.prepareSaveLocked(obj, time.Now().UTC())
+	if err != nil {
+		return "", nil, false, err
+	}
+	b, err := yaml.Marshal(out)
+	if err != nil {
+		return "", nil, false, err
+	}
+	return filepath.ToSlash(rel), b, exists, nil
+}
+
+// prepareSaveLocked is the validation Save and DryRun share, so a preview can
+// never pass where the real write would fail. It returns the object's path
+// relative to the config dir, the timestamp-stamped value to marshal and
+// whether an object of that name is already stored (the write would be an
+// update). Callers hold s.mu (read or write).
+func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any, bool, error) {
+	if err := obj.Validate(); err != nil {
+		return "", nil, false, err
 	}
 	dir, ok := kindDir[obj.Kind()]
 	if !ok {
-		return "", fmt.Errorf("unknown object kind %q", obj.Kind())
+		return "", nil, false, fmt.Errorf("unknown object kind %q", obj.Kind())
 	}
 
 	// Referential-integrity gate: apply this object to the current config and
@@ -328,7 +381,7 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	// committed.
 	cfg, _, err := s.loadLocked()
 	if err != nil {
-		return "", err
+		return "", nil, false, err
 	}
 	meta := obj.GetMeta()
 	// Captured BEFORE withObject: upsert() below replaces a same-named element
@@ -338,22 +391,15 @@ func (s *Store) Save(ctx context.Context, obj model.Object, author Author) (stri
 	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
-		return "", fmt.Errorf("rejecting save: %w", err)
+		return "", nil, false, fmt.Errorf("rejecting save: %w", err)
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
-		return "", err
+		return "", nil, false, err
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
-		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+		return "", nil, false, fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
-
-	now := time.Now().UTC()
-	path := filepath.Join(s.dir, dir, meta.Name+".yaml")
-	if err := writeYAML(path, stampTimes(obj, existing, now)); err != nil {
-		return "", err
-	}
-	msg := fmt.Sprintf("%s %q: update", obj.Kind(), meta.Name)
-	return s.git.CommitAll(ctx, msg, author)
+	return filepath.Join(dir, meta.Name+".yaml"), stampTimes(obj, existing, now), existing != nil, nil
 }
 
 // Delete removes the named object of the given kind. It refuses the delete if

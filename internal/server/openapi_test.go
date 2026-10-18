@@ -152,6 +152,7 @@ func registeredRoutes(t *testing.T) []route {
 			route{"DELETE", item},
 			route{"GET", item + "/history"},
 			route{"POST", item + "/revert"},
+			route{"POST", base + "/_parse"},
 		)
 	}
 

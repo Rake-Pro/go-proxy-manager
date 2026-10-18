@@ -49,6 +49,50 @@ scope. A viewer-role session and a resource-scoped token both hit this.
 provider's raw message, whoever is asking. The full message stays on that
 certificate's own status, behind `certificates:read`.
 
+## Previewing and importing objects
+
+Two calls on every config kind let a client show the committed YAML before a
+save, or fill a form from pasted YAML. Neither persists anything: no file, no
+commit, no reload, no webhook, no `X-Config-Commit` header.
+
+| Call | Scope | Request | Reply |
+|---|---|---|---|
+| `PUT /api/{plural}/{name}?dryRun=1` | Same as the real `PUT` | The JSON body the real `PUT` takes | `200` `{"kind","name","path","yaml","exists"}`, or the same `400` the real save would give |
+| `PUT /api/{plural}/{name}` with `If-None-Match: *` | Same as the real `PUT` | Same | Create-only: `409` when the name is already stored, nothing written; otherwise the normal reply |
+| `POST /api/{plural}/_parse` | `<plural>:write` (`admin` for `api-tokens`) | One YAML document, `Content-Type: application/yaml`, `application/x-yaml` or `text/yaml` | `200` `{"name","object","valid","error"}` |
+
+- **Dry run runs the real checks.** Object validation, references across the
+  whole config, the GeoIP gate and the literal-secret refusal all run, through
+  the same store code as the save.
+- **`dryRun` values.** `1` or `true` previews; `0`, `false` or absent saves;
+  anything else is a `400`, so a typo never commits.
+- **`path` and `yaml`.** `path` is relative to the config dir (e.g.
+  `proxy-hosts/app.yaml`); `yaml` is the exact file content, with `createdAt`
+  and `updatedAt` stamped as the save would stamp them.
+- **API tokens.** A dry run never mints a secret, so the previewed APIToken
+  YAML has no `tokenHash`.
+- **`_parse` name.** Taken from the document's top-level `name` key, else the
+  `name` query parameter; with neither it is a `400`.
+- **`_parse` validation.** The kind's own decode rules apply (inline basic-auth
+  passwords come back hashed). A document that decodes but fails the object's
+  own validation is still a `200` with `valid: false` and the message in
+  `error`; references to other objects are checked by the save or a dry run.
+- **`_parse` refusals.** Wrong `Content-Type` is `415`. Invalid YAML, a
+  document that is not a mapping, more than one document, excessive alias
+  expansion, or a body over 1 MiB is `400`.
+- **HA followers.** Both calls are `POST`/`PUT`, so a follower answers `503`
+  like any other write.
+
+```
+curl -s -X PUT 'https://<admin>/api/proxy-hosts/app?dryRun=1' \
+  -H 'Authorization: Bearer gpm_...' -H 'Content-Type: application/json' \
+  -d '{"domains":["app.example.com"],"upstream":{"scheme":"http","host":"10.0.0.5","port":8080}}' | jq -r .yaml
+
+curl -s -X POST https://<admin>/api/proxy-hosts/_parse \
+  -H 'Authorization: Bearer gpm_...' -H 'Content-Type: application/yaml' \
+  --data-binary @app.yaml | jq '{valid, error}'
+```
+
 ## The specification
 
 [`openapi.yaml`](../api/openapi.yaml) is an OpenAPI 3.1 specification for the whole
@@ -78,7 +122,8 @@ traffic.
 
 ## What's in it, and what isn't
 
-- Every route `internal/api/api.go` registers (CRUD per config kind, settings,
+- Every route `internal/api/api.go` registers (CRUD per config kind, the
+  `?dryRun=1` preview and `_parse` YAML import per kind, settings,
   backup/restore, whole-config and per-object history/revert, API tokens,
   DNS-sync status/reconcile/plan, Ingress-discovery status/reconcile/plan,
   capabilities, upstream health, logs, SSO revocation) plus the admin-session
@@ -109,7 +154,9 @@ out of `internal/api/api.go` and `internal/server/server.go` and fails if any
 of them has no matching `path`+method in `openapi.yaml`. It catches a missing
 route; it does **not** catch a route whose documented request/response shape
 has drifted from the actual Go struct; review that by eye against
-`internal/model` when a field changes.
+`internal/model` when a field changes. The per-kind template it expands from
+each `register` call does not include `POST /api/{plural}/_parse`, so that
+route is kept in the spec by hand.
 
 `openapi.yaml` was scaffolded once from a generator script (to keep ~100
 routes' worth of CRUD boilerplate consistent); that script isn't part of the

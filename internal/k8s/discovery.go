@@ -719,7 +719,7 @@ func dnsPolicy(ing Ingress, tmpl model.IngressHostTemplate, conf model.IngressDi
 			*dst = false
 		default:
 			log.Warn().Str("ingress", ing.Metadata.Namespace+"/"+ing.Metadata.Name).
-				Str("annotation", key).Str("value", raw).
+				Str("annotation", key).Str("value", ellipsize(raw, 32)).
 				Msg(`ingress discovery: annotation value must be "true" or "false"; keeping the template default`)
 		}
 	}

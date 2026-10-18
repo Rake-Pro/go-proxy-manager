@@ -194,6 +194,7 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 
 	files := map[string][]byte{}
 	var total int64
+	entries := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -201,6 +202,16 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("restore: read archive: %w", err)
+		}
+		// Count and size every entry, kept or not: an entry that is skipped
+		// below still has its bytes decompressed on the way to the next header.
+		entries++
+		if entries > maxRestoreEntries {
+			return nil, fmt.Errorf("restore: archive has too many entries (> %d)", maxRestoreEntries)
+		}
+		total += hdr.Size
+		if total > maxRestoreBytes {
+			return nil, fmt.Errorf("restore: archive too large (> %d bytes uncompressed)", maxRestoreBytes)
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue // skip directories and anything non-regular
@@ -213,13 +224,6 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 		}
 		if !s.allowedRestorePath(entry) {
 			return nil, fmt.Errorf("restore: archive entry %q is not an allowed config path", hdr.Name)
-		}
-		if len(files) >= maxRestoreEntries {
-			return nil, fmt.Errorf("restore: archive has too many entries (> %d)", maxRestoreEntries)
-		}
-		total += hdr.Size
-		if total > maxRestoreBytes {
-			return nil, fmt.Errorf("restore: archive too large (> %d bytes uncompressed)", maxRestoreBytes)
 		}
 		b, err := io.ReadAll(io.LimitReader(tr, maxRestoreBytes))
 		if err != nil {

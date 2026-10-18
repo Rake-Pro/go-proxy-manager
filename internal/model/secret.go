@@ -134,13 +134,55 @@ func allowedSecretFile(ref string) error {
 		return fmt.Errorf("secret file %q must be an absolute path", ref)
 	}
 	clean := filepath.Clean(ref)
+	inRoot := false
 	for _, root := range secretFileRoots() {
 		root = filepath.Clean(root)
 		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
-			return nil
+			inRoot = true
+			break
 		}
 	}
-	return fmt.Errorf("secret file %q is outside the allowed secret roots (set GPM_SECRET_FILE_ROOTS to permit it)", ref)
+	if !inRoot {
+		return fmt.Errorf("secret file %q is outside the allowed secret roots (set GPM_SECRET_FILE_ROOTS to permit it)", ref)
+	}
+	if reservedSecretFile(clean) {
+		return fmt.Errorf("secret file %q is one of gpm's own credential files and may not be referenced from the configuration", ref)
+	}
+	return nil
+}
+
+// reservedSecretFileEnv names the env vars whose value is the path of one of
+// gpm's own credential files. They usually sit under /run/secrets, inside the
+// allowed root, so the root check alone would let a config ${FILE:} reference
+// read them and send the value wherever that object points (a webhook, an
+// identity provider, a bouncer). Same rule as reservedSecretEnv: never.
+var reservedSecretFileEnv = []string{
+	"GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE",
+	"GPM_LOCAL_ADMIN_TOTP_SECRET_FILE",
+	"GPM_SSO_SIGNING_KEY_FILE",
+}
+
+// reservedSecretFile reports whether clean (an absolute, cleaned path) names
+// a reserved credential file, by path or through a symlink either way.
+func reservedSecretFile(clean string) bool {
+	target := clean
+	if ev, err := filepath.EvalSymlinks(clean); err == nil {
+		target = ev
+	}
+	for _, k := range reservedSecretFileEnv {
+		p := strings.TrimSpace(os.Getenv(k))
+		if p == "" {
+			continue
+		}
+		rp := filepath.Clean(p)
+		if clean == rp || target == rp {
+			return true
+		}
+		if ev, err := filepath.EvalSymlinks(rp); err == nil && (ev == clean || ev == target) {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedSecretEnv are gpm's own sensitive process env vars. A config

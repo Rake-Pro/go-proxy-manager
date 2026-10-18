@@ -439,6 +439,10 @@ func hostSNIConfig(t model.TLSSettings, fleet uint16, clientCAs map[string]*clie
 		// it hangs off VerifyPeerCertificate - which runs after the chain builds,
 		// on the handshake, for every host referencing this CA.
 		c.VerifyPeerCertificate = anchor.verifyPeer
+		// ... except on a resumed session, where the stdlib skips chain
+		// verification and VerifyPeerCertificate alike. VerifyConnection runs
+		// on every connection, so revocation is re-checked there too.
+		c.VerifyConnection = anchor.verifyResumed
 	}
 	return c, nil
 }

@@ -46,6 +46,7 @@ nav:
   - Home: index.md
   - Getting started:
       - Quickstart: getting-started/quickstart.md
+      - Admin panel tour: getting-started/admin-ui-tour.md
       - Install with Docker Compose: getting-started/install-docker.md
       - Install the binary: getting-started/install-binary.md
       - Your first host with HTTPS: getting-started/first-host-with-https.md

@@ -276,6 +276,14 @@ func TestScopeEnforcement(t *testing.T) {
 		{"delete needs write", []string{"proxy-hosts:read"}, "DELETE", "/proxy-hosts/app", "", http.StatusForbidden},
 		{"object revert needs write", []string{"proxy-hosts:read"}, "POST", "/proxy-hosts/app/revert", `{"hash":"abcdef1"}`, http.StatusForbidden},
 		{"history needs read", []string{"certificates:read"}, "GET", "/proxy-hosts/app/history", "", http.StatusForbidden},
+		// The dry run and the YAML parse persist nothing but take the write
+		// scope, like the PUT they preview. do() sends no Content-Type, so the
+		// parse past the gate is a 415.
+		{"dry run needs write", []string{"proxy-hosts:read"}, "PUT", "/proxy-hosts/app?dryRun=1", validProxyHost, http.StatusForbidden},
+		{"write scope reaches dry run", []string{"proxy-hosts:write"}, "PUT", "/proxy-hosts/app?dryRun=1", validProxyHost, http.StatusOK},
+		{"parse needs write", []string{"proxy-hosts:read"}, "POST", "/proxy-hosts/_parse", "name: app", http.StatusForbidden},
+		{"wildcard read blocks parse", []string{"*:read"}, "POST", "/proxy-hosts/_parse", "name: app", http.StatusForbidden},
+		{"write scope reaches parse", []string{"proxy-hosts:write"}, "POST", "/proxy-hosts/_parse", "name: app", http.StatusUnsupportedMediaType},
 
 		{"settings read scope", []string{"settings:read"}, "GET", "/settings", "", http.StatusOK},
 		{"settings read blocks write", []string{"settings:read"}, "PUT", "/settings", validSettings, http.StatusForbidden},
@@ -292,6 +300,9 @@ func TestScopeEnforcement(t *testing.T) {
 		{"api-tokens write needs admin", []string{"*:write"}, "PUT", "/api-tokens/x", validToken, http.StatusForbidden},
 		{"api-tokens delete needs admin", []string{"*:write"}, "DELETE", "/api-tokens/x", "", http.StatusForbidden},
 		{"api-tokens revert needs admin", []string{"*:write"}, "POST", "/api-tokens/x/revert", `{"hash":"abcdef1"}`, http.StatusForbidden},
+		{"api-tokens dry run needs admin", []string{"*:write"}, "PUT", "/api-tokens/x?dryRun=1", validToken, http.StatusForbidden},
+		{"api-tokens parse needs admin", []string{"*:write"}, "POST", "/api-tokens/_parse", "name: x", http.StatusForbidden},
+		{"admin reaches api-tokens dry run", []string{model.ScopeAdmin}, "PUT", "/api-tokens/x?dryRun=1", validToken, http.StatusOK},
 		{"admin reaches api-tokens", []string{model.ScopeAdmin}, "GET", "/api-tokens", "", http.StatusOK},
 		// 404: past the scope gate, refused by the store because it does not exist.
 		{"admin reaches api-tokens delete", []string{model.ScopeAdmin}, "DELETE", "/api-tokens/x", "", http.StatusNotFound},

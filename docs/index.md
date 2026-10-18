@@ -24,11 +24,14 @@ proxy listeners and the admin panel.
 - **Git-backed config, REST API and web UI.** Every change is a commit with
   per-object history and revert, over an embedded single-page app.
 
+![Proxy hosts in the admin panel](assets/ui/proxy-hosts.png)
+
 ## Where to start
 
 | You want to | Read |
 |---|---|
 | Get running in 15 minutes | [Quickstart](getting-started/quickstart.md) |
+| See the admin panel first | [Admin panel tour](getting-started/admin-ui-tour.md) |
 | Understand the moving parts | [Architecture](concepts/architecture.md), [Terminology](concepts/terminology.md) |
 | Pick between two similar knobs | [Which mechanism do I use?](concepts/which-mechanism.md) |
 | Do one specific task | [How-to guides](how-to/add-https-host.md) |

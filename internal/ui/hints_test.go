@@ -37,6 +37,7 @@ var hintExempt = map[string]string{
 	`class="host-sel"`: "bulk-selection checkbox, not a config field",
 	`id="restoreFile"`: "hidden file input behind the Restore button",
 	`id="tok-reveal"`:  "read-only display of the token secret that was just minted",
+	`id="wz-yaml"`:     "wizard import box: the pane heading says what to paste",
 
 	`<input class="mono" placeholder="${esc(placeholder || 'add...')}"`: "the chip-input's add box; the chip-input wrapper carries the hint",
 	`class="field mono kv-k"`: "generic key/value repeater; every call site's wrapper carries the hint",
@@ -48,6 +49,7 @@ var hintExempt = map[string]string{
 	`class="tok-write"`:      "one cell of the scope matrix; the matrix carries the hint",
 	`value="${esc(m.name)}"`: "middleware check-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}`:                  "host access-list item; the check-list carries the hint",
+	`value="${esc(a.name)}"${d.accessLists.indexOf(a.name) !== -1 ? ' checked' : ''}`:          "host wizard access-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !hasBasic ? ' checked' : ''}`:     "stream access-list item; the check-list carries the hint",
 	`value="${esc(p.name)}"${storedProvs.indexOf(p.name) !== -1 ? ' checked' : ''}`:            "admin SSO provider item; the check-list carries the hint",
 	`<input type="checkbox" value="${esc(n)}" checked/`:                                        "admin SSO provider stored under a name this instance does not define",

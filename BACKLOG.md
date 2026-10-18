@@ -225,6 +225,84 @@ error-page system; none is a regression from that change.
   token header when Authentik is itself proxied through gpm, breaking every admin
   login with "CSRF token missing". `X-Authentik-Csrf` is now exempt from the strip.
 
+Findings of the 2026-10-18 project-wide review (three fresh-context reviewers:
+admin surface, data plane, config and integrations), remediation level only.
+Pre-existing, none introduced by the UI redesign; the one defect the redesign
+introduced (`_parse` returned the decorated projection) was fixed in the same
+change.
+
+- [ ] **Admin-equivalent writes behind per-kind scopes.** `identity-providers:write`
+  can re-point an IdP that `adminAuth.providers` names (issuer, role mapping)
+  and so mint an admin session; `dns-providers:write` and `middlewares:write`
+  can pair a `${ENV:}` / `${FILE:}` placeholder with a destination URL they
+  choose, which sends the resolved secret off-box. Set `writeScope` to `admin`
+  for identity providers and DNS providers (as `PUT /settings` already is), or
+  require `admin` for any write that changes a URL on an object holding a
+  placeholder; put the link-local guard on the bouncer client. Partly done
+  2026-10-18: `${FILE:}` refuses gpm's own credential files (the paths behind
+  the `GPM_LOCAL_ADMIN_*_FILE` and `GPM_SSO_SIGNING_KEY_FILE` variables), so the
+  TOTP and password-hash files can no longer be exfiltrated this way; the
+  scope change is still open. *(High)*
+- [x] **`sanitizeReturnTo` accepts control bytes other than CR/LF/NUL**; a TAB
+  in `?return=` survives `http.Redirect` and browsers collapse it into an
+  off-site `//host` redirect after login. Done 2026-10-18: every byte below
+  0x20 and 0x7f is refused. *(Medium)*
+- [ ] **`IsPlaceholder` is unanchored**: literal text around a `${ENV:}` token
+  passes `LiteralSecrets`, is committed and echoed verbatim. Require the whole
+  value to be placeholders, or redact the leftover text. *(Medium)*
+- [ ] **Discovery planning denial of service**: a new Ingress or container whose
+  name sorts before an existing managed host can claim its domain and fail the
+  whole batch on every poll. Let existing managed owners keep their domains
+  before new claimants are placed. *(Medium)*
+- [ ] **Viewer leakage of delivery URLs**: `GET /settings` (`settings:read`,
+  held by the read-only role) returns webhook and notification target URLs,
+  which for Discord, Slack and ntfy are the credential. Redact path and query
+  for non-admin callers, or make them placeholder-typed secrets. *(Medium)*
+- [ ] **Login lockout keyed by full IPv6 address and no per-account counter**;
+  key by /64 and add a per-username counter. *(Low)*
+- [ ] **`GET /version` is unauthenticated** and returns commit, build date and Go
+  version; put it behind the user role or trim it. *(Low)*
+- [ ] **`ingressDiscovery.tokenFile` / `caFile` accept any absolute path**,
+  bypassing the `${FILE:}` roots; confine them. *(Low)*
+- [ ] **Webhook secret is sent raw** in a header; sign with HMAC over timestamp
+  and body instead. *(Low)*
+- [ ] **Restore brings back `api-tokens/*` from the archive**, which Revert
+  deliberately refuses; keep the directory, or require an explicit flag. *(Low)*
+- [x] **Restore skips non-regular tar entries before counting them**. Done
+  2026-10-18: every entry is counted and sized before the kind check. *(Low)*
+- [x] **Revoked client certificates keep working through TLS session
+  resumption**. Done 2026-10-18: `VerifyConnection` re-runs the revocation
+  check on resumed sessions (`TestCRLRevocationAppliesToResumedSessions`).
+  Still open: a per-request re-check for long-lived connections. *(High)*
+- [ ] **Guard `queryEquals` reads only the first value of a repeated key**, so
+  `?direct=0&direct=1` passes a trigger a PHP backend reads as `direct=1`; a
+  trailing slash or different case also misses an exact path trigger. Fail
+  closed on a repeated key (as `;` already does); consider trailing-slash and
+  case options. *(Medium)*
+- [ ] **The SSO session cookie is bound to the host, not to the identity
+  provider or gate**: with two OIDC gates on one host (host plus location, or
+  two middlewares), a login at provider A passes provider B's gate and role
+  mapping. Store the provider in the session and require a match, or refuse
+  more than one OIDC provider per host in validation. *(Medium)*
+- [ ] **`mode: client-cert` is allowed on a host without `tls.clientAuth`**, so a
+  chain verified under another mTLS host's SNI is accepted for it. Require
+  `tls.clientAuth` on any host or location using client-cert mode and check
+  the handshake used this host's own config. *(Medium)*
+- [ ] **Rate limit, basic-auth lockout and bouncer keys are full IPv6
+  addresses**; one /64 bypasses or fills them (the lockout map fails closed
+  for everyone when full). Key IPv6 by a configurable prefix. *(Medium)*
+- [ ] The `Host` port part is never validated and is forwarded raw (header
+  poisoning of upstreams); client-supplied override headers (`X-Original-URL`,
+  `X-HTTP-Method-Override`, `True-Client-IP`, ...) are not stripped from
+  untrusted peers; request bodies have no idle or rate limit; identity-header
+  trust is one union per host; the sticky cookie carries the upstream address
+  in readable base64. *(Low)*
+- [ ] Revert (tree and object) does not run `LiteralSecrets`; `HTTPS_PROXY`
+  defeats the link-local check on outbound clients; `release.yml` lets
+  `workflow_dispatch` from any branch tag and sign, and `docs.yml` grants
+  `pages:write` / `id-token:write` at workflow level. (The raw Ingress
+  annotation is now logged truncated.) *(Info)*
+
 ## Public release (done)
 
 - [x] **Take the repo public** once it has had a polish pass and a dedicated
@@ -342,6 +420,34 @@ the live deployment (the rest of the 2026-06-28 batch was validated live).
   (`refreshAppName`, ~line 235). The login page title
   (`internal/server/authhttp.go`, "{{.AppName}} - Sign in") is fine as is.
   (Done: both spots now read the app name with no suffix.)
+
+## Admin UI redesign (2026-10-18, PatternFly grammar) follow-ups
+
+Shipped in the working tree: the PatternFly 4 restyle of `app.css`, the
+masthead / sidebar / title-band shell, the Red Hat fonts, the generic
+`wizard()` primitive, the proxy host wizard and the `dryRun` / `_parse` API
+routes. Design reports: `2026-10-18_gpm-ui-design-r3.html` in the owner's
+reports workspace.
+
+- [ ] **Delete the unreferenced font files** `inter-latin.woff2`,
+  `space-grotesk-latin.woff2` and `jetbrains-mono-latin.woff2` under
+  `internal/ui/static/fonts/` (still embedded in the binary; left in place
+  pending the owner's approval of the deletion).
+- [ ] **PR3: proxy host editor as tabs plus rail.** Routing, TLS, Access,
+  Headers, Advanced tabs with a dot on tabs holding non-default values; a rail
+  card with status, certificate coverage, the request chain in pipeline order
+  and the config file; YAML, Clone and Delete in the title band. Replaces the
+  "Request flow" panel and the card grid. Fixes round-1 B1 to B6.
+- [ ] **PR4: certificate wizard** (Domains, Authority with the CA preset
+  picker, Validation, Review) and the certificate editor on the same tab/rail
+  pattern.
+- [ ] **PR5: wizards for the remaining kinds** (identity provider, middleware,
+  access list, stream, upstream group, DNS provider, client CA; one-step
+  modals for redirect, parked and token), each with `summary()` lines.
+- [ ] **PR6: Overview panels** (This instance, Hosts bar, Certificates) ahead
+  of Needs attention; first consumer of the host-status aggregator.
+- [x] **HA followers answer 503 to `dryRun=1` and `_parse`**. Done 2026-10-18:
+  `followerSafe` lets both through (`TestFollowerAllowsPreviews`).
 
 ## Upstream-group follow-ups
 

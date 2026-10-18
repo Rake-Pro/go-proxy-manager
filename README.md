@@ -75,6 +75,26 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
   API, structured logging with an optional access log, opt-in Prometheus metrics,
   a fleet health endpoint, and ntfy, Discord or webhook notifications.
 
+**Admin panel**
+
+- **Guided from the first sign-in.** A setup wizard names the instance, sets
+  its public URL and the proxies to trust, then hands over to the host wizard.
+- **Wizards that show their work.** Creating a host walks Service, Certificate,
+  Access and Review; the Review step prints the exact YAML the server would
+  commit, and a pasted YAML document fills the steps back in.
+- **Everything is a file.** Every save is a git commit with history and revert;
+  the panel, the API and a text editor edit the same objects.
+
+## Admin panel
+
+![Proxy hosts in the admin panel](docs/assets/ui/proxy-hosts.png)
+
+![Creating a proxy host with the wizard](docs/assets/ui/wizard-proxy-host.gif)
+
+Light and dark themes, keyboard and phone friendly, no third-party asset: fonts,
+scripts and styles ship inside the binary. More screens in the
+[admin panel tour](docs/getting-started/admin-ui-tour.md).
+
 ## Quick start
 
 Prerequisites: Docker and Docker Compose.

@@ -6,12 +6,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
@@ -24,6 +27,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -1009,9 +1013,27 @@ func followerReadOnly(next http.Handler) http.Handler {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
 		default:
+			if followerSafe(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			writeErr(w, http.StatusServiceUnavailable, errFollowerReadOnly)
 		}
 	})
+}
+
+// followerSafe reports a non-GET request that only reads: a PUT dry run and
+// the YAML parse route. Both are what the admin UI's creation wizard uses, and
+// a warm standby previews exactly as the leader would.
+func followerSafe(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPut:
+		dry, err := dryRunParam(r)
+		return err == nil && dry
+	case http.MethodPost:
+		return strings.HasSuffix(r.URL.Path, "/_parse")
+	}
+	return false
 }
 
 // resource describes one config kind and how to project/decode it.
@@ -1103,6 +1125,27 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
+		dryRun, err := dryRunParam(r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if dryRun {
+			// A dry run deliberately skips beforeSave: for api-tokens that hook
+			// mints a new secret, and a preview must never mint or reveal a
+			// credential. The previewed APIToken YAML therefore has no tokenHash.
+			path, yml, exists, err := d.Store.DryRun(r.Context(), obj)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, dryRunResponse{Kind: res.kind, Name: name, Path: path, YAML: string(yml), Exists: exists})
+			return
+		}
+		// If-None-Match: * makes the PUT create-only (RFC 9110 section 13.1.2):
+		// an existing object answers 409 instead of being replaced. The SPA's
+		// creation wizard sends it, so a name collision can never overwrite.
+		createOnly := strings.TrimSpace(r.Header.Get("If-None-Match")) == "*"
 		var extra map[string]any
 		if res.beforeSave != nil {
 			cfg, _, err := d.Store.Load(r.Context())
@@ -1115,8 +1158,17 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 				return
 			}
 		}
-		sha, err := d.Store.Save(r.Context(), obj, d.author(r))
+		var sha string
+		if createOnly {
+			sha, err = d.Store.Create(r.Context(), obj, d.author(r))
+		} else {
+			sha, err = d.Store.Save(r.Context(), obj, d.author(r))
+		}
 		if err != nil {
+			if errors.Is(err, store.ErrExists) {
+				writeErr(w, http.StatusConflict, err)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1134,6 +1186,62 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			return
 		}
 		writeJSON(w, http.StatusOK, merged)
+	}))
+
+	// Parse one YAML document into this kind's object, for the SPA's "Import
+	// from YAML" entry. It runs the kind's own decode (so e.g. inline basic-auth
+	// passwords are hashed) and reports Validate's verdict without failing on
+	// it: the wizard wants the object back even when it is incomplete. Nothing
+	// is persisted. "_parse" can never be an object name (model.ValidateName
+	// requires a leading alphanumeric), and the {name} routes are other methods.
+	mux.HandleFunc("POST "+base+"/_parse", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
+		if !isYAMLContentType(r.Header.Get("Content-Type")) {
+			writeErr(w, http.StatusUnsupportedMediaType,
+				errors.New("request Content-Type must be application/yaml, application/x-yaml or text/yaml"))
+			return
+		}
+		body, err := readBody(w, r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		doc, err := parseYAMLMapping(body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if v, ok := doc["name"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeErr(w, http.StatusBadRequest, errors.New("top-level name must be a string"))
+				return
+			}
+			name = s
+		}
+		if name == "" {
+			writeErr(w, http.StatusBadRequest, errors.New("name is required: set a top-level name key or the name query parameter"))
+			return
+		}
+		jsonBody, err := json.Marshal(doc)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("the YAML cannot be represented as a JSON object: %w", err))
+			return
+		}
+		obj, err := res.decode(jsonBody, name)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, decodeError(err))
+			return
+		}
+		// The bare object, never the decorated projection: a decorate step
+		// may touch disk on the strength of fields in the object (the
+		// certificate one reads certFile), and this object has not been
+		// validated, so a crafted path would read outside the store.
+		resp := parseResponse{Name: name, Object: obj, Valid: true}
+		if err := obj.Validate(); err != nil {
+			resp.Valid, resp.Error = false, err.Error()
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}))
 
 	mux.HandleFunc("DELETE "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
@@ -1208,6 +1316,82 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, map[string]string{"commit": sha})
 	}))
+}
+
+// dryRunResponse is the PUT ?dryRun=1 reply: what the store would write and
+// where, relative to the config dir.
+type dryRunResponse struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+	YAML string `json:"yaml"`
+	// Exists reports that an object of this name is already stored, so the
+	// real PUT would be an update (and a create-only PUT a 409).
+	Exists bool `json:"exists"`
+}
+
+// parseResponse is the POST /{plural}/_parse reply. Error carries Validate's
+// message when Valid is false and is empty otherwise.
+type parseResponse struct {
+	Name   string `json:"name"`
+	Object any    `json:"object"`
+	Valid  bool   `json:"valid"`
+	Error  string `json:"error"`
+}
+
+// dryRunParam reads the dryRun query parameter. An unrecognised value is an
+// error rather than a real save, so a typo never commits what was meant as a
+// preview.
+func dryRunParam(r *http.Request) (bool, error) {
+	q := r.URL.Query()
+	if !q.Has("dryRun") {
+		return false, nil
+	}
+	switch q.Get("dryRun") {
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid dryRun value %q: use 1, true, 0 or false", q.Get("dryRun"))
+	}
+}
+
+// isYAMLContentType reports whether ct names one of the accepted YAML media
+// types (parameters such as charset are ignored).
+func isYAMLContentType(ct string) bool {
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(mt) {
+	case "application/yaml", "application/x-yaml", "text/yaml":
+		return true
+	}
+	return false
+}
+
+// parseYAMLMapping decodes exactly one YAML document whose top level is a
+// mapping. yaml.v3 refuses documents with excessive alias expansion, and the
+// caller has already capped the body at maxBody.
+func parseYAMLMapping(body []byte) (map[string]any, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(body))
+	var doc any
+	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("the request body is empty: expected one YAML mapping")
+		}
+		return nil, fmt.Errorf("invalid YAML: %w", err)
+	}
+	m, ok := doc.(map[string]any)
+	if !ok {
+		return nil, errors.New("the YAML document must be a mapping of field names to values")
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("expected exactly one YAML document")
+	}
+	return m, nil
 }
 
 // tokenRevealNote is returned alongside a freshly minted secret so a client (or

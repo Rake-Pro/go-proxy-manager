@@ -34,6 +34,26 @@ func TestSecretResolveFileConfinement(t *testing.T) {
 	if _, err := (Secret("${FILE:/etc/shadow}")).Resolve(); err == nil {
 		t.Fatal("expected out-of-root absolute path to be rejected")
 	}
+
+	// gpm's own credential files are refused even inside the root, by their
+	// own path and through a symlink to them; a sibling file still resolves.
+	hashPath := filepath.Join(dir, "gpm_admin_hash")
+	if err := os.WriteFile(hashPath, []byte("$2a$10$hash"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE", hashPath)
+	if _, err := Secret("${FILE:" + hashPath + "}").Resolve(); err == nil {
+		t.Fatal("expected the local admin hash file to be refused")
+	}
+	link := filepath.Join(dir, "alias")
+	if err := os.Symlink(hashPath, link); err == nil {
+		if _, err := Secret("${FILE:" + link + "}").Resolve(); err == nil {
+			t.Fatal("expected a symlink to the local admin hash file to be refused")
+		}
+	}
+	if got, err := Secret("${FILE:" + secretPath + "}").Resolve(); err != nil || got != "s3cr3t" {
+		t.Fatalf("sibling secret must still resolve: %q %v", got, err)
+	}
 }
 
 func TestSecretResolveEnvGuard(t *testing.T) {

@@ -59,11 +59,17 @@ minutes, plus certificate issuance time.
    box: `GPM_COOKIE_SECURE` defaults to `auto`, so the session cookie is issued
    without `Secure` over plain HTTP and becomes `Secure` (and `__Host-` named)
    automatically once the panel is served over HTTPS or `externalBaseURL` is an
-   `https://` URL.
+   `https://` URL. The Overview of a fresh instance offers **Set up this
+   instance**: three steps (instance name, public URL, trusted proxies) that
+   end in the host wizard of the next step. Skip it if you prefer to write
+   YAML.
 
-5. **Add a proxy host.** In the UI: **Proxy Hosts -> New**, domain
-   `app.example.com`, upstream scheme `http`, host and port of your backend.
-   The equivalent YAML, written to `config/proxy-hosts/app.yaml`:
+   ![First sign-in: the setup card on the Overview](../assets/ui/setup-0-welcome.png)
+
+5. **Add a proxy host.** In the UI: **Proxy Hosts -> Add proxy host** opens
+   the wizard. Service step: domain `app.example.com`, upstream scheme `http`,
+   host and port of your backend. The Review step shows the YAML below before
+   it is committed. The equivalent YAML, written to `config/proxy-hosts/app.yaml`:
 
    ```yaml
    name: app
