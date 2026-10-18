@@ -354,6 +354,14 @@ func sanitizeReturnTo(p string) string {
 	if strings.ContainsAny(p, "\\\r\n\x00") {
 		return "/"
 	}
+	// Every other control byte too: http.Redirect passes a path url.Parse
+	// refuses through unchanged, and browsers drop a TAB from a URL, which
+	// turns "/\t/evil.com" into the "//evil.com" refused just below.
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x20 || p[i] == 0x7f {
+			return "/"
+		}
+	}
 	if strings.HasPrefix(p, "//") {
 		return "/"
 	}

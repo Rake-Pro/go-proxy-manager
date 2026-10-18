@@ -17,6 +17,9 @@ func TestSanitizeReturnTo(t *testing.T) {
 		{"https://evil.com", "/"},
 		{"/ok\r\nSet-Cookie: x", "/"},
 		{"/ok\x00", "/"},
+		{"/\t/evil.com", "/"},
+		{"/ok\x7f", "/"},
+		{"/ok\x1b[0m", "/"},
 	}
 	for _, c := range cases {
 		if got := sanitizeReturnTo(c.in); got != c.want {

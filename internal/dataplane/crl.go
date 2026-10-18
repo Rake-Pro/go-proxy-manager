@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -166,6 +167,27 @@ func (a *clientCAAnchor) reloadIfChanged() {
 		return
 	}
 	log.Info().Str("clientCA", a.name).Str("path", a.crlFile).Msg("crl: revocation list reloaded")
+}
+
+// verifyResumed is wired to tls.Config.VerifyConnection. A resumed handshake
+// never runs VerifyPeerCertificate (the certificates come back out of the
+// session ticket already verified), and TLS 1.3 hands out a fresh ticket on
+// every resumption, so without this a certificate revoked after its first
+// handshake could keep resuming for as long as it liked. Full handshakes have
+// already been through verifyPeer and are not checked twice.
+func (a *clientCAAnchor) verifyResumed(cs tls.ConnectionState) error {
+	if !cs.DidResume || len(cs.PeerCertificates) == 0 {
+		return nil
+	}
+	raw := make([][]byte, len(cs.PeerCertificates))
+	for i, c := range cs.PeerCertificates {
+		raw[i] = c.Raw
+	}
+	chains := cs.VerifiedChains
+	if len(chains) == 0 {
+		chains = [][]*x509.Certificate{cs.PeerCertificates}
+	}
+	return a.verifyPeer(raw, chains)
 }
 
 // verifyPeer is wired to tls.Config.VerifyPeerCertificate for any host whose
