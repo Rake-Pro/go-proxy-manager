@@ -67,6 +67,24 @@ func TestFollowerAllowsReads(t *testing.T) {
 	}
 }
 
+// The two preview routes write nothing, so a follower answers them like the
+// leader; the same PUT without the dry-run flag stays refused.
+func TestFollowerAllowsPreviews(t *testing.T) {
+	h, changed := followerHandler(t, ha.RoleFollower)
+	if w := do(t, h, "PUT", "/proxy-hosts/app?dryRun=1", validProxyHost); w.Code != http.StatusOK {
+		t.Fatalf("PUT ?dryRun=1 on a follower = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if w := doCT(t, h, "POST", "/proxy-hosts/_parse", "application/yaml", hostYAML); w.Code != http.StatusOK {
+		t.Fatalf("POST _parse on a follower = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, "PUT", "/proxy-hosts/app?dryRun=0", validProxyHost); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("PUT ?dryRun=0 on a follower = %d, want 503", w.Code)
+	}
+	if *changed != 0 {
+		t.Fatalf("a preview reloaded the running config (%d times)", *changed)
+	}
+}
+
 // The leader (and the unset zero value) behaves exactly as before.
 func TestLeaderAcceptsWrites(t *testing.T) {
 	for _, role := range []ha.Role{"", ha.RoleLeader} {

@@ -20,6 +20,7 @@ environment, and the store refuses literal `Secret` values outright.
 PUT  /api/api-tokens/ci            # create; response carries "token" once
 PUT  /api/api-tokens/ci            # ordinary edit; digest carried forward, no new secret
 PUT  /api/api-tokens/ci?rotate=1   # rotate; new secret returned once, old one dies
+PUT  /api/api-tokens/ci?dryRun=1   # preview the YAML only; never mints a secret
 ```
 
 Use it as a bearer credential:

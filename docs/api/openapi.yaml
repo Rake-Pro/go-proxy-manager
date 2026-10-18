@@ -2224,6 +2224,52 @@ components:
           description: The new commit hash created by this write (the revert/restore is itself a new commit).
       required:
       - commit
+    DryRunResponse:
+      type: object
+      description: Reply to PUT /api/{plural}/{name}?dryRun=1. Nothing was written.
+      properties:
+        kind:
+          type: string
+          description: Object kind, e.g. ProxyHost.
+        name:
+          type: string
+        path:
+          type: string
+          description: Where the file would be written, relative to the config dir, e.g. proxy-hosts/app.yaml.
+        yaml:
+          type: string
+          description: The exact YAML the save would write, timestamps stamped as a save would stamp them.
+        exists:
+          type: boolean
+          description: True when an object of this name is already stored, so the real PUT would update
+            it (and a create-only PUT with If-None-Match would answer 409).
+      required:
+      - kind
+      - name
+      - path
+      - yaml
+      - exists
+    ParseResponse:
+      type: object
+      description: Reply to POST /api/{plural}/_parse. Nothing was written.
+      properties:
+        name:
+          type: string
+        object:
+          type: object
+          description: The decoded object, projected exactly as GET returns it.
+        valid:
+          type: boolean
+          description: Whether the object passes its own validation (references to other objects are
+            not checked; the save or a dry run does that).
+        error:
+          type: string
+          description: The validation message when valid is false; empty otherwise.
+      required:
+      - name
+      - object
+      - valid
+      - error
     VersionInfo:
       type: object
       properties:
@@ -2893,6 +2939,12 @@ components:
             $ref: '#/components/schemas/Error'
     NoContent:
       description: Deleted.
+    UnsupportedMediaType:
+      description: The request Content-Type is not one this route accepts.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   parameters:
     NamePath:
       name: name
@@ -2908,6 +2960,40 @@ components:
       description: Required on this mutating request when authenticated by session cookie (the value from
         GET /api/me's csrfToken). Not required, and ignored, for bearer-token authentication - a token
         carries no ambient browser authority to defend against.
+      schema:
+        type: string
+    DryRunQuery:
+      name: dryRun
+      in: query
+      required: false
+      description: '1 or true runs every check the real save runs and answers 200 with a DryRunResponse
+        (the YAML the save would commit, and its path) instead of writing. Nothing is persisted: no file,
+        no commit, no reload, no webhook, no X-Config-Commit header. A failing check is the same 400 as
+        the real save. 0, false or absent is a normal save; any other value is a 400. For api-tokens the
+        dry run never mints a secret, so the previewed YAML has no tokenHash.'
+      schema:
+        type: string
+        enum:
+        - '1'
+        - 'true'
+        - '0'
+        - 'false'
+    IfNoneMatchHeader:
+      name: If-None-Match
+      in: header
+      required: false
+      description: '"*" makes the PUT create-only (RFC 9110 section 13.1.2): a stored object of that name
+        answers 409 and nothing is written. Any other value is ignored. The admin UI creation wizard sends it.'
+      schema:
+        type: string
+        enum:
+        - '*'
+    ParseNameQuery:
+      name: name
+      in: query
+      required: false
+      description: Object name to use when the YAML document has no top-level `name` key. The document's
+        `name` wins when both are set.
       schema:
         type: string
 paths:
@@ -2979,6 +3065,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: access-lists:read
+  /api/access-lists/_parse:
+    post:
+      summary: Parse a YAML document into an AccessList
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Access lists
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/AccessList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:write
   /api/access-lists/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -3004,6 +3137,9 @@ paths:
       summary: Create or update an AccessList
       tags:
       - Access lists
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -3012,11 +3148,14 @@ paths:
               $ref: '#/components/schemas/AccessList'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AccessList'
+                oneOf:
+                - $ref: '#/components/schemas/AccessList'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -3163,6 +3302,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: admin
+  /api/api-tokens/_parse:
+    post:
+      summary: Parse a YAML document into an APIToken
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - API tokens
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/APIToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
   /api/api-tokens/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -3193,6 +3379,8 @@ paths:
       tags:
       - API tokens
       parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       - name: rotate
         in: query
         required: false
@@ -3209,11 +3397,14 @@ paths:
               $ref: '#/components/schemas/APIToken'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/APITokenCreateResponse'
+                oneOf:
+                - $ref: '#/components/schemas/APITokenCreateResponse'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -3351,6 +3542,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: certificates:read
+  /api/certificates/_parse:
+    post:
+      summary: Parse a YAML document into a Certificate
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Certificates
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/Certificate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: certificates:write
   /api/certificates/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -3376,6 +3614,9 @@ paths:
       summary: Create or update a Certificate
       tags:
       - Certificates
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -3384,11 +3625,14 @@ paths:
               $ref: '#/components/schemas/Certificate'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Certificate'
+                oneOf:
+                - $ref: '#/components/schemas/Certificate'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -3553,6 +3797,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: client-cas:read
+  /api/client-cas/_parse:
+    post:
+      summary: Parse a YAML document into a ClientCA
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Client CAs
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/ClientCA'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: client-cas:write
   /api/client-cas/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -3578,6 +3869,9 @@ paths:
       summary: Create or update a ClientCA
       tags:
       - Client CAs
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -3586,11 +3880,14 @@ paths:
               $ref: '#/components/schemas/ClientCA'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ClientCA'
+                oneOf:
+                - $ref: '#/components/schemas/ClientCA'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -3957,6 +4254,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: parked-hosts:read
+  /api/parked-hosts/_parse:
+    post:
+      summary: Parse a YAML document into a ParkedHost
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Parked hosts
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/ParkedHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: parked-hosts:write
   /api/parked-hosts/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -3982,6 +4326,9 @@ paths:
       summary: Create or update a ParkedHost
       tags:
       - Parked hosts
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -3990,11 +4337,14 @@ paths:
               $ref: '#/components/schemas/ParkedHost'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ParkedHost'
+                oneOf:
+                - $ref: '#/components/schemas/ParkedHost'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -4095,6 +4445,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: dns-providers:read
+  /api/dns-providers/_parse:
+    post:
+      summary: Parse a YAML document into a DNSProvider
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - DNS providers
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/DNSProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: dns-providers:write
   /api/dns-providers/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4120,6 +4517,9 @@ paths:
       summary: Create or update a DNSProvider
       tags:
       - DNS providers
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -4128,11 +4528,14 @@ paths:
               $ref: '#/components/schemas/DNSProvider'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DNSProvider'
+                oneOf:
+                - $ref: '#/components/schemas/DNSProvider'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -4351,6 +4754,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: identity-providers:read
+  /api/identity-providers/_parse:
+    post:
+      summary: Parse a YAML document into an IdentityProvider
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Identity providers
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/IdentityProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: identity-providers:write
   /api/identity-providers/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4376,6 +4826,9 @@ paths:
       summary: Create or update an IdentityProvider
       tags:
       - Identity providers
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -4384,11 +4837,14 @@ paths:
               $ref: '#/components/schemas/IdentityProvider'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IdentityProvider'
+                oneOf:
+                - $ref: '#/components/schemas/IdentityProvider'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -4708,6 +5164,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: middlewares:read
+  /api/middlewares/_parse:
+    post:
+      summary: Parse a YAML document into a Middleware
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Middlewares
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/Middleware'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: middlewares:write
   /api/middlewares/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4733,6 +5236,9 @@ paths:
       summary: Create or update a Middleware
       tags:
       - Middlewares
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -4741,11 +5247,14 @@ paths:
               $ref: '#/components/schemas/Middleware'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Middleware'
+                oneOf:
+                - $ref: '#/components/schemas/Middleware'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -4862,6 +5371,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: proxy-hosts:read
+  /api/proxy-hosts/_parse:
+    post:
+      summary: Parse a YAML document into a ProxyHost
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Proxy hosts
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/ProxyHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: proxy-hosts:write
   /api/proxy-hosts/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4887,6 +5443,9 @@ paths:
       summary: Create or update a ProxyHost
       tags:
       - Proxy hosts
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -4895,11 +5454,14 @@ paths:
               $ref: '#/components/schemas/ProxyHost'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProxyHost'
+                oneOf:
+                - $ref: '#/components/schemas/ProxyHost'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -5000,6 +5562,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: redirect-hosts:read
+  /api/redirect-hosts/_parse:
+    post:
+      summary: Parse a YAML document into a RedirectHost
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Redirect hosts
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/RedirectHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: redirect-hosts:write
   /api/redirect-hosts/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -5025,6 +5634,9 @@ paths:
       summary: Create or update a RedirectHost
       tags:
       - Redirect hosts
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -5033,11 +5645,14 @@ paths:
               $ref: '#/components/schemas/RedirectHost'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RedirectHost'
+                oneOf:
+                - $ref: '#/components/schemas/RedirectHost'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -5285,6 +5900,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: stream-hosts:read
+  /api/stream-hosts/_parse:
+    post:
+      summary: Parse a YAML document into a StreamHost
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Stream hosts
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/StreamHost'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: stream-hosts:write
   /api/stream-hosts/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -5310,6 +5972,9 @@ paths:
       summary: Create or update a StreamHost
       tags:
       - Stream hosts
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -5318,11 +5983,14 @@ paths:
               $ref: '#/components/schemas/StreamHost'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StreamHost'
+                oneOf:
+                - $ref: '#/components/schemas/StreamHost'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -5423,6 +6091,53 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: upstream-groups:read
+  /api/upstream-groups/_parse:
+    post:
+      summary: Parse a YAML document into an UpstreamGroup
+      description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
+        the object plus its own validation verdict. A document that decodes but fails validation is still
+        a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        over 1 MiB are refused (400).'
+      tags:
+      - Upstream groups
+      parameters:
+      - $ref: '#/components/parameters/ParseNameQuery'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          application/x-yaml:
+            schema:
+              type: string
+          text/yaml:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - type: object
+                  properties:
+                    object:
+                      $ref: '#/components/schemas/UpstreamGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: upstream-groups:write
   /api/upstream-groups/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -5448,6 +6163,9 @@ paths:
       summary: Create or update an UpstreamGroup
       tags:
       - Upstream groups
+      parameters:
+      - $ref: '#/components/parameters/DryRunQuery'
+      - $ref: '#/components/parameters/IfNoneMatchHeader'
       requestBody:
         required: true
         content:
@@ -5456,11 +6174,14 @@ paths:
               $ref: '#/components/schemas/UpstreamGroup'
       responses:
         '200':
-          description: OK
+          description: OK. With ?dryRun=1 the reply is a DryRunResponse and nothing is written.
+            With If-None-Match set to * a stored name answers 409 instead.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UpstreamGroup'
+                oneOf:
+                - $ref: '#/components/schemas/UpstreamGroup'
+                - $ref: '#/components/schemas/DryRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
