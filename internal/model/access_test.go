@@ -42,7 +42,7 @@ func TestAccessListGeoValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "bad"},
 				Geo:        &AccessListGeo{CountryDeny: []string{"cn"}},
 			},
-			wantErr: `invalid geo countryDeny code "cn"`,
+			wantErr: `geo.countryDeny: code "cn" is invalid`,
 		},
 		{
 			name: "three-letter country code rejected",
@@ -50,7 +50,7 @@ func TestAccessListGeoValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "bad"},
 				Geo:        &AccessListGeo{CountryAllow: []string{"USA"}},
 			},
-			wantErr: `invalid geo countryAllow code "USA"`,
+			wantErr: `geo.countryAllow: code "USA" is invalid`,
 		},
 		{
 			name: "bad onUnknown rejected",
@@ -58,7 +58,7 @@ func TestAccessListGeoValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "bad"},
 				Geo:        &AccessListGeo{CountryDeny: []string{"CN"}, OnUnknown: "sometimes"},
 			},
-			wantErr: "geo onUnknown must be allow|deny",
+			wantErr: "geo.onUnknown: must be allow|deny",
 		},
 	}
 	for _, tc := range tests {

@@ -115,7 +115,7 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 
 The proxy listeners route by hostname, so **at most one enabled host may claim a
 given domain**. Two enabled proxy, redirect or parked hosts listing the same domain
-are rejected at load time (`hosts "a" and "b" both claim domain "x.example.com"`)
+are rejected at load time (`proxy host "b": domains: x.example.com is already claimed by proxy host "a"`)
 rather than resolved by whichever file happens to be read last. *Disabled* hosts
 are exempt: they are excluded from the running proxy listeners entirely, so staging a
 replacement host beside the live one stays legal: enable the new one in the same

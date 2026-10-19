@@ -60,7 +60,7 @@ than followed: the request carries `X-Api-User` and `X-Api-Key`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Write refused: `config.zone is required` | `zone` is mandatory for the `rfc2136` provider; there is no optional-zone mode today | Set `config.zone` to the zone apex, e.g. `example.com` |
+| Write refused: `config.zone: is required for provider rfc2136` | `zone` is mandatory for the `rfc2136` provider; there is no optional-zone mode today | Set `config.zone` to the zone apex, e.g. `example.com` |
 | `SOA lookup for ... answered with zone ..., which is not a suffix of that name` | Something answering for the nameserver returned an SOA for an unrelated zone | Set `config.zone` explicitly, and check the `server` address and transport (`tcp` is the safer choice) |
 | `REFUSED` from the nameserver | The server's update policy does not grant this key the `_acme-challenge` name | Widen `update-policy` for that name only, and reload the nameserver |
 | `NOTAUTH` from the nameserver | Wrong key name, secret or algorithm, or a clock more than 300 seconds off | Re-check `tsigKeyName`/`tsigSecret`/`tsigAlgorithm` and fix NTP on both hosts |

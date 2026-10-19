@@ -168,16 +168,16 @@ func (g *AccessListGeo) validate(listName string) error {
 	}
 	for _, cc := range g.CountryAllow {
 		if !countryCodeRe.MatchString(cc) {
-			return fmt.Errorf("access list %q: invalid geo countryAllow code %q, want ISO-3166-1 alpha-2 (e.g. US)", listName, cc)
+			return fmt.Errorf("access list %q: geo.countryAllow: code %q is invalid, want ISO-3166-1 alpha-2 (e.g. US)", listName, cc)
 		}
 	}
 	for _, cc := range g.CountryDeny {
 		if !countryCodeRe.MatchString(cc) {
-			return fmt.Errorf("access list %q: invalid geo countryDeny code %q, want ISO-3166-1 alpha-2 (e.g. US)", listName, cc)
+			return fmt.Errorf("access list %q: geo.countryDeny: code %q is invalid, want ISO-3166-1 alpha-2 (e.g. US)", listName, cc)
 		}
 	}
 	if ou := g.OnUnknown; ou != "" && ou != ActionAllow && ou != ActionDeny {
-		return fmt.Errorf("access list %q: geo onUnknown must be allow|deny, got %q", listName, ou)
+		return fmt.Errorf("access list %q: geo.onUnknown: must be allow|deny, got %q", listName, ou)
 	}
 	return nil
 }
@@ -224,32 +224,32 @@ func (a AccessList) Validate() error {
 	sources := map[string]bool{}
 	for _, src := range a.Sources {
 		if err := ValidateName(src.Name); err != nil {
-			return fmt.Errorf("access list %q: source: %w", a.Name, err)
+			return fmt.Errorf("access list %q: sources: %w", a.Name, err)
 		}
 		if sources[src.Name] {
-			return fmt.Errorf("access list %q: duplicate source %q", a.Name, src.Name)
+			return fmt.Errorf("access list %q: sources: duplicate source %q", a.Name, src.Name)
 		}
 		sources[src.Name] = true
 		u, err := url.Parse(src.URL)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("access list %q: source %q: url must be an absolute https URL, got %q", a.Name, src.Name, src.URL)
+			return fmt.Errorf("access list %q: sources: source %q url must be an absolute https URL, got %q", a.Name, src.Name, src.URL)
 		}
 		if src.Interval != "" {
 			d, err := time.ParseDuration(src.Interval)
 			if err != nil {
-				return fmt.Errorf("access list %q: source %q: interval must be a Go duration (e.g. \"24h\"), got %q: %w", a.Name, src.Name, src.Interval, err)
+				return fmt.Errorf("access list %q: sources: source %q interval must be a Go duration (e.g. \"24h\"), got %q: %w", a.Name, src.Name, src.Interval, err)
 			}
 			if d < MinAccessListSourceInterval {
-				return fmt.Errorf("access list %q: source %q: interval must be at least %s, got %q", a.Name, src.Name, MinAccessListSourceInterval, src.Interval)
+				return fmt.Errorf("access list %q: sources: source %q interval must be at least %s, got %q", a.Name, src.Name, MinAccessListSourceInterval, src.Interval)
 			}
 		}
 		if src.MaxEntries < 0 {
-			return fmt.Errorf("access list %q: source %q: maxEntries must not be negative, got %d", a.Name, src.Name, src.MaxEntries)
+			return fmt.Errorf("access list %q: sources: source %q maxEntries must not be negative, got %d", a.Name, src.Name, src.MaxEntries)
 		}
 	}
 	for _, r := range a.Rules {
 		if r.Action != ActionAllow && r.Action != ActionDeny {
-			return fmt.Errorf("access list %q: rule action must be allow|deny, got %q", a.Name, r.Action)
+			return fmt.Errorf("access list %q: rules: rule action must be allow|deny, got %q", a.Name, r.Action)
 		}
 		// A rule draws its networks from exactly one place. Allowing both would
 		// leave the precedence between a literal and a fetched set undefined;
@@ -257,18 +257,18 @@ func (a AccessList) Validate() error {
 		// that matches something.
 		switch {
 		case r.CIDR != "" && r.Source != "":
-			return fmt.Errorf("access list %q: rule sets both cidr %q and source %q: use exactly one", a.Name, r.CIDR, r.Source)
+			return fmt.Errorf("access list %q: rules: rule sets both cidr %q and source %q: use exactly one", a.Name, r.CIDR, r.Source)
 		case r.CIDR == "" && r.Source == "":
-			return fmt.Errorf("access list %q: rule must set either cidr or source", a.Name)
+			return fmt.Errorf("access list %q: rules: rule must set either cidr or source", a.Name)
 		case r.Source != "":
 			if !sources[r.Source] {
-				return fmt.Errorf("access list %q: rule references source %q, which is not declared in this list's sources", a.Name, r.Source)
+				return fmt.Errorf("access list %q: rules: rule references source %q, which is not declared in this list's sources", a.Name, r.Source)
 			}
 		default:
 			if _, _, err := net.ParseCIDR(r.CIDR); err != nil {
 				// Permit a bare IP by trying to parse it as a single host.
 				if net.ParseIP(r.CIDR) == nil {
-					return fmt.Errorf("access list %q: invalid cidr/ip %q", a.Name, r.CIDR)
+					return fmt.Errorf("access list %q: rules: invalid cidr/ip %q", a.Name, r.CIDR)
 				}
 			}
 		}
@@ -277,14 +277,14 @@ func (a AccessList) Validate() error {
 		}
 	}
 	if da := a.DefaultAction; da != "" && da != ActionAllow && da != ActionDeny {
-		return fmt.Errorf("access list %q: defaultAction must be allow|deny, got %q", a.Name, da)
+		return fmt.Errorf("access list %q: defaultAction: must be allow|deny, got %q", a.Name, da)
 	}
 	if err := a.Geo.validate(a.Name); err != nil {
 		return err
 	}
 	for _, u := range a.BasicAuth {
 		if u.Username == "" || u.PasswordHash == "" {
-			return fmt.Errorf("access list %q: basic-auth user requires username and passwordHash", a.Name)
+			return fmt.Errorf("access list %q: basicAuth: user requires username and passwordHash", a.Name)
 		}
 	}
 	return nil
@@ -298,7 +298,7 @@ func (a AccessList) Validate() error {
 func validateRulePaths(listName string, r IPRule) error {
 	if !r.PathScoped() {
 		if len(r.Methods) > 0 {
-			return fmt.Errorf("access list %q: rule sets methods %v without paths: methods only scope a path rule", listName, r.Methods)
+			return fmt.Errorf("access list %q: rules: rule sets methods %v without paths: methods only scope a path rule", listName, r.Methods)
 		}
 		return nil
 	}
@@ -311,27 +311,27 @@ func validateRulePaths(listName string, r IPRule) error {
 	// request past (fails OPEN). Deny-by-path belongs to the guard middleware,
 	// which owns that matching problem - see docs/reference/config/middleware.md.
 	if r.Action == ActionDeny {
-		return fmt.Errorf("access list %q: rule paths are allow-only, got action deny: an exact path match cannot be relied on to DENY (it would miss %q and other equivalent spellings); use a guard middleware for deny-by-path", listName, r.Paths[0]+"/")
+		return fmt.Errorf("access list %q: rules: rule paths are allow-only, got action deny: an exact path match cannot be relied on to DENY (it would miss %q and other equivalent spellings); use a guard middleware for deny-by-path", listName, r.Paths[0]+"/")
 	}
 	seen := map[string]bool{}
 	for _, p := range r.Paths {
 		if !strings.HasPrefix(p, "/") {
-			return fmt.Errorf("access list %q: rule path %q must start with \"/\"", listName, p)
+			return fmt.Errorf("access list %q: rules: rule path %q must start with \"/\"", listName, p)
 		}
 		if strings.ContainsAny(p, "?#") {
-			return fmt.Errorf("access list %q: rule path %q must be a path only (no query string or fragment)", listName, p)
+			return fmt.Errorf("access list %q: rules: rule path %q must be a path only (no query string or fragment)", listName, p)
 		}
 		if path.Clean(p) != p {
-			return fmt.Errorf("access list %q: rule path %q is not clean: use %q", listName, p, path.Clean(p))
+			return fmt.Errorf("access list %q: rules: rule path %q is not clean: use %q", listName, p, path.Clean(p))
 		}
 		if seen[p] {
-			return fmt.Errorf("access list %q: duplicate rule path %q", listName, p)
+			return fmt.Errorf("access list %q: rules: duplicate rule path %q", listName, p)
 		}
 		seen[p] = true
 	}
 	for _, m := range r.Methods {
 		if !httpMethods[m] {
-			return fmt.Errorf("access list %q: rule method %q is not an upper-case standard HTTP method", listName, m)
+			return fmt.Errorf("access list %q: rules: rule method %q is not an upper-case standard HTTP method", listName, m)
 		}
 	}
 	return nil

@@ -160,7 +160,7 @@ func (t APIToken) Validate() error {
 		return err
 	}
 	if len(t.Scopes) == 0 {
-		return fmt.Errorf("api token %q: at least one scope is required", t.Name)
+		return fmt.Errorf("api token %q: scopes: at least one scope is required", t.Name)
 	}
 	for _, s := range t.Scopes {
 		if s == ScopeAdmin {
@@ -168,10 +168,10 @@ func (t APIToken) Validate() error {
 		}
 		plural, _, ok := splitScope(s)
 		if !ok {
-			return fmt.Errorf("api token %q: invalid scope %q (want \"<plural>:read\", \"<plural>:write\", \"*:read\", \"*:write\" or %q)", t.Name, s, ScopeAdmin)
+			return fmt.Errorf("api token %q: scopes: invalid scope %q (want \"<plural>:read\", \"<plural>:write\", \"*:read\", \"*:write\" or %q)", t.Name, s, ScopeAdmin)
 		}
 		if plural != "*" && !knownScopePlural(plural) {
-			return fmt.Errorf("api token %q: unknown scope subject %q in %q (known: %s, *)", t.Name, plural, s, strings.Join(ScopePlurals, ", "))
+			return fmt.Errorf("api token %q: scopes: unknown scope subject %q in %q (known: %s, *)", t.Name, plural, s, strings.Join(ScopePlurals, ", "))
 		}
 	}
 	return nil

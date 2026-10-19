@@ -152,7 +152,7 @@ list is being served from a set that is no longer being refreshed.
 | `refused > 0` in the status | The feed answered non-`200`, was empty, exceeded `maxEntries`, sent over 1 MiB, or held one unparseable line. A fetch is refused **whole** | Fix the feed; the previously fetched set keeps serving, and the retry is on the next poll tick rather than after the source's own interval |
 | A `source` rule matches nothing | The source has never been fetched, so it resolves to the **empty set** | Trigger a reconcile and check `fetchedAt`; an unfetched feed can never widen access |
 | The whole fetch is refused over one line | The feed carries a default route, a prefix broader than `/8` (v4) or `/32` (v6), or a non-public address | That bound is deliberate: one hijacked `0.0.0.0/0` would otherwise allow the internet. Take it up with the feed publisher |
-| Config write refused: `url` must be https | `http` source URLs are refused | Use the `https` endpoint |
+| Config write refused: `sources: source "name" url must be an absolute https URL` | `http` source URLs are refused | Use the `https` endpoint |
 | Config load fails on the source ledger | `config/access-list-sources.yaml` was hand-edited; each entry carries a `sha256` over its set | Never hand-edit it: revert the file and let the fetcher rewrite it |
 | The list is refused on a stream host | A stream host resolves no ledger and has no request path, so `sources` and `paths` rules are refused there | Use a plain CIDR list at L4 |
 | Nothing is ever fetched | `settings.accessListSync.enabled: false`, or this instance is an HA follower | Re-enable it; only the leader fetches, and a follower serves the replicated ledger |

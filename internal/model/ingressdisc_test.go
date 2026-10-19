@@ -37,8 +37,8 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"empty apiURL is in-cluster", func(d *IngressDiscoverySettings) { d.APIURL = "" }, ""},
 		{"plain http apiURL", func(d *IngressDiscoverySettings) { d.APIURL = "http://k8s.example.lan:6443" }, "https"},
 		{"apiURL without host", func(d *IngressDiscoverySettings) { d.APIURL = "https://" }, "https"},
-		{"relative tokenFile", func(d *IngressDiscoverySettings) { d.TokenFile = "token" }, "tokenFile must be an absolute path"},
-		{"relative caFile", func(d *IngressDiscoverySettings) { d.CAFile = "../ca.crt" }, "caFile must be an absolute path"},
+		{"relative tokenFile", func(d *IngressDiscoverySettings) { d.TokenFile = "token" }, "tokenFile: must be an absolute path"},
+		{"relative caFile", func(d *IngressDiscoverySettings) { d.CAFile = "../ca.crt" }, "caFile: must be an absolute path"},
 		{"empty token/ca are in-cluster", func(d *IngressDiscoverySettings) { d.TokenFile, d.CAFile = "", "" }, ""},
 		{"bad namespace", func(d *IngressDiscoverySettings) { d.Namespace = "Not A Namespace" }, "namespace"},
 		{"good namespace", func(d *IngressDiscoverySettings) { d.Namespace = "kube-system" }, ""},
@@ -57,7 +57,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"unparseable interval", func(d *IngressDiscoverySettings) { d.PollInterval = "soon" }, "pollInterval"},
 		{"interval too small", func(d *IngressDiscoverySettings) { d.PollInterval = "1s" }, "at least 15s"},
 		{"empty interval is the default", func(d *IngressDiscoverySettings) { d.PollInterval = "" }, ""},
-		{"suffixes required", func(d *IngressDiscoverySettings) { d.AllowedDomainSuffixes = nil }, "allowedDomainSuffixes is required"},
+		{"suffixes required", func(d *IngressDiscoverySettings) { d.AllowedDomainSuffixes = nil }, "allowedDomainSuffixes: is required"},
 		{"suffix must be a domain", func(d *IngressDiscoverySettings) { d.AllowedDomainSuffixes = []string{"*.example.com"} }, "not a valid domain suffix"},
 		{"leading dot suffix accepted", func(d *IngressDiscoverySettings) { d.AllowedDomainSuffixes = []string{".example.com"} }, ""},
 		{"upstream required", func(d *IngressDiscoverySettings) { d.Template.Upstream = Upstream{} }, "template.upstream"},
@@ -73,7 +73,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 			d.Template.Upstream = Upstream{}
 			d.Template.UpstreamGroupRef = "Not A Name"
 		}, "template.upstreamGroupRef"},
-		{"certificateRef required", func(d *IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "" }, "certificateRef is required"},
+		{"certificateRef required", func(d *IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "" }, "certificateRef: is required"},
 		{"certificateRef name shape", func(d *IngressDiscoverySettings) { d.Template.TLS.CertificateRef = "Wild Card" }, "certificateRef"},
 		{"template tls validated", func(d *IngressDiscoverySettings) { d.Template.TLS.MinTLSVersion = "1.1" }, "minTLSVersion"},
 		{"clientAuth needs forceSSL", func(d *IngressDiscoverySettings) {
@@ -108,10 +108,10 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		}, "hop-by-hop"},
 		{"template connect timeout out of range", func(d *IngressDiscoverySettings) {
 			d.Template.Timeouts = &HostTimeouts{ConnectSeconds: 3601}
-		}, "template: timeouts.connectSeconds 3601 out of range (0-3600)"},
+		}, "ingressDiscovery.template.timeouts.connectSeconds: 3601 is out of range (0-3600)"},
 		{"template read timeout negative", func(d *IngressDiscoverySettings) {
 			d.Template.Timeouts = &HostTimeouts{ReadSeconds: -1}
-		}, "template: timeouts.readSeconds -1 out of range (0-3600)"},
+		}, "ingressDiscovery.template.timeouts.readSeconds: -1 is out of range (0-3600)"},
 
 		// A named profile is a full chain an untrusted Ingress can select, so it is
 		// held to EXACTLY the template's standard - and at settings-write time, not
@@ -127,47 +127,47 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 			}}
-		}, `profiles["sso-internal"].tls.certificateRef is required`},
+		}, `ingressDiscovery.profiles.sso-internal.tls.certificateRef: is required`},
 		{"profile with both upstream and group", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream:         Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 				UpstreamGroupRef: "k8s-nodes",
 				TLS:              TLSSettings{CertificateRef: "wildcard"},
 			}}
-		}, `profiles["sso-internal"]: upstream and upstreamGroupRef are mutually exclusive`},
+		}, `ingressDiscovery.profiles.sso-internal.upstream: upstream and upstreamGroupRef are mutually exclusive`},
 		{"profile with a bad middleware name", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 				TLS:         TLSSettings{CertificateRef: "wildcard"},
 				Middlewares: []string{"Bad Name"},
 			}}
-		}, `profiles["sso-internal"].middlewares[0]`},
+		}, `ingressDiscovery.profiles.sso-internal.middlewares[0]: `},
 		{"profile with a bad access list name", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 				TLS:         TLSSettings{CertificateRef: "wildcard"},
 				AccessLists: []string{""},
 			}}
-		}, `profiles["sso-internal"].accessLists[0]`},
+		}, `ingressDiscovery.profiles.sso-internal.accessLists[0]: `},
 		{"profile with an invalid upstream", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 70000},
 				TLS:      TLSSettings{CertificateRef: "wildcard"},
 			}}
-		}, `profiles["sso-internal"].upstream`},
+		}, `ingressDiscovery.profiles.sso-internal.upstream.port: `},
 		{"profile tls validated", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 				TLS:      TLSSettings{CertificateRef: "wildcard", MinTLSVersion: "1.1"},
 			}}
-		}, `profiles["sso-internal"].tls`},
+		}, `ingressDiscovery.profiles.sso-internal.tls.minTLSVersion: `},
 		{"profile timeouts validated", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 				TLS:      TLSSettings{CertificateRef: "wildcard"},
 				Timeouts: &HostTimeouts{ReadSeconds: 4000},
 			}}
-		}, `profiles["sso-internal"]: timeouts.readSeconds 4000 out of range (0-3600)`},
+		}, `ingressDiscovery.profiles.sso-internal.timeouts.readSeconds: 4000 is out of range (0-3600)`},
 		{"profile name shape", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"Not A Name": {
 				Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
@@ -216,7 +216,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 				TLS:                   TLSSettings{CertificateRef: "wildcard"},
 				AllowedDomainSuffixes: []string{"example.com"},
 			}}
-		}, `profiles["public"].allowedDomainSuffixes "example.com" is not covered`},
+		}, `ingressDiscovery.profiles.public.allowedDomainSuffixes: "example.com" is not covered`},
 
 		// profileSelection.
 		{"profileSelection empty is the default", func(d *IngressDiscoverySettings) { d.ProfileSelection = "" }, ""},
@@ -228,7 +228,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		}, ""},
 		{"profileSelection rejects an unknown value", func(d *IngressDiscoverySettings) {
 			d.ProfileSelection = "bogus"
-		}, "profileSelection must be"},
+		}, "profileSelection: must be"},
 
 		// profileRules: operator-side selection, strictly stronger than the
 		// annotation, so it is validated as strictly as everything else here.
@@ -244,16 +244,16 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		}, ""},
 		{"rule targeting an undefined profile", func(d *IngressDiscoverySettings) {
 			d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring", Profile: "no-such-profile"}}
-		}, `profileRules[0].profile "no-such-profile" is not defined`},
+		}, `profileRules[0].profile: "no-such-profile" is not defined`},
 		{"rule with no profile at all", func(d *IngressDiscoverySettings) {
 			d.ProfileRules = []IngressProfileRule{{Namespace: "monitoring"}}
-		}, "profileRules[0].profile is required"},
+		}, "profileRules[0].profile: is required"},
 		{"rule with a bad namespace", func(d *IngressDiscoverySettings) {
 			d.ProfileRules = []IngressProfileRule{{Namespace: "Not A Namespace", Profile: DefaultProfileName}}
 		}, "profileRules[0].namespace"},
 		{"rule with an empty matchLabels key", func(d *IngressDiscoverySettings) {
 			d.ProfileRules = []IngressProfileRule{{MatchLabels: map[string]string{"": "x"}, Profile: DefaultProfileName}}
-		}, "profileRules[0].matchLabels has an empty key"},
+		}, "profileRules[0].matchLabels: has an empty key"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -299,7 +299,7 @@ func TestSettingsValidateIncludesProfiles(t *testing.T) {
 	s.IngressDiscovery.Profiles = map[string]IngressHostTemplate{
 		"public-ratelimited": {Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}},
 	}
-	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "certificateRef is required") {
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "certificateRef: is required") {
 		t.Fatalf("Settings.Validate() = %v, want the profile's missing certificateRef", err)
 	}
 	s.IngressDiscovery.Profiles["public-ratelimited"] = IngressHostTemplate{
@@ -604,7 +604,7 @@ func TestTemplateTimeoutsUseTheProxyHostRules(t *testing.T) {
 		t.Fatal("the template must reject the timeouts a proxy host rejects")
 	}
 
-	const want = "timeouts.connectSeconds 3601 out of range (0-3600)"
+	const want = "timeouts.connectSeconds: 3601 is out of range (0-3600)"
 	if !strings.Contains(hostErr.Error(), want) || !strings.Contains(tmplErr.Error(), want) {
 		t.Fatalf("error shapes differ:\n host: %v\n tmpl: %v", hostErr, tmplErr)
 	}

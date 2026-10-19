@@ -282,7 +282,7 @@ func TestStreamHostRefusesRequestScopedAccessLists(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "lan"},
 				Rules:      []IPRule{{Action: ActionAllow, CIDR: "10.0.0.0/8", Paths: []string{"/health"}}},
 			},
-			wantErr: "path-scoped and/or source-backed rules",
+			wantErr: "accessLists: \"lan\" has path rules, which do not apply at L4",
 		},
 		{
 			name: "source-backed rule refused",
@@ -291,7 +291,7 @@ func TestStreamHostRefusesRequestScopedAccessLists(t *testing.T) {
 				Sources:    []AccessListSource{{Name: "up", URL: "https://example.com/i.txt"}},
 				Rules:      []IPRule{{Action: ActionAllow, Source: "up"}},
 			},
-			wantErr: "path-scoped and/or source-backed rules",
+			wantErr: "accessLists: \"lan\" has path rules, which do not apply at L4",
 		},
 		{
 			name: "a declared source alone is enough to refuse",
@@ -300,7 +300,7 @@ func TestStreamHostRefusesRequestScopedAccessLists(t *testing.T) {
 				Sources:    []AccessListSource{{Name: "up", URL: "https://example.com/i.txt"}},
 				Rules:      []IPRule{{Action: ActionAllow, CIDR: "10.0.0.0/8"}},
 			},
-			wantErr: "path-scoped and/or source-backed rules",
+			wantErr: "accessLists: \"lan\" has path rules, which do not apply at L4",
 		},
 	}
 	for _, tt := range tests {

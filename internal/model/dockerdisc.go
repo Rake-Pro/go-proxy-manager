@@ -308,16 +308,16 @@ func (d DockerDiscoverySettings) Validate() error {
 	if d.Host != "" {
 		u, err := url.Parse(d.Host)
 		if err != nil || u.Host == "" || (u.Scheme != "tcp" && u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("settings: dockerDiscovery.host must be an absolute tcp:// or https:// URL (e.g. tcp://socket-proxy:2375), got %q", d.Host)
+			return fmt.Errorf("dockerDiscovery.host: must be an absolute tcp:// or https:// URL (e.g. tcp://socket-proxy:2375), got %q", d.Host)
 		}
 		if u.Scheme != "https" && (d.TLSCert != "" || d.TLSKey != "") {
-			return fmt.Errorf("settings: dockerDiscovery.tlsCert/tlsKey need an https:// host; %q is plaintext", d.Host)
+			return fmt.Errorf("dockerDiscovery.tlsCert: tlsCert/tlsKey need an https:// host; %q is plaintext", d.Host)
 		}
 	} else if d.Socket != "" && !strings.HasPrefix(d.Socket, "/") {
-		return fmt.Errorf("settings: dockerDiscovery.socket must be an absolute path, got %q", d.Socket)
+		return fmt.Errorf("dockerDiscovery.socket: must be an absolute path, got %q", d.Socket)
 	}
 	if (d.TLSCert == "") != (d.TLSKey == "") {
-		return errors.New("settings: dockerDiscovery.tlsCert and dockerDiscovery.tlsKey must be set together")
+		return errors.New("dockerDiscovery.tlsCert: tlsCert and tlsKey must be set together")
 	}
 	for _, f := range []struct{ label, path string }{
 		{"tlsCert", d.TLSCert},
@@ -325,33 +325,33 @@ func (d DockerDiscoverySettings) Validate() error {
 		{"tlsCA", d.TLSCA},
 	} {
 		if f.path != "" && !strings.HasPrefix(f.path, "/") {
-			return fmt.Errorf("settings: dockerDiscovery.%s must be an absolute path, got %q", f.label, f.path)
+			return fmt.Errorf("dockerDiscovery.%s: must be an absolute path, got %q", f.label, f.path)
 		}
 	}
 	if d.PublishedHost != "" && !d.UsePublishedPorts {
-		return errors.New("settings: dockerDiscovery.publishedHost only applies with dockerDiscovery.usePublishedPorts: true")
+		return errors.New("dockerDiscovery.publishedHost: only applies with usePublishedPorts: true")
 	}
 	if d.PublishedHost != "" && strings.ContainsAny(d.PublishedHost, " /\r\n") {
-		return fmt.Errorf("settings: dockerDiscovery.publishedHost %q is not a bare host or IP address", d.PublishedHost)
+		return fmt.Errorf("dockerDiscovery.publishedHost: %q is not a bare host or IP address", d.PublishedHost)
 	}
 	if d.Network != "" && d.UsePublishedPorts {
-		return errors.New("settings: dockerDiscovery.network and dockerDiscovery.usePublishedPorts are mutually exclusive (one forwards to a container IP, the other to a host-published port)")
+		return errors.New("dockerDiscovery.network: network and usePublishedPorts are mutually exclusive (one forwards to a container IP, the other to a host-published port)")
 	}
 	if d.PollInterval != "" {
 		v, err := time.ParseDuration(d.PollInterval)
 		if err != nil {
-			return fmt.Errorf("settings: dockerDiscovery.pollInterval must be a Go duration (e.g. \"60s\", \"5m\"), got %q: %w", d.PollInterval, err)
+			return fmt.Errorf("dockerDiscovery.pollInterval: must be a Go duration (e.g. \"60s\", \"5m\"), got %q: %w", d.PollInterval, err)
 		}
 		if v < minimumDockerPollInterval {
-			return fmt.Errorf("settings: dockerDiscovery.pollInterval must be at least %s, got %q", minimumDockerPollInterval, d.PollInterval)
+			return fmt.Errorf("dockerDiscovery.pollInterval: must be at least %s, got %q", minimumDockerPollInterval, d.PollInterval)
 		}
 	}
 	if len(d.AllowedDomainSuffixes) == 0 {
-		return errors.New("settings: dockerDiscovery.allowedDomainSuffixes is required when discovery is enabled (it bounds which hostnames a container label can publish at the edge)")
+		return errors.New("dockerDiscovery.allowedDomainSuffixes: is required when discovery is enabled (it bounds which hostnames a container label can publish at the edge)")
 	}
 	for i, s := range d.AllowedDomainSuffixes {
 		if !IsHostname(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), ".")) {
-			return fmt.Errorf("settings: dockerDiscovery.allowedDomainSuffixes[%d] %q is not a valid domain suffix", i, s)
+			return fmt.Errorf("dockerDiscovery.allowedDomainSuffixes[%d]: %q is not a valid domain suffix", i, s)
 		}
 	}
 	// The default block and every named profile are held to IDENTICAL standards,
@@ -363,12 +363,12 @@ func (d DockerDiscoverySettings) Validate() error {
 	}
 	for _, name := range d.ProfileNames() {
 		if name == DefaultProfileName {
-			return fmt.Errorf("settings: dockerDiscovery.profiles[%q] is reserved for the default template block; pick another name", name)
+			return fmt.Errorf("dockerDiscovery.profiles: profile %q is reserved for the default template block; pick another name", name)
 		}
 		if err := ValidateName(name); err != nil {
-			return fmt.Errorf("settings: dockerDiscovery.profiles: %w", err)
+			return fmt.Errorf("dockerDiscovery.profiles: %w", err)
 		}
-		if err := d.Profiles[name].validateWith(fmt.Sprintf("profiles[%q]", name), false); err != nil {
+		if err := d.Profiles[name].validateWith("profiles."+name, false); err != nil {
 			return dockerSettingsErr(err)
 		}
 	}
@@ -376,7 +376,7 @@ func (d DockerDiscoverySettings) Validate() error {
 		return dockerSettingsErr(err)
 	}
 	for _, name := range d.ProfileNames() {
-		path := fmt.Sprintf("profiles[%q]", name)
+		path := "profiles." + name
 		if err := validateSuffixSubset(path, d.Profiles[name].AllowedDomainSuffixes, d.AllowedDomainSuffixes); err != nil {
 			return dockerSettingsErr(err)
 		}
@@ -392,7 +392,7 @@ func dockerSettingsErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(strings.Replace(err.Error(), "settings: ingressDiscovery.", "settings: dockerDiscovery.", 1))
+	return errors.New(strings.Replace(err.Error(), "ingressDiscovery.", "dockerDiscovery.", 1))
 }
 
 // ValidateRefs cross-checks every object the docker discovery block NAMES - the
@@ -435,20 +435,20 @@ func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
 
 	var errs []error
 	check := func(path string, t IngressHostTemplate) {
-		owner := "settings.dockerDiscovery." + path
-		checkRef(&errs, "docker discovery", owner, "certificate", t.TLS.CertificateRef, certs)
-		checkRef(&errs, "docker discovery", owner, "upstreamGroup", t.UpstreamGroupRef, ugs)
-		checkClientAuthRef(&errs, "docker discovery", owner, t.TLS, clientCAs, disabledClientCAs)
+		owner := "dockerDiscovery." + path
+		checkRef(&errs, "", owner, "tls.certificateRef", "certificate", t.TLS.CertificateRef, certs)
+		checkRef(&errs, "", owner, "upstreamGroupRef", "upstreamGroup", t.UpstreamGroupRef, ugs)
+		checkClientAuthRef(&errs, "", owner, t.TLS, clientCAs, disabledClientCAs)
 		for _, m := range t.Middlewares {
-			checkRef(&errs, "docker discovery", owner, "middleware", m, mws)
+			checkRef(&errs, "", owner, "middlewares", "middleware", m, mws)
 		}
 		for _, a := range t.AccessLists {
-			checkRef(&errs, "docker discovery", owner, "accessList", a, als)
+			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
 		}
 	}
 	check(DefaultProfileName, d.Template)
 	for _, name := range d.ProfileNames() {
-		check(fmt.Sprintf("profiles[%q]", name), d.Profiles[name])
+		check("profiles."+name, d.Profiles[name])
 	}
 	return errors.Join(errs...)
 }
@@ -472,6 +472,6 @@ func (d DockerDiscoverySettings) checkPrefixMigration(cfg Config) error {
 	if stale == 0 {
 		return nil
 	}
-	return fmt.Errorf("settings: ingressDiscovery.annotationPrefix %q would orphan %d container-derived proxy host(s) still labelled managed-by under a different prefix; "+
+	return fmt.Errorf("ingressDiscovery.annotationPrefix: %q would orphan %d container-derived proxy host(s) still labelled managed-by under a different prefix; "+
 		"re-label them first, or set ingressDiscovery.annotationPrefixMigrate: true to relabel them automatically in the next reconcile", d.Prefix(), stale)
 }

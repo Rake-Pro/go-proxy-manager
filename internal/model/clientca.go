@@ -103,16 +103,16 @@ func (c ClientCA) Validate() error {
 		return err
 	}
 	if len(c.CAPEM) == 0 {
-		return fmt.Errorf("client CA %q: caPEM is required", c.Name)
+		return fmt.Errorf("client CA %q: caPEM: is required", c.Name)
 	}
 	if c.CRLFile != "" && c.CRLPEM != "" {
-		return fmt.Errorf("client CA %q: set crlFile or crlPEM, not both", c.Name)
+		return fmt.Errorf("client CA %q: crlFile: set crlFile or crlPEM, not both", c.Name)
 	}
 	if err := confinedStorePath("crlFile", c.CRLFile); err != nil {
 		return fmt.Errorf("client CA %q: %w", c.Name, err)
 	}
 	if c.CAKeyFile != "" && !c.CAKeyPEM.IsEmpty() {
-		return fmt.Errorf("client CA %q: set caKeyFile or caKeyPEM, not both", c.Name)
+		return fmt.Errorf("client CA %q: caKeyFile: set caKeyFile or caKeyPEM, not both", c.Name)
 	}
 	if err := confinedStorePath("caKeyFile", c.CAKeyFile); err != nil {
 		return fmt.Errorf("client CA %q: %w", c.Name, err)
@@ -121,16 +121,16 @@ func (c ClientCA) Validate() error {
 		return err
 	}
 	if d := c.ExpiryWarningDays; d < 0 || d > MaxExpiryWarningDays {
-		return fmt.Errorf("client CA %q: expiryWarningDays must be between 0 (default %d) and %d, got %d",
+		return fmt.Errorf("client CA %q: expiryWarningDays: must be between 0 (default %d) and %d, got %d",
 			c.Name, DefaultExpiryWarningDays, MaxExpiryWarningDays, d)
 	}
 	switch c.CRLPolicy {
 	case "", CRLPolicyFailClosed, CRLPolicyFailOpen:
 	default:
-		return fmt.Errorf("client CA %q: crlPolicy must be %q or %q, got %q", c.Name, CRLPolicyFailClosed, CRLPolicyFailOpen, c.CRLPolicy)
+		return fmt.Errorf("client CA %q: crlPolicy: must be %q or %q, got %q", c.Name, CRLPolicyFailClosed, CRLPolicyFailOpen, c.CRLPolicy)
 	}
 	if c.CRLPolicy != "" && c.CRLFile == "" && c.CRLPEM == "" {
-		return fmt.Errorf("client CA %q: crlPolicy is set but no crlFile or crlPEM is configured", c.Name)
+		return fmt.Errorf("client CA %q: crlPolicy: is set but no crlFile or crlPEM is configured", c.Name)
 	}
 	return nil
 }
@@ -145,7 +145,7 @@ func confinedStorePath(field, p string) error {
 		return nil
 	}
 	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || strings.Contains(filepath.Clean(p), "..") {
-		return fmt.Errorf("%s %q must be relative to the cert store (no absolute or .. paths)", field, p)
+		return fmt.Errorf("%s: %q must be relative to the cert store (no absolute or .. paths)", field, p)
 	}
 	return nil
 }

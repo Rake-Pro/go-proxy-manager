@@ -50,14 +50,14 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "ghost", Mode: AuthModeOIDC}
 				})},
 			},
-			wantErr: `proxy host "app" references unknown identityProvider "ghost"`,
+			wantErr: `proxy host "app": auth.identityProvider: references unknown identityProvider "ghost"`,
 		},
 		{
 			name: "inline auth without a provider",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Auth = &AuthMiddleware{Mode: AuthModeOIDC}
 			})}},
-			wantErr: `proxy host "app": auth.identityProvider is required`,
+			wantErr: `proxy host "app": auth.identityProvider: is required`,
 		},
 		{
 			name: "inline auth with an unknown mode",
@@ -67,7 +67,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "sso", Mode: "magic"}
 				})},
 			},
-			wantErr: `proxy host "app": auth.mode must be oidc|forward-auth|auth-request|client-cert`,
+			wantErr: `proxy host "app": auth.mode: must be oidc|forward-auth|auth-request|client-cert`,
 		},
 		{
 			name: "inline auth allowFrom is refused in oidc mode",
@@ -77,7 +77,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "sso", Mode: AuthModeOIDC, AllowFrom: []string{"10.0.0.0/8"}}
 				})},
 			},
-			wantErr: `proxy host "app": auth.allowFrom is only supported in auth-request, client-cert and basic modes`,
+			wantErr: `proxy host "app": auth.allowFrom: is only supported in auth-request, client-cert and basic modes`,
 		},
 		{
 			name: "inline auth allowFrom is accepted in auth-request mode",
@@ -96,7 +96,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "authentik", Mode: AuthModeAuthRequest, AllowFrom: []string{"10.0.0.0/8", "nope"}}
 				})},
 			},
-			wantErr: `proxy host "app": auth.allowFrom has invalid CIDR/IP "nope"`,
+			wantErr: `proxy host "app": auth.allowFrom: has invalid CIDR/IP "nope"`,
 		},
 		{
 			// The mode defaults from the provider type, which only the whole
@@ -109,7 +109,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "sso", AllowFrom: []string{"10.0.0.0/8"}}
 				})},
 			},
-			wantErr: `proxy host "app": auth.allowFrom is only supported in auth-request and client-cert modes; auth.mode is unset`,
+			wantErr: `proxy host "app": auth.allowFrom: is only supported in auth-request and client-cert modes; auth.mode is unset`,
 		},
 		{
 			name: "inline client-cert auth needs no provider",
@@ -125,14 +125,14 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{Mode: AuthModeClientCert, IdentityProvider: "sso"}
 				})},
 			},
-			wantErr: `proxy host "app": auth.identityProvider is not used in client-cert mode`,
+			wantErr: `proxy host "app": auth.identityProvider: is not used in client-cert mode`,
 		},
 		{
 			name: "inline client-cert requiredRoles without a subject mapping",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Auth = &AuthMiddleware{Mode: AuthModeClientCert, RequiredRoles: []string{"admin"}}
 			})}},
-			wantErr: `proxy host "app": auth.requiredRoles in client-cert mode needs auth.clientCertRoles`,
+			wantErr: `proxy host "app": auth.requiredRoles: client-cert mode needs auth.clientCertRoles`,
 		},
 		{
 			name: "inline auth-request refuses requiredRoles",
@@ -142,7 +142,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "authentik", Mode: AuthModeAuthRequest, RequiredRoles: []string{"admin"}}
 				})},
 			},
-			wantErr: `proxy host "app": auth.requiredRoles is not supported in auth-request mode`,
+			wantErr: `proxy host "app": auth.requiredRoles: is not supported in auth-request mode`,
 		},
 		{
 			name: "inline clientCertRoles outside client-cert mode",
@@ -152,7 +152,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 					h.Auth = &AuthMiddleware{IdentityProvider: "sso", Mode: AuthModeOIDC, ClientCertRoles: map[string]string{"CN=ops": "admin"}}
 				})},
 			},
-			wantErr: `proxy host "app": auth.clientCertRoles is only used in client-cert mode`,
+			wantErr: `proxy host "app": auth.clientCertRoles: is only used in client-cert mode`,
 		},
 
 		{
@@ -172,35 +172,35 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{Burst: 5}
 			})}},
-			wantErr: `proxy host "app": rateLimit.requestsPerSecond must be > 0 (or set requests+window)`,
+			wantErr: `proxy host "app": rateLimit.requestsPerSecond: must be > 0 (or set requests+window)`,
 		},
 		{
 			name: "inline rateLimit with both forms",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, Requests: 100, Window: "1m"}
 			})}},
-			wantErr: `proxy host "app": rateLimit must set either requestsPerSecond or requests+window, not both`,
+			wantErr: `proxy host "app": rateLimit: must set either requestsPerSecond or requests+window, not both`,
 		},
 		{
 			name: "inline rateLimit with an unparseable window",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{Requests: 100, Window: "1 minute"}
 			})}},
-			wantErr: `proxy host "app": rateLimit.window must be a valid duration`,
+			wantErr: `proxy host "app": rateLimit.window: must be a valid duration`,
 		},
 		{
 			name: "inline rateLimit with an invalid allowFrom",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, AllowFrom: []string{"lan"}}
 			})}},
-			wantErr: `proxy host "app": rateLimit.allowFrom has invalid CIDR/IP "lan"`,
+			wantErr: `proxy host "app": rateLimit.allowFrom: has invalid CIDR/IP "lan"`,
 		},
 		{
 			name: "inline rateLimit with an invalid blockFor",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, BlockFor: "-1s"}
 			})}},
-			wantErr: `proxy host "app": rateLimit.blockFor must be > 0`,
+			wantErr: `proxy host "app": rateLimit.blockFor: must be > 0`,
 		},
 
 		{
@@ -220,21 +220,21 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Locations = []Location{{Path: "/admin", Auth: &AuthMiddleware{IdentityProvider: "ghost", Mode: AuthModeOIDC}}}
 			})}},
-			wantErr: `proxy host "app location /admin" references unknown identityProvider "ghost"`,
+			wantErr: `proxy host "app": locations: location "/admin": auth.identityProvider: references unknown identityProvider "ghost"`,
 		},
 		{
 			name: "location inline auth with a bad mode",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Locations = []Location{{Path: "/admin", Auth: &AuthMiddleware{IdentityProvider: "sso", Mode: "magic"}}}
 			})}},
-			wantErr: `proxy host "app" location "/admin": auth.mode must be`,
+			wantErr: `proxy host "app": locations: location "/admin": auth.mode: must be`,
 		},
 		{
 			name: "location inline rateLimit with neither form",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Locations = []Location{{Path: "/api", RateLimit: &RateLimitMiddleware{}}}
 			})}},
-			wantErr: `proxy host "app" location "/api": rateLimit.requestsPerSecond must be > 0`,
+			wantErr: `proxy host "app": locations: location "/api": rateLimit.requestsPerSecond: must be > 0`,
 		},
 
 		{

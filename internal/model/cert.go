@@ -127,53 +127,53 @@ func (c Certificate) Validate() error {
 		return err
 	}
 	if len(c.Domains) == 0 {
-		return fmt.Errorf("certificate %q: at least one domain is required", c.Name)
+		return fmt.Errorf("certificate %q: domains: at least one domain is required", c.Name)
 	}
 	switch c.Type {
 	case CertTypeACME:
 		if c.ACME == nil {
-			return fmt.Errorf("certificate %q: acme spec required for type acme", c.Name)
+			return fmt.Errorf("certificate %q: acme: spec required for type acme", c.Name)
 		}
 		if c.ACME.Email == "" {
-			return fmt.Errorf("certificate %q: acme.email is required", c.Name)
+			return fmt.Errorf("certificate %q: acme.email: is required", c.Name)
 		}
 		// Only ecdsa is actually issued (see internal/acme/order.go); catching an
 		// unsupported keyType here means a config write fails immediately instead
 		// of only surfacing at the next issue/renew attempt.
 		if kt := c.ACME.KeyType; kt != "" && kt != "ecdsa" {
-			return fmt.Errorf("certificate %q: acme.keyType %q is not supported (only ecdsa is issued)", c.Name, kt)
+			return fmt.Errorf("certificate %q: acme.keyType: %q is not supported (only ecdsa is issued)", c.Name, kt)
 		}
 		if ch := c.ACME.Challenge; ch != "" && ch != ChallengeDNS01 && ch != ChallengeHTTP01 {
-			return fmt.Errorf("certificate %q: acme.challenge must be %s or %s, got %q", c.Name, ChallengeDNS01, ChallengeHTTP01, ch)
+			return fmt.Errorf("certificate %q: acme.challenge: must be %s or %s, got %q", c.Name, ChallengeDNS01, ChallengeHTTP01, ch)
 		}
 		switch c.ACME.EffectiveChallenge() {
 		case ChallengeDNS01:
 			if c.ACME.DNSProvider == "" {
-				return fmt.Errorf("certificate %q: acme.dnsProvider is required for dns-01", c.Name)
+				return fmt.Errorf("certificate %q: acme.dnsProvider: is required for dns-01", c.Name)
 			}
 		case ChallengeHTTP01:
 			if c.ACME.DNSProvider != "" {
-				return fmt.Errorf("certificate %q: acme.dnsProvider is only valid with the dns-01 challenge", c.Name)
+				return fmt.Errorf("certificate %q: acme.dnsProvider: is only valid with the dns-01 challenge", c.Name)
 			}
 			// HTTP-01 validates a single name over port 80; a wildcard can only be
 			// proven by control of the zone, i.e. dns-01.
 			for _, d := range c.Domains {
 				if strings.HasPrefix(d, "*.") {
-					return fmt.Errorf("certificate %q: wildcard domain %q requires the dns-01 challenge", c.Name, d)
+					return fmt.Errorf("certificate %q: domains: wildcard domain %q requires the dns-01 challenge", c.Name, d)
 				}
 			}
 		}
 		if eab := c.ACME.EAB; eab != nil {
 			if strings.TrimSpace(eab.KID) == "" {
-				return fmt.Errorf("certificate %q: acme.eab.kid is required when eab is set", c.Name)
+				return fmt.Errorf("certificate %q: acme.eab.kid: is required when eab is set", c.Name)
 			}
 			if eab.HMACKey.IsEmpty() {
-				return fmt.Errorf("certificate %q: acme.eab.hmacKey is required when eab is set", c.Name)
+				return fmt.Errorf("certificate %q: acme.eab.hmacKey: is required when eab is set", c.Name)
 			}
 		}
 	case CertTypeCustom:
 		if c.Custom == nil || c.Custom.CertFile == "" || c.Custom.KeyFile == "" {
-			return fmt.Errorf("certificate %q: custom certFile and keyFile are required", c.Name)
+			return fmt.Errorf("certificate %q: custom: certFile and keyFile are required", c.Name)
 		}
 		// Confine custom cert files to the managed cert store: reject absolute
 		// paths and traversal so a config write cannot point the loader at an
@@ -182,11 +182,11 @@ func (c Certificate) Validate() error {
 		// Windows build would otherwise accept "/etc/shadow" or a "\"-rooted path.
 		for _, f := range []string{c.Custom.CertFile, c.Custom.KeyFile} {
 			if filepath.IsAbs(f) || strings.HasPrefix(f, "/") || strings.HasPrefix(f, `\`) || strings.Contains(filepath.Clean(f), "..") {
-				return fmt.Errorf("certificate %q: custom cert path %q must be relative to the cert store (no absolute or .. paths)", c.Name, f)
+				return fmt.Errorf("certificate %q: custom: cert path %q must be relative to the cert store (no absolute or .. paths)", c.Name, f)
 			}
 		}
 	default:
-		return fmt.Errorf("certificate %q: type must be custom or acme, got %q", c.Name, c.Type)
+		return fmt.Errorf("certificate %q: type: must be custom or acme, got %q", c.Name, c.Type)
 	}
 	return nil
 }
@@ -211,7 +211,7 @@ func (p DNSProvider) Validate() error {
 		return err
 	}
 	if p.Provider == "" {
-		return fmt.Errorf("dns provider %q: provider is required", p.Name)
+		return fmt.Errorf("dns provider %q: provider: is required", p.Name)
 	}
 	known := false
 	for _, k := range KnownDNSProviders {
@@ -221,7 +221,7 @@ func (p DNSProvider) Validate() error {
 		}
 	}
 	if !known {
-		return fmt.Errorf("dns provider %q: provider must be one of %s, got %q", p.Name, strings.Join(KnownDNSProviders, ", "), p.Provider)
+		return fmt.Errorf("dns provider %q: provider: must be one of %s, got %q", p.Name, strings.Join(KnownDNSProviders, ", "), p.Provider)
 	}
 	switch p.Provider {
 	case DNSProviderRFC2136:
@@ -230,7 +230,7 @@ func (p DNSProvider) Validate() error {
 		return p.validateACMEDNS()
 	default:
 		if p.Config["apiToken"].IsEmpty() {
-			return fmt.Errorf("dns provider %q: config.apiToken is required", p.Name)
+			return fmt.Errorf("dns provider %q: config.apiToken: is required", p.Name)
 		}
 	}
 	return nil
@@ -241,7 +241,7 @@ func (p DNSProvider) Validate() error {
 func (p DNSProvider) requireConfig(keys ...string) error {
 	for _, k := range keys {
 		if p.Config[k].IsEmpty() {
-			return fmt.Errorf("dns provider %q: config.%s is required for provider %s", p.Name, k, p.Provider)
+			return fmt.Errorf("dns provider %q: config.%s: is required for provider %s", p.Name, k, p.Provider)
 		}
 	}
 	return nil
@@ -256,25 +256,25 @@ func (p DNSProvider) validateRFC2136() error {
 	}
 	if alg := strings.ToLower(strings.TrimSpace(string(p.Config["tsigAlgorithm"]))); alg != "" {
 		if alg == "hmac-md5" || alg == "hmac-md5.sig-alg.reg.int" {
-			return fmt.Errorf("dns provider %q: config.tsigAlgorithm hmac-md5 is refused; regenerate the key with hmac-sha256", p.Name)
+			return fmt.Errorf("dns provider %q: config.tsigAlgorithm: hmac-md5 is refused; regenerate the key with hmac-sha256", p.Name)
 		}
 		if !slices.Contains(TSIGAlgorithms, alg) {
-			return fmt.Errorf("dns provider %q: config.tsigAlgorithm must be one of %s, got %q", p.Name, strings.Join(TSIGAlgorithms, ", "), alg)
+			return fmt.Errorf("dns provider %q: config.tsigAlgorithm: must be one of %s, got %q", p.Name, strings.Join(TSIGAlgorithms, ", "), alg)
 		}
 	}
 	if t := strings.ToLower(strings.TrimSpace(string(p.Config["transport"]))); t != "" && t != "tcp" && t != "udp" {
-		return fmt.Errorf("dns provider %q: config.transport must be tcp or udp, got %q", p.Name, t)
+		return fmt.Errorf("dns provider %q: config.transport: must be tcp or udp, got %q", p.Name, t)
 	}
 	if ttl := strings.TrimSpace(string(p.Config["ttl"])); ttl != "" {
 		n, err := strconv.Atoi(ttl)
 		if err != nil || n < 1 || n > 86400 {
-			return fmt.Errorf("dns provider %q: config.ttl must be a whole number of seconds between 1 and 86400, got %q", p.Name, ttl)
+			return fmt.Errorf("dns provider %q: config.ttl: must be a whole number of seconds between 1 and 86400, got %q", p.Name, ttl)
 		}
 	}
 	if to := strings.TrimSpace(string(p.Config["timeout"])); to != "" {
 		d, err := time.ParseDuration(to)
 		if err != nil || d <= 0 {
-			return fmt.Errorf("dns provider %q: config.timeout must be a positive Go duration such as 30s, got %q", p.Name, to)
+			return fmt.Errorf("dns provider %q: config.timeout: must be a positive Go duration such as 30s, got %q", p.Name, to)
 		}
 	}
 	return nil
@@ -321,7 +321,7 @@ func IsTruthyConfig(v string) bool {
 func ValidateOutboundBaseURL(field, raw string, allowLocal bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("%s must be an http or https URL, got %q", field, raw)
+		return fmt.Errorf("%s: must be an http or https URL, got %q", field, raw)
 	}
 	host := u.Hostname()
 	ip := net.ParseIP(host)
@@ -330,11 +330,11 @@ func ValidateOutboundBaseURL(field, raw string, allowLocal bool) error {
 	}
 	switch {
 	case ip.IsLoopback():
-		return fmt.Errorf("%s points at the loopback address %s; set config.allowInsecureLocal: \"true\" if the service really runs beside gpm", field, ip)
+		return fmt.Errorf("%s: points at the loopback address %s; set config.allowInsecureLocal: \"true\" if the service really runs beside gpm", field, ip)
 	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
-		return fmt.Errorf("%s points at the link-local address %s, which is the cloud metadata range and never a DNS provider", field, ip)
+		return fmt.Errorf("%s: points at the link-local address %s, which is the cloud metadata range and never a DNS provider", field, ip)
 	case ip.IsUnspecified() || ip.IsMulticast():
-		return fmt.Errorf("%s points at %s, which is not a destination gpm can send credentials to", field, ip)
+		return fmt.Errorf("%s: points at %s, which is not a destination gpm can send credentials to", field, ip)
 	}
 	return nil
 }

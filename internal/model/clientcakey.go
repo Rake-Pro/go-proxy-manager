@@ -96,7 +96,7 @@ func (c ClientCA) validateInlineSigningKey() error {
 		return fmt.Errorf("client CA %q: caKeyPEM: %w", c.Name, err)
 	}
 	if _, err := matchIssuer([]byte(caPEM), signer); err != nil {
-		return fmt.Errorf("client CA %q: %w", c.Name, err)
+		return fmt.Errorf("client CA %q: caKeyPEM: %w", c.Name, err)
 	}
 	return nil
 }

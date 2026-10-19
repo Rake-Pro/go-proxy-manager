@@ -22,7 +22,7 @@ func TestClientCAValidate(t *testing.T) {
 		{
 			name:    "empty caPEM rejected",
 			ca:      ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}},
-			wantErr: "caPEM is required",
+			wantErr: "caPEM: is required",
 		},
 		{
 			name:    "bad name rejected",
@@ -98,7 +98,7 @@ func TestClientAuthValidation(t *testing.T) {
 				h.TLS.ForceSSL = true
 				h.TLS.ClientAuth = &ClientAuth{Mode: "require"}
 			})}},
-			wantErr: "caRef is required",
+			wantErr: "caRef: is required",
 		},
 		{
 			name: "disabled clientCA ref rejected",
@@ -109,7 +109,7 @@ func TestClientAuthValidation(t *testing.T) {
 					h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "require"}
 				})},
 			},
-			wantErr: `references clientCA "corp", which is disabled`,
+			wantErr: `tls.clientAuth.caRef: clientCA "corp" is disabled`,
 		},
 		{
 			name: "bad mode rejected",
@@ -120,7 +120,7 @@ func TestClientAuthValidation(t *testing.T) {
 					h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "sometimes"}
 				})},
 			},
-			wantErr: `clientAuth.mode must be "require" or "optional"`,
+			wantErr: `clientAuth.mode: must be "require" or "optional"`,
 		},
 	}
 	for _, tc := range tests {
@@ -155,7 +155,7 @@ func TestClientCARevocationValidation(t *testing.T) {
 		{"both sources", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPEM: "p"}, "not both"},
 		{"absolute crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "/etc/shadow"}, "must be relative to the cert store"},
 		{"traversal crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "../../etc/shadow"}, "must be relative to the cert store"},
-		{"unknown policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: "maybe"}, "crlPolicy must be"},
+		{"unknown policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: "maybe"}, "crlPolicy: must be"},
 		{"policy without a source", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLPolicy: CRLPolicyFailOpen}, "no crlFile or crlPEM"},
 	}
 	for _, tc := range tests {
@@ -230,7 +230,7 @@ func TestClientCertAuthModeValidation(t *testing.T) {
 			"needs auth.clientCertRoles"},
 		{"mapping in another mode", mw(AuthMiddleware{Mode: AuthModeForwardAuth, IdentityProvider: "authentik",
 			ClientCertRoles: map[string]string{"ops": "admin"}}), "only used in client-cert mode"},
-		{"no provider in another mode", mw(AuthMiddleware{Mode: AuthModeOIDC}), "auth.identityProvider is required"},
+		{"no provider in another mode", mw(AuthMiddleware{Mode: AuthModeOIDC}), "auth.identityProvider: is required"},
 		// allowFrom is the LAN-bypass exemption. It is honoured in client-cert
 		// mode (certless clients on those networks skip the certificate
 		// requirement) and in auth-request mode, and refused where the gate has

@@ -33,7 +33,7 @@ func TestUpstreamPathValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := upstreamWith(tc.path, "").validate()
+			err := upstreamWith(tc.path, "").validate("upstream")
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("validate(%q) = %v, want nil", tc.path, err)
@@ -67,7 +67,7 @@ func TestUpstreamHostHeaderValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := upstreamWith("", tc.value).validate()
+			err := upstreamWith("", tc.value).validate("upstream")
 			if tc.wantErr != (err != nil) {
 				t.Fatalf("validate(hostHeader=%q) = %v, wantErr %v", tc.value, err, tc.wantErr)
 			}
@@ -111,7 +111,7 @@ func TestRewriteMiddlewareValidation(t *testing.T) {
 		{
 			name:    "prefix no-op is refused",
 			spec:    RewriteMiddleware{PrefixRules: []RewriteRule{{From: "/a", To: "/a"}}},
-			wantErr: "prefixRules[0] rewrites",
+			wantErr: "prefixRules[0]: rewrites",
 		},
 		{
 			name: "the failing rule index is reported",
