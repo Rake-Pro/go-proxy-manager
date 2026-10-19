@@ -78,7 +78,7 @@ func TestDeleteGoesThroughConfirmModal(t *testing.T) {
 		"title: `Delete ${kind} ${name}?`",
 		"confirmLabel: `Delete ${kind}`",
 		"const DELETE_UNDO = 'Recorded as a commit; History can undo it.';",
-		"showSaveError(e, `Could not delete ${kind}`)",
+		"showSaveError(e, `Could not delete ${name}`)",
 		"deleteObject('hosts', 'proxy host', h.name,",
 		"deleteObject('certs', 'certificate', ct.name,",
 		"deleteObject(section, meta.singular, origName,",
@@ -96,5 +96,40 @@ func TestDeleteGoesThroughConfirmModal(t *testing.T) {
 	}
 	if strings.Contains(js, "gs-del") {
 		t.Error("the card lists carry a Delete button again (gs-del)")
+	}
+}
+
+// The wizard batch: the name follows the first domain until it is typed in, a
+// declined navigation prompt puts the wizard's own page back, the setup wizard
+// settles unsaved edits first and hands off to the host wizard only on an
+// instance with no proxy host and only once that page has rendered, a write
+// without a commit says "No changes", and one rule per field is shared with
+// the editors.
+func TestWizardBatchMarkers(t *testing.T) {
+	js := loadAppJS(t)
+	for _, want := range []string{
+		`data-auto="${d.nameTouched ? '0' : '1'}"`,
+		"if (location.hash !== openHash) { restoringHash = true; location.hash = openHash; }",
+		"Leaving this page throws the steps away.",
+		"The setup can end on the Proxy Hosts page, which discards them.",
+		"if (r && firstHost && (await hostCount()) === 0) {",
+		"const rendered = nextRouteRendered('#/hosts');",
+		"window.dispatchEvent(new CustomEvent('gpm:routed'",
+		"toast('No changes', ",
+		`${isReadOnly() ? '' : '<button type="button" id="setupBtn">Setup wizard</button>'}`,
+		`<div class="hint warn" id="su-tp-warn"`,
+		"showInvalid('HSTS needs Force SSL'",
+		"filter((l) => !/^(createdAt|updatedAt):/.test(l))",
+		"function plural(n, one, many)",
+		"function historyText(msg)",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing wizard/vocabulary marker %q", want)
+		}
+	}
+	for _, gone := range []string{"Trusting every address lets any visitor set their own client address.", "'Create host'", ">Log out<", "revision.", "(s)</span>"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still contains %q", gone)
+		}
 	}
 }

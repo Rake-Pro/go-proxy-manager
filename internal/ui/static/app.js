@@ -122,6 +122,32 @@ const KIND_PLURAL = {
   APIToken: 'api-tokens',
 };
 
+// The UI singular for each Go kind, so History and its dialogs speak the
+// words the rest of the UI uses ("proxy host", never "ProxyHost").
+const KIND_SINGULAR = {
+  ProxyHost: 'proxy host', RedirectHost: 'redirect', StreamHost: 'stream',
+  ParkedHost: 'parked host', Certificate: 'certificate', ClientCA: 'client CA',
+  DNSProvider: 'DNS provider', IdentityProvider: 'identity provider',
+  UpstreamGroup: 'upstream group', AccessList: 'access list', Middleware: 'middleware',
+  APIToken: 'API token',
+};
+function kindSingular(kind) { return KIND_SINGULAR[kind] || String(kind || '').toLowerCase(); }
+function capFirst(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+// historyText renders a commit message in UI words: `ProxyHost "notes": update`
+// reads "Proxy host notes updated". A message it does not recognise is shown
+// as written; the raw message always stays in the entry's title.
+function historyText(msg) {
+  const m = /^(\w+) "(.+)": (update|delete)$/.exec(msg || '');
+  if (m && KIND_SINGULAR[m[1]]) return `${capFirst(KIND_SINGULAR[m[1]])} ${m[2]} ${m[3] === 'update' ? 'updated' : 'deleted'}`;
+  const r = /^Revert (\w+)\/(.+) to (\w+)$/.exec(msg || '');
+  if (r && KIND_SINGULAR[r[1]]) return `${capFirst(KIND_SINGULAR[r[1]])} ${r[2]} reverted to ${shortSha(r[3])}`;
+  const c = /^Revert config to (\w+)$/.exec(msg || '');
+  if (c) return `Config reverted to ${shortSha(c[1])}`;
+  if (msg === 'Settings: update') return 'Settings updated';
+  if (msg === 'Restore configuration from archive') return 'Config restored from archive';
+  return msg || '(no message)';
+}
+
 // parseObjectCommit recognises a single-object update commit (e.g.
 // `ProxyHost "app": update`) and returns its kind/name/plural so the history
 // view can offer a scoped revert. Non-object commits (import, restore, revert,
@@ -141,6 +167,9 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function shortSha(s) { return (s || '').slice(0, 7); }
+// One helper for every count shown with a noun: plural(1, 'tag', 'tags') is
+// "1 tag", plural(2, 'tag', 'tags') is "2 tags".
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
 function fmtTime(s) {
   const d = new Date(s);
   if (isNaN(d.getTime())) return s || '';
@@ -258,7 +287,7 @@ function domainZone(d) {
 // effective default is rather than appending a meaningless "- ".
 const ENUM_LABELS = {
   middlewareType: {
-    'auth': 'Authentication',
+    'auth': 'Sign-in (authentication)',
     'headers': 'Headers',
     'guard': 'Guard (block matching requests)',
     'rate-limit': 'Rate limit',
@@ -483,13 +512,19 @@ function toast(title, msg, type, opts) {
   }, type === 'err' ? 7000 : 4500);
 }
 // The one commit toast: "Added" after a create, "Saved" after an edit,
-// "Deleted" after a delete, each with the commit when there is one.
+// "Deleted" after a delete, each with the commit. The server sends no commit
+// when the write changed nothing, so a save without one says "No changes"
+// rather than claiming a commit.
 function toastSaved(commit, title) {
   const sha = shortSha(commit);
-  toast(title || 'Saved', sha ? `committed <span class="sha">${esc(sha)}</span>` : 'changes committed to git', 'ok', { html: true });
+  if (sha) { toast(title || 'Saved', `committed <span class="sha">${esc(sha)}</span>`, 'ok', { html: true }); return; }
+  if (!title || title === 'Saved') { toast('No changes', 'The stored config already matches; nothing was committed.', 'ok'); return; }
+  toast(title, '', 'ok');
 }
-function toastErr(e) {
-  toast('Something went wrong', e && e.message ? e.message : String(e), 'err');
+// A failure toast is titled with the action that failed ("Could not delete
+// notes"); the server's message is the body.
+function toastErr(e, title) {
+  toast(title || 'Something went wrong', e && e.message ? e.message : String(e), 'err');
 }
 
 // A toast that stays put and is rewritten as work proceeds, for the bulk
@@ -599,7 +634,7 @@ function invalidTarget(t) {
 // at the top of every save handler so a stale failure never outlives its cause.
 function showSaveError(e, title, field) {
   const c = $('#content');
-  if (!c) { toastErr(e); return null; }
+  if (!c) { toastErr(e, title); return null; }
   // The banner replaces the previous one; a row this attempt just marked
   // (markRowError) keeps its mark - the save handler cleared stale ones first.
   clearEditorBanner();
@@ -1130,7 +1165,8 @@ async function loadTopbar() {
   ]);
   const v = vR && vR.data;
   state.version = v;
-  if (v) verStr = `${v.version ? 'Version ' + v.version : ''}${v.commit ? ' (' + shortSha(v.commit) + ')' : ''}`.trim();
+  // A build without a commit reports a placeholder ("none"); only a real hash is shown.
+  if (v) verStr = `${v.version ? 'Version ' + v.version : ''}${/^[0-9a-f]{7,}$/i.test(v.commit || '') ? ' (' + shortSha(v.commit) + ')' : ''}`.trim();
 
   const h = hR && hR.data;
   if (Array.isArray(h) && h.length) { state.headSha = h[0].hash; cfgSha = shortSha(h[0].hash); }
@@ -1168,9 +1204,9 @@ async function loadTopbar() {
     <div class="m-head"><b>${esc(name || 'Not signed in')}</b>${who ? `<span>${who}</span>` : ''}${state.instance ? `<span class="mono" title="This instance">${esc(state.instance)}</span>` : ''}</div>
     <a href="#/tokens">API tokens</a>
     <a href="#/history">History</a>
-    ${isRoleReadOnly() ? '' : '<button type="button" id="setupBtn">Setup wizard</button>'}
+    ${isReadOnly() ? '' : '<button type="button" id="setupBtn">Setup wizard</button>'}
     <div class="m-sep" role="separator"></div>
-    <button type="button" id="logoutBtn">Log out</button>`;
+    <button type="button" id="logoutBtn">Sign out</button>`;
   $('#logoutBtn').addEventListener('click', logout);
   const sb = $('#setupBtn');
   if (sb) sb.addEventListener('click', () => { setUserMenu(false); openSetupWizard(); });
@@ -1329,7 +1365,7 @@ function applyReadOnlyGating(container) {
   if (isRoleReadOnly()) {
     const banner = document.createElement('div');
     banner.className = 'ro-banner';
-    banner.innerHTML = '<b>Read-only access.</b> Your role is "user": you can view everything and change nothing.';
+    banner.innerHTML = '<b>Read-only access.</b> Your role can view everything and change nothing.';
     container.prepend(banner);
   }
 }
@@ -1344,7 +1380,7 @@ function applyNoAdminLoginBanner(container) {
   banner.className = 'ro-banner warn';
   banner.innerHTML = '<b>No administrator login is configured.</b>'
     + '<ul><li>Set <span class="mono">GPM_LOCAL_ADMIN_USER</span> and <span class="mono">GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE</span> on the container, then restart it.</li>'
-    + '<li>Or add an <span class="mono">oidc</span> identity provider and list its name under <span class="mono">adminAuth.providers</span> in <a href="#/settings/general">Settings</a>.</li></ul>'
+    + '<li>Or add an <span class="mono">oidc</span> identity provider and tick it under <a href="#/settings/general">Admin sign-in &gt; Single sign-on providers</a> <span class="mono muted">(adminAuth.providers)</span>.</li></ul>'
     + '<pre class="mono">gpm hashpw \'your-password\' &gt; /run/secrets/gpm_admin_hash</pre>';
   container.prepend(banner);
 }
@@ -1363,7 +1399,7 @@ function applyInsecureCookieBanner(container) {
   banner.className = 'ro-banner warn';
   banner.innerHTML = '<b>This admin session cookie is sent without the Secure flag.</b> '
     + 'It travels over plain HTTP from a public address, so it can be read in transit. '
-    + 'Serve the panel over HTTPS, or set <a href="#/settings/general">External base URL</a> to an '
+    + 'Serve the panel over HTTPS, or set <a href="#/settings/general">Public URL of this panel</a> to an '
     + '<span class="mono">https://</span> URL, and sign in again. '
     + `<a href="${docHref('operations/hardening.md#admin-session-cookie')}" target="_blank" rel="noopener">Learn more</a>.`;
   container.prepend(banner);
@@ -1396,7 +1432,7 @@ function emptyState(title, sub, btnLabel, btnHref) {
   </div>`;
 }
 function inlineError(msg) {
-  return `<div class="inline-error"><b>Could not load this view.</b><br/>${esc(msg)}</div>`;
+  return `<div class="inline-error"><b>Could not load this view. Reload the page.</b><br/>${esc(msg)}</div>`;
 }
 // The title band above the content belongs to the shell; every view fills it
 // (title, one summary line, an optional breadcrumb) instead of rendering a
@@ -1805,7 +1841,7 @@ function upstreamPathError(p) {
 function deliveryChipHtml(st, disabled) {
   const pre = disabled ? 'Disabled - ' : '';
   if (!st || !st.lastAttempt) {
-    return `<span class="chip" title="This target has not fired since gpm started.">${esc(pre)}Never delivered</span>`;
+    return `<span class="chip" title="This target has not fired since gpm started.">${esc(pre)}Never</span>`;
   }
   const when = relTime(st.lastAttempt);
   const tip = [st.error || '', fmtTime(st.lastAttempt)].filter(Boolean).join(' - ');
@@ -1834,7 +1870,7 @@ function makeBasicUserRows(wrap, users) {
     div._new = !existing;
     div.innerHTML = `<input class="field mono bu-user" data-hint="middleware.auth.basic.users.username" style="flex:1 1 130px" value="${esc(u.username || '')}" placeholder="username" aria-label="Username" />
       <input class="field mono bu-pw" data-hint="middleware.auth.basic.users.password" type="password" autocomplete="new-password" style="flex:2 1 170px" placeholder="${existing ? 'Unchanged' : 'Set a password'}" aria-label="Password" />
-      ${existing ? '<span class="chip ok" title="A password is set for this user. Leave the field blank to keep it.">set</span>' : ''}
+      ${existing ? '<span class="chip ok" title="A password is set for this user. Leave the field blank to keep it.">Set</span>' : ''}
       <button class="icon-btn bu-del" type="button" aria-label="Remove user">${ICON.x}</button>`;
     div.querySelector('.bu-del').addEventListener('click', () => { div.remove(); sync(); });
     wrap.appendChild(div);
@@ -1920,7 +1956,7 @@ function authBlockHtml(p, auth, idps, opts) {
     <div class="field-group" id="${p}-certroles-wrap"><label>Certificate subject -&gt; role</label>
       <div id="${p}-certroles" data-hint="middleware.auth.clientCertRoles"></div>
       <button class="btn ghost sm" id="${p}-certroles-add" type="button" style="margin-top:6px">${ICON.plus}Add</button>
-      <div class="hint">Key: the certificate subject (<span class="mono">CN=ops,O=Corp</span>) or its bare common name. Leave empty to admit any verified certificate.</div>
+      <div class="hint">Key: the certificate subject (<span class="mono">CN=ops,O=Corp</span>) or its bare common name. Value: the role.</div>
     </div>
     <div class="field-group" id="${p}-basic-wrap">
       <p class="section-label" style="margin-top:4px">Credentials</p>
@@ -1938,7 +1974,7 @@ const AUTH_MODE_HINTS = {
   '': 'The identity provider\'s own type decides how sign-in happens.',
   'oidc': 'gpm redirects to the provider and keeps the session cookie itself.',
   'forward-auth': 'Identity is read from headers asserted by a trusted proxy in front of gpm.',
-  'auth-request': 'Each request is authorized by a subrequest to an external outpost, which does the authorization too.',
+  'auth-request': 'The external outpost decides allow or deny for every request.',
   'client-cert': 'The TLS handshake is the identity source. Pair with TLS &gt; Client certificates (mTLS) in optional mode so certless clients still reach this gate.',
   'basic': 'Checks a username and password against the credentials below. No identity provider is involved.',
 };
@@ -2151,7 +2187,7 @@ function authFoldSummary(auth, loc) {
   const parts = [];
   if (auth.mode) parts.push(enumLabel('authMode', auth.mode).split(' - ')[0]);
   if (auth.identityProvider) parts.push('via ' + auth.identityProvider);
-  if (arr(auth.requiredRoles).length) parts.push(arr(auth.requiredRoles).length + ' required role(s)');
+  if (arr(auth.requiredRoles).length) parts.push(plural(arr(auth.requiredRoles).length, 'required role', 'required roles'));
   return parts.length ? parts.join(', ') : 'on';
 }
 function rateFoldSummary(rl) {
@@ -2173,21 +2209,21 @@ function upstreamExtraHtml(p, up) {
     <div class="inline-fields">
       <div class="field-group"><label>Base path</label>
         <input class="field mono" id="${p}-uppath" data-hint="proxyHost.upstream.path" value="${esc(up.path || '')}" placeholder="/api" />
-        <div class="hint">Prefixed to every request sent to this backend: with <span class="mono">/api</span>, a request for <span class="mono">/v1/x</span> arrives as <span class="mono">/api/v1/x</span>. Leave empty to forward the path unchanged.</div>
+        <div class="hint">With <span class="mono">/api</span>, a request for <span class="mono">/v1/x</span> arrives as <span class="mono">/api/v1/x</span>.</div>
       </div>
       <div class="field-group"><label>Host header</label>
         <select class="field mono" id="${p}-uphh" data-hint="proxyHost.upstream.hostHeader">${enumOptions('hostHeader', ['', 'upstream', 'custom'], preset)}</select>
         <div class="hint" id="${p}-uphh-hint"></div>
       </div>
       <div class="field-group" id="${p}-uphh-custom-wrap"${preset === 'custom' ? '' : ' hidden'}><label>Custom Host header</label>
-        <input class="field mono" id="${p}-uphh-custom" data-hint="proxyHost.upstream.hostHeaderCustom" value="${esc(preset === 'custom' ? hh : '')}" placeholder="backend.example.com" />
+        <input class="field mono" id="${p}-uphh-custom" data-hint="proxyHost.upstream.hostHeaderCustom" value="${esc(preset === 'custom' ? hh : '')}" placeholder="app.internal.example.com" />
       </div>
     </div>`;
 }
 const HOSTHEADER_HINTS = {
-  '': 'The backend sees the hostname the client asked for. This is the default and suits almost every backend.',
-  'upstream': 'The backend sees its own address (host:port). Use it for a backend that keys its virtual host off its own address.',
-  'custom': 'The backend sees exactly this hostname. Must be a hostname, optionally with a port.',
+  '': 'The upstream sees the hostname the client asked for. This is the default and suits almost every app.',
+  'upstream': 'The upstream sees its own address (host:port). Use it for an app that keys its virtual host off its own address.',
+  'custom': 'The upstream sees exactly this hostname. Must be a hostname, optionally with a port.',
 };
 function wireUpstreamExtra(p) {
   const sel = $('#' + p + '-uphh');
@@ -2233,12 +2269,12 @@ function wireUpstreamExtra(p) {
 // with a time-of-day component. The absolute date, if a caller wants it, is a
 // separate plain-text element next to the chip (see certExpiryCellHtml).
 function certExpiryLabel(state, days) {
-  if (state === 'pending') return 'pending';
-  if (state === 'error') return 'error';
+  if (state === 'pending') return 'Pending';
+  if (state === 'error') return 'Error';
   if (days == null) return '';
-  if (days >= 0) return `in ${days} day${days === 1 ? '' : 's'}`;
+  if (days >= 0) return `In ${plural(days, 'day', 'days')}`;
   const ago = -days;
-  return `expired ${ago} day${ago === 1 ? '' : 's'} ago`;
+  return `Expired ${plural(ago, 'day', 'days')} ago`;
 }
 // valid/pending render as a small coloured dot plus text (no border or fill),
 // so a healthy or not-yet-issued certificate stays quiet; only expiring,
@@ -2257,7 +2293,7 @@ function certStateChip(ct) {
   if (state === 'error' || state === 'pending') {
     if (ct.lastError) titleBits.push(ct.lastError);
   } else if (days != null) {
-    titleBits.push(days >= 0 ? `${days} days remaining` : `Expired ${-days} days ago`);
+    titleBits.push(days >= 0 ? `${plural(days, 'day', 'days')} remaining` : `Expired ${plural(-days, 'day', 'days')} ago`);
   }
   if (ct.notAfter) titleBits.push(fmtTime(ct.notAfter));
   const title = titleBits.join('; ');
@@ -2270,13 +2306,14 @@ function certStateChip(ct) {
 // amber, with "expires in N days". Expired or failed: red. Not issued yet:
 // amber. Nothing covers the domain: amber "no certificate".
 function certCoverHtml(ct, domain) {
-  if (!ct) return `<span class="chip warn cert-cover" title="${esc(domain ? 'No certificate covers ' + domain : 'No domain')}">no certificate</span>`;
+  if (!ct) return `<span class="chip warn cert-cover" title="${esc(domain ? 'No certificate covers ' + domain : 'No domain')}">No certificate</span>`;
   const st = ct.state || '';
   const when = ct.notAfter ? ', expires ' + fmtDate(ct.notAfter) : '';
   if (st === 'expiring' || st === 'expired' || st === 'error' || st === 'pending') {
     const cls = (st === 'expiring' || st === 'pending') ? 'warn' : 'err';
     const days = ct.daysRemaining;
-    let label = certExpiryLabel(st, days);
+    // The label follows the certificate's name inside the chip, so it stays lowercase.
+    let label = certExpiryLabel(st, days).toLowerCase();
     if (st === 'expiring') label = days != null && days >= 0 ? 'expires ' + label : 'expiring';
     const title = `Certificate ${ct.name}: ${label}${when}${ct.lastError ? '; ' + ct.lastError : ''}`;
     return `<span class="chip ${cls} cert-cover" title="${esc(title)}"><span class="dot ${cls}"></span><span class="trunc">${esc(ct.name)}</span>${esc(label)}</span>`;
@@ -2312,7 +2349,7 @@ async function renewCertificate(name) {
     if (e && e.status === 409) {
       toast('Renewal already running', 'Another certificate order is already in progress on this instance. Wait for it to finish and try again.', 'err');
     } else {
-      toastErr(e);
+      toastErr(e, `Could not renew ${name}`);
     }
     return false;
   }
@@ -2406,7 +2443,7 @@ async function cloneFlow(section, obj) {
       validate: (v) => {
         if (!HOST_NAME_RE.test(v)) return 'Lowercase letters, digits, dots, - or _, starting and ending with a letter or digit.';
         if (v === origName) return 'The copy needs a different name.';
-        if (names && names.indexOf(v) !== -1) return `A ${singular} named ${v} already exists.`;
+        if (names && names.indexOf(v) !== -1) return `${/^[aeiou]/i.test(singular) ? 'An' : 'A'} ${singular} named "${v}" already exists.`;
         return '';
       },
     },
@@ -2520,10 +2557,12 @@ async function route() {
     armDirtyTracking(c);
     decorateHints(c);
     if (hintObserver) { hintObserver.disconnect(); hintObserver.observe(c, { childList: true, subtree: true }); }
+    window.dispatchEvent(new CustomEvent('gpm:routed', { detail: { hash: location.hash, ok: true } }));
   } catch (e) {
     if (e && e.message === 'Unauthorized') return;
     if (seq !== routeSeq) return;
     c.innerHTML = inlineError(e && e.message ? e.message : String(e));
+    window.dispatchEvent(new CustomEvent('gpm:routed', { detail: { hash: location.hash, ok: false } }));
   }
 }
 function setActiveNav(section) {
@@ -2648,7 +2687,7 @@ function makeEventChips(container, selected) {
 // so rather than naming only the card it sits in.
 function intSaveBar() {
   return `<div class="panel save-bar int-save-bar">
-    <div class="save-note">${ICON.commit}Saves every card on this page as one revision.</div>
+    <div class="save-note">${ICON.commit}Saves every card on this page as one commit.</div>
     <div style="display:flex;gap:10px"><button class="btn primary int-save" type="button">Save integrations</button></div>
   </div>`;
 }
@@ -2661,10 +2700,10 @@ function discoveryCounters(st) {
   const n = (k) => (st[k] || 0);
   // A zero count stays a plain chip: six coloured pills on every quiet run
   // drew the eye to nothing.
-  const c = (k, cls) => `<span class="chip${n(k) ? ' ' + cls : ''}">${k} ${n(k)}</span>`;
+  const c = (k, cls) => `<span class="chip${n(k) ? ' ' + cls : ''}">${n(k)} ${k}</span>`;
   return `<div class="chip-row" style="margin:6px 0">
-    <span class="chip">discovered ${n('discovered')}</span>
-    <span class="chip">managed ${n('managed')}</span>
+    <span class="chip">${n('discovered')} discovered</span>
+    <span class="chip">${n('managed')} managed</span>
     ${c('created', 'ok')}
     ${c('updated', 'cyan')}
     ${c('deleted', 'err')}
@@ -2689,8 +2728,8 @@ function discoveryRunLine(st) {
   const stale = st.lastSuccess && st.lastRun && new Date(st.lastSuccess) < new Date(st.lastRun);
   const tip = 'A failed run freezes the managed hosts; it never deletes them.';
   return `<div class="chip-row"${stale ? ` title="${esc(tip)}"` : ''}>
-    <span class="chip${stale ? ' warn' : ''}">Last run ${esc(st.lastRun ? relTime(st.lastRun) : 'never')}</span>
-    <span class="chip${stale ? ' warn' : ''}">Last success ${esc(st.lastSuccess ? relTime(st.lastSuccess) : 'never')}</span>
+    <span class="chip${stale ? ' warn' : ''}">Last run: ${esc(st.lastRun ? relTime(st.lastRun) : 'Never')}</span>
+    <span class="chip${stale ? ' warn' : ''}">Last success: ${esc(st.lastSuccess ? relTime(st.lastSuccess) : 'Never')}</span>
   </div>`;
 }
 
@@ -2725,17 +2764,17 @@ async function viewIntegrations(c) {
   const resolvedPrefix = idc.annotationPrefix || 'gpm.rake.pro';
 
   c.innerHTML = viewHead('Integrations',
-    'Systems gpm talks to on your behalf: DNS zones it publishes into, orchestrators it derives hosts from, IP feeds it pulls, and the endpoints it notifies.')
+    'Systems gpm talks to: DNS zones it writes, hosts it discovers, IP feeds it pulls, endpoints it notifies.')
     + `
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a backend on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a DNS server on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
       <div class="grid-2">
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Pi-hole (LAN)</div><div class="ds">Local CNAMEs on the LAN resolver</div></div>${switchHtml('set-ph-on', !!ds.pihole.enabled, 'Pi-hole DNS sync', 'settings.dnsSync.pihole.enabled')}</div>
           <div class="field-group" style="margin-top:8px"><label>Pi-hole URL</label><input class="field mono" id="set-ph-url" data-hint="settings.dnsSync.pihole.url" data-path="dnsSync.pihole.url" value="${esc(ds.pihole.url || '')}" placeholder="http://pihole.lan" /></div>
           <div class="field-group"><label>App password</label><input class="field mono" id="set-ph-pw" data-hint="settings.dnsSync.pihole.appPassword" data-path="dnsSync.pihole.appPassword" value="${esc(ds.pihole.appPassword || '')}" placeholder="\${ENV:PIHOLE_APP_PASSWORD}" /></div>
-          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-ph-apex" data-hint="settings.dnsSync.pihole.apexTarget" data-path="dnsSync.pihole.apexTarget" value="${esc(ds.pihole.apexTarget || '')}" placeholder="edge.example.com" /><div class="hint">Where managed CNAMEs point. It is not an ownership marker: hand-written records aimed here are adopted only if a host asks for that exact name, and are otherwise left alone.</div></div>
+          <div class="field-group"><label>Apex target</label><input class="field mono" id="set-ph-apex" data-hint="settings.dnsSync.pihole.apexTarget" data-path="dnsSync.pihole.apexTarget" value="${esc(ds.pihole.apexTarget || '')}" placeholder="edge.example.com" /><div class="hint">Where managed CNAMEs point.</div></div>
         </div>
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Cloudflare (public)</div><div class="ds">Records in the authoritative zone</div></div>${switchHtml('set-cf-on', !!ds.cloudflare.enabled, 'Cloudflare DNS sync', 'settings.dnsSync.cloudflare.enabled')}</div>
@@ -2748,7 +2787,7 @@ async function viewIntegrations(c) {
       <div id="set-dns-status" class="hint" style="margin-top:12px"></div>
       <div id="set-dns-plan" class="hint" style="margin-top:6px"></div>
       <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-        <button class="btn ghost sm" id="set-dns-preview" type="button" title="Read the backends and report what a reconcile would change. Nothing is written.">Preview changes</button>
+        <button class="btn ghost sm" id="set-dns-preview" type="button" title="Read the DNS servers and report what a reconcile would change. Nothing is written.">Preview changes</button>
         <button class="btn ghost sm" id="set-dns-run" type="button">Reconcile now</button>
       </div>
       ${intSaveBar()}
@@ -2762,7 +2801,7 @@ async function viewIntegrations(c) {
         <div class="grid-2">
           <div>
             <div class="field-group"><label>API server URL</label><input class="field mono" id="set-id-url" data-hint="settings.ingressDiscovery.apiURL" data-path="ingressDiscovery.apiURL" value="${esc(idc.apiURL || '')}" placeholder="https://k8s.example.lan:6443" /></div>
-            <div class="field-group"><label>Token file</label><input class="field mono" id="set-id-token" data-hint="settings.ingressDiscovery.tokenFile" data-path="ingressDiscovery.tokenFile" value="${esc(idc.tokenFile || '')}" placeholder="/run/secrets/gpm-k8s-token" /><div class="hint">Path to a read-only ServiceAccount token. Re-read periodically, so a rotated token is picked up.</div></div>
+            <div class="field-group"><label>Token file</label><input class="field mono" id="set-id-token" data-hint="settings.ingressDiscovery.tokenFile" data-path="ingressDiscovery.tokenFile" value="${esc(idc.tokenFile || '')}" placeholder="/run/secrets/gpm-k8s-token" /><div class="hint">Path to a read-only ServiceAccount token.</div></div>
           </div>
           <div>
             <div class="field-group"><label>CA file</label><input class="field mono" id="set-id-ca" data-hint="settings.ingressDiscovery.caFile" data-path="ingressDiscovery.caFile" value="${esc(idc.caFile || '')}" placeholder="/run/secrets/gpm-k8s-ca.crt" /></div>
@@ -2802,8 +2841,8 @@ async function viewIntegrations(c) {
               <div class="hint">Leave blank and name an upstream group below instead when the controller runs on more than one node.</div>
             </div>
             <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(idt.upstreamGroupRef || '')}" placeholder="k8s-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
-            <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required. Discovery never issues per-host certificates: point this at your wildcard certificate.</div></div>
-            <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect http to https on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
+            <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required: point this at your wildcard certificate.</div></div>
+            <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
           </div>
           <div>
@@ -2821,7 +2860,7 @@ async function viewIntegrations(c) {
             <div class="field-group">
               <label>Allowed domain suffixes override (optional)</label>
               <div class="chip-input" id="set-id-suffixes-override" data-hint="settings.ingressDiscovery.template.allowedDomainSuffixes"></div>
-              <div class="hint">Narrows the global list above for hosts derived from the template. Must be a subset. Leave empty to use the global list.</div>
+              <div class="hint">Must be a subset of the global list. Empty uses the global list.</div>
             </div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div><div class="ds">When the lan-direct annotation is absent</div></div>${switchHtml('set-id-dns-lan', !!idt.defaultDNS.lanDirect, 'Default LAN direct', 'settings.ingressDiscovery.template.defaultDNS.lanDirect')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div><div class="ds">When the public-cname annotation is absent</div></div>${switchHtml('set-id-dns-pub', !!idt.defaultDNS.publicCname, 'Default public CNAME', 'settings.ingressDiscovery.template.defaultDNS.publicCname')}</div>
@@ -2833,7 +2872,7 @@ async function viewIntegrations(c) {
         <div id="set-id-profiles" data-hint="settings.ingressDiscovery.profiles"></div>
         <button class="btn ghost sm" id="addIdProfile" type="button" style="margin-top:6px">${ICON.plus}Add profile</button>
       `)}
-      ${foldHtml('id-rules-card', 'Profile selection rules', arr(idc.profileRules).length ? arr(idc.profileRules).length + ' rule(s)' : 'none - the annotation decides', arr(idc.profileRules).length > 0, `
+      ${foldHtml('id-rules-card', 'Profile selection rules', arr(idc.profileRules).length ? plural(arr(idc.profileRules).length, 'rule', 'rules') : 'none - the annotation decides', arr(idc.profileRules).length > 0, `
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules let YOU route an Ingress to a profile by namespace and/or label, with no say from the Ingress author at all - stronger than the annotation. Evaluated in order; the first match wins.</p>
         <div class="field-group" style="max-width:380px"><label>Mode</label>
           <select class="field mono" id="set-id-profile-selection" data-hint="settings.ingressDiscovery.profileSelection" data-path="ingressDiscovery.profileSelection">
@@ -2861,14 +2900,14 @@ async function viewIntegrations(c) {
         ${foldHtml('dkr-conn-card', 'Engine connection', dd.host || dd.socket || '/var/run/docker.sock', !!dd.enabled, `
           <div class="grid-2">
             <div>
-              <div class="field-group"><label>Socket</label><input class="field mono" id="set-dkr-socket" data-hint="settings.dockerDiscovery.socket" data-path="dockerDiscovery.socket" value="${esc(dd.socket || '')}" placeholder="/var/run/docker.sock" /><div class="hint">Docker Engine unix socket. Absolute path. Ignored when a host URL is set.</div></div>
-              <div class="field-group"><label>Host URL</label><input class="field mono" id="set-dkr-host" data-hint="settings.dockerDiscovery.host" data-path="dockerDiscovery.host" value="${esc(dd.host || '')}" placeholder="tcp://socket-proxy:2375" /><div class="hint">Engine endpoint used instead of the socket. A read-only socket proxy is the recommended shape.</div></div>
-              <div class="field-group"><label>Poll interval</label><input class="field mono" id="set-dkr-poll" data-hint="settings.dockerDiscovery.pollInterval" data-path="dockerDiscovery.pollInterval" value="${esc(dd.pollInterval || '')}" placeholder="60s" /><div class="hint">Fallback loop interval (Go duration, minimum 15s). Container events drive the normal case.</div></div>
+              <div class="field-group"><label>Socket</label><input class="field mono" id="set-dkr-socket" data-hint="settings.dockerDiscovery.socket" data-path="dockerDiscovery.socket" value="${esc(dd.socket || '')}" placeholder="/var/run/docker.sock" /><div class="hint">Absolute path. Ignored when a host URL is set.</div></div>
+              <div class="field-group"><label>Host URL</label><input class="field mono" id="set-dkr-host" data-hint="settings.dockerDiscovery.host" data-path="dockerDiscovery.host" value="${esc(dd.host || '')}" placeholder="tcp://socket-proxy:2375" /><div class="hint">Used instead of the socket.</div></div>
+              <div class="field-group"><label>Poll interval</label><input class="field mono" id="set-dkr-poll" data-hint="settings.dockerDiscovery.pollInterval" data-path="dockerDiscovery.pollInterval" value="${esc(dd.pollInterval || '')}" placeholder="60s" /><div class="hint">Go duration, minimum 15s.</div></div>
             </div>
             <div>
               <div class="field-group"><label>TLS client certificate</label><input class="field mono" id="set-dkr-tlscert" data-hint="settings.dockerDiscovery.tlsCert" data-path="dockerDiscovery.tlsCert" value="${esc(dd.tlsCert || '')}" placeholder="/run/secrets/docker-client.crt" /><div class="hint">Absolute path. Only for an <span class="mono">https://</span> host URL. Set with the key.</div></div>
               <div class="field-group"><label>TLS client key</label><input class="field mono" id="set-dkr-tlskey" data-hint="settings.dockerDiscovery.tlsKey" data-path="dockerDiscovery.tlsKey" value="${esc(dd.tlsKey || '')}" placeholder="/run/secrets/docker-client.key" /></div>
-              <div class="field-group"><label>TLS CA bundle</label><input class="field mono" id="set-dkr-tlsca" data-hint="settings.dockerDiscovery.tlsCA" data-path="dockerDiscovery.tlsCA" value="${esc(dd.tlsCA || '')}" placeholder="/run/secrets/docker-ca.crt" /><div class="hint">Absolute path to the PEM bundle that verifies the endpoint. There is no skip-verify option.</div></div>
+              <div class="field-group"><label>TLS CA bundle</label><input class="field mono" id="set-dkr-tlsca" data-hint="settings.dockerDiscovery.tlsCA" data-path="dockerDiscovery.tlsCA" value="${esc(dd.tlsCA || '')}" placeholder="/run/secrets/docker-ca.crt" /><div class="hint">Absolute path. There is no skip-verify option.</div></div>
             </div>
           </div>
         `)}
@@ -2879,8 +2918,8 @@ async function viewIntegrations(c) {
               <div class="field-group"><label>Published host</label><input class="field mono" id="set-dkr-pubhost" data-hint="settings.dockerDiscovery.publishedHost" data-path="dockerDiscovery.publishedHost" value="${esc(dd.publishedHost || '')}" placeholder="127.0.0.1" /></div>
             </div>
             <div>
-              <div class="toggle-line"><div class="tl-text"><div class="nm">Use published ports</div><div class="ds">Forward to the host-published port instead of the container IP. Use when gpm runs on the Docker host rather than in a shared network.</div></div>${switchHtml('set-dkr-pubports', !!dd.usePublishedPorts, 'Use published ports', 'settings.dockerDiscovery.usePublishedPorts')}</div>
-              <div class="toggle-line"><div class="tl-text"><div class="nm">Include stopped containers</div><div class="ds">List non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived.</div></div>${switchHtml('set-dkr-stopped', !!dd.includeStopped, 'Include stopped containers', 'settings.dockerDiscovery.includeStopped')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Use published ports</div><div class="ds">Forward to the host-published port instead of the container IP.</div></div>${switchHtml('set-dkr-pubports', !!dd.usePublishedPorts, 'Use published ports', 'settings.dockerDiscovery.usePublishedPorts')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Include stopped containers</div><div class="ds">List non-running containers too.</div></div>${switchHtml('set-dkr-stopped', !!dd.includeStopped, 'Include stopped containers', 'settings.dockerDiscovery.includeStopped')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Allowed domain suffixes</label>
                 <div class="chip-input" id="set-dkr-suffixes" data-hint="settings.dockerDiscovery.allowedDomainSuffixes" data-path="dockerDiscovery.allowedDomainSuffixes"></div>
@@ -2894,7 +2933,7 @@ async function viewIntegrations(c) {
           <div class="grid-2">
             <div>
               <div class="field-group"><label>Certificate</label><input class="field mono" id="set-dkr-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" data-path="dockerDiscovery.template.tls.certificateRef" value="${esc(ddt.tls.certificateRef || '')}" placeholder="wildcard" /></div>
-              <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect http to https on derived hosts</div></div>${switchHtml('set-dkr-forcessl', !!ddt.tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-dkr-forcessl', !!ddt.tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-dkr-robots', !!ddt.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Upstream timeouts (seconds)</label>
@@ -2981,11 +3020,11 @@ async function viewIntegrations(c) {
         return `${label}: ok (${b.desired} desired, ${b.managed} owned, +${b.created} / -${b.deleted}` +
           (extra.length ? ', ' + extra.join(', ') : '') + ')';
       };
-      el.textContent = (st.lastRun ? 'Last run ' + fmtTime(st.lastRun) + '. ' : 'Never run. ') +
+      el.textContent = 'Last run: ' + (st.lastRun ? fmtTime(st.lastRun) : 'Never') + '. ' +
         line('Pi-hole', st.pihole) + ' | ' + line('Cloudflare', st.cloudflare) +
         (st.error ? ' | ' + st.error : '');
     } catch (e) {
-      el.textContent = e && e.status === 501 ? 'DNS sync is not wired in this deployment.' : 'Status unavailable: ' + (e.message || e);
+      el.textContent = e && e.status === 501 ? 'DNS sync is not available in this build.' : 'Status unavailable: ' + (e.message || e);
     }
   }
   renderDNSStatus();
@@ -2996,7 +3035,7 @@ async function viewIntegrations(c) {
   async function renderDNSPlan() {
     const el = $('#set-dns-plan');
     if (!el) return;
-    el.textContent = 'Reading backends...';
+    el.textContent = 'Reading the DNS servers...';
     try {
       const p = (await api('/api/dns-sync/plan')).data || {};
       const names = (a) => arr(a).join(', ');
@@ -3009,12 +3048,12 @@ async function viewIntegrations(c) {
         if (arr(b.retarget).length) parts.push(`retarget ${names(b.retarget)}`);
         if (arr(b.delete).length) parts.push(`DELETE ${names(b.delete)}`);
         if (arr(b.skip).length) parts.push(`skip (not ours) ${names(b.skip)}`);
-        parts.push(`${b.untouched || 0} record(s) gpm does not own, left alone`);
+        parts.push(`${plural(b.untouched || 0, 'record', 'records')} gpm does not own, left alone`);
         return `${label}: ` + parts.join('; ');
       };
       el.textContent = 'Dry run, nothing was changed. ' + line('Pi-hole', p.pihole) + ' | ' + line('Cloudflare', p.cloudflare);
     } catch (e) {
-      el.textContent = e && e.status === 501 ? 'DNS sync is not wired in this deployment.' : 'Preview unavailable: ' + (e.message || e);
+      el.textContent = e && e.status === 501 ? 'DNS sync is not available in this build.' : 'Preview unavailable: ' + (e.message || e);
     }
   }
   $('#set-dns-preview').addEventListener('click', async () => {
@@ -3027,7 +3066,7 @@ async function viewIntegrations(c) {
     try {
       await api('/api/dns-sync/reconcile', { method: 'POST' });
       toast('Reconciled', 'DNS records are back in step with the config.', 'ok');
-    } catch (e) { toastErr(e); }
+    } catch (e) { toastErr(e, 'Could not run DNS sync'); }
     await renderDNSStatus();
     btn.disabled = false;
   });
@@ -3166,7 +3205,7 @@ async function viewIntegrations(c) {
     try {
       const st = (await api('/api/ingress-discovery/status')).data || {};
       const parts = [];
-      parts.push(st.lastRun ? 'Last run ' + fmtTime(st.lastRun) : 'Never run');
+      parts.push('Last run: ' + (st.lastRun ? fmtTime(st.lastRun) : 'Never'));
       // A failed run freezes the managed hosts, so how stale the good state is
       // matters more than when the last attempt happened.
       if (st.error) parts.push('FAILED - ' + st.error + (st.lastSuccess ? ' (last success ' + fmtTime(st.lastSuccess) + ', managed hosts frozen as they were)' : ' (no successful run yet)'));
@@ -3174,7 +3213,7 @@ async function viewIntegrations(c) {
       el.textContent = parts.join('. ') + '.';
       if (list) list.innerHTML = discoveryRunLine(st) + discoveryCounters(st) + discoveryHostsTable(st.hosts, 'Ingress', 'ingress');
     } catch (e) {
-      el.textContent = e && e.status === 501 ? 'Ingress discovery is not wired in this deployment.' : 'Status unavailable: ' + (e.message || e);
+      el.textContent = e && e.status === 501 ? 'Ingress discovery is not available in this build.' : 'Status unavailable: ' + (e.message || e);
       if (list) list.innerHTML = '';
     }
   }
@@ -3203,7 +3242,7 @@ async function viewIntegrations(c) {
       const list = $('#set-id-hosts');
       if (list) list.innerHTML = discoveryCounters(p) + discoveryHostsTable(p.hosts, 'Ingress', 'ingress');
     } catch (e) {
-      el.textContent = e && e.status === 501 ? 'Ingress discovery is not wired in this deployment.' :
+      el.textContent = e && e.status === 501 ? 'Ingress discovery is not available in this build.' :
         (e && e.status === 409 ? 'A reconcile is already in progress; try again shortly.' : 'Preview unavailable: ' + (e.message || e));
     }
   }
@@ -3217,7 +3256,7 @@ async function viewIntegrations(c) {
     try {
       await api('/api/ingress-discovery/reconcile', { method: 'POST' });
       toast('Reconciled', 'Managed proxy hosts are back in step with the cluster.', 'ok');
-    } catch (e) { toastErr(e); }
+    } catch (e) { toastErr(e, 'Could not run Ingress discovery'); }
     await renderIngressStatus();
     btn.disabled = false;
   });
@@ -3322,7 +3361,7 @@ async function viewIntegrations(c) {
     try {
       renderDockerPayload((await api('/api/docker-discovery/status')).data || {}, false);
     } catch (e) {
-      el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Docker discovery is not wired in this build.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
+      el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Docker discovery is not available in this build.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
     }
   }
   renderDockerStatus();
@@ -3344,14 +3383,14 @@ async function viewIntegrations(c) {
   function dockerActionError(e) {
     const st = e && e.status;
     if (st === 409) { toast('Already running', 'A reconcile is already running.', 'err'); return; }
-    if (st === 501) { toast('Not wired', 'Docker discovery is not wired in this build.', 'err'); return; }
+    if (st === 501) { toast('Not available', 'Docker discovery is not available in this build.', 'err'); return; }
     if (st === 403) { toast('Scope missing', 'This token lacks the docker-discovery scope.', 'err'); return; }
     if (st === 502) {
       const el = $('#set-dkr-status');
       if (el) el.innerHTML = `<div class="inline-error">${esc((e && e.message) || 'Engine error')}</div>`;
       return;
     }
-    toastErr(e);
+    toastErr(e, 'Could not run Docker discovery');
   }
 
   // ----- Access-list sync -----
@@ -3366,12 +3405,12 @@ async function viewIntegrations(c) {
         <tbody>${rows.map((r) => `<tr>
           <td class="col-name"><a class="mono trunc" href="#/access/${encodeURIComponent(r.list || '')}" title="${esc(r.list || '')}">${esc(r.list || '')}</a></td>
           <td class="mono col-name"><span class="trunc" title="${esc(r.name || '')}">${esc(r.name || '')}</span></td>
-          <td class="faint col-time"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'never')}</td>
+          <td class="faint col-time"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'Never')}</td>
           <td class="mono col-num">${esc(r.entryCount || 0)}</td>
           <td class="warn-text col-reason">${esc(r.lastError || '')}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="hint">No access list declares a remote source yet.</div>';
     } catch (e) {
-      el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Access-list source sync is not wired in this deployment.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
+      el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Access-list source sync is not available in this build.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
     }
   }
   renderAlsStatus();
@@ -3380,7 +3419,7 @@ async function viewIntegrations(c) {
     try {
       await api('/api/access-list-sources/reconcile', { method: 'POST' });
       toast('Reconciled', 'Access-list sources are back in sync.', 'ok');
-    } catch (e) { toastErr(e); }
+    } catch (e) { toastErr(e, 'Could not refresh the sources'); }
     await renderAlsStatus();
     btn.disabled = false;
   });
@@ -3437,7 +3476,7 @@ async function viewIntegrations(c) {
       else toast(kind + ' unreachable', `${name} did not answer: ${r.error || 'no response'}`, 'err');
     } catch (e) {
       if (e && e.status === 404) toast('Not saved yet', `Save first - gpm can only test a ${kind.toLowerCase()} that is in the saved configuration.`, 'err');
-      else toastErr(e);
+      else toastErr(e, `Could not test ${name}`);
     }
     btn.disabled = false;
     if (pfx === 'wh') await loadWebhookStatus(); else await loadNotifyStatus();
@@ -3894,11 +3933,11 @@ async function viewOverview(c) {
       } else if (ct.state === 'expired') {
         const ago = ct.daysRemaining != null ? -ct.daysRemaining : null;
         errRows.push(attnRow('err', `Certificate <b>${name}</b> has expired`,
-          [ago != null ? `expired ${ago} day${ago === 1 ? '' : 's'} ago` : 'expired', domains].filter(Boolean).join(' &middot; '),
+          [ago != null ? `expired ${plural(ago, 'day', 'days')} ago` : 'expired', domains].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       } else if (ct.state === 'expiring') {
         const days = ct.daysRemaining;
-        warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${days} day${days === 1 ? '' : 's'}`,
+        warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${plural(days, 'day', 'days')}`,
           [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : ''].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       }
@@ -3916,7 +3955,7 @@ async function viewOverview(c) {
     arr(health.upstreamGroups).forEach((g) => {
       if (g.unhealthy > 0) {
         errRows.push(attnRow('err',
-          `Upstream <b>${esc(g.name)}</b>: ${g.unhealthy} of ${g.healthy + g.unhealthy} members unhealthy`,
+          `Upstream group <b>${esc(g.name)}</b>: ${g.unhealthy} of ${plural(g.healthy + g.unhealthy, 'member', 'members')} unhealthy`,
           '', '#/upstreams/' + encodeURIComponent(g.name), 'Open group'));
       }
     });
@@ -3962,8 +4001,8 @@ async function viewOverview(c) {
   let body;
   if (errCount + warnCount > 0) {
     const headParts = [];
-    if (errCount) headParts.push(`<span class="err-text">${errCount}</span> problem${errCount === 1 ? '' : 's'}`);
-    if (warnCount) headParts.push(`<span class="warn-text">${warnCount}</span> warning${warnCount === 1 ? '' : 's'}`);
+    if (errCount) headParts.push(`<span class="err-text">${errCount}</span> ${errCount === 1 ? 'problem' : 'problems'}`);
+    if (warnCount) headParts.push(`<span class="warn-text">${warnCount}</span> ${warnCount === 1 ? 'warning' : 'warnings'}`);
     body = `<div class="card">
       <div class="card-head">
         <div>
@@ -3982,12 +4021,12 @@ async function viewOverview(c) {
     const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
     const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
 
-    const parts = [`${liveHosts} host${liveHosts === 1 ? '' : 's'} live`];
+    const parts = [`${plural(liveHosts, 'host', 'hosts')} live`];
     if (validCerts.length) {
       const soonest = validCerts.reduce((min, ct) =>
         (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
-      parts.push(`${validCerts.length} certificate${validCerts.length === 1 ? '' : 's'} valid`
-        + (soonest != null ? `, next expiry in ${soonest} day${soonest === 1 ? '' : 's'}` : ''));
+      parts.push(`${plural(validCerts.length, 'certificate', 'certificates')} valid`
+        + (soonest != null ? `, next expiry in ${plural(soonest, 'day', 'days')}` : ''));
     }
     parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
 
@@ -4037,7 +4076,7 @@ function managedBy(h) {
 // The one "disabled" marker: a muted dot plus the word, the quiet style of the
 // hosts list's Status column. Every list that shows a disabled object (cards,
 // the certificates table, API tokens) uses this, so it means one thing.
-const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>disabled</span>';
+const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>Disabled</span>';
 const MANAGED_CHIPS = {
   'ingress-discovery': { text: 'ingress', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
   'docker-discovery': { text: 'docker', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
@@ -4059,7 +4098,7 @@ async function listHosts(c) {
   arr(mwR).forEach((m) => { mwType[m.name] = m.type; });
 
   const head = viewHead('Proxy Hosts',
-    'One public domain routed to one internal upstream, with the TLS, access and middleware chain that sits in between. This is where most day-to-day work happens.',
+    'Public domains routed to an upstream, with the TLS, access and middleware that sit in between.',
     `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`);
 
   if (!hosts.length) {
@@ -4143,7 +4182,7 @@ async function listHosts(c) {
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
     { key: 'upstream', label: 'Upstream', cls: 'col-upstream' },
     { key: null, label: 'Certificate', cls: 'col-cert' },
-    { key: null, label: 'Auth', cls: 'col-auth' },
+    { key: null, label: 'Sign-in', cls: 'col-auth' },
     { key: null, label: 'Status', cls: 'col-status' },
     { key: 'updated', label: 'Updated', cls: 'col-updated' },
   ];
@@ -4186,14 +4225,14 @@ async function listHosts(c) {
       : '<span class="faint" title="The certificate list did not load.">-</span>';
     const auth = r.authMw
       ? `<span class="chip brand" title="${esc(r.authMw)}">${esc(r.authMw)}</span>`
-      : (r.authInline ? `<span class="chip brand" title="Configured inline on this host, under Sign-in.">sign-in</span>` : `<span class="chip">none</span>`);
+      : (r.authInline ? `<span class="chip brand" title="Configured inline on this host, under Sign-in.">Sign-in</span>` : `<span class="chip">None</span>`);
     // live/disabled are the quiet states (dot + text, no pill); maintenance is
     // the one that should draw the eye, so it keeps the filled/bordered pill.
     const status = r.status === 'disabled'
       ? DISABLED_CHIP
       : (r.status === 'maintenance'
-        ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
-        : `<span class="chip flat ok"><span class="dot ok"></span>live</span>`);
+        ? `<span class="chip warn"><span class="dot warn"></span>Maintenance</span>`
+        : `<span class="chip flat ok"><span class="dot ok"></span>Live</span>`);
     const tagChips = r.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join('');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
@@ -4220,14 +4259,15 @@ async function listHosts(c) {
   }
 
   function zoneChipsInner() {
-    return (zonesOff.size ? `<button type="button" class="chip zone all" data-zone-all="1">all</button>` : '')
+    return '<span class="chip-row-label">Domain</span>'
+      + (zonesOff.size ? `<button type="button" class="chip zone all" data-zone-all="1">All</button>` : '')
       + zoneEntries.map(([z, n]) => `<button type="button" class="chip zone${zonesOff.has(z) ? ' off' : ''}" data-zone="${esc(z)}" aria-pressed="${!zonesOff.has(z)}">${esc(z)} (${n})</button>`).join('');
   }
-  const zoneChipsHtml = showZones ? `<div class="chip-row" id="zoneChips">${zoneChipsInner()}</div>` : '';
+  const zoneChipsHtml = showZones ? `<div class="chip-row" id="zoneChips" role="group" aria-label="Filter by domain">${zoneChipsInner()}</div>` : '';
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, auth, tag and status" aria-label="Filter hosts" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, sign-in, tag and status" aria-label="Filter hosts" /></div>
       ${zoneChipsHtml}
     </div>
     <div id="hostBulk"></div>
@@ -4349,7 +4389,7 @@ async function listHosts(c) {
     const shownNames = targets.slice(0, 12).map((h) => `<li class="mono">${esc(arr(h.domains)[0] || h.name)}</li>`).join('');
     const listHtml = `<ul class="bulk-targets">${shownNames}${targets.length > 12 ? `<li class="muted">and ${targets.length - 12} more</li>` : ''}</ul>`;
     const skipHtml = skipped.length
-      ? `<p class="muted">${skipped.length} discovery-managed host${skipped.length === 1 ? '' : 's'} skipped (${skipped.map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}): tags come from the discovery template.</p>`
+      ? `<p class="muted">${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped (${skipped.map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}): tags come from the discovery template.</p>`
       : '';
     let mutate, title, confirmLabel, body, tag = '';
 
@@ -4408,8 +4448,8 @@ async function listHosts(c) {
         return;
       }
     }
-    prog.done('Done', `${done} host${done === 1 ? '' : 's'} updated and committed.`
-      + (skipped.length ? ` ${skipped.length} discovery-managed host${skipped.length === 1 ? '' : 's'} skipped.` : ''), 'ok');
+    prog.done('Done', `${plural(done, 'host', 'hosts')} updated and committed.`
+      + (skipped.length ? ` ${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped.` : ''), 'ok');
     refreshHeadSha();
     if (c.isConnected) await route();
   }
@@ -4483,12 +4523,13 @@ function revealTabPanel(el) {
 
 // The rail's request chain, in the order the data plane evaluates it: rate
 // limit, access lists, bouncer, sign-in, guard, headers, rewrite, then the
-// backend. An inline block sits at its kind's position, just before the
+// upstream. An inline block sits at its kind's position, just before the
 // referenced middlewares of that kind.
 const CHAIN_TYPE_ORDER = ['rate-limit', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
 function renderRailChain(el, ctx) {
   if (!el) return;
-  const byType = (t) => ctx.mwSelected.filter((m) => (ctx.mwType[m] || '') === t).map((m) => ({ name: m, kind: t }));
+  const KIND_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit' };
+  const byType = (t) => ctx.mwSelected.filter((m) => (ctx.mwType[m] || '') === t).map((m) => ({ name: m, kind: KIND_LABEL[t] || t }));
   const items = [];
   if (ctx.inlineRateLimit) items.push({ name: 'rate limit', kind: 'on this host' });
   items.push(...byType('rate-limit'));
@@ -4501,7 +4542,7 @@ function renderRailChain(el, ctx) {
     const t = ctx.mwType[m] || '';
     if (CHAIN_TYPE_ORDER.indexOf(t) === -1) items.push({ name: m, kind: t || 'middleware' });
   });
-  items.push({ name: ctx.upstreamStr, kind: 'backend', end: true });
+  items.push({ name: ctx.upstreamStr, kind: 'upstream', end: true });
   el.innerHTML = items.map((it, i) => `<li${it.end ? ' class="end"' : ''}><span class="n">${i + 1}</span><span class="mono trunc" title="${esc(it.name)}">${esc(it.name)}</span><span class="kind">${esc(it.kind)}</span></li>`).join('');
 }
 
@@ -4513,7 +4554,7 @@ async function showHostYaml(h) {
   let res;
   try {
     res = await api('/api/proxy-hosts/' + encodeURIComponent(h.name) + '?dryRun=1', { method: 'PUT', body: h });
-  } catch (e) { toastErr(e); return; }
+  } catch (e) { toastErr(e, 'Could not show the YAML'); return; }
   const reply = res.data || {};
   const text = reply.yaml || '';
   await confirmModal({
@@ -4585,7 +4626,7 @@ async function hostEditor(c, name) {
   const caHint = !caListOK
     ? 'Client CA list unavailable - reload the page. Saving leaves this host\'s trust anchor exactly as it is.'
     : (!caList.length
-      ? 'Create one under <a href="#/clientcas">Client CAs</a> first - it is the trust anchor client certificates are verified against.'
+      ? 'Add one under <a href="#/clientcas">Client CAs</a> first - it is the trust anchor client certificates are verified against.'
       : (caRef && !caKnown
         ? `<b>${esc(caRef)}</b> is not in the client CA list. It is kept as-is on save - fix it under <a href="#/clientcas">Client CAs</a>.`
         : 'The trust anchor presented certificates are verified against.'));
@@ -4615,8 +4656,8 @@ async function hostEditor(c, name) {
   const statusChip = h.disabled
     ? DISABLED_CHIP
     : ((h.maintenance || globalMaint) && !isNew
-      ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
-      : `<span class="chip flat ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`);
+      ? `<span class="chip warn"><span class="dot warn"></span>Maintenance</span>`
+      : `<span class="chip flat ok"><span class="dot ok"></span>${isNew ? 'New' : 'Live'}</span>`);
 
   // Progressive disclosure. A proxy host has thirteen sections and a normal one
   // uses four of them, so everything optional collapses to a single line that
@@ -4628,7 +4669,7 @@ async function hostEditor(c, name) {
   // The four that stay open are the ones every host needs: domains, the
   // upstream, TLS, and the access/middleware chain.
   const locCount = arr(h.locations).length;
-  const locSummary = locCount ? `${locCount} path override${locCount === 1 ? '' : 's'}` : 'none - every path goes to the upstream above';
+  const locSummary = locCount ? `${plural(locCount, 'path override', 'path overrides')}` : 'none - every path goes to the upstream above';
 
   const tmo = h.timeouts || {};
   const tmoParts = [];
@@ -4638,20 +4679,20 @@ async function hostEditor(c, name) {
   const tmoSummary = tmoParts.length ? tmoParts.join(', ') : 'defaults';
 
   const compSummary = comp.enabled
-    ? ['gzip on', comp.minBytes ? `min ${comp.minBytes} bytes` : '', arr(comp.types).length ? `${arr(comp.types).length} content types` : ''].filter(Boolean).join(', ')
+    ? ['gzip on', comp.minBytes ? `min ${plural(comp.minBytes, 'byte', 'bytes')}` : '', arr(comp.types).length ? plural(arr(comp.types).length, 'content type', 'content types') : ''].filter(Boolean).join(', ')
     : 'off';
 
   const epParts = [];
   if (ep.dir) epParts.push(`directory ${ep.dir}`);
   if (ep.inline && Object.keys(ep.inline).length) epParts.push(`${Object.keys(ep.inline).length} inline`);
   if (arr(ep.interceptUpstream).length) epParts.push(`intercepts ${arr(ep.interceptUpstream).join(', ')}`);
-  const epSummary = epParts.length ? epParts.join(', ') : 'inherited from Settings';
+  const epSummary = epParts.length ? epParts.join(', ') : 'inherited from Error Pages';
 
   const secHdrCount = (h.securityHeaders && typeof h.securityHeaders === 'object') ? Object.keys(h.securityHeaders).length : 0;
   const secHdrSummary = secHdrCount ? `${secHdrCount} set` : 'fleet defaults';
 
   const stripCount = arr(h.stripResponseHeaders).length;
-  const stripSummary = stripCount ? `${stripCount} header${stripCount === 1 ? '' : 's'}` : 'none';
+  const stripSummary = stripCount ? `${plural(stripCount, 'header', 'headers')}` : 'none';
 
   const dnsParts = [];
   if (h.dns && h.dns.lanDirect) dnsParts.push('LAN direct');
@@ -4672,7 +4713,7 @@ async function hostEditor(c, name) {
   // Title-band tabs. Nothing on a tab marks a non-default value: every optional
   // section says in its fold summary what it holds, and the rail shows the
   // certificate and the request chain.
-  const HOST_TABS = [['routing', 'Routing'], ['tls', 'TLS'], ['access', 'Access'], ['headers', 'Headers'], ['advanced', 'Advanced']];
+  const HOST_TABS = [['routing', 'Routing'], ['tls', 'TLS'], ['access', 'Access'], ['headers', 'Headers'], ['advanced', 'More']];
   const hostTabsHtml = HOST_TABS.map(([id, label]) => `<button class="tab-btn" type="button" role="tab" id="host-tab-${id}" aria-controls="host-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
   const panel = (id, body) => `<div class="tab-panel" data-tab="${id}" role="tabpanel" id="host-panel-${id}" aria-labelledby="host-tab-${id}" hidden><div class="stack">
 ${body}      </div></div>`;
@@ -4680,7 +4721,7 @@ ${body}      </div></div>`;
   const railManaged = mc ? `<span class="muted">${esc(mc.title)}</span>` : '';
 
   c.innerHTML = `
-    ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit routing, TLS, and the middleware chain for this host.',
+    ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit this proxy host.',
       `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
       statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
       isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
@@ -4692,7 +4733,7 @@ ${panel('routing', `        ${identityCard('f', h, {
     section: 'hosts', isNew, foldable: true, placeholder: seed && seed.origName ? seed.origName + '-copy' : 'internal-name',
     extra: `<div class="toggle-line" style="margin-top:6px">
             <div class="tl-text"><div class="nm">Maintenance</div><div class="ds">${globalMaint
-              ? 'Fleet-wide maintenance is on in <a href="#/settings">Settings</a>: every host serves the maintenance page regardless of this switch.'
+              ? 'Fleet-wide maintenance is on under <a href="#/settings/operations">Settings &gt; Operations</a>: every host serves the maintenance page regardless of this switch.'
               : 'Serve a 503 maintenance page instead of proxying. The host keeps its domains and certificate.'}</div></div>
             ${switchHtml('f-maintenance', !!h.maintenance, 'Maintenance', 'proxyHost.maintenance')}
           </div>`,
@@ -4701,7 +4742,7 @@ ${panel('routing', `        ${identityCard('f', h, {
         <div class="card form-section">
           <p class="section-label">Domains</p>
           <div class="chip-input" id="f-domains" data-hint="proxyHost.domains" data-path="domains"></div>
-          <div class="hint">Press Enter to add. At least one domain is required.</div>
+          <div class="hint">Press Enter after each domain.</div>
         </div>
 
         <div class="card form-section">
@@ -4710,7 +4751,7 @@ ${panel('routing', `        ${identityCard('f', h, {
             <label>Upstream group</label>
             <select class="field mono" id="f-upgroup" data-hint="proxyHost.upstreamGroupRef" data-path="upstreamGroupRef">
               <option value="">(single upstream)</option>
-              ${upstreamGroups.map((g) => `<option value="${esc(g.name)}"${h.upstreamGroupRef === g.name ? ' selected' : ''}>${esc(g.name)} (${arr(g.upstreams).length} upstreams)</option>`).join('')}
+              ${upstreamGroups.map((g) => `<option value="${esc(g.name)}"${h.upstreamGroupRef === g.name ? ' selected' : ''}>${esc(g.name)} (${plural(arr(g.upstreams).length, 'upstream', 'upstreams')})</option>`).join('')}
             </select>
           </div>` : ''}
           <div class="inline-fields">
@@ -4727,7 +4768,7 @@ ${panel('routing', `        ${identityCard('f', h, {
             </div>
             <div class="field-group">
               <label>Port</label>
-              <input class="field mono" id="f-upport" data-hint="proxyHost.upstream.port" data-path="upstream.port" type="number" value="${esc(up.port != null ? up.port : '')}" placeholder="8080" />
+              <input class="field mono" id="f-upport" data-hint="proxyHost.upstream.port" data-path="upstream.port" type="number" value="${esc(up.port != null ? up.port : '')}" placeholder="3000" />
             </div>
           </div>
           ${upstreamExtraHtml('f', up)}
@@ -4816,7 +4857,7 @@ ${panel('tls', `        <div class="card form-section">
               <select class="field mono" id="f-mtls-mode" data-hint="proxyHost.tls.clientAuth.mode" data-path="tls.clientAuth.mode">
                 ${enumOptions('mtlsMode', ['require', 'optional'], caMode === 'optional' ? 'optional' : 'require')}
               </select>
-              <div class="hint">Pair <span class="mono">optional</span> with a client-cert auth middleware for LAN-exempt enforcement.</div>
+              <div class="hint">Pair <span class="mono">optional</span> with a client-cert sign-in middleware for LAN-exempt enforcement.</div>
             </div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Identity passthrough</div><div class="ds">Send the verified certificate's subject upstream</div></div>${switchHtml('f-certid', certIDOn, 'Identity passthrough', 'proxyHost.tls.clientAuth.identityHeaders')}</div>
             <div id="certid-fields" style="${certIDOn ? '' : 'display:none'}">
@@ -4835,7 +4876,7 @@ ${panel('tls', `        <div class="card form-section">
 `)}
 ${panel('access', `        <div class="card form-section">
           <p class="section-label">Request chain</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-mw-attached">${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, auth, guard, headers, rewrite, then the upstream.</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-mw-attached">${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.</p>
           <div class="check-list" id="f-mw" data-hint="proxyHost.middlewares" data-path="middlewares">
             ${!mwListOK ? refListUnavailableHtml('the middleware list') : (mwSorted.length ? mwSorted.map((m) => `
               <label class="check-item"><input type="checkbox" value="${esc(m.name)}"${selMw.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>
@@ -4875,7 +4916,7 @@ ${panel('headers', `        ${foldHtml('f-sech-card', 'Response security headers
 
 `)}
 ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary, epParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (<a href="#/errorpages">Error Pages</a>) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the global pages (or gpm's default output) in effect.</p>
           <div class="field-group">
             <label>Templates directory</label>
             <input class="field mono" id="f-errp-dir" data-hint="proxyHost.errorPages.dir" data-path="errorPages.dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
@@ -4912,22 +4953,22 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         `)}
 
         ${foldHtml('f-dns-card', 'DNS sync', dnsSummary, dnsParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. The DNS servers are set under <a href="#/integrations">Integrations &gt; DNS sync</a>.</p>
           <div class="toggle-line">
             <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
             ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct', 'proxyHost.dns.lanDirect')}
           </div>
-          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
+          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet. This takes effect once it is, under <a href="#/integrations">Integrations &gt; DNS sync</a>.</div>
           <div class="toggle-line">
             <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
             ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME', 'proxyHost.dns.publicCname')}
           </div>
-          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
+          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet. This takes effect once it is, under <a href="#/integrations">Integrations &gt; DNS sync</a>.</div>
         `)}
 `)}
 
     <div class="panel save-bar">
-      <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+      <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
         <a class="btn ghost" href="#/hosts">Cancel</a>
         <button class="btn primary" id="saveBtn" type="button">${isNew ? 'Add proxy host' : 'Save changes'}</button>
@@ -5021,7 +5062,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     return isOn('f-auth-on') || $$('#f-mw input:checked').some((i) => mwType[i.value] === 'auth');
   }
   const foldSums = {
-    'f-locs-card': () => (locCtls.length ? `${locCtls.length} path override${locCtls.length === 1 ? '' : 's'}` : 'none - every path goes to the upstream above'),
+    'f-locs-card': () => (locCtls.length ? `${plural(locCtls.length, 'path override', 'path overrides')}` : 'none - every path goes to the upstream above'),
     'f-crawl-card': () => {
       const parts = [];
       const cs = parseInt($('#f-to-connect').value, 10); if (cs > 0) parts.push(`connect ${cs}s`);
@@ -5033,7 +5074,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       if (!isOn('f-gzip')) return 'off';
       const mb = parseInt($('#f-gzip-min').value, 10);
       const types = $('#f-gzip-types').value.split(',').map((s) => s.trim()).filter(Boolean).length;
-      return ['gzip on', mb > 0 ? `min ${mb} bytes` : '', types ? `${types} content types` : ''].filter(Boolean).join(', ');
+      return ['gzip on', mb > 0 ? `min ${plural(mb, 'byte', 'bytes')}` : '', types ? plural(types, 'content type', 'content types') : ''].filter(Boolean).join(', ');
     },
     'f-errp-card': () => {
       const parts = [];
@@ -5042,10 +5083,10 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       if (raw) { try { const n = Object.keys(JSON.parse(raw) || {}).length; if (n) parts.push(`${n} inline`); } catch (e) { parts.push('inline (not valid JSON)'); } }
       const ic = $('#f-errp-intercept').value.split(',').map((s) => s.trim()).filter(Boolean);
       if (ic.length) parts.push(`intercepts ${ic.join(', ')}`);
-      return parts.length ? parts.join(', ') : 'inherited from Settings';
+      return parts.length ? parts.join(', ') : 'inherited from Error Pages';
     },
     'f-sech-card': () => { const n = $$('#f-secheaders > .loc-row').length; return n ? `${n} set` : 'fleet defaults'; },
-    'f-strip-card': () => { const n = stripCtl.get().length; return n ? `${n} header${n === 1 ? '' : 's'}` : 'none'; },
+    'f-strip-card': () => { const n = stripCtl.get().length; return n ? `${plural(n, 'header', 'headers')}` : 'none'; },
     'f-adv-card': () => {
       const mode = tpChoice();
       if (mode === 'custom') { const l = trustedCtl.get(); return l.length ? `trusted proxies: ${l.join(', ')}` : 'trusted proxies: custom list (empty)'; }
@@ -5094,7 +5135,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         <button class="icon-btn loc-del" type="button" aria-label="Remove location">${ICON.x}</button>
       </div>
       <div class="toggle-line" style="margin-top:6px">
-        <div class="tl-text"><div class="nm">Strip prefix</div><div class="ds">Removes the location path from the request before it reaches the backend: <span class="mono">/app/foo</span> arrives as <span class="mono">/foo</span>, and <span class="mono">/app</span> as <span class="mono">/</span>. Use it when the backend expects to live at the root.</div></div>
+        <div class="tl-text"><div class="nm">Strip prefix</div><div class="ds">Removes the location path from the request before it reaches the upstream: <span class="mono">/app/foo</span> arrives as <span class="mono">/foo</span>, and <span class="mono">/app</span> as <span class="mono">/</span>. Use it when the app expects to live at the root.</div></div>
         ${switchHtml(p + '-strip', !!loc.stripPrefix, 'Strip prefix', 'proxyHost.locations.stripPrefix')}
       </div>
       <div class="hint loc-strip-preview" hidden></div>
@@ -5257,7 +5298,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     const parts = [];
     parts.push(ct ? `<a class="rail-cert" href="#/certs/${encodeURIComponent(ct.name)}">${certCoverHtml(ct, d)}</a>` : certCoverHtml(null, d));
     if (ct) {
-      const meta = [ct.type === 'acme' ? 'ACME' : (ct.type || ''), ct.notAfter ? `expires ${fmtDate(ct.notAfter)}` : ''].filter(Boolean).join(' - ');
+      const meta = [ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : (ct.type || '')), ct.notAfter ? `expires ${fmtDate(ct.notAfter)}` : ''].filter(Boolean).join(' - ');
       if (meta) parts.push(`<span class="muted">${esc(meta)}</span>`);
     }
     if (list.length > 1) {
@@ -5393,6 +5434,11 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     // absent-stays-absent, present-stays-present: 1.2 is the default so the
     // key is normally omitted, but a file that spells it out keeps it.
     if (minTLS && (minTLS !== '1.2' || tls.minTLSVersion === '1.2')) tlsObj.minTLSVersion = minTLS;
+    // The same rule as the host wizard's Certificate step.
+    if (isOn('f-hsts') && !isOn('f-forcessl')) {
+      showInvalid('HSTS needs Force SSL', 'HSTS needs Force SSL on, or browsers are told to use HTTPS on a host that still answers plain HTTP.', $('#f-hsts'));
+      return;
+    }
     if (isOn('f-hsts')) {
       const hstsObj = { enabled: true, includeSubdomains: isOn('f-hsts-sub'), preload: isOn('f-hsts-preload') };
       const maxAge = hstsMaxAgeFor(hsts.maxAge, $('#f-hsts-max'));
@@ -5611,7 +5657,7 @@ function certExpiry(ct) {
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
   const head = viewHead('Certificates',
-    'The TLS certificates gpm presents at the edge, issued by ACME or brought as PEM files. A host never picks one: the handshake selects by domain, so a certificate covering the name is all a host needs.',
+    'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.',
     `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`);
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
@@ -5697,7 +5743,7 @@ async function listCerts(c) {
       </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td class="col-type">
-        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type)}</span></div>
+        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type === 'acme' ? 'ACME' : (r.type === 'custom' ? 'Custom' : r.type))}</span></div>
         <div class="cell-sub mono">${issuance}</div>
       </td>
       <td class="mono faint col-issuer"><span class="trunc" title="${esc(r.issuer || '')}">${esc(r.issuer || '-')}</span></td>
@@ -5800,7 +5846,7 @@ async function certEditor(c, name) {
   const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
 
   c.innerHTML = `
-    ${pageHead(esc(isNew ? 'New certificate' : ct.name), 'Terminate TLS with an ACME-issued or custom certificate.',
+    ${pageHead(esc(isNew ? 'New certificate' : ct.name), isNew ? 'Add a certificate.' : 'Edit this certificate.',
       `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name)}
 
     <div class="form-grid">
@@ -5818,7 +5864,7 @@ async function certEditor(c, name) {
         <div class="field-group">
           <label>Domains</label>
           <div class="chip-input" id="ct-domains" data-hint="certificate.domains" data-path="domains"></div>
-          <div class="hint">Press Enter to add each domain.</div>
+          <div class="hint">Press Enter after each domain.</div>
         </div>
       </div>
       </div>
@@ -5866,7 +5912,7 @@ async function certEditor(c, name) {
     </div>
 
     <div class="panel save-bar">
-      <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+      <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
         ${(!isNew && type === 'acme') ? `<button class="btn ghost" id="ed-renew" type="button">Renew now</button>` : ''}
         ${isNew ? '' : `<button class="btn ghost" id="ct-clone" type="button">Clone</button>`}
@@ -5961,15 +6007,15 @@ async function certEditor(c, name) {
 // ---------- GENERIC SECTIONS (list + JSON-editor form) ----------
 const SECTION_META = {
   clientcas: {
-    title: 'Client CAs', sub: 'The authority a client certificate is checked against. Add one when a host should ask devices for a certificate at the TLS handshake instead of, or as well as, a sign-in.',
+    title: 'Client CAs', sub: 'The authority a client certificate is checked against, for hosts that ask devices for one at the handshake.',
     empty: 'Generate a CA here and gpm can issue the client certificates too; paste an existing certificate if your organisation already runs a CA.',
     singular: 'client CA', addLabel: 'Add client CA',
     summary: (o) => `<span class="k">Revocation</span><span class="v">${o.crlFile ? 'file: ' + esc(o.crlFile) : (o.crlPEM ? 'inline CRL' : 'none')}</span>` +
       ((o.crlFile || o.crlPEM) ? `<span class="k">Policy</span><span class="v">${enumChip('crlPolicy', o.crlPolicy === 'fail-open' ? 'fail-open' : '')}</span>` : ''),
   },
   identity: {
-    title: 'Identity Providers', sub: 'Where gpm sends people to prove who they are: an OIDC provider, a trusted forward-auth proxy, or an external auth-request outpost. An auth middleware points at one of these.',
-    empty: 'Add the provider first. An auth middleware then references it, and every host that picks up that middleware is protected by it.',
+    title: 'Identity Providers', sub: 'Where people prove who they are: an OIDC provider, a forward-auth proxy or an auth-request outpost.',
+    empty: 'Add the provider first. A sign-in middleware then references it, and every host that picks up that middleware is protected by it.',
     singular: 'identity provider', addLabel: 'Add identity provider',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('idpType', o.type || '')}</span>` +
       (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span><span class="k">Client ID</span><span class="v">${esc(o.oidc.clientID || '')}</span>` : '') +
@@ -5984,29 +6030,30 @@ const SECTION_META = {
       (o.defaultAction ? `<span class="k">Default</span><span class="v">${esc(o.defaultAction)}</span>` : '') +
       // Surfaced on the list so an unmigrated basic-auth block is visible
       // without opening every editor.
-      (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v v-list"><span class="chip warn">Deprecated</span> ${arr(o.basicAuth).length} basic-auth user(s)</span>` : ''),
+      (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v v-list"><span class="chip warn">Deprecated</span> ${plural(arr(o.basicAuth).length, 'basic-auth user', 'basic-auth users')}</span>` : ''),
   },
   middleware: {
-    title: 'Middleware', sub: 'Reusable steps any host can pick up: authentication, headers, rate limits, guards, path rewrites and deny hooks. Evaluation order is fixed, whatever order a host lists them in: rate limit -> access list -> bouncer -> auth -> guard -> headers -> rewrite -> upstream.',
-    empty: 'Most installs start with one auth middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
+    title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, guards, path rewrites and deny hooks.',
+    empty: 'Most installs start with one sign-in middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
     singular: 'middleware', addLabel: 'Add middleware',
+    intro: 'Evaluation order is fixed, whatever order a host lists them in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('middlewareType', o.type || '')}${(o.type === 'auth' && o.auth && o.auth.mode) ? ' - ' + esc(enumLabel('authMode', o.auth.mode).split(' - ')[0]) : ''}</span>` +
-      (o.auth && o.auth.identityProvider ? `<span class="k">IdP</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
-      (o.auth && o.auth.basic ? `<span class="k">Credentials</span><span class="v">${arr(o.auth.basic.users).length} user(s)</span>` : '') +
+      (o.auth && o.auth.identityProvider ? `<span class="k">Identity provider</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
+      (o.auth && o.auth.basic ? `<span class="k">Credentials</span><span class="v">${plural(arr(o.auth.basic.users).length, 'user', 'users')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
       (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : '') +
-      (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${Object.keys(o.rewrite.replacePath).length} path(s)</span>` : '') +
+      (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${plural(Object.keys(o.rewrite.replacePath).length, 'path', 'paths')}</span>` : '') +
       (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
   },
   dns: {
-    title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into - dns-01 ACME challenges, and published records where DNS sync is on.',
+    title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into: ACME dns-01 challenges and DNS sync records.',
     empty: 'Add the provider that hosts your zone and give it a scoped API token, as a ${ENV:...} placeholder so no secret is committed.',
     singular: 'DNS provider', addLabel: 'Add DNS provider',
     summary: (o) => `<span class="k">Provider</span><span class="v">${esc(o.provider || '')}</span>` +
       (o.config ? `<span class="k">Config keys</span><span class="v v-list">${Object.keys(o.config).map((k) => `<span class="dl-item">${esc(k)}</span>`).join(', ')}</span>` : ''),
   },
   redirects: {
-    title: 'Redirects', sub: 'A domain that answers with a redirect instead of proxying anything - retired names, vanity hostnames, apex to www.',
+    title: 'Redirects', sub: 'A domain that answers with a redirect: retired names, vanity hostnames, apex to www.',
     empty: 'Add the old domain, the target it should send visitors to, and whether the redirect is permanent.',
     singular: 'redirect', addLabel: 'Add redirect',
     summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>` +
@@ -6022,14 +6069,14 @@ const SECTION_META = {
       (o.protocol ? `<span class="k">Protocol</span><span class="v">${enumChip('streamProtocol', o.protocol)}</span>` : ''),
   },
   parked: {
-    title: 'Parked Hosts', sub: 'A domain that answers but serves nothing. Reserve a name you own, or return a clean 404 instead of falling through to another host.',
+    title: 'Parked Hosts', sub: 'A domain that answers but serves nothing: a reserved name, or a clean 404 instead of another host.',
     empty: 'Add the domains to reserve. They answer 404 by default; change the status code if you want something else.',
     singular: 'parked host', addLabel: 'Add parked host',
     summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>`,
   },
   upstreams: {
-    title: 'Upstream Groups', sub: 'Several backends behind one name, with health checks and a load-distribution policy. A host references the group instead of a single upstream.',
-    empty: 'Add two or more backends, then pick how requests are spread across them. A health check keeps a dead one out of the rotation.',
+    title: 'Upstream Groups', sub: 'Several upstreams behind one name, with health checks and a load-distribution policy.',
+    empty: 'Add two or more upstreams, then pick how requests are spread across them. A health check keeps a dead one out of the rotation.',
     singular: 'upstream group', addLabel: 'Add upstream group',
     summary: (o) => `<span class="k">Upstreams</span><span class="v v-list">${arr(o.upstreams).map((u) => `<span class="dl-item">${esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))}</span>`).join(' -&gt; ') || '0'}</span>` +
       `<span class="k">Policy</span><span class="v">${enumChip('loadBalance', o.policy || '')}</span>` +
@@ -6063,9 +6110,10 @@ async function genericList(c, section) {
   const plural = PLURAL[section];
   const items = arr((await api('/api/' + plural)).data);
   const head = viewHead(meta.title, meta.sub,
-    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`);
+    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`)
+    + (meta.intro ? `<p class="muted list-intro">${esc(meta.intro)}</p>` : '');
   if (!items.length) {
-    c.innerHTML = head + emptyState(`No ${meta.singular}s yet`,
+    c.innerHTML = head + emptyState(`No ${meta.singular === 'middleware' ? 'middleware' : meta.singular + 's'} yet`,
       meta.empty || `Add your first ${meta.singular}.`, meta.addLabel, `#/${section}/_new`);
     return;
   }
@@ -6193,8 +6241,8 @@ async function deleteObject(section, kind, name, path, btn) {
     refreshHeadSha(); clearDirty();
     location.hash = '#/' + section;
   } catch (e) {
-    if (e && (e.status === 409 || e.status === 400)) showSaveError(e, `Could not delete ${kind}`);
-    else toastErr(e);
+    if (e && (e.status === 409 || e.status === 400)) showSaveError(e, `Could not delete ${name}`);
+    else toastErr(e, `Could not delete ${name}`);
     btn.disabled = false;
   }
 }
@@ -6202,11 +6250,12 @@ async function deleteObject(section, kind, name, path, btn) {
 // ---------- editor scaffolding shared by the typed object editors ----------
 function editorHead(section, meta, isNew, name) {
   const crumb = `<a href="#/${section}">${esc(meta.title)}</a>${ICON.chevron}<span>${isNew ? 'new' : esc(name)}</span>`;
-  return pageHead(esc(isNew ? 'New ' + meta.singular : name), esc(meta.sub), crumb, isNew ? '' : name);
+  const article = /^[aeiou]/i.test(meta.singular) ? 'an' : 'a';
+  return pageHead(esc(isNew ? 'New ' + meta.singular : name), esc(isNew ? `Add ${article} ${meta.singular}.` : `Edit this ${meta.singular}.`), crumb, isNew ? '' : name);
 }
 function saveBar(section, isNew, addLabel) {
   return `<div class="panel save-bar">
-    <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+    <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
     <div style="display:flex;gap:10px">
       ${isNew ? '' : `<button class="btn ghost" id="ed-clone" type="button">Clone</button>`}
       ${isNew ? '' : `<button class="btn danger" id="ed-delete" type="button">${ICON.trash}Delete</button>`}
@@ -6246,7 +6295,7 @@ function identityCard(p, obj, opts) {
 function identitySummary(display, tagCount, disabled, maintenance, name) {
   const parts = [];
   if (display) parts.push(display);
-  if (tagCount) parts.push(`${tagCount} tag${tagCount === 1 ? '' : 's'}`);
+  if (tagCount) parts.push(`${plural(tagCount, 'tag', 'tags')}`);
   if (disabled) parts.push('disabled');
   if (maintenance) parts.push('maintenance');
   return { set: parts.length > 0, text: parts.length ? parts.join(' - ') : (name || 'name, tags, status') };
@@ -6579,7 +6628,7 @@ async function redirectEditor(c, name) {
   const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('redirects', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${identityCard('ed', o, { section: 'redirects', isNew, placeholder: seed && seed.origName + '-copy', foldable: true })}
-    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="redirectHost.domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
+    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="redirectHost.domains"></div><div class="hint">Press Enter after each domain.</div></div>
     <div class="card form-section"><p class="section-label">Redirect target</p>
       <div class="inline-fields">
         <div class="field-group"><label>Target scheme</label><select class="field mono" id="ed-tscheme" data-hint="redirectHost.targetScheme">
@@ -6672,7 +6721,7 @@ async function streamEditor(c, name) {
       </div>
       <div id="ed-tls-fields" style="display:none">
         <div class="field-group"><label>SNI match</label><div class="chip-input" id="ed-sni" data-hint="streamHost.tls.sniMatch"></div>
-          <div class="hint">Server names this host claims, e.g. <span class="mono">db.example.com</span> or <span class="mono">*.example.com</span>. Required when sharing a port; leave empty to take every connection on a port of your own.</div>
+          <div class="hint">Server names this host claims, e.g. <span class="mono">db.example.com</span> or <span class="mono">*.example.com</span>. Required when sharing a port.</div>
         </div>
         <div class="field-group" id="ed-cert-group"><label>Certificate</label>
           <select class="field mono" id="ed-streamcert" data-hint="streamHost.tls.certificateRef">
@@ -6684,7 +6733,7 @@ async function streamEditor(c, name) {
       </div>
     `)}
     ${foldHtml('ed-stream-al-card', 'Access lists', streamAlSummary, selAl.length > 0, `
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any backend is dialled. Only literal IP rules and geo apply at L4. A list with basic-auth users, rules scoped to paths or methods, or rules backed by a source needs an HTTP request, so it is unavailable here.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any upstream is dialled. Only literal IP rules and geo apply at L4. A list with basic-auth users, rules scoped to paths or methods, or rules backed by a source needs an HTTP request, so it is unavailable here.</p>
       <div class="check-list" id="ed-stream-al" data-hint="streamHost.accessLists">
         ${streamAls.length ? streamAls.map((a) => {
     const off = streamAlUnavailable(a);
@@ -6760,9 +6809,9 @@ async function parkedEditor(c, name) {
   const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('parked', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${identityCard('ed', o, { section: 'parked', isNew, placeholder: seed && seed.origName + '-copy', foldable: true })}
-    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="parkedHost.domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
+    <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="parkedHost.domains"></div><div class="hint">Press Enter after each domain.</div></div>
     <div class="card form-section"><p class="section-label">Response</p>
-      <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" data-hint="parkedHost.statusCode" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Returned for every request to these domains. Default 404.</div></div>
+      <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" data-hint="parkedHost.statusCode" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Default 404.</div></div>
     </div>
   </div><div class="stack">${tlsCard(o.tls, certs, arr(o.domains))}</div></div>` + saveBar('parked', isNew, meta.addLabel);
   const domainsCtl = makeChipInput($('#ed-domains'), arr(o.domains), 'add domain...',
@@ -6961,7 +7010,7 @@ async function accessEditor(c, name) {
   const legacyUsers = arr(o.basicAuth);
   const hasLegacy = legacyUsers.length > 0;
   const legacyCard = hasLegacy ? `<div class="ro-banner warn" id="al-legacy">
-    <b>Legacy basic auth.</b> This access list has ${legacyUsers.length} user${legacyUsers.length === 1 ? '' : 's'}
+    <b>Legacy basic auth.</b> This access list has ${plural(legacyUsers.length, 'user', 'users')}
     (<span class="mono">${esc(legacyUsers.map((u) => u.username).join(', '))}</span>). Basic auth in an access list is
     deprecated and will be removed in gpm v2.
     ${o.satisfyAny ? '<br /><b>satisfyAny is set:</b> an allowed IP currently passes without a password.' : ''}
@@ -6981,7 +7030,7 @@ async function accessEditor(c, name) {
     <div class="card form-section"><p class="section-label">IP rules</p><div id="ed-rules" data-hint="accessList.rules" data-path="rules"></div>
       <button class="btn ghost sm" id="ed-addrule" type="button" style="margin-top:6px">${ICON.plus}Add rule</button>
       <div class="hint" style="margin-top:6px">Evaluated top-down, first match wins. Match a literal CIDR/IP, or a named source declared below. Paths (comma-separated, each must start with "/") narrow a rule to exact request paths; methods (comma-separated, upper-cased) only apply alongside paths and default to GET, HEAD when left blank.</div>
-      <div class="hint" style="margin-top:6px">For username/password gating, create an auth middleware in Basic mode under <a href="#/middleware/_new">Middleware</a>.</div>
+      <div class="hint" style="margin-top:6px">For username/password gating, add a sign-in middleware in Basic mode under <a href="#/middleware/_new">Middleware</a>.</div>
     </div>
     <div class="card form-section"><p class="section-label">Sources</p><div id="ed-sources" data-hint="accessList.sources" data-path="sources"></div>
       <button class="btn ghost sm" id="ed-addsource" type="button" style="margin-top:6px">${ICON.plus}Add source</button>
@@ -6995,7 +7044,7 @@ async function accessEditor(c, name) {
       ${geoAvailable ? '' : `<div class="field-group"><div class="hint warn" id="ed-geo-hint">${esc(geoReason)}</div></div>`}
       <div class="field-group"><label>Country allow</label>
         <div class="chip-input" id="ed-geo-allow" data-hint="accessList.geo.countryAllow"></div>
-        <div class="hint">ISO-3166-1 alpha-2 codes (e.g. US). Non-empty allow list takes priority over deny.</div>
+        <div class="hint">Two-letter codes, e.g. US.</div>
       </div>
       <div class="field-group"><label>Country deny</label><div class="chip-input" id="ed-geo-deny" data-hint="accessList.geo.countryDeny"></div></div>
       <div class="field-group"><label>On unknown country</label><select class="field mono" id="ed-geo-unknown" data-hint="accessList.geo.onUnknown">
@@ -7096,12 +7145,12 @@ async function accessEditor(c, name) {
       card.style.display = '';
       el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
         <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
-        <span class="muted" style="font-size:11px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + (s.entryCount || 0) + ' entries' : 'never fetched'}</span>
+        <span class="muted" style="font-size:11px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + plural(s.entryCount || 0, 'entry', 'entries') : 'Never'}</span>
         ${s.lastError ? `<span class="muted" style="font-size:11px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
     } catch (e) {
       card.style.display = arr(o.sources).length ? '' : 'none';
-      el.innerHTML = `<p class="hint" style="margin:0">${e && e.status === 501 ? 'Access-list source sync is not wired in this deployment.' : esc('Status unavailable: ' + (e.message || e))}</p>`;
+      el.innerHTML = `<p class="hint" style="margin:0">${e && e.status === 501 ? 'Access-list source sync is not available in this build.' : esc('Status unavailable: ' + (e.message || e))}</p>`;
     }
   }
   if (!isNew) renderAccessSourceStatus();
@@ -7112,7 +7161,7 @@ async function accessEditor(c, name) {
     try {
       await api('/api/access-list-sources/reconcile', { method: 'POST' });
       toast('Reconciled', 'Access-list sources are back in sync.', 'ok');
-    } catch (e) { toastErr(e); }
+    } catch (e) { toastErr(e, 'Could not refresh the sources'); }
     await renderAccessSourceStatus();
     btn.disabled = false;
   });
@@ -7224,7 +7273,7 @@ async function migrateBasicAuth(listName, btn) {
     return;
   }
   const attach = arr(plan.attachTo).map((a) => esc(a.name + (a.path ? ' ' + a.path : '')));
-  const body = `<p>Create auth middleware <b>${esc(plan.middleware)}</b> with <b>${arr(plan.users).length}</b> users (<span class="mono">${esc(arr(plan.users).join(', '))}</span>).</p>`
+  const body = `<p>Adds the sign-in middleware <b>${esc(plan.middleware)}</b> with <b>${plural(arr(plan.users).length, 'user', 'users')}</b> (<span class="mono">${esc(arr(plan.users).join(', '))}</span>).</p>`
     + (attach.length
       ? `<p>Attach it to:</p><ul>${attach.map((a) => `<li><span class="mono">${a}</span></li>`).join('')}</ul>`
       : '<p>Nothing references this list yet, so nothing is attached.</p>')
@@ -7249,7 +7298,7 @@ async function migrateBasicAuth(listName, btn) {
 }
 function migrateError(e) {
   if (e && e.status === 404) { toast('Not found', 'Access list not found - reload the page.', 'err'); return; }
-  toastErr(e);
+  toastErr(e, 'Could not migrate basic auth');
 }
 
 // ---------- IDENTITY PROVIDER EDITOR (polymorphic) ----------
@@ -7277,7 +7326,7 @@ async function idpEditor(c, name) {
     </div>
 
     <div class="card form-section ed-sub" data-type="forward-auth" style="${type === 'forward-auth' ? '' : 'display:none'}"><p class="section-label">Forward-auth</p>
-      <div class="field-group"><label>Trusted proxies (CIDRs)</label><div class="chip-input" id="fa-trusted" data-hint="identityProvider.forwardAuth.trustedProxies"></div><div class="hint">Which peers may assert identity headers such as <span class="mono">Remote-User</span>. Required. This does not affect the client IP - see <a href="#/settings/general">Settings</a> -&gt; Client IP.</div></div>
+      <div class="field-group"><label>Proxies that may assert identity (CIDRs)</label><div class="chip-input" id="fa-trusted" data-hint="identityProvider.forwardAuth.trustedProxies"></div><div class="hint">Which peers may send identity headers such as <span class="mono">Remote-User</span>. Required. The client address is set elsewhere, under <a href="#/settings/general">Settings &gt; Client addresses</a>.</div></div>
       <div class="inline-fields">
         <div class="field-group"><label>User header</label><input class="field mono" id="fa-user" data-hint="identityProvider.forwardAuth.userHeader" value="${esc(fa.userHeader || '')}" placeholder="X-authentik-username" /></div>
         <div class="field-group"><label>Email header</label><input class="field mono" id="fa-email" data-hint="identityProvider.forwardAuth.emailHeader" value="${esc(fa.emailHeader || '')}" placeholder="X-authentik-email" /></div>
@@ -7380,7 +7429,7 @@ async function middlewareEditor(c, name) {
       </select></div>
     </div>
 
-    <div class="card form-section ed-sub" data-type="auth" style="${type === 'auth' ? '' : 'display:none'}"><p class="section-label">Auth</p>
+    <div class="card form-section ed-sub" data-type="auth" style="${type === 'auth' ? '' : 'display:none'}"><p class="section-label">Sign-in</p>
       ${authBlockHtml('mw', auth, idps)}
     </div>
 
@@ -7397,7 +7446,7 @@ async function middlewareEditor(c, name) {
       <div class="inline-fields" style="margin-top:14px">
         <div class="field-group"><label>Deny status</label><input class="field mono" id="guard-deny" data-hint="middleware.guard.denyStatus" type="number" value="${esc(guard.denyStatus != null ? guard.denyStatus : '')}" placeholder="403" /></div>
       </div>
-      <div class="field-group"><label>Allow from (CIDRs)</label><div class="chip-input" id="guard-allow" data-hint="middleware.guard.allowFrom"></div></div>
+      <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="guard-allow" data-hint="middleware.guard.allowFrom"></div></div>
     </div>
 
     <div class="card form-section ed-sub" data-type="rate-limit" style="${type === 'rate-limit' ? '' : 'display:none'}"><p class="section-label">Rate limit</p>
@@ -7415,7 +7464,7 @@ async function middlewareEditor(c, name) {
         </select></div>
       </div>
       <div class="field-group"><label>URL</label><input class="field mono" id="bo-url" data-hint="middleware.bouncer.url" value="${esc(bo.url || '')}" placeholder="http://crowdsec:8080" /></div>
-      <div class="field-group"><label>API key</label><input class="field mono" id="bo-apikey" data-hint="middleware.bouncer.apiKey" value="${esc(bo.apiKey || '')}" placeholder="\${ENV:CROWDSEC_BOUNCER_KEY}" /><div class="hint">Sent as <span class="mono">X-Api-Key</span>. Required for crowdsec - register one with <span class="mono">cscli bouncers add gpm</span>. Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder; a masked secret reads <span class="mono">***</span>.</div></div>
+      <div class="field-group"><label>API key</label><input class="field mono" id="bo-apikey" data-hint="middleware.bouncer.apiKey" value="${esc(bo.apiKey || '')}" placeholder="\${ENV:CROWDSEC_BOUNCER_KEY}" /><div class="hint">Sent as <span class="mono">X-Api-Key</span>. Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder; a masked secret reads <span class="mono">***</span>.</div></div>
       <div class="inline-fields">
         <div class="field-group"><label>Timeout</label><input class="field mono" id="bo-timeout" data-hint="middleware.bouncer.timeout" value="${esc(bo.timeout || '')}" placeholder="2s" /></div>
         <div class="field-group"><label>Cache TTL</label><input class="field mono" id="bo-cachettl" data-hint="middleware.bouncer.cacheTTL" value="${esc(bo.cacheTTL || '')}" placeholder="60s" /></div>
@@ -7428,7 +7477,7 @@ async function middlewareEditor(c, name) {
       <div class="toggle-line" id="bo-stream-line"><div class="tl-text"><div class="nm">Stream mode (crowdsec only)</div><div class="ds">Pull the whole decision set once, then deltas every cache TTL, so the request path is a local lookup with no per-request LAPI call</div></div>${switchHtml('bo-stream', !!bo.stream, 'Stream mode', 'middleware.bouncer.stream')}</div>
     </div>
     <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules are tried in order: exact, then prefix (longest first), then regex. The first match wins, and a rewrite is never a redirect - the method, body and query string reach the backend unchanged. Security controls (rate limit, access list, bouncer, auth, guards) always evaluate the ORIGINAL client path.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules are tried in order: exact, then prefix (longest first), then regex. The first match wins, and a rewrite is never a redirect - the method, body and query string reach the upstream unchanged. Security controls (rate limit, access list, bouncer, sign-in, guards) always evaluate the ORIGINAL client path.</p>
       <div class="field-group"><label>Exact</label>
         <div class="hint" style="margin:0 0 6px">The request path must equal "From" exactly.</div>
         <div id="rw-replacepath" data-hint="middleware.rewrite.replacePath"></div>
@@ -7898,7 +7947,7 @@ function wireClientCAGenerate() {
       const r = await api('/api/client-cas/' + encodeURIComponent(nm) + '/generate', { method: 'POST', body });
       toastSaved(r.commit, 'Added'); refreshHeadSha(); clearDirty();
       location.hash = '#/clientcas/' + encodeURIComponent(nm);
-    } catch (e) { toastErr(e); btn.disabled = false; }
+    } catch (e) { toastErr(e, `Could not generate ${nm}`); btn.disabled = false; }
   });
 }
 
@@ -7928,12 +7977,12 @@ function expiryBanner(issued) {
   const anyExpired = bad.some((r) => r.status === 'expired');
   const items = bad.map((r) => {
     const when = r.status === 'expired'
-      ? `expired ${Math.abs(r.daysRemaining)} day${Math.abs(r.daysRemaining) === 1 ? '' : 's'} ago`
-      : `${r.daysRemaining} day${r.daysRemaining === 1 ? '' : 's'} left`;
+      ? `expired ${plural(Math.abs(r.daysRemaining), 'day', 'days')} ago`
+      : `${plural(r.daysRemaining, 'day', 'days')} left`;
     return `<li><b>${esc(r.commonName)}</b> <span class="mono">${esc(r.serial)}</span> - ${esc(when)} (expires ${esc(fmtTime(r.notAfter))})</li>`;
   }).join('');
   return `<div class="ro-banner ${anyExpired ? 'err' : 'warn'}">
-    <b>${bad.length} issued client certificate${bad.length === 1 ? '' : 's'} ${anyExpired ? 'expired or expiring' : 'expiring soon'}.</b>
+    <b>${plural(bad.length, 'issued client certificate', 'issued client certificates')} ${anyExpired ? 'expired or expiring' : 'expiring soon'}.</b>
     Renew each one below and re-issue the bundle. <b>There is no client-side renewal:</b> every device
     using the certificate must import the new <span class="mono">.p12</span> by hand, so plan the
     re-import before the date below, not after it.
@@ -7958,7 +8007,7 @@ function issueCard() {
     </div>
     <div class="field-group"><label>Subject alternative names</label>
       <input class="field mono" id="iss-sans" data-hint="clientCA.issue.sans" placeholder="phone-01.example.com, ops@example.com, 10.1.2.3" />
-      <div class="hint">Optional, comma-separated. An IP becomes an IP SAN, a value with <span class="mono">@</span> an email SAN, anything else DNS.</div>
+      <div class="hint">Optional, comma-separated.</div>
     </div>
     <div class="field-group"><button class="btn primary" id="iss-btn" type="button">Download .p12</button>
       <div class="hint">The private key exists only in the download - gpm records the subject, serial and validity, never the key.</div>
@@ -7972,7 +8021,7 @@ function issueCard() {
 function issuedStatusChip(r) {
   // One "superseded" chip in the status column; the name cell used to carry a
   // second one beside a status chip that still read "valid".
-  if (r.supersededBy) return `<span class="chip" title="${esc(r.status)}">superseded</span>`;
+  if (r.supersededBy) return `<span class="chip" title="${esc(r.status)}">Superseded</span>`;
   const cls = r.status === 'expired' ? 'err' : (r.status === 'expiring' ? 'warn' : 'ok');
   return `<span class="chip ${cls}"><span class="dot ${cls}"></span>${esc(r.status)}</span>`;
 }
@@ -8068,7 +8117,7 @@ function wireClientCertRenew(name, hasKey) {
           + encodeURIComponent(b.dataset.serial) + '/renew', { password: pw, validityDays: days }, b.dataset.cn);
         toast('Certificate renewed', 'Import the new .p12 on every device using this certificate - the old one is not revoked and still works until it expires.', 'ok');
         await refreshIssuedCerts(name, hasKey);
-      } catch (e) { toastErr(e); b.disabled = false; }
+      } catch (e) { toastErr(e, 'Could not renew the certificate'); b.disabled = false; }
     });
   });
 }
@@ -8101,7 +8150,7 @@ function wireClientCertIssue(name, hasKey) {
       $('#iss-pw').value = '';
       toast('Certificate issued', `Downloaded ${file}. It is not stored - keep the file and its password.`, 'ok');
       await refreshIssuedCerts(name, hasKey);
-    } catch (e) { toastErr(e); } finally { btn.disabled = false; }
+    } catch (e) { toastErr(e, 'Could not issue the certificate'); } finally { btn.disabled = false; }
   });
 }
 
@@ -8167,8 +8216,8 @@ async function upstreamGroupEditor(c, name) {
     // up is the quiet state (dot + text only); down gets the filled/bordered
     // pill, so a bad backend is what catches the eye.
     return health[label]
-      ? '<span class="chip flat ok" style="flex:0 0 auto"><span class="dot ok"></span>up</span>'
-      : '<span class="chip err" style="flex:0 0 auto"><span class="dot err"></span>down</span>';
+      ? '<span class="chip flat ok" style="flex:0 0 auto"><span class="dot ok"></span>Up</span>'
+      : '<span class="chip err" style="flex:0 0 auto"><span class="dot err"></span>Down</span>';
   };
   c.innerHTML = editorHead('upstreams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
     ${identityCard('ed', o, { section: 'upstreams', isNew, placeholder: seed && seed.origName + '-copy' })}
@@ -8370,7 +8419,7 @@ const ADMIN_ONLY_SCOPES = {
 };
 
 function tokenExpiryLabel(t) {
-  if (!t.expiresAt) return 'never';
+  if (!t.expiresAt) return 'Never';
   const d = new Date(t.expiresAt);
   if (isNaN(d.getTime())) return esc(t.expiresAt);
   return fmtTime(t.expiresAt) + (d.getTime() < Date.now() ? ' (expired)' : '');
@@ -8449,7 +8498,7 @@ async function viewTokens(c) {
       </td>
       <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
       <td class="mono col-time">${tokenExpiryLabel(t)}</td>
-      <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'never'}</td>
+      <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'Never'}</td>
       <td class="col-actions">
         <div class="row-actions">
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
@@ -8459,9 +8508,9 @@ async function viewTokens(c) {
     </tr>`).join('');
 
   c.innerHTML = viewHead('API Tokens',
-    'Non-interactive credentials for scripts and CI. Send as Authorization: Bearer gpm_...; scopes limit what each token can reach.') +
+    'Credentials for scripts and CI, sent as a Bearer token. Scopes limit what each token can reach.') +
     `<div class="card form-section" style="margin-bottom:16px">
-      <p class="section-label">Create token</p>
+      <p class="section-label">Add token</p>
       <div class="inline-fields">
         <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" data-hint="apiToken.name" placeholder="ci-deploy" /></div>
         <div class="field-group field-narrow"><label>Expires</label><input class="field mono" id="tok-expires" data-hint="apiToken.expiresAt" type="date" /></div>
@@ -8508,7 +8557,7 @@ async function viewTokens(c) {
         <tbody id="tokRows">${rows}</tbody>
       </table></div>`
       : emptyState('No API tokens yet',
-        'Create one above with only the scopes the script needs - write implies read, so a deploy job usually wants proxy-hosts:write and nothing else.'));
+        'Add one with only the scopes the script needs - write implies read, so a deploy job usually wants proxy-hosts:write and nothing else.'));
 
   const tokFilter = $('#tokFilter');
   if (tokFilter) {
@@ -8597,7 +8646,7 @@ async function viewTokens(c) {
     } catch (e) {
       // A token has no page of its own: the stored one is in the list below,
       // where Rotate replaces its secret.
-      if (!showNameTaken(e, 'token', nm, '', 'Could not add this token', $('#tok-name'))) toastErr(e);
+      if (!showNameTaken(e, 'token', nm, '', 'Could not add this token', $('#tok-name'))) toastErr(e, 'Could not add this token');
       btn.disabled = false;
     }
   });
@@ -8626,7 +8675,7 @@ async function viewTokens(c) {
         const secret = r.data && r.data.token;
         if (c.isConnected) await route();
         if (secret) revealToken(secret);
-      } catch (e) { toastErr(e); b.disabled = false; }
+      } catch (e) { toastErr(e, `Could not rotate ${nm}`); b.disabled = false; }
     });
   });
 
@@ -8647,8 +8696,8 @@ async function viewTokens(c) {
         toastSaved(r.commit, 'Deleted');
         refreshHeadSha(); if (c.isConnected) await route();
       } catch (e) {
-        if (e && (e.status === 409 || e.status === 400)) showSaveError(e, 'Could not delete token');
-        else toastErr(e);
+        if (e && (e.status === 409 || e.status === 400)) showSaveError(e, `Could not delete ${nm}`);
+        else toastErr(e, `Could not delete ${nm}`);
         b.disabled = false;
       }
     });
@@ -8681,7 +8730,7 @@ async function viewLogs(c) {
     ${entries.length ? `<div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter requests..." title="Matches host, path, method, status code and client address" aria-label="Filter log entries" /></div>
     </div>` : ''}
-    ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">--access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
+    ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">-access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
     <div class="table-wrap">
       <table>
         <thead><tr><th class="col-time">Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th class="col-num">Duration</th><th>Client</th></tr></thead>
@@ -8708,9 +8757,9 @@ async function viewLogs(c) {
     btn.disabled = true;
     try {
       await api('/api/logs', { method: 'PUT', body: { enabled: !enabled } });
-      toast(enabled ? 'Capture disabled' : 'Capture enabled', 'runtime only - a restart reverts to the --access-log flag', 'ok');
+      toast(enabled ? 'Capture disabled' : 'Capture enabled', 'Runtime only: a restart goes back to the -access-log flag.', 'ok');
       if (c.isConnected) await route();
-    } catch (e) { toastErr(e); btn.disabled = false; }
+    } catch (e) { toastErr(e, enabled ? 'Could not disable capture' : 'Could not enable capture'); btn.disabled = false; }
   });
 }
 
@@ -8736,13 +8785,13 @@ async function viewHistory(c) {
         const obj = parseObjectCommit(h.message);
         // Buttons, not spans: these commit a config change, so they have to be
         // tabbable and operable from the keyboard like every other action here.
-        const scoped = obj ? `<button type="button" class="revert" data-revert-obj="${esc(h.hash)}" data-obj-plural="${esc(obj.plural)}" data-obj-name="${esc(obj.name)}" data-obj-kind="${esc(obj.kind)}" title="Revert only ${esc(obj.kind)} &quot;${esc(obj.name)}&quot; to this version; every other object is left untouched">revert this object</button>` : '';
+        const scoped = obj ? `<button type="button" class="revert" data-revert-obj="${esc(h.hash)}" data-obj-plural="${esc(obj.plural)}" data-obj-name="${esc(obj.name)}" data-obj-kind="${esc(obj.kind)}" title="Revert only ${esc(kindSingular(obj.kind))} &quot;${esc(obj.name)}&quot; to this version; every other object is left untouched">Revert this object</button>` : '';
         const whole = i === 0
-          ? '<span class="revert disabled" title="Already the current config">current</span>'
-          : `<button type="button" class="revert" data-revert="${esc(h.hash)}" title="Revert the ENTIRE config (every object) to this commit">revert entire config</button>`;
-        return `<div class="tl-item" data-blob="${esc([h.message, h.author, h.email, h.hash].join(' ').toLowerCase())}">
+          ? '<span class="revert disabled" title="Already the current config">Current</span>'
+          : `<button type="button" class="revert" data-revert="${esc(h.hash)}" title="Revert the entire config (every object) to this commit">Revert entire config</button>`;
+        return `<div class="tl-item" data-blob="${esc([h.message, historyText(h.message), h.author, h.email, h.hash].join(' ').toLowerCase())}">
           <div class="tl-meta">${esc(fmtTime(h.when))} &middot; <span${h.email ? ` title="${esc(h.email)}"` : ''}>${esc(h.author || 'unknown')}</span></div>
-          <div class="tl-msg">${esc(h.message || '(no message)')}</div>
+          <div class="tl-msg" title="${esc(h.message || '')}">${esc(historyText(h.message))}</div>
           <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${scoped}${whole}</div>
         </div>`;
       }).join('')}</div>` : '<div class="muted" style="font-size:13px">No commits yet.</div>'}
@@ -8779,7 +8828,7 @@ async function viewHistory(c) {
       toast('Restored', data && data.commit ? `committed <span class="sha">${esc(shortSha(data.commit))}</span>` : 'configuration restored', 'ok', { html: true });
       refreshHeadSha();
       if (c.isConnected) await route();
-    } catch (e) { toastErr(e); } finally { fileInput.value = ''; }
+    } catch (e) { toastErr(e, 'Could not restore the archive'); } finally { fileInput.value = ''; }
   });
   c.querySelectorAll('[data-revert]').forEach((el) => {
     el.addEventListener('click', async () => {
@@ -8797,7 +8846,7 @@ async function viewHistory(c) {
         toast('Reverted', r.data && r.data.commit ? `committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : 'config reverted', 'ok', { html: true });
         refreshHeadSha();
         if (c.isConnected) await route();
-      } catch (e) { toastErr(e); }
+      } catch (e) { toastErr(e, 'Could not revert the config'); }
     });
   });
   c.querySelectorAll('[data-revert-obj]').forEach((el) => {
@@ -8805,10 +8854,10 @@ async function viewHistory(c) {
       const hash = el.getAttribute('data-revert-obj');
       const plural = el.getAttribute('data-obj-plural');
       const name = el.getAttribute('data-obj-name');
-      const kind = el.getAttribute('data-obj-kind');
+      const kind = kindSingular(el.getAttribute('data-obj-kind'));
       const ok = await confirmModal({
-        title: `Revert this ${kind.toLowerCase()}?`,
-        body: `<p><b>${esc(kind)} "${esc(name)}"</b> is reset to how it was at <span class="sha mono">${esc(shortSha(hash))}</span>.</p>`
+        title: `Revert this ${kind}?`,
+        body: `<p>The ${esc(kind)} <b>${esc(name)}</b> is reset to how it was at <span class="sha mono">${esc(shortSha(hash))}</span>.</p>`
           + '<p>Every other object is left exactly as it is, and this is recorded as a new commit - so this page can undo it.</p>',
         confirmLabel: 'Revert this object',
         danger: false,
@@ -8816,10 +8865,10 @@ async function viewHistory(c) {
       if (!ok) return;
       try {
         const r = await api('/api/' + plural + '/' + encodeURIComponent(name) + '/revert', { method: 'POST', body: { hash } });
-        toast('Reverted', r.data && r.data.commit ? `${esc(kind)} "${esc(name)}" committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : `${esc(kind)} "${esc(name)}" reverted`, 'ok', { html: true });
+        toast('Reverted', r.data && r.data.commit ? `${esc(capFirst(kind))} ${esc(name)}, committed <span class="sha">${esc(shortSha(r.data.commit))}</span>` : `${esc(capFirst(kind))} ${esc(name)} reverted`, 'ok', { html: true });
         refreshHeadSha();
         if (c.isConnected) await route();
-      } catch (e) { toastErr(e); }
+      } catch (e) { toastErr(e, `Could not revert ${name}`); }
     });
   });
 }
@@ -8836,10 +8885,10 @@ async function viewErrorPages(c) {
   const ep = s.errorPages || {};
 
   c.innerHTML = viewHead('Error Pages',
-    'Custom HTML for the errors gpm generates itself - a dead upstream, a denial, a rate limit. Applies to every host unless a host overrides it in its own editor.')
+    'Custom HTML for the errors gpm itself generates. Applies to every host unless a host overrides it.')
     + `<div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">What these replace</p>
-      <p class="muted" style="font-size:11.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), an auth-middleware refusal (401/403, and the 502/503 an unavailable auth backend or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
+      <p class="muted" style="font-size:11.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), a sign-in refusal (401/403, and the 502/503 an unavailable auth server or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Templates</p>
@@ -8861,7 +8910,7 @@ async function viewErrorPages(c) {
       <div class="hint" style="margin-top:12px">Leave everything blank for gpm's built-in plain-text output. A parse error fails the config reload with a message naming the template. Per-host overrides live in each host's editor, under Error pages.</div>
     </div>
     <div class="panel save-bar">
-      <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
+      <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
         <button class="btn primary" id="errp-save" type="button">Save changes</button>
       </div>
@@ -8953,7 +9002,7 @@ function runtimeCardHtml(rt) {
     <p class="muted" style="font-size:11.5px;margin:0 0 10px">What this process is. Everything here is set at startup and needs a restart to change.</p>
     <div class="kv">
       ${row('Version', mono(rt.version || 'unknown'))}
-      ${row('HA role', rt.haRole === 'follower' ? '<span class="chip warn">follower (read-only)</span>' : '<span class="chip">leader</span>')}
+      ${row('HA role', rt.haRole === 'follower' ? '<span class="chip warn">Follower (read-only)</span>' : '<span class="chip">Leader</span>')}
       ${row('HTTP listener', mono(listeners.http))}
       ${row('HTTPS listener', mono(listeners.https))}
       ${row('Admin listener', mono(listeners.admin))}
@@ -8961,9 +9010,9 @@ function runtimeCardHtml(rt) {
       ${row('Certificate directory', mono(paths.certDir))}
       ${row('Session database', mono(paths.sessionDB))}
       ${row('Secret file roots', roots.length ? roots.map((r) => `<span class="chip mono">${esc(r)}</span>`).join(' ') : mono('none'), 'Allowlisted directories for <span class="mono">${FILE:...}</span> secrets (<span class="mono">GPM_SECRET_FILE_ROOTS</span>).')}
-      ${row('Local admin login', rt.localAdminConfigured ? word(true, 'Configured', '') : '<span class="chip warn">Not configured</span>',
+      ${row('Local admin sign-in', rt.localAdminConfigured ? word(true, 'Configured', '') : '<span class="chip warn">Not configured</span>',
     rt.localAdminConfigured ? '' : 'No local password login. Set <span class="mono">GPM_LOCAL_ADMIN_USER</span> and <span class="mono">GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE</span> and restart.')}
-      ${row('Local admin TOTP', word(!!rt.localAdminTOTP, 'enabled', 'disabled'))}
+      ${row('Local admin TOTP', word(!!rt.localAdminTOTP, 'On', 'Off'))}
       ${row('Prometheus metrics', word(!!rt.metricsEnabled, 'On', 'Off'), rt.metricsEnabled ? '' : 'Start gpm with <span class="mono">GPM_METRICS=1</span> to expose <span class="mono">/metrics</span>.')}
       ${row('Access log', word(!!rt.accessLogEnabled, 'On', 'Off'), 'Live value. The Access Logs page toggles it at runtime; the <span class="mono">-access-log</span> flag decides the state after a restart.')}
       ${row('GeoIP database', word(!!rt.geoipLoaded, 'Loaded', 'Not loaded'), rt.geoipLoaded ? '' : 'Set <span class="mono">GPM_GEOIP_DB</span>. Access lists with geo rules cannot be saved or evaluated until it loads.')}
@@ -8975,7 +9024,7 @@ function runtimeCardHtml(rt) {
 
 function settingsSaveBar(id) {
   return `<div class="panel save-bar">
-    <div class="save-note">${ICON.commit}Saving any tab commits the whole settings object as one revision.</div>
+    <div class="save-note">${ICON.commit}Saving any tab writes the whole settings object as one commit.</div>
     <div style="display:flex;gap:10px">
       <button class="btn primary set-save" id="${esc(id)}" type="button">Save changes</button>
     </div>
@@ -9007,7 +9056,7 @@ async function viewSettings(c, tab) {
   const stls = s.tls || {};
 
   c.innerHTML = `
-    ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound integrations live under <a href="#/integrations">Integrations</a>.')}
+    ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound systems are under <a href="#/integrations">Integrations</a>.')}
     <div class="tabs" id="set-tabs" role="tablist">
       ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="set-tab-${esc(t.id)}" aria-controls="set-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join('')}
     </div>
@@ -9015,11 +9064,11 @@ async function viewSettings(c, tab) {
     <div class="tab-panel" data-tab="general" id="set-panel-general" role="tabpanel" aria-labelledby="set-tab-general" hidden>
       ${runtimeCardHtml(rt)}
       <div class="card form-section" style="margin-top:16px">
-        <p class="section-label">Identity</p>
+        <p class="section-label">Instance</p>
         <div class="field-group">
           <label>Instance name</label>
           <input class="field" id="set-appname" data-hint="settings.appName" data-path="appName" value="${esc(s.appName || '')}" placeholder="Go Proxy Manager" />
-          <div class="hint">Brand label in the sidebar, the browser title and the login page. Blank falls back to "Go Proxy Manager".</div>
+          <div class="hint">Shown in the masthead, the browser title and the login page.</div>
         </div>
         <div class="field-group">
           <label>Public URL of this panel</label>
@@ -9029,7 +9078,7 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Admin sign-in</p>
-        <div class="toggle-line"><div class="tl-text"><div class="nm">Local username/password</div><div class="ds" id="set-local-status">Username/password fallback</div></div>${switchHtml('set-local', !!admin.localLoginEnabled, 'Local login', 'settings.adminAuth.localLoginEnabled')}</div>
+        <div class="toggle-line"><div class="tl-text"><div class="nm">Local sign-in</div><div class="ds" id="set-local-status">Username/password fallback</div></div>${switchHtml('set-local', !!admin.localLoginEnabled, 'Local sign-in', 'settings.adminAuth.localLoginEnabled')}</div>
         <div class="field-group" style="margin-top:12px">
           <label>Single sign-on providers</label>
           <div class="check-list" id="set-providers" data-hint="settings.adminAuth.providers" data-path="adminAuth.providers">
@@ -9039,13 +9088,13 @@ async function viewSettings(c, tab) {
               <label class="check-item"><input type="checkbox" value="${esc(n)}" checked/>${esc(n)}<span class="ci-ty" title="Stored in settings but not an OIDC identity provider on this instance">unknown</span></label>
             `).join('') : '<div class="check-empty">No OIDC identity providers defined yet.</div>'}
           </div>
-          <div class="hint">Which identity providers may sign in to this admin panel. Only OIDC providers can: forward-auth and auth-request assert identity for proxied hosts, not for the panel. Define them under <a href="#/identity">Identity Providers</a>.</div>
+          <div class="hint">Only OIDC providers can sign in to this panel. Define them under <a href="#/identity">Identity Providers</a>.</div>
         </div>
         <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Require SSO for admins</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'Require SSO for admins', 'settings.adminAuth.ssoOnly')}</div>
-        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local login re-enabled.</div>
+        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local sign-in re-enabled.</div>
       </div>
       <div class="card form-section" style="margin-top:16px">
-        <p class="section-label">Client IP</p>
+        <p class="section-label">Client addresses</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">Which proxies in front of gpm may set the client address.</p>
         <div class="field-group">
           <label>Trusted proxies</label>
@@ -9098,14 +9147,14 @@ async function viewSettings(c, tab) {
     <div class="tab-panel" data-tab="advanced" id="set-panel-advanced" role="tabpanel" aria-labelledby="set-tab-advanced" hidden>
       <div class="card form-section">
         <p class="section-label">PROXY protocol (inbound)</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. This is the L4 half of the same question the Client IP card answers at L7. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below. UDP stream listeners are unaffected.</p>
+        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. This is the L4 half of the same question the Client addresses card answers at L7. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below. UDP stream listeners are unaffected.</p>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Accept PROXY headers</div><div class="ds">From the trusted peers below only</div></div>${switchHtml('set-pp-on', !!pp.enabled, 'Accept PROXY headers', 'settings.proxyProtocol.enabled')}</div>
         <div class="grid-2" style="margin-top:10px">
           <div class="field-group"><label>Trusted peers</label><div class="chip-input" id="set-pp-cidrs" data-hint="settings.proxyProtocol.trustedCIDRs" data-path="proxyProtocol.trustedCIDRs"></div>
-            <div class="hint">CIDRs or bare IPs of your load balancers, e.g. <span class="mono">10.0.0.0/8</span>. Required when enabled - there is no "trust everyone" mode.</div>
+            <div class="hint">For example <span class="mono">10.0.0.0/8</span>. Required when enabled.</div>
           </div>
           <div class="field-group"><label>Header timeout</label><input class="field mono" id="set-pp-timeout" data-hint="settings.proxyProtocol.timeout" data-path="proxyProtocol.timeout" value="${esc(pp.timeout || '')}" placeholder="5s" />
-            <div class="hint">How long a trusted peer has to deliver a complete header before the connection is closed. Blank = 5s, maximum 1m.</div>
+            <div class="hint">Blank = 5s, maximum 1m.</div>
           </div>
         </div>
       </div>
@@ -9127,7 +9176,7 @@ async function viewSettings(c, tab) {
         <p class="section-label">High availability</p>
         <p class="muted" style="font-size:11.5px;margin:0 0 10px">HA is decided at startup, not here. One instance is the leader and owns every write - config commits, ACME orders, DNS and discovery reconciles. A follower serves traffic from the replicated config and refuses config writes with a <span class="mono">503</span>, which is why its write controls are greyed out.</p>
         <div class="kv">
-          <span class="k">This instance</span><span class="v">${(rt && rt.haRole === 'follower') ? '<span class="chip warn">follower (read-only)</span>' : '<span class="chip">leader</span>'}</span>
+          <span class="k">This instance</span><span class="v">${(rt && rt.haRole === 'follower') ? '<span class="chip warn">Follower (read-only)</span>' : '<span class="chip">Leader</span>'}</span>
           <span class="k">Config repo</span><span class="v"><span class="mono">${esc((rt && rt.paths && rt.paths.configDir) || '-')}</span><div class="hint">Replicate this directory to the follower; it is the whole state.</div></span>
         </div>
       </div>
@@ -9146,7 +9195,7 @@ async function viewSettings(c, tab) {
         <div class="field-group" style="margin-top:10px;max-width:220px">
           <label>Retry-After (seconds)</label>
           <input class="field mono" id="set-maint-retry" data-hint="settings.maintenance.retryAfterSeconds" data-path="maintenance.retryAfterSeconds" type="number" min="0" max="86400" value="${esc(maint.retryAfterSeconds != null ? String(maint.retryAfterSeconds) : '')}" placeholder="300" />
-          <div class="hint">Sent on every maintenance response, per-host ones included. Blank = 300s, maximum 24h.</div>
+          <div class="hint">Blank = 300s, maximum 24h.</div>
         </div>
       </div>
       <div class="card form-section danger-zone" style="margin-top:16px">
@@ -9214,9 +9263,9 @@ async function viewSettings(c, tab) {
     if (!isOn('set-sso')) return;
     const ok = await confirmModal({
       title: 'Require SSO for admins?',
-      body: '<p>Local username/password login is <b>disabled</b> for this admin panel. Every operator signs in through one of the providers above.</p>'
+      body: '<p>Local sign-in is <b>disabled</b> for this admin panel. Every operator signs in through one of the providers above.</p>'
         + '<p>There is deliberately no in-band break-glass door. If the identity provider is unreachable, its configuration drifts, or the provider entry is removed, '
-        + '<b>recovery is a redeploy</b> with local login re-enabled - not a login page.</p>',
+        + '<b>recovery is a redeploy</b> with local sign-in re-enabled - not a sign-in page.</p>',
       confirmLabel: 'Require SSO',
     });
     if (!ok) $('#set-sso').setAttribute('aria-checked', 'false');
@@ -9228,7 +9277,7 @@ async function viewSettings(c, tab) {
     if (!isOn('set-maint-on')) return;
     const ok = await confirmModal({
       title: 'Turn on fleet-wide maintenance?',
-      body: `<p><b>${proxyHostCount} proxy host${proxyHostCount === 1 ? '' : 's'}</b> will stop reaching their upstreams and answer <span class="mono">503</span> with a <span class="mono">Retry-After</span> instead.</p>`
+      body: `<p><b>${plural(proxyHostCount, 'proxy host', 'proxy hosts')}</b> will stop reaching their upstreams and answer <span class="mono">503</span> with a <span class="mono">Retry-After</span> instead.</p>`
         + '<p>It overrides each host\'s own Maintenance switch. Redirect, parked and stream hosts keep serving, and ACME HTTP-01 is still answered, so certificates continue to renew.</p>'
         + '<p>This takes effect as soon as the save commits.</p>',
       confirmLabel: 'Turn on maintenance',
@@ -9252,7 +9301,7 @@ async function viewSettings(c, tab) {
       added++;
     });
     toast(added ? 'Recommended headers added' : 'Nothing to add',
-      added ? `${added} header${added === 1 ? '' : 's'} added. Review them, then save.` : 'Every recommended header is already listed.', added ? 'ok' : '');
+      added ? `${plural(added, 'header', 'headers')} added. Review them, then save.` : 'Every recommended header is already listed.', added ? 'ok' : '');
   });
   const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');
 
@@ -9281,7 +9330,7 @@ async function viewSettings(c, tab) {
     try {
       await api('/api/sso/revoke', { method: 'POST' });
       toast('Sessions revoked', 'All per-host SSO sessions are now invalid.', 'ok');
-    } catch (e) { toastErr(e); }
+    } catch (e) { toastErr(e, 'Could not revoke sessions'); }
     btn.disabled = false;
   });
 
@@ -9463,7 +9512,7 @@ function applyNavGating() {
   // other page is readable by that role, so nothing else is hidden.
   if (isRoleReadOnly()) { if (item) item.hidden = true; return; }
   gateControl(item, hasCapability('apiTokens.enabled'),
-    'API tokens are not wired in this deployment.');
+    'API tokens are not available in this build.');
 }
 
 // buildShell renders the sidebar before any fetch has happened, so a
@@ -9506,6 +9555,10 @@ function wizard(opts) {
     let dirty = false;
     let closed = false;
     let prompting = false;
+    // The page the wizard opened over: a declined navigation prompt puts the
+    // hash back here, and the hashchange that puts it back is swallowed.
+    const openHash = location.hash;
+    let restoringHash = false;
     const prevFocus = document.activeElement;
     const wrap = document.createElement('div');
     wrap.className = 'modal-scrim wz-scrim';
@@ -9554,7 +9607,7 @@ function wizard(opts) {
       ctl = null;
       nextBtn.hidden = false;
       backBtn.hidden = i === 0;
-      nextBtn.textContent = i === steps.length - 1 ? (opts.finishLabel || 'Create') : 'Next';
+      nextBtn.textContent = i === steps.length - 1 ? (opts.finishLabel || 'Add') : 'Next';
       const r = steps[i].render(main, draft);
       const got = (r && typeof r.then === 'function') ? await r : r;
       if (closed || cur !== i) return;
@@ -9592,14 +9645,23 @@ function wizard(opts) {
         nextBtn.disabled = false;
       }
     }
-    async function cancel() {
+    // navigating: the page underneath changed, so the prompt speaks of leaving
+    // and a decline returns to the page the wizard opened on.
+    async function cancel(navigating) {
       if (dirty) {
         prompting = true;
         let leave = false;
         try {
-          leave = await confirmModal({ title: `Discard this ${opts.noun || 'draft'}?`, body: '<p>Nothing has been created yet. Closing throws the steps away.</p>', confirmLabel: 'Discard' });
+          leave = await confirmModal(navigating === true
+            ? { title: `Discard this ${opts.noun || 'draft'}?`, body: '<p>Nothing has been created yet. Leaving this page throws the steps away.</p>', confirmLabel: 'Discard and leave', keepOnNavigate: true }
+            : { title: `Discard this ${opts.noun || 'draft'}?`, body: '<p>Nothing has been created yet. Closing throws the steps away.</p>', confirmLabel: 'Discard' });
         } finally { prompting = false; }
-        if (!leave) return;
+        if (!leave) {
+          // Declined: the wizard stays over the page it opened on, whichever
+          // navigation happened while the prompt was up.
+          if (location.hash !== openHash) { restoringHash = true; location.hash = openHash; }
+          return;
+        }
       }
       close(null);
     }
@@ -9617,8 +9679,10 @@ function wizard(opts) {
     // a dirty one asks first and stays if the operator declines.
     function onHash() {
       if (closed) return;
+      if (restoringHash) { if (location.hash === openHash) restoringHash = false; return; }
       if (!dirty) { close(null); return; }
-      cancel();
+      if (prompting) return; // the open prompt answers this navigation too
+      cancel(true);
     }
     function onKey(e) {
       if (prompting) return; // the discard prompt on top owns the keys
@@ -9690,8 +9754,8 @@ function wizard(opts) {
     }
     document.addEventListener('keydown', onKey, true);
     window.addEventListener('hashchange', onHash);
-    wrap.querySelector('#wz-close').addEventListener('click', cancel);
-    wrap.querySelector('#wz-cancel').addEventListener('click', cancel);
+    wrap.querySelector('#wz-close').addEventListener('click', () => cancel());
+    wrap.querySelector('#wz-cancel').addEventListener('click', () => cancel());
     backBtn.addEventListener('click', () => go(cur - 1));
     nextBtn.addEventListener('click', () => { if (cur === steps.length - 1) finish(); else go(cur + 1); });
     const imp = wrap.querySelector('#wz-import');
@@ -9766,7 +9830,9 @@ async function runHostWizard() {
   const existing = new Set(arr(hostsR).map((h) => h.name));
   // forceSSLTouched: Force SSL follows the domains' coverage (on only when
   // every domain is covered) until the operator flips the switch.
-  const draft = { name: '', domains: [], scheme: 'http', host: '', port: '', path: '', forceSSL: null, forceSSLTouched: false, hsts: false, idp: '', accessLists: [], middlewares: [] };
+  // nameTouched: the name follows the first domain until the name field
+  // itself is typed in (a Back and re-render does not count as typing).
+  const draft = { name: '', nameTouched: false, domains: [], scheme: 'http', host: '', port: '', path: '', forceSSL: null, forceSSLTouched: false, hsts: false, idp: '', accessLists: [], middlewares: [] };
   const allCovered = (d) => d.domains.length > 0 && d.domains.every((x) => certForDomain(certs, x));
   // One coverage phrase for the step list and Review: which certificate covers
   // the host, or how many of its domains are covered when only some are.
@@ -9785,22 +9851,22 @@ async function runHostWizard() {
     {
       id: 'service', title: 'Service',
       render(pane, d) {
-        pane.innerHTML = `<h3>Service</h3><p class="lead">The public name and the backend that answers it.</p>
+        pane.innerHTML = `<h3>Service</h3><p class="lead">The public name and the upstream that answers it.</p>
           <div class="field-group"><label>Domains</label><div class="chip-input" id="wz-domains" data-hint="proxyHost.domains"></div>
-            <div class="hint">The first domain names the host. Press Enter after each one.</div></div>
-          <div class="field-group"><label>Name</label><input class="field mono" id="wz-name" value="${esc(d.name)}" placeholder="app" autocomplete="off" spellcheck="false" data-auto="${d.name ? '0' : '1'}" data-hint="common.name" />
+            <div class="hint">Press Enter after each domain. The first one names the host.</div></div>
+          <div class="field-group"><label>Name</label><input class="field mono" id="wz-name" value="${esc(d.name)}" placeholder="app" autocomplete="off" spellcheck="false" data-auto="${d.nameTouched ? '0' : '1'}" data-hint="common.name" />
             <div class="hint">Internal name and config file name, fixed after creation. Taken from the first domain; lowercase letters, digits, dots, - and _.</div></div>
           <div class="inline-fields">
             <div class="field-group" style="flex:0 0 130px"><label>Scheme</label><select class="field mono" id="wz-scheme" data-hint="proxyHost.upstream.scheme"><option value="http"${d.scheme !== 'https' ? ' selected' : ''}>http</option><option value="https"${d.scheme === 'https' ? ' selected' : ''}>https</option></select></div>
-            <div class="field-group"><label>Host or IP</label><input class="field mono" id="wz-host" value="${esc(d.host)}" placeholder="10.0.0.5" autocomplete="off" spellcheck="false" data-hint="proxyHost.upstream.host" /></div>
+            <div class="field-group"><label>Host</label><input class="field mono" id="wz-host" value="${esc(d.host)}" placeholder="10.0.0.5" autocomplete="off" spellcheck="false" data-hint="proxyHost.upstream.host" /></div>
             <div class="field-group" style="flex:0 0 120px"><label>Port</label><input class="field mono" id="wz-port" value="${esc(d.port)}" placeholder="3000" inputmode="numeric" autocomplete="off" data-hint="proxyHost.upstream.port" /></div>
           </div>
           <div class="hint">http is right for most apps on your LAN; gpm terminates TLS in front of it.</div>
           ${foldHtml('wz-more-routing', 'More routing', d.path ? 'base path ' + d.path : 'base path none, host header kept, timeouts default', !!d.path,
             `<div class="field-group"><label>Base path</label><input class="field mono" id="wz-path" value="${esc(d.path)}" placeholder="/" autocomplete="off" spellcheck="false" data-hint="proxyHost.upstream.path" />
-              <div class="hint">Prefixed to every request sent to the backend. Empty forwards the path unchanged. Host header, timeouts and path overrides are in the editor after creation.</div></div>`)}`;
+              <div class="hint">Prefixed to every request sent to the upstream. Empty forwards the path unchanged. Host header, timeouts and path overrides are in the editor after creation.</div></div>`)}`;
         const nameEl = pane.querySelector('#wz-name');
-        nameEl.addEventListener('input', () => { nameEl.dataset.auto = '0'; });
+        nameEl.addEventListener('input', () => { nameEl.dataset.auto = '0'; d.nameTouched = true; });
         const chips = makeChipInput(pane.querySelector('#wz-domains'), d.domains, 'add domain...', (list) => {
           if (nameEl.dataset.auto === '1') nameEl.value = hostNameFrom(list[0]);
         });
@@ -9811,6 +9877,7 @@ async function runHostWizard() {
             // when the Certificate step is not shown again.
             if (!dd.forceSSLTouched) dd.forceSSL = allCovered(dd);
             dd.name = nameEl.value.trim();
+            dd.nameTouched = nameEl.dataset.auto === '0';
             dd.scheme = pane.querySelector('#wz-scheme').value;
             dd.host = pane.querySelector('#wz-host').value.trim();
             dd.port = pane.querySelector('#wz-port').value.trim();
@@ -9830,7 +9897,7 @@ async function runHostWizard() {
         if (d.name.length > 253) return 'The name is too long (253 characters at most).';
         if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
         if (existing.has(d.name)) return `A proxy host named "${d.name}" already exists. Pick another name, or edit that host from the list.`;
-        if (!d.host) return 'Enter the backend host or IP address.';
+        if (!d.host) return 'Enter the upstream host or IP address.';
         const port = parseInt(d.port, 10);
         if (isNaN(port) || port < 1 || port > 65535 || String(port) !== d.port) return 'Enter a port between 1 and 65535.';
         if (d.path && d.path[0] !== '/') return 'A base path must start with "/".';
@@ -9838,7 +9905,7 @@ async function runHostWizard() {
       },
       summary(d) {
         const more = d.domains.length > 1 ? ` +${d.domains.length - 1}` : '';
-        return `${esc(d.domains[0])}${more} to <span class="mono">${esc(d.host)}:${esc(d.port)}</span>`;
+        return `${esc(d.domains[0])}${more} to <span class="mono">${esc(d.scheme)}://${esc(d.host)}:${esc(d.port)}${esc(d.path)}</span>`;
       },
     },
     {
@@ -9876,7 +9943,7 @@ async function runHostWizard() {
       render(pane, d) {
         const alHtml = als.length
           ? `<div class="check-list" id="wz-als" data-hint="proxyHost.accessLists">${als.map((a) => `<label class="check-item"><input type="checkbox" value="${esc(a.name)}"${d.accessLists.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}${a.displayName ? `<span class="ci-ty">${esc(a.displayName)}</span>` : ''}</label>`).join('')}</div>`
-          : `<div class="hint">No access lists yet. Create one under <a href="#/access">Access Lists</a> to allow or deny by network or country.</div>`;
+          : `<div class="hint">No access lists yet. Add one under <a href="#/access">Access Lists</a> to allow or deny by network or country.</div>`;
         const mwHtml = mws.length
           ? `<div class="check-list" id="wz-mws">${mws.map((m) => `<label class="check-item"><input type="checkbox" value="${esc(m.name)}"${d.middlewares.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>`).join('')}</div>`
           : `<div class="hint">No middleware yet. Rate limits, headers, rewrites and reusable sign-in gates live under <a href="#/middleware">Middleware</a>.</div>`;
@@ -9895,10 +9962,10 @@ async function runHostWizard() {
       },
       validate() { return ''; },
       summary(d) {
-        const parts = [d.idp ? `sign-in with ${esc(d.idp)}` : 'no sign-in'];
-        if (d.accessLists.length) parts.push(d.accessLists.map(esc).join(', '));
+        const parts = [d.idp ? `sign-in ${esc(d.idp)}` : 'no sign-in'];
+        if (d.accessLists.length) parts.push(`access lists ${d.accessLists.map(esc).join(', ')}`);
         if (d.middlewares.length) parts.push(`${d.middlewares.length} middleware`);
-        return parts.join(', ');
+        return parts.join('; ');
       },
     },
     {
@@ -9906,11 +9973,11 @@ async function runHostWizard() {
       async render(pane, d) {
         reviewErr = '';
         const tok = ++reviewSeq; // a reply from an earlier render is dropped
-        pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you create the host.</p>
+        pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you add the host.</p>
           <dl class="dl-h" style="margin-bottom:20px">
             <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
             <dt>Name</dt><dd class="mono">${esc(d.name)}</dd>
-            <dt>Backend</dt><dd class="mono">${esc(d.scheme)}://${esc(d.host)}:${esc(d.port)}${esc(d.path)}</dd>
+            <dt>Upstream</dt><dd class="mono">${esc(d.scheme)}://${esc(d.host)}:${esc(d.port)}${esc(d.path)}</dd>
             <dt>Certificate</dt><dd>${coverText(d)}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}</dd>
             <dt>Sign-in</dt><dd>${d.idp ? esc(d.idp) : 'none'}</dd>
             <dt>Access lists</dt><dd>${d.accessLists.length ? `<span class="mono">${d.accessLists.map(esc).join(', ')}</span>` : 'none'}</dd>
@@ -9931,8 +9998,12 @@ async function runHostWizard() {
             slot.outerHTML = `<div class="inline-error"><b>This name is taken.</b><br/>${esc(reviewErr)}</div>`;
             return null;
           }
-          slot.outerHTML = `<div class="code-head"><span>${esc(y.path || '')}</span><button class="btn plain sm" type="button" id="wz-copy">Copy</button></div><pre class="code">${yamlHtml(y.yaml || '')}</pre>`;
-          pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(y.yaml || '', e.currentTarget));
+          // The dry run stamps its own createdAt/updatedAt, which Add restamps;
+          // they are left out so every line shown is the line committed.
+          const yaml = String(y.yaml || '').split('\n').filter((l) => !/^(createdAt|updatedAt):/.test(l)).join('\n');
+          slot.outerHTML = `<div class="code-head"><span>${esc(y.path || '')}</span><button class="btn plain sm" type="button" id="wz-copy">Copy</button></div><pre class="code">${yamlHtml(yaml)}</pre>
+            <p class="hint">createdAt and updatedAt are stamped when you add the host.</p>`;
+          pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(yaml, e.currentTarget));
         } catch (e) {
           if (tok !== reviewSeq || !pane.isConnected) return null;
           reviewErr = (e && e.message) || String(e);
@@ -9947,10 +10018,10 @@ async function runHostWizard() {
 
   const r = await wizard({
     title: 'New proxy host',
-    desc: 'Publish a backend on a public name.',
+    desc: 'Publish an upstream on a public name.',
     noun: 'host',
     steps, draft,
-    finishLabel: 'Create host',
+    finishLabel: 'Add proxy host',
     // The full editor opens on what the steps hold so far, through the same
     // clone-seed hand-over as "Open the full editor with everything".
     altLink: {
@@ -9971,7 +10042,7 @@ async function runHostWizard() {
       const o = data.object || {};
       const up = o.upstream || {}, tls = o.tls || {}, auth = o.auth || {};
       const nd = {
-        name: data.name || o.name || '', domains: arr(o.domains), scheme: up.scheme || 'http', host: up.host || '',
+        name: data.name || o.name || '', nameTouched: !!(data.name || o.name), domains: arr(o.domains), scheme: up.scheme || 'http', host: up.host || '',
         port: up.port != null ? String(up.port) : '', path: up.path || '', forceSSL: !!tls.forceSSL, forceSSLTouched: true,
         hsts: !!(tls.hsts && tls.hsts.enabled), idp: auth.identityProvider || '',
         accessLists: arr(o.accessLists), middlewares: arr(o.middlewares),
@@ -10047,7 +10118,23 @@ let setupWizardBusy = false;
 async function openSetupWizard() {
   if (setupWizardBusy) return null;
   setupWizardBusy = true;
-  try { return await runSetupWizard(); } finally { setupWizardBusy = false; }
+  try {
+    // The setup can end on the Proxy Hosts page, so unsaved edits on the page
+    // underneath are settled first, not by a prompt hidden under the wizard.
+    if (dirtyFlag && !(await confirmModal({
+      title: 'You have unsaved changes',
+      body: '<p>Changes on this page are not committed yet. The setup can end on the Proxy Hosts page, which discards them.</p>',
+      confirmLabel: 'Discard and continue',
+    }))) return null;
+    return await runSetupWizard();
+  } finally { setupWizardBusy = false; }
+}
+// Resolves after the next route render: true when it rendered hash.
+function nextRouteRendered(hash) {
+  return new Promise((resolve) => {
+    const on = (e) => { window.removeEventListener('gpm:routed', on); resolve(!!(e.detail && e.detail.ok && e.detail.hash === hash)); };
+    window.addEventListener('gpm:routed', on);
+  });
 }
 async function runSetupWizard() {
   const [setR, rtR] = await Promise.all([
@@ -10062,11 +10149,17 @@ async function runSetupWizard() {
     externalBaseURL: setR.externalBaseURL || '',
     trustedProxies: arr(setR.trustedProxies),
   };
+  // The hand-off to the host wizard is for a first service only: an instance
+  // that already has a proxy host stays on the page it is on.
+  const hostCount = async () => {
+    try { return arr((await api('/api/proxy-hosts')).data).length; } catch (e) { return -1; }
+  };
+  const firstHost = (await hostCount()) === 0;
   const steps = [
     {
       id: 'instance', title: 'Instance',
       render(pane, d) {
-        pane.innerHTML = `<h3>Welcome</h3><p class="lead">A few facts about this instance, then the first host.</p>
+        pane.innerHTML = `<h3>Instance</h3><p class="lead">A few facts about this instance, and what to call it.</p>
           <dl class="dl-h" style="margin-bottom:20px">
             <dt>Proxy listeners</dt><dd class="mono">${esc([ls.https, ls.http].filter(Boolean).join('  ') || 'not reported')}</dd>
             <dt>Admin panel</dt><dd class="mono">${esc(ls.admin || 'not reported')}</dd>
@@ -10074,7 +10167,7 @@ async function runSetupWizard() {
             <dt>Version</dt><dd class="mono">${esc(rt.version || (state.version && state.version.version) || '')}</dd>
           </dl>
           <div class="field-group"><label>Instance name</label><input class="field" id="su-name" value="${esc(d.appName)}" placeholder="Go Proxy Manager" autocomplete="off" data-hint="settings.appName" />
-            <div class="hint">Shown in the masthead, the browser title and the login page. Name the place, not the product: "Home edge", "Office ingress".</div></div>
+            <div class="hint">Shown in the masthead, the browser title and the login page.</div></div>
           <div class="field-group"><label>Public URL of this panel</label><input class="field mono" id="su-url" value="${esc(d.externalBaseURL)}" placeholder="https://gpm.example.com" autocomplete="off" spellcheck="false" data-hint="settings.externalBaseURL" />
             <div class="hint">The address operators reach this panel at. Single sign-on builds its redirect from it, and an https:// URL marks the session cookie Secure. Leave it empty while you only use an IP address.</div></div>`;
         return { read(dd) { dd.appName = pane.querySelector('#su-name').value.trim(); dd.externalBaseURL = pane.querySelector('#su-url').value.trim(); } };
@@ -10095,14 +10188,16 @@ async function runSetupWizard() {
         pane.innerHTML = `<h3>Client addresses</h3><p class="lead">Which proxies in front of gpm may say who the client is.</p>
           <div class="field-group"><label>Trusted proxies</label><div class="chip-input" id="su-tp" data-hint="settings.trustedProxies"></div>
             <div class="hint">CIDRs or addresses of load balancers or tunnels that sit in front of gpm. A request from one of them has its client address read from <span class="mono">X-Forwarded-For</span>; from anyone else the connection address is the client. Leave it empty when gpm faces the internet directly, which is the usual homelab setup.</div></div>
+          <div class="hint warn" id="su-tp-warn"${hasWildcardProxy(d.trustedProxies) ? '' : ' hidden'}>${esc(TRUSTED_WILDCARD_WARNING)}</div>
           <p class="hint">Access lists, geo rules, rate limits and the access log all judge that one address, so a wrong entry here lets a visitor choose their own.</p>`;
-        const chips = makeChipInput(pane.querySelector('#su-tp'), d.trustedProxies, 'add CIDR or address...');
+        const warn = pane.querySelector('#su-tp-warn');
+        const chips = makeChipInput(pane.querySelector('#su-tp'), d.trustedProxies, 'add CIDR or address...', (list) => { warn.hidden = !hasWildcardProxy(list); });
         return { read(dd) { dd.trustedProxies = chips.get().map((x) => String(x).trim()).filter(Boolean); } };
       },
       validate(d) {
         const bad = firstBadCidr(d.trustedProxies);
         if (bad) return `"${bad}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`;
-        if (d.trustedProxies.some((x) => x === '0.0.0.0/0' || x === '::/0')) return 'Trusting every address lets any visitor set their own client address. Name the proxies you run.';
+        // A wildcard is warned about, not refused, exactly as Settings does.
         return '';
       },
       summary(d) { return d.trustedProxies.length ? `trusts ${d.trustedProxies.map(esc).join(', ')}` : 'gpm faces the internet directly'; },
@@ -10116,7 +10211,10 @@ async function runSetupWizard() {
             <dt>Public URL</dt><dd class="mono">${esc(d.externalBaseURL || 'none yet')}</dd>
             <dt>Trusted proxies</dt><dd>${d.trustedProxies.length ? `<span class="mono">${d.trustedProxies.map(esc).join(', ')}</span>` : 'none, the connection address is the client'}</dd>
           </dl>
-          <p>Next: the Proxy Hosts page opens with the host wizard, to publish your first service. Certificates are issued under Certificates (Let's Encrypt over HTTP-01 or DNS-01), and a sign-in provider goes under Identity Providers; both can wait until the host works.</p>`;
+          ${hasWildcardProxy(d.trustedProxies) ? `<div class="hint warn" style="margin-bottom:12px">${esc(TRUSTED_WILDCARD_WARNING)}</div>` : ''}
+          ${firstHost
+            ? '<p>Next: the Proxy Hosts page opens with the host wizard, to publish your first service. Certificates are issued under Certificates (Let\'s Encrypt over HTTP-01 or DNS-01), and an identity provider for sign-in goes under Identity Providers; both can wait until the host works.</p>'
+            : '<p>This instance already has proxy hosts, so the setup ends here. The same fields are under Settings &gt; General.</p>'}`;
         return null;
       },
       validate() { return ''; },
@@ -10135,7 +10233,7 @@ async function runSetupWizard() {
       if (d.trustedProxies.length) body.trustedProxies = d.trustedProxies; else delete body.trustedProxies;
       const res = await api('/api/settings', { method: 'PUT', body });
       resetRouteMemo();
-      toastSaved(res.commit);
+      toastSaved(res.commit); // "No changes" when the settings already held these values
       refreshHeadSha();
       markSetupDone();
       state.appName = d.appName || 'Go Proxy Manager';
@@ -10149,12 +10247,15 @@ async function runSetupWizard() {
       return true;
     },
   });
-  if (r) {
-    // Hand over to the host wizard once the Proxy Hosts page is in place (the
-    // hash change would otherwise close a wizard opened before it lands).
+  // Hand over to the host wizard only on an instance with no proxy host yet,
+  // and only once the Proxy Hosts page has rendered (the hash change would
+  // otherwise close a wizard opened before it lands).
+  if (r && firstHost && (await hostCount()) === 0) {
+    if (location.hash === '#/hosts') { openHostWizard(); return r; }
+    clearDirty(); // the operator agreed to discard before the setup opened
+    const rendered = nextRouteRendered('#/hosts');
     location.hash = '#/hosts';
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    openHostWizard();
+    if (await rendered) openHostWizard();
   }
   return r;
 }

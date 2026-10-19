@@ -1,6 +1,6 @@
 {
   "glossary.upstream": {
-    "text": "The backend a proxy host or location forwards to, written as scheme, host and port. A stream host's equivalent is called the target and carries no scheme.",
+    "text": "The service a proxy host or location forwards to, written as scheme, host and port. A stream host's equivalent is called the target and carries no scheme.",
     "doc": "concepts/terminology.md#the-path-a-request-takes"
   },
   "glossary.location": {
@@ -16,7 +16,7 @@
     "doc": "concepts/terminology.md#access-and-identity"
   },
   "glossary.identity-provider": {
-    "text": "An OIDC issuer, a trusted forward-auth proxy, or an auth-request outpost, plus its group-to-role mapping. It has no effect until an auth gate references it.",
+    "text": "An OIDC issuer, a trusted forward-auth proxy, or an auth-request outpost, plus its group-to-role mapping. It has no effect until a sign-in gate references it.",
     "doc": "concepts/terminology.md#access-and-identity"
   },
   "glossary.outpost": {
@@ -60,11 +60,11 @@
     "doc": "concepts/config-model.md#common-fields-every-object"
   },
   "proxyHost.tags": {
-    "text": "Free-form labels for grouping and filtering in the host list. They have no effect on how the host is served.",
+    "text": "Free-form tags for grouping and filtering in the host list. They have no effect on how the host is served.",
     "doc": "concepts/config-model.md#common-fields-every-object"
   },
   "proxyHost.maintenance": {
-    "text": "Serves a 503 maintenance page instead of proxying. The host keeps its domains, certificate and DNS records.",
+    "text": "Serves a 503 maintenance page with a Retry-After instead of proxying. The host keeps its domains, certificate and DNS records, so turning it off restores service at once.",
     "doc": "reference/config/proxy-host.md#proxy-host-maintenance"
   },
   "proxyHost.domains": {
@@ -76,23 +76,23 @@
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-group-ref"
   },
   "proxyHost.upstream.scheme": {
-    "text": "How gpm talks to the backend: http or https. With https the upstream host is what SNI and certificate verification use.",
+    "text": "How gpm talks to the upstream: http or https. With https the upstream host is what SNI and certificate verification use.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-scheme"
   },
   "proxyHost.upstream.host": {
-    "text": "The backend's address (an IP or a hostname gpm can resolve). Not the public domain clients ask for.",
+    "text": "The upstream's address (an IP or a hostname gpm can resolve). Not the public domain clients ask for.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-host"
   },
   "proxyHost.upstream.port": {
-    "text": "The port the backend listens on.",
+    "text": "The port the upstream listens on.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-port"
   },
   "proxyHost.upstream.path": {
-    "text": "A base path prefixed to every request sent to this backend. Leave it empty to forward the path unchanged.",
+    "text": "A base path prefixed to every request sent to the upstream: with /api, a request for /v1/x arrives as /api/v1/x. Leave it empty to forward the path unchanged.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-path"
   },
   "proxyHost.upstream.hostHeader": {
-    "text": "Which hostname the backend sees in the Host header: the name the client asked for (default), the upstream's own address, or a fixed value.",
+    "text": "Which hostname the upstream sees in the Host header: the name the client asked for (default), the upstream's own address, or a fixed value.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-host-header"
   },
   "proxyHost.upstream.hostHeaderCustom": {
@@ -104,11 +104,11 @@
     "doc": "reference/config/proxy-host.md#proxy-host-robots-no-index"
   },
   "proxyHost.timeouts.connectSeconds": {
-    "text": "How long gpm waits to open a connection to the backend. Blank keeps the shared pooled transport.",
+    "text": "How long gpm waits to open a connection to the upstream. Blank keeps the shared pooled transport.",
     "doc": "reference/config/proxy-host.md#proxy-host-timeouts"
   },
   "proxyHost.timeouts.readSeconds": {
-    "text": "How long gpm waits for the backend's first response byte. It does not cut off slow streaming or websocket bodies.",
+    "text": "How long gpm waits for the upstream's first response byte. It does not cut off slow streaming or websocket bodies.",
     "doc": "reference/config/proxy-host.md#proxy-host-timeouts"
   },
   "proxyHost.compression.enabled": {
@@ -132,7 +132,7 @@
     "doc": "reference/config/proxy-host.md#proxy-host-error-pages"
   },
   "proxyHost.errorPages.interceptUpstream": {
-    "text": "Status codes for which the backend's own error body is replaced too. Normally only gpm's own errors get the custom page.",
+    "text": "Status codes for which the upstream's own error body is replaced too. Normally only gpm's own errors get the custom page.",
     "doc": "reference/config/proxy-host.md#proxy-host-error-pages"
   },
   "proxyHost.securityHeaders": {
@@ -224,7 +224,7 @@
     "doc": "reference/config/proxy-host.md#proxy-host-access-lists"
   },
   "proxyHost.auth": {
-    "text": "An auth gate written directly on this host instead of as a shared middleware. Same handler, same position in the chain.",
+    "text": "A sign-in gate written directly on this host instead of as a shared middleware. Same handler, same position in the chain.",
     "doc": "reference/config/proxy-host.md#proxy-host-auth"
   },
   "proxyHost.rateLimit": {
@@ -240,19 +240,19 @@
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream-group-ref"
   },
   "proxyHost.locations.upstream.scheme": {
-    "text": "Scheme for this path's own backend. A new path override starts on the host's scheme and follows it until you pick one.",
+    "text": "Scheme for this path's own upstream. A new path override starts on the host's scheme and follows it until you pick one.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream"
   },
   "proxyHost.locations.upstream.host": {
-    "text": "Address of this path's own backend. Blank falls back to the host's upstream host.",
+    "text": "Address of this path's own upstream. Blank falls back to the host's upstream host.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream"
   },
   "proxyHost.locations.upstream.port": {
-    "text": "Port of this path's own backend. Blank falls back to the host's upstream port.",
+    "text": "Port of this path's own upstream. Blank falls back to the host's upstream port.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream"
   },
   "proxyHost.locations.stripPrefix": {
-    "text": "Removes the location path from the request before it reaches the backend, so /app/foo arrives as /foo. Use it when the backend expects to live at the root.",
+    "text": "Removes the location path from the request before it reaches the upstream, so /app/foo arrives as /foo. Use it when the app expects to live at the root.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-strip-prefix"
   },
   "proxyHost.locations.middlewares": {
@@ -264,7 +264,7 @@
     "doc": "reference/config/proxy-host.md#proxy-host-locations-access-lists"
   },
   "proxyHost.locations.auth": {
-    "text": "An auth gate for this path only. The host's own sign-in still applies on top of it.",
+    "text": "A sign-in gate for this path only. The host's own sign-in still applies on top of it.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-auth"
   },
   "proxyHost.locations.rateLimit": {
@@ -300,15 +300,15 @@
     "doc": "reference/config/stream-host.md#stream-host-protocol"
   },
   "streamHost.target.host": {
-    "text": "The backend address the bytes are forwarded to.",
+    "text": "The address the bytes are forwarded to.",
     "doc": "reference/config/stream-host.md#stream-host-target-host"
   },
   "streamHost.target.port": {
-    "text": "The backend port the bytes are forwarded to.",
+    "text": "The port the bytes are forwarded to.",
     "doc": "reference/config/stream-host.md#stream-host-target-port"
   },
   "streamHost.tls.mode": {
-    "text": "Whether gpm reads the TLS handshake at all: passthrough routes by SNI without decrypting, terminate decrypts here and speaks plaintext to the backend.",
+    "text": "Whether gpm reads the TLS handshake at all: passthrough routes by SNI without decrypting, terminate decrypts here and speaks plaintext to the upstream.",
     "doc": "reference/config/stream-host.md#stream-host-tls-mode"
   },
   "streamHost.tls.sniMatch": {
@@ -320,7 +320,7 @@
     "doc": "reference/config/stream-host.md#stream-host-tls-certificate-ref"
   },
   "streamHost.accessLists": {
-    "text": "IP and geo lists evaluated on the client address before any backend is dialled. A list with basic-auth users cannot be used on a raw stream.",
+    "text": "IP and geo lists evaluated on the client address before any upstream is dialled. A list with basic-auth users cannot be used on a raw stream.",
     "doc": "reference/config/stream-host.md#stream-host-access-lists"
   },
   "parkedHost.domains": {
@@ -588,7 +588,7 @@
     "doc": "reference/config/identity-provider.md#identity-provider-role-mapping"
   },
   "middleware.type": {
-    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, access list, bouncer, auth, guard, headers, rewrite, then the upstream.",
+    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.auth.identityProvider": {
@@ -628,7 +628,7 @@
     "doc": "reference/config/middleware.md#middleware-auth-basic-users-password-hash"
   },
   "middleware.headers.setRequest": {
-    "text": "Headers added to the request before it reaches the backend.",
+    "text": "Headers added to the request before it reaches the upstream.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.headers.setResponse": {
@@ -636,7 +636,7 @@
     "doc": "reference/config/middleware.md"
   },
   "middleware.headers.removeRequest": {
-    "text": "Header names stripped from the request before it reaches the backend.",
+    "text": "Header names stripped from the request before it reaches the upstream.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.headers.removeResponse": {
@@ -692,7 +692,7 @@
     "doc": "reference/config/middleware.md"
   },
   "middleware.rateLimit.allowFrom": {
-    "text": "CIDRs or bare IPs that bypass the limit entirely.",
+    "text": "Requests from these networks are never counted against the limit, for example your own LAN or a monitoring probe. Empty limits every client.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.bouncer.provider": {
@@ -740,11 +740,11 @@
     "doc": "reference/config/middleware.md#middleware-rewrite-replace-path"
   },
   "middleware.rewrite.prefixRules": {
-    "text": "Prefix rules, matched on a path-segment boundary so /reports never captures /reports-evil. The longest matching rule wins.",
+    "text": "Prefix rules, matched on a path-segment boundary so /reports never captures /reports-evil. The longest matching rule wins. Example: /reports to /r turns /reports/q1 into /r/q1.",
     "doc": "reference/config/middleware.md#middleware-rewrite-prefix-rules"
   },
   "middleware.rewrite.regexRules": {
-    "text": "Regex rules, anchored at the start of the path. Use $1 in the replacement for a capture group.",
+    "text": "Regex rules, anchored at the start of the path. Use $1 in the replacement for a capture group. Example: /u/([0-9]+) to /users/$1.",
     "doc": "reference/config/middleware.md#middleware-rewrite-regex-rules"
   },
   "middleware.rewrite.rule.from": {
@@ -752,7 +752,7 @@
     "doc": "reference/config/middleware.md#middleware-rewrite-prefix-rules"
   },
   "middleware.rewrite.rule.to": {
-    "text": "The path the match is replaced with before the request reaches the backend. A rewrite is never a redirect.",
+    "text": "The path the match is replaced with before the request reaches the upstream. A rewrite is never a redirect.",
     "doc": "reference/config/middleware.md#middleware-rewrite-prefix-rules"
   },
   "accessList.defaultAction": {
@@ -820,7 +820,7 @@
     "doc": "reference/config/access-list.md#access-list-geo"
   },
   "upstreamGroup.upstreams": {
-    "text": "The interchangeable backends behind this group name, in order. Duplicates are rejected.",
+    "text": "The interchangeable upstreams behind this group name, in order. Duplicates are rejected.",
     "doc": "reference/config/upstream-group.md#upstream-group-upstreams"
   },
   "upstreamGroup.upstreams.scheme": {
@@ -888,11 +888,11 @@
     "doc": "reference/config/api-token.md#api-token-scopes"
   },
   "settings.appName": {
-    "text": "The brand label shown in the sidebar, the browser title and the login page. Blank falls back to Go Proxy Manager.",
+    "text": "Shown in the masthead, the browser title and the login page. Name the place, not the product (\"Home edge\", \"Office ingress\"). Blank falls back to Go Proxy Manager.",
     "doc": "reference/config/settings/general.md#settings-app-name"
   },
   "settings.externalBaseURL": {
-    "text": "The canonical public URL of this admin panel. OIDC builds its redirect_uri from it, so admin sign-in fails until it matches what the provider has registered.",
+    "text": "The canonical public URL of this admin panel. OIDC builds its redirect_uri from it, so admin sign-in fails until it matches what the provider has registered. An https:// URL also marks the session cookie Secure.",
     "doc": "reference/config/settings/general.md#settings-external-base-url"
   },
   "settings.adminAuth.localLoginEnabled": {
@@ -904,7 +904,7 @@
     "doc": "reference/config/settings/admin-auth.md#settings-admin-auth-providers"
   },
   "settings.adminAuth.ssoOnly": {
-    "text": "Disables local login entirely. There is no in-band break-glass door: recovering from a provider outage means redeploying with local login re-enabled.",
+    "text": "Turns local sign-in off: only the single sign-on providers ticked above can sign in to this panel. There is no in-band break-glass door; recovering from a provider outage means a redeploy.",
     "doc": "reference/config/settings/admin-auth.md#settings-admin-auth-sso-only"
   },
   "settings.trustedProxies": {
@@ -988,7 +988,7 @@
     "doc": "reference/config/settings/dns-sync.md#settings-dns-sync-pihole-app-password"
   },
   "settings.dnsSync.pihole.apexTarget": {
-    "text": "The CNAME target every managed LAN record points at. It is not an ownership marker: hand-written records aimed here are left alone.",
+    "text": "The CNAME target every managed LAN record points at. It is not an ownership marker: hand-written records aimed here are adopted only if a host asks for that exact name, and are otherwise left alone.",
     "doc": "reference/config/settings/dns-sync.md#settings-dns-sync-pihole-apex-target"
   },
   "settings.dnsSync.cloudflare.enabled": {
@@ -1040,7 +1040,7 @@
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-label-selector"
   },
   "settings.ingressDiscovery.allowedDomainSuffixes": {
-    "text": "Required. A discovered hostname must equal or end in one of these, so a cluster manifest cannot publish an arbitrary name at the edge.",
+    "text": "Required. A discovered hostname must equal or end in one of these, so a cluster manifest cannot publish an arbitrary name at the edge. Example: with home.example.com listed, app.home.example.com qualifies and app.example.com does not.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-allowed-domain-suffixes"
   },
   "settings.ingressDiscovery.template.upstream": {
@@ -1056,11 +1056,11 @@
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-tls"
   },
   "settings.ingressDiscovery.template.tls.forceSSL": {
-    "text": "Redirects http to https on every derived host.",
+    "text": "Redirects HTTP to HTTPS on every derived host. The template certificate has to cover those names, or visitors are sent to a handshake that fails.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-tls"
   },
   "settings.ingressDiscovery.template.robotsNoIndex": {
-    "text": "Sends X-Robots-Tag on every derived host.",
+    "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-robots-no-index"
   },
   "settings.ingressDiscovery.template.middlewares": {
@@ -1076,7 +1076,7 @@
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-timeouts"
   },
   "settings.ingressDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping in the host list.",
+    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-tags"
   },
   "settings.ingressDiscovery.template.allowedDomainSuffixes": {
@@ -1164,7 +1164,7 @@
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-include-stopped"
   },
   "settings.dockerDiscovery.allowedDomainSuffixes": {
-    "text": "Required. A derived hostname must equal one of these, or end in a dot plus one of them.",
+    "text": "Required. A derived hostname must equal one of these, or end in a dot plus one of them. Example: with home.example.com listed, app.home.example.com qualifies and app.example.com does not.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-allowed-domain-suffixes"
   },
   "settings.dockerDiscovery.template.tls.certificateRef": {
@@ -1172,11 +1172,11 @@
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.tls.forceSSL": {
-    "text": "Redirects http to https on every derived host.",
+    "text": "Redirects HTTP to HTTPS on every derived host. The template certificate has to cover those names, or visitors are sent to a handshake that fails.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.robotsNoIndex": {
-    "text": "Sends X-Robots-Tag on every derived host.",
+    "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.timeouts": {
@@ -1192,7 +1192,7 @@
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping in the host list.",
+    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.allowedDomainSuffixes": {
