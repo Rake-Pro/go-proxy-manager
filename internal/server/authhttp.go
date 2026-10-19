@@ -2,10 +2,12 @@ package server
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
@@ -56,107 +58,108 @@ func originOK(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
+// loginShellCSS is the login-only layout. Everything else (fonts, the light and
+// dark token blocks, buttons, form controls, banners) comes from the SPA's own
+// app.css, linked by the pages below, so the first screen a user sees is drawn
+// from the same tokens as the app behind it. theme-init.js applies the user's
+// gpm.theme choice before first paint; with no choice, app.css follows
+// prefers-color-scheme. Both are served unauthenticated by the UI handler, and
+// an inline <style> block is within the existing style-src 'unsafe-inline'.
 const loginShellCSS = `
-  :root{--bg1:#0b1220;--bg2:#020617;--card:#0f1729;--ink:#e2e8f0;--muted:#94a3b8;
-        --line:#1e293b;--accent:#3b82f6;--accent-h:#60a5fa;--field:#0b1220;
-        --glow:#172033;--heading:#f1f5f9}
-  @media (prefers-color-scheme:light){
-    :root{--bg1:#eef1f8;--bg2:#f7f8fc;--card:#ffffff;--ink:#161b2c;--muted:#5b6377;
-          --line:#dfe3ee;--accent:#3b82f6;--accent-h:#2f6fe0;--field:#f4f6fb;
-          --glow:#dbe3f7;--heading:#161b2c}
-  }
-  *{box-sizing:border-box}
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-       padding:1.5rem;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-       color:var(--ink);background:radial-gradient(1200px 600px at 50% -10%,var(--glow),var(--bg2)),linear-gradient(135deg,var(--bg1),var(--bg2))}
-  .card{width:100%;max-width:23rem;background:var(--card);border:1px solid var(--line);border-radius:14px;
-        box-shadow:0 20px 50px rgba(0,0,0,.55);padding:2.25rem 2rem 2rem}
-  .brand{text-align:center;margin-bottom:1.5rem}
-  .brand h1{font-size:1.2rem;font-weight:650;margin:0;letter-spacing:.01em;color:var(--heading)}
-  .brand p{margin:.4rem 0 0;color:var(--muted);font-size:.85rem}
-  .btn{display:block;width:100%;border:0;border-radius:9px;padding:.72rem 1rem;
-       font-size:.95rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none}
-  .btn-primary{background:var(--accent);color:#fff;transition:background .15s}
-  .btn-primary:hover{background:var(--accent-h)}
-  .sso{margin-bottom:.6rem}
-  .divider{display:flex;align-items:center;gap:.75rem;color:var(--muted);
-           font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;margin:1.25rem 0}
-  .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
-  label{display:block;font-size:.78rem;color:var(--muted);margin:0 0 .3rem}
-  .field{margin-bottom:.9rem}
-  input{width:100%;padding:.62rem .7rem;border:1px solid var(--line);border-radius:9px;
-        background:var(--field);font-size:.95rem;color:var(--ink)}
-  input::placeholder{color:#475569}
-  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.25)}
-  form{margin:0}
-  .empty{color:var(--muted);text-align:center;font-size:.9rem;margin:0}
-  .notice{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:9px;
-          background:var(--field);padding:.9rem 1rem;margin-bottom:1.25rem}
-  .notice h2{margin:0 0 .5rem;font-size:.92rem;font-weight:650;color:var(--heading)}
-  .notice ul{margin:0;padding-left:1.1rem;color:var(--muted);font-size:.8rem;line-height:1.5}
-  .notice li+li{margin-top:.35rem}
-  .notice code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.76rem;color:var(--ink)}
-  .notice pre{margin:.7rem 0 0;padding:.55rem .65rem;border-radius:7px;background:var(--bg2);
-              color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-              font-size:.74rem;overflow-x:auto}
+  .login{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 16px}
+  .login-brand{font-family:var(--display);font-size:20px;font-weight:500;margin:0 0 16px;text-align:center;
+    max-width:400px;overflow-wrap:anywhere}
+  .login-card{width:100%;max-width:400px;background:var(--panel);box-shadow:var(--shadow-sm);padding:32px 24px}
+  .login-card h1{font-family:var(--display);font-size:24px;font-weight:500;margin:0 0 20px}
+  .login-card h1 + .login-sub{margin-top:-16px}
+  .login-sub{color:var(--muted);margin:0 0 20px}
+  .login-field{margin-bottom:16px}
+  .login-field label{display:block;margin-bottom:6px}
+  .login .btn{display:flex;width:100%}
+  .login-sso + .login-sso{margin-top:8px}
+  .login-or{display:flex;align-items:center;gap:12px;color:var(--muted);margin:16px 0}
+  .login-or::before,.login-or::after{content:"";flex:1;height:1px;background:var(--border)}
+  .login-empty{color:var(--muted);text-align:center;margin:0}
+  .login-err{margin:16px 0 0}
+  .login-notice{margin:0 0 20px}
+  .login-notice h2{font-size:14px;font-weight:700;margin:0}
+  .login-notice code{font-family:var(--mono);font-size:13px}
+  .login-notice .code{margin-top:8px;padding:8px 12px}
+  .login-aside{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  input.field.otp{font-family:var(--mono);font-size:18px;letter-spacing:.35em;text-align:center}
 `
 
-var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+// loginHead is the shared <head> of the login and verification-code pages.
+// theme-init.js must stay ahead of app.css (see the comment in that file).
+const loginHead = `<meta charset="utf-8">
+<script src="/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.AppName}} - Sign in</title>
-<style>` + loginShellCSS + `</style></head>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="preload" href="/fonts/red-hat-text-vf.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/app.css">
+<style>` + loginShellCSS + `</style>`
+
+// loginPage renders every outcome of the first login step: the plain page, and
+// the same page again with .Error set after a refused attempt (wrong
+// credentials, a wrong second-factor code, a lockout or an unreadable form),
+// keeping the submitted username so only the password has to be retyped.
+var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
+<html lang="en"><head>` + loginHead + `
+<title>{{.AppName}} - Sign in</title></head>
 <body>
-<div class="card">
-  <div class="brand"><h1>{{.AppName}}</h1><p>Sign in to continue</p></div>
-  {{if .NoAdminLogin}}<div class="notice">
-    <h2>No administrator login is configured</h2>
+<main class="login">
+  <p class="login-brand">{{.AppName}}</p>
+  <div class="login-card">
+  <h1>Sign in</h1>
+  {{if .NoAdminLogin}}<div class="ro-banner warn login-notice">
+    <h2>No administrator sign-in is configured</h2>
     <ul>
       <li>Set <code>GPM_LOCAL_ADMIN_USER</code> and <code>GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE</code> on the container, then restart it.</li>
-      <li>Or add an <code>oidc</code> identity provider and list its name under <code>adminAuth.providers</code> in settings.</li>
+      <li>Or add an <code>oidc</code> identity provider and choose it under Admin sign-in &gt; Single sign-on providers in Settings <span class="login-aside">(adminAuth.providers)</span>.</li>
     </ul>
-    <pre>gpm hashpw &#39;your-password&#39; &gt; /run/secrets/gpm_admin_hash</pre>
+    <pre class="code">gpm hashpw &#39;your-password&#39; &gt; /run/secrets/gpm_admin_hash</pre>
   </div>{{end}}
-  {{range .Providers}}<a class="btn btn-primary sso" href="/auth/login?idp={{.Name}}&return={{$.Return}}">Login with {{.Label}}</a>{{end}}
-  {{if .Local}}{{if .Providers}}<div class="divider">or</div>{{end}}
+  {{range .Providers}}<a class="btn primary login-sso" href="/auth/login?idp={{.Name}}&return={{$.Return}}">Sign in with {{.Label}}</a>{{end}}
+  {{if .Local}}{{if .Providers}}<div class="login-or">or</div>{{end}}
   <form method="post" action="/auth/local">
     <input type="hidden" name="return" value="{{.Return}}">
-    <div class="field"><label for="u">Username</label>
-      <input id="u" name="username" placeholder="admin" autocomplete="username" autofocus></div>
-    <div class="field"><label for="p">Password</label>
-      <input id="p" name="password" type="password" placeholder="Password" autocomplete="current-password"></div>
-    <button class="btn btn-primary" type="submit">Log in</button>
+    <div class="login-field"><label for="u">Username</label>
+      <input id="u" class="field" name="username" value="{{.Username}}" placeholder="admin" autocomplete="username"{{if not .Username}} autofocus{{end}}></div>
+    <div class="login-field"><label for="p">Password</label>
+      <input id="p" class="field" name="password" type="password" placeholder="Password" autocomplete="current-password"{{if .Username}} autofocus{{end}}></div>
+    <button class="btn primary" type="submit">Sign in</button>
   </form>{{end}}
-  {{if not .Providers}}{{if not .Local}}<p class="empty">No login methods are available.</p>{{end}}{{end}}
-</div>
+  {{if not .Providers}}{{if not .Local}}<p class="login-empty">No sign-in methods are available</p>{{end}}{{end}}
+  {{if .Error}}<p class="ro-banner err login-err" role="alert">{{.Error}}</p>{{end}}
+  </div>
+</main>
 </body></html>`))
 
 // totpPage is step two of local login: the password was accepted and a TOTP
 // code is outstanding. It carries the opaque pending token forward in a hidden
-// field - no session and no cookie exist yet at this point.
+// field - no session and no cookie exist yet at this point. The username rides
+// along only so a wrong code can send the user back to step one with it filled
+// in; the pending token is single-use, so a wrong code always means step one.
 var totpPage = template.Must(template.New("totp").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.AppName}} - Verification code</title>
-<style>` + loginShellCSS + `
-  .code{letter-spacing:.35em;text-align:center;font-size:1.15rem;
-        font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  .err{border:1px solid var(--line);border-left:3px solid #ef4444;border-radius:9px;
-       background:var(--field);padding:.7rem .8rem;margin-bottom:1rem;font-size:.82rem}
-</style></head>
+<html lang="en"><head>` + loginHead + `
+<title>{{.AppName}} - Verification code</title></head>
 <body>
-<div class="card">
-  <div class="brand"><h1>{{.AppName}}</h1><p>Enter the code from your authenticator app</p></div>
-  {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<main class="login">
+  <p class="login-brand">{{.AppName}}</p>
+  <div class="login-card">
+  <h1>Verification code</h1>
+  <p class="login-sub">Enter the code from your authenticator app</p>
   <form method="post" action="/auth/local/totp">
     <input type="hidden" name="pending" value="{{.Pending}}">
     <input type="hidden" name="return" value="{{.Return}}">
-    <div class="field"><label for="c">Verification code</label>
-      <input id="c" class="code" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+    <input type="hidden" name="username" value="{{.Username}}">
+    <div class="login-field"><label for="c">Verification code</label>
+      <input id="c" class="field otp" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6"
              autocomplete="one-time-code" placeholder="000000" autofocus></div>
-    <button class="btn btn-primary" type="submit">Verify</button>
+    <button class="btn primary" type="submit">Verify</button>
   </form>
-</div>
+  </div>
+</main>
 </body></html>`))
 
 // startLogin begins an OIDC flow: it sets the state-binding cookie and redirects
@@ -179,37 +182,63 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.startLogin(w, r, idp, returnTo)
 		return
 	}
-	providers := s.authn.LoginOptions()
-	local := s.authn.LocalLoginVisible()
 
 	// SSO-only with a single provider: skip the chooser and go straight to the
 	// IdP - there is nothing to choose. ?select=1 (used by logout) forces the
 	// page so a signed-out user is not immediately bounced back into a still-live
 	// IdP session.
-	if !local && len(providers) == 1 && r.URL.Query().Get("select") == "" {
+	if providers := s.authn.LoginOptions(); !s.authn.LocalLoginVisible() && len(providers) == 1 && r.URL.Query().Get("select") == "" {
 		s.startLogin(w, r, providers[0].Name, returnTo)
 		return
 	}
+	s.renderLoginPage(w, http.StatusOK, returnTo, "", "")
+}
 
+// Messages shown under the login form after a refused attempt.
+const (
+	msgWrongCredentials = "Wrong username or password."
+	msgWrongCode        = "Wrong code. Enter your password, then a new code."
+	msgBadForm          = "The form could not be read. Try again."
+)
+
+// renderLoginPage draws step one of local login with the given status. A
+// refused attempt re-renders it with errMsg under the form and the submitted
+// username kept, never a bare text response.
+func (s *Server) renderLoginPage(w http.ResponseWriter, status int, returnTo, username, errMsg string) {
 	data := struct {
 		AppName   string
 		Providers []auth.LoginOption
 		Local     bool
 		Return    string
+		Username  string
+		Error     string
 		// NoAdminLogin renders the bootstrap banner. Without it this page looks
 		// identical whether admin auth is misconfigured or simply signed out: the
-		// operator sees "No login methods are available." with no way to learn why
-		// or what to set.
+		// operator sees "No sign-in methods are available" with no way to learn
+		// why or what to set.
 		NoAdminLogin bool
 	}{
 		AppName:      s.authn.AppName(),
-		Providers:    providers,
-		Local:        local,
+		Providers:    s.authn.LoginOptions(),
+		Local:        s.authn.LocalLoginVisible(),
 		Return:       returnTo,
+		Username:     username,
+		Error:        errMsg,
 		NoAdminLogin: s.authn.NoAdminLoginConfigured(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	_ = loginPage.Execute(w, data)
+}
+
+// lockoutMessage names how long the client stays locked out, in whole minutes
+// rounded up so the page never says "0 minutes".
+func (s *Server) lockoutMessage(key string) string {
+	n := int((s.authn.LoginLockoutRemaining(key) + time.Minute - 1) / time.Minute)
+	if n <= 1 {
+		return "Too many attempts. Try again in 1 minute."
+	}
+	return fmt.Sprintf("Too many attempts. Try again in %d minutes.", n)
 }
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -244,16 +273,17 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	key := clientIPKey(r)
-	if s.authn.LoginThrottled(key) {
-		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
+		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgBadForm)
 		return
 	}
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
-	sess, pending, err := s.authn.LocalLogin(r.Context(), r.PostForm.Get("username"), r.PostForm.Get("password"))
+	username := r.PostForm.Get("username")
+	key := clientIPKey(r)
+	if s.authn.LoginThrottled(key) {
+		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
+		return
+	}
+	sess, pending, err := s.authn.LocalLogin(r.Context(), username, r.PostForm.Get("password"))
 	// A correct password with a second factor still outstanding is NOT a
 	// success: clearing the gate here would let an attacker who already has the
 	// password reset the lockout before every code guess, which would make the
@@ -263,40 +293,52 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Warn().Err(err).Msg("local login failed")
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, msgWrongCredentials))
 		return
 	}
 	if pending != "" {
 		// Password accepted, second factor outstanding. No session and no cookie
 		// exist yet: the only thing carried forward is the opaque, single-use,
 		// short-lived pending token in this form.
-		s.renderTOTPPage(w, pending, returnTo, "")
+		s.renderTOTPPage(w, pending, returnTo, username)
 		return
 	}
 	s.authn.IssueCookie(w, r, sess)
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
+// failureMessage is msg, or the lockout message when the failure just recorded
+// was the one that locked the client out, so the user learns it now rather
+// than on the next attempt.
+func (s *Server) failureMessage(key, msg string) string {
+	if s.authn.LoginThrottled(key) {
+		return s.lockoutMessage(key)
+	}
+	return msg
+}
+
 // handleLocalTOTP is step two of local login: it redeems the pending token from
 // handleLocalLogin against a TOTP code. A wrong code counts toward the SAME
 // per-IP lockout as a wrong password, so guessing six digits is throttled
-// exactly like guessing the password.
+// exactly like guessing the password. The pending token is spent either way,
+// so every failure goes back to step one.
 func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	key := clientIPKey(r)
-	if s.authn.LoginThrottled(key) {
-		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
+		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgBadForm)
 		return
 	}
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
+	username := r.PostForm.Get("username")
+	key := clientIPKey(r)
+	if s.authn.LoginThrottled(key) {
+		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
+		return
+	}
 	sess, err := s.authn.CompleteTOTPLogin(r.Context(), r.PostForm.Get("pending"), r.PostForm.Get("code"))
 	s.authn.NoteLoginResult(key, err == nil)
 	if err != nil {
 		log.Warn().Err(err).Msg("local login second factor failed")
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, msgWrongCode))
 		return
 	}
 	s.authn.IssueCookie(w, r, sess)
@@ -305,13 +347,13 @@ func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
 
 // renderTOTPPage draws the second step of local login in the same shell as the
 // login page.
-func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, errMsg string) {
+func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, username string) {
 	data := struct {
-		AppName string
-		Pending string
-		Return  string
-		Error   string
-	}{AppName: s.authn.AppName(), Pending: pending, Return: returnTo, Error: errMsg}
+		AppName  string
+		Pending  string
+		Return   string
+		Username string
+	}{AppName: s.authn.AppName(), Pending: pending, Return: returnTo, Username: username}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = totpPage.Execute(w, data)
 }

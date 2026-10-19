@@ -38,8 +38,8 @@ login page with no buttons and no password form.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Login page shows a "No administrator login is configured" banner; startup log has an `error`-level line saying nobody can sign in | No usable local credential (`GPM_LOCAL_ADMIN_USER` plus a bcrypt hash) **and** no `oidc` provider listed in `adminAuth.providers` | Set the local pair below, or finish the OIDC steps above, then restart |
-| Login form accepts a password but always answers "authentication failed" | `GPM_LOCAL_ADMIN_USER` is set but the hash is not (or is unreadable) | Generate the hash and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
+| Login page shows a "No administrator sign-in is configured" banner; startup log has an `error`-level line saying nobody can sign in | No usable local credential (`GPM_LOCAL_ADMIN_USER` plus a bcrypt hash) **and** no `oidc` provider listed in `adminAuth.providers` | Set the local pair below, or finish the OIDC steps above, then restart |
+| Login page always answers "Wrong username or password." | `GPM_LOCAL_ADMIN_USER` is set but the hash is not (or is unreadable) | Generate the hash and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
 | `ssoOnly: true` write is refused | `adminAuth.providers` names a provider that does not exist, or one of type `forward-auth`/`auth-request` | Point it at an existing `oidc` provider first |
 
 To set the local anti-lockout credential:

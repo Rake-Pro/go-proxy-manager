@@ -161,6 +161,26 @@ func (g *rateGate) clear(key string) {
 	delete(g.entries, key)
 }
 
+// remaining reports how long key stays at its limit, or zero when it is not.
+// A key left untracked by a saturated map is at limit (see atLimit) for as long
+// as a fresh window, which is the most a tracked key could wait.
+func (g *rateGate) remaining(key string) time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.entries[key]
+	if e == nil {
+		if len(g.entries) >= g.maxKeys {
+			return g.window
+		}
+		return 0
+	}
+	d := time.Until(e.resetAt)
+	if d <= 0 || e.fails < g.limit {
+		return 0
+	}
+	return d
+}
+
 const (
 	maxLoginFails    = 5                // failures within the window before lockout
 	loginLockout     = 15 * time.Minute // how long failures are remembered / locked
@@ -575,6 +595,12 @@ func (a *Authenticator) newLocalSession(ctx context.Context, amr []string) (*ses
 // locked out after too many recent failures.
 func (a *Authenticator) LoginThrottled(key string) bool {
 	return a.loginGate.atLimit(key, true)
+}
+
+// LoginLockoutRemaining reports how much longer key is locked out of local
+// login, or zero when it is not, so the login page can say when to retry.
+func (a *Authenticator) LoginLockoutRemaining(key string) time.Duration {
+	return a.loginGate.remaining(key)
 }
 
 // NoteLoginResult records the outcome of a local-login attempt for throttling:
