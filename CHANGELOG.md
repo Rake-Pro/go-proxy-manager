@@ -51,6 +51,25 @@ All notable changes to go-proxy-manager are documented here. The format follows
     chips and buttons, failure toasts named for the action, help popovers
     that add to the inline line instead of repeating it (a test keeps it
     so), the sidebar foot without "(none)".
+  - Lists: the Overview counts hosts in maintenance apart and lists them
+    under Needs attention; the hosts list sorts by Domain with the header
+    marked, zone chips group by the primary domain's zone and hide exactly
+    what they count, tags cap at three plus "+N"; Redirects and Parked
+    Hosts lead with the domain, status, tags and last change, and Parked
+    Hosts moved into the Hosts group; API Tokens shows the list first with
+    "Add token" and Enable/Disable per row; upstream group cards show
+    health; access log times carry seconds; per-list filter hints.
+  - Phone and tablet: below 1000 px the hosts table drops Upstream and
+    Updated, below 720 px it shows Domain and Status with no sideways
+    scroll; the sidebar becomes a drawer below 800 px, the menu button
+    toggles and the page behind it is inert.
+  - Keyboard and screen readers: a "Skip to content" link, the title band
+    inside the main landmark, the same focus ring on fold summaries and
+    tabs, help popovers reachable by Tab with "Learn more" inside, the
+    theme button showing its state as text, the masthead name with a
+    tooltip.
+  - Typography: 15 px base, no thin antialiasing, darker secondary text in
+    light mode, secondary text half a step larger, no 11 px text.
 - API and model: validation errors lead with the dotted path of the field
   they are about (`proxy host "app": upstream.port: ...`), cross-object
   conflicts name the field of the object being saved, and the store's
@@ -78,7 +97,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
   is now create-only (`If-None-Match: *`) and a duplicate name is refused
   with a link to the existing object.
 - Sign-in: an identity provider's error code from the SSO callback is logged,
-  not echoed into the page.
+  not echoed into the page, trimmed to the RFC 6749 charset and 64 bytes.
+- Local sign-in lockout: the attempt is now counted before the credential is
+  checked, so a burst of parallel guesses from one address cannot exceed the
+  limit; a gate full of expired entries no longer keeps every new client
+  locked out until a restart; IPv6 clients are keyed by /64. The callback
+  clears the state cookie and drops the pending login on every failure path.
+  The sign-in and TOTP pages send `Cache-Control: no-store`.
 
 ## [2.0.1] - 2026-10-19
 

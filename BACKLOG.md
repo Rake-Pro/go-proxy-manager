@@ -463,6 +463,22 @@ reports workspace.
   independent of DNS and of the 5s wait, or make RenewNow's in-progress gate
   observable so the test waits on it instead of on time.
 
+## Admin UI consistency round (2026-10-19) leftovers
+
+Source: the adversarial review report `2026-10-19_gpm-ui-adversarial-review`
+in the owner's reports workspace; 88 findings, all addressed on dev except:
+
+- [ ] **Phone, hosts with many tags.** At 390 px a host with a dozen tags
+  shows its chips as stubs and the "+N" is clipped; hide tags below 720 px or
+  move them into the "+N" block.
+- [ ] **A Save with no changes still makes a commit** (updatedAt is
+  restamped). A store-side no-op check would keep History clean.
+- [ ] **Domain conflicts name the other host's kind** to a write-scoped token
+  (the name was already disclosed). Accepted; redact when the caller lacks
+  read on that kind if it ever matters.
+- [ ] **Middleware check-lists show the raw type** ("auth") where the rest of
+  the UI says "sign-in". Map the type label in the check-list and the rail.
+
 ## Upstream-group follow-ups
 
 - [x] **Per-location upstream group references.** `upstreamGroupRef` on Location
