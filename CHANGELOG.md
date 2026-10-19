@@ -5,6 +5,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-19
+
 ### Changed
 
 - Admin UI: the dot that marked a host editor tab holding a non-default
@@ -409,7 +411,8 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...v2.0.0
 [1.0.10]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.9...v1.0.10
