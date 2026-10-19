@@ -527,7 +527,10 @@ function progressToast(title) {
 // path in data-path, so the banner can flag the field, scroll to it and offer a
 // "Go to field" jump. Longest-prefix matching, so "tls.hsts.maxAge" still finds
 // a control registered as "tls.hsts" when the leaf has no control of its own.
-const ERROR_PATH_RE = /^([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)+)\s*:\s*/;
+// A server complaint names the field it is about as a leading path ("tls.hsts
+// .maxAge: ..."), optionally behind the object ("proxy host \"app\": ..."); a
+// top-level field is one bare segment ("stripResponseHeaders: ...").
+const ERROR_PATH_RE = /^(?:[a-z][a-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
 
 function clearEditorError() {
   $$('#content .editor-error').forEach((el) => el.remove());
@@ -550,6 +553,7 @@ function errorFieldFor(msg) {
 function focusErrorField(target) {
   if (!target || !target.el) return;
   target.el.classList.add('field-flagged');
+  revealTabPanel(target.el);
   try { target.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { target.el.scrollIntoView(); }
   // A field inside a collapsed <details> is worth nothing until it is open.
   let d = target.el.closest && target.el.closest('details');
@@ -581,7 +585,7 @@ function showSaveError(e, title) {
   // view rather than jumping to the banner at the top of a long page.
   const badRow = target ? null : c.querySelector('.row-bad');
   if (target) focusErrorField(target);
-  else if (badRow) { try { badRow.scrollIntoView({ block: 'center' }); } catch (e2) { badRow.scrollIntoView(); } }
+  else if (badRow) { revealTabPanel(badRow); try { badRow.scrollIntoView({ block: 'center' }); } catch (e2) { badRow.scrollIntoView(); } }
   else window.scrollTo(0, 0);
   return banner;
 }
@@ -637,7 +641,7 @@ function confirmModal(opts) {
     const wrap = document.createElement('div');
     wrap.className = 'modal-scrim';
     wrap.innerHTML = `
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cm-title">
+      <div class="modal${opts.wide ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="cm-title">
         <div class="modal-title" id="cm-title">${esc(opts.title || 'Are you sure?')}</div>
         <div class="modal-body">${opts.body || ''}</div>
         ${opts.typed ? `<div class="field-group modal-typed">
@@ -646,16 +650,18 @@ function confirmModal(opts) {
         </div>` : ''}
         ${opts.prompt ? `<div class="field-group modal-typed">
           <label for="cm-prompt">${esc(opts.prompt.label || 'Value')}</label>
-          <input class="field mono" id="cm-prompt" autocomplete="off" spellcheck="false" placeholder="${esc(opts.prompt.placeholder || '')}" aria-label="${esc(opts.prompt.label || 'Value')}" />
+          <input class="field mono" id="cm-prompt" autocomplete="off" spellcheck="false" value="${esc(opts.prompt.value || '')}" placeholder="${esc(opts.prompt.placeholder || '')}" aria-label="${esc(opts.prompt.label || 'Value')}" />
+          <div class="hint warn" id="cm-prompt-err" hidden></div>
         </div>` : ''}
         <div class="modal-actions">
-          <button class="btn ghost" id="cm-cancel" type="button">Cancel</button>
+          ${opts.closeOnly ? '' : '<button class="btn ghost" id="cm-cancel" type="button">Cancel</button>'}
           <button class="btn ${opts.danger === false ? 'primary' : 'danger'}" id="cm-ok" type="button">${esc(opts.confirmLabel || 'Confirm')}</button>
         </div>
       </div>`;
     document.body.appendChild(wrap);
 
     const okBtn = wrap.querySelector('#cm-ok');
+    const cancelBtn = wrap.querySelector('#cm-cancel');
     const typedInput = wrap.querySelector('#cm-typed');
     const promptInput = wrap.querySelector('#cm-prompt');
     let done = false;
@@ -667,17 +673,30 @@ function confirmModal(opts) {
       if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* ignore */ } }
       resolve(v);
     }
+    // A prompt's validate(value) answers with the complaint, or '' when the
+    // value is acceptable; the complaint shows under the field and holds the
+    // confirm button.
+    function promptError() {
+      if (!opts.prompt || !opts.prompt.validate || !promptInput) return '';
+      const v = promptInput.value.trim();
+      return v ? (opts.prompt.validate(v) || '') : '';
+    }
     function typedOK() {
       if (opts.typed && !(typedInput && typedInput.value.trim() === opts.typed)) return false;
       if (opts.prompt && !(promptInput && promptInput.value.trim())) return false;
+      if (promptError()) return false;
       return true;
     }
     // Confirming a prompt dialog answers with the value, not with `true`.
     function answer() { return promptInput ? promptInput.value.trim() : true; }
-    function refresh() { okBtn.disabled = !typedOK(); }
+    function refresh() {
+      const errEl = wrap.querySelector('#cm-prompt-err');
+      if (errEl) { const err = promptError(); errEl.hidden = !err; errEl.textContent = err; }
+      okBtn.disabled = !typedOK();
+    }
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); finish(false); return; }
-      if (e.key === 'Enter' && typedOK() && e.target !== wrap.querySelector('#cm-cancel')) { e.preventDefault(); finish(answer()); }
+      if (e.key === 'Enter' && typedOK() && e.target !== cancelBtn) { e.preventDefault(); finish(answer()); }
       // Crude focus trap: Tab out of the dialog wraps back into it.
       if (e.key === 'Tab') {
         const f = Array.from(wrap.querySelectorAll('button:not([disabled]), input'));
@@ -689,14 +708,20 @@ function confirmModal(opts) {
     }
     document.addEventListener('keydown', onKey, true);
     wrap.addEventListener('click', (e) => { if (e.target === wrap) finish(false); });
-    wrap.querySelector('#cm-cancel').addEventListener('click', () => finish(false));
+    if (cancelBtn) cancelBtn.addEventListener('click', () => finish(false));
     okBtn.addEventListener('click', () => { if (typedOK()) finish(answer()); });
     if (typedInput) typedInput.addEventListener('input', refresh);
     if (promptInput) promptInput.addEventListener('input', refresh);
-    if (typedInput || promptInput) { refresh(); (promptInput || typedInput).focus(); }
+    if (typedInput || promptInput) {
+      refresh();
+      (promptInput || typedInput).focus();
+      // A prefilled prompt is a suggestion: typing replaces it.
+      if (promptInput && promptInput.value) promptInput.select();
+    }
     // A destructive dialog opens on Cancel, so a stray or repeated Enter never
     // confirms it; a non-destructive one opens on its confirm button.
-    else (opts.danger === false ? okBtn : wrap.querySelector('#cm-cancel')).focus();
+    else (opts.danger === false || !cancelBtn ? okBtn : cancelBtn).focus();
+    if (opts.onOpen) opts.onOpen(wrap);
   });
 }
 
@@ -933,7 +958,8 @@ function buildShell() {
         <div class="main">
           <section class="page-head" id="pageHead">
             <div class="page-crumb" id="pageCrumb"></div>
-            <div class="head-row"><div><h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1><p class="page-sub" id="pageSub"></p><div class="head-labels" id="pageLabels"></div></div></div>
+            <div class="head-row"><div><h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1><p class="page-sub" id="pageSub"></p><div class="head-labels" id="pageLabels"></div></div><div class="head-actions" id="pageActions"></div></div>
+            <div class="tabs page-tabs" id="pageTabs" role="tablist"></div>
           </section>
           <main class="content" id="content"></main>
         </div>
@@ -1298,12 +1324,15 @@ function inlineError(msg) {
 // view that finished loading after the operator moved on can therefore never
 // put its title over another page.
 let pendingHead = null;
-function pageHead(titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml) {
-  pendingHead = { titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml };
+// actionsHtml and tabsHtml are the band's object actions and tab bar; an edit
+// view passes them, every other view leaves them empty and the band clears.
+function pageHead(titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml, actionsHtml, tabsHtml) {
+  pendingHead = { titleHtml, subHtml, crumbHtml, titleAttr, labelsHtml, actionsHtml, tabsHtml };
   return '';
 }
 function applyHead(h) {
   const t = $('#pageTitle'), sb = $('#pageSub'), c = $('#pageCrumb'), l = $('#pageLabels');
+  const a = $('#pageActions'), tb = $('#pageTabs');
   if (t) {
     t.innerHTML = h.titleHtml || esc(state.appName);
     if (h.titleAttr) t.title = h.titleAttr; else t.removeAttribute('title');
@@ -1311,6 +1340,8 @@ function applyHead(h) {
   if (sb) sb.innerHTML = h.subHtml || '';
   if (c) c.innerHTML = h.crumbHtml || '';
   if (l) l.innerHTML = h.labelsHtml || '';
+  if (a) a.innerHTML = h.actionsHtml || '';
+  if (tb) tb.innerHTML = h.tabsHtml || '';
 }
 function viewHead(title, sub, actionHtml) {
   pageHead(esc(title), glossaryize(esc(sub)));
@@ -2198,12 +2229,55 @@ function cloneObject(obj, clearDomains) {
   stripSecrets(copy);
   return copy;
 }
-// Stashes a clone seed and navigates to that section's "new" editor, which
-// picks it up via takeCloneSeed instead of starting from a blank object.
+// Stashes a clone seed under the chosen name and navigates to that section's
+// "new" editor, which picks it up via takeCloneSeed instead of starting from a
+// blank object. Only cloneFlow below reaches this: the list views carry no
+// Clone button, so a copy is always made from the object's own page, after
+// the naming step.
 let cloneSeed = null;
-function startClone(section, obj) {
-  cloneSeed = { section, origName: (obj && obj.name) || '', data: cloneObject(obj, CLONE_CLEAR_DOMAINS.has(section)) };
+function startClone(section, obj, newName) {
+  const data = cloneObject(obj, CLONE_CLEAR_DOMAINS.has(section));
+  data.name = newName || '';
+  cloneSeed = { section, origName: (obj && obj.name) || '', data };
   location.hash = '#/' + section + '/_new';
+}
+const CLONE_SINGULAR = { hosts: 'proxy host', certs: 'certificate' };
+// What the naming dialog says a copy keeps and drops.
+function cloneNotesHtml(section, obj, singular) {
+  const name = (obj && obj.name) || '';
+  const notes = [`<p>Every setting of <b>${esc(name)}</b> is copied into a new ${esc(singular)}. Nothing is saved until you press Save in the editor.</p>`];
+  if (CLONE_CLEAR_DOMAINS.has(section)) notes.push('<p>The copy starts with no domains: a domain belongs to one host.</p>');
+  if (JSON.stringify(obj || {}).indexOf('"***"') !== -1) notes.push('<p>Secrets are not copied; enter them again in the copy.</p>');
+  return notes.join('');
+}
+// The naming step before a clone. The copy's name is chosen and checked here
+// (its shape, and against the names the kind already holds), so the editor
+// opens on a copy that is ready to review and save instead of on a blank name
+// that fails later.
+async function cloneFlow(section, obj) {
+  const origName = (obj && obj.name) || '';
+  const singular = CLONE_SINGULAR[section] || (SECTION_META[section] && SECTION_META[section].singular) || 'object';
+  let names = null;
+  try { names = arr((await api('/api/' + PLURAL[section])).data).map((o) => o.name); } catch (e) { names = null; }
+  const newName = await confirmModal({
+    title: `Clone ${origName}`,
+    body: cloneNotesHtml(section, obj, singular),
+    prompt: {
+      label: 'Name of the copy',
+      value: origName + '-copy',
+      placeholder: origName + '-copy',
+      validate: (v) => {
+        if (!HOST_NAME_RE.test(v)) return 'Lowercase letters, digits, dots, - or _, starting and ending with a letter or digit.';
+        if (v === origName) return 'The copy needs a different name.';
+        if (names && names.indexOf(v) !== -1) return `A ${singular} named ${v} already exists.`;
+        return '';
+      },
+    },
+    confirmLabel: 'Continue to the editor',
+    danger: false,
+  });
+  if (!newName) return;
+  startClone(section, obj, newName);
 }
 // Consumes (one-shot) the pending clone seed for section, or returns null.
 function takeCloneSeed(section) {
@@ -2214,11 +2288,12 @@ function takeCloneSeed(section) {
   }
   return null;
 }
-// Wires the editor's optional #ed-clone / btnId save-bar button (rendered only
-// for an existing object) to clone the object currently loaded in that editor.
+// Wires the editor's optional #ed-clone / btnId Clone button (rendered only
+// for an existing object) to the naming step for the object loaded in that
+// editor.
 function wireCloneButton(section, orig, btnId) {
   const btn = $('#' + (btnId || 'ed-clone'));
-  if (btn) btn.addEventListener('click', () => startClone(section, orig));
+  if (btn) btn.addEventListener('click', () => cloneFlow(section, orig));
 }
 
 // ---------- router ----------
@@ -3911,7 +3986,6 @@ async function listHosts(c) {
     { key: null, label: 'Auth', cls: 'col-auth' },
     { key: null, label: 'Status', cls: 'col-status' },
     { key: 'updated', label: 'Updated', cls: 'col-updated' },
-    { key: null, label: '', cls: 'col-actions' },
   ];
   function headHtml() {
     return `<tr><th class="sel-cell"><input type="checkbox" id="hostSelAll" aria-label="Select all listed hosts" /></th>`
@@ -3982,7 +4056,6 @@ async function listHosts(c) {
       <td class="col-auth">${auth}</td>
       <td class="col-status">${status}</td>
       <td class="mono faint col-updated">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
-      <td class="col-actions"><button class="btn ghost sm host-clone" data-name="${esc(h.name)}" type="button">Clone</button></td>
     </tr>`;
   }
 
@@ -4070,7 +4143,7 @@ async function listHosts(c) {
   function wireRows() {
     $$('#hostRows tr.clickable').forEach((tr) => {
       tr.addEventListener('click', (e) => {
-        if (e.target.closest('.host-clone') || e.target.closest('.sel-cell') || e.target.closest('a')) return;
+        if (e.target.closest('.sel-cell') || e.target.closest('a')) return;
         location.hash = '#/hosts/' + encodeURIComponent(tr.dataset.name);
       });
     });
@@ -4080,13 +4153,6 @@ async function listHosts(c) {
         const all = $('#hostSelAll');
         if (all) all.checked = $$('#hostRows .host-sel').every((b) => b.checked);
         renderBulk();
-      });
-    });
-    $$('#hostRows .host-clone').forEach((b) => {
-      b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const h = hosts.find((x) => x.name === b.dataset.name);
-        if (h) startClone('hosts', h);
       });
     });
   }
@@ -4186,55 +4252,95 @@ async function listHosts(c) {
 }
 
 // ---------- HOST EDITOR ----------
-function flowNode(type, name, sub, icon, cap) {
-  const tip = [name, sub].filter(Boolean).join(' - ');
-  if (cap) {
-    return `<div class="node cap" title="${esc(tip)}">
-      <span class="ico">${icon}</span>
-      <span class="cap-label">${esc(name)}</span>
-      <span class="cap-sub">${esc(sub || '')}</span>
-    </div>`;
-  }
-  return `<div class="node" title="${esc(tip)}">
-    <span class="ico">${icon}</span>
-    <span class="type">${esc(type)}</span>
-    <span class="nm">${esc(name)}${sub ? `<small>${esc(sub)}</small>` : ''}</span>
-  </div>`;
+// Tabs in the title band that switch panels in the content area. In-page only:
+// a hash change re-renders the editor and would drop unsaved edits. Roving
+// tabindex with the arrow keys, Home and End, as the Settings tabs do.
+function showPageTab(id) {
+  $$('#pageTabs .tab-btn').forEach((b) => {
+    const on = b.dataset.tab === id;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+  });
+  $$('#content .tab-panel[data-tab]').forEach((p) => { p.hidden = p.dataset.tab !== id; });
 }
-const connector = `<div class="connector"><span class="line"></span><span class="flow-dash"></span></div>`;
-
-function mwIcon(type) {
-  if (type === 'auth') return ICON.shieldCheck;
-  if (type === 'headers') return ICON.headers;
-  if (type === 'rate-limit') return ICON.gauge;
-  if (type === 'rewrite') return ICON.redirect;
-  if (type === 'bouncer') return ICON.shield;
-  return ICON.layers;
+function wirePageTabs(initial) {
+  const bar = $('#pageTabs');
+  const tabs = $$('#pageTabs .tab-btn');
+  if (!bar || !tabs.length) return;
+  tabs.forEach((b) => b.addEventListener('click', () => showPageTab(b.dataset.tab)));
+  // The bar outlives every page, so its key handler is attached once.
+  if (!bar.dataset.wired) {
+    bar.dataset.wired = '1';
+    bar.addEventListener('keydown', (e) => {
+      const all = $$('#pageTabs .tab-btn');
+      const i = all.indexOf(document.activeElement);
+      if (i === -1) return;
+      let j = -1;
+      if (e.key === 'ArrowRight') j = (i + 1) % all.length;
+      else if (e.key === 'ArrowLeft') j = (i - 1 + all.length) % all.length;
+      else if (e.key === 'Home') j = 0;
+      else if (e.key === 'End') j = all.length - 1;
+      if (j === -1) return;
+      e.preventDefault();
+      all[j].focus();
+      all[j].click();
+    });
+  }
+  showPageTab(initial || tabs[0].dataset.tab);
+}
+// A field on a hidden tab panel is worth nothing until its tab is shown.
+function revealTabPanel(el) {
+  const panel = el && el.closest && el.closest('.tab-panel[data-tab]');
+  if (!panel || !panel.hidden) return;
+  const tab = $(`#pageTabs .tab-btn[data-tab="${panel.dataset.tab}"]`);
+  if (tab) tab.click();
 }
 
-function renderHostFlow(rootEl, ctx) {
-  // ctx: { certRef, certDomains, upstreamStr, mwSelected:[name], mwType:{}, alSelected:[name] }
-  const nodes = [];
-  nodes.push(flowNode('', 'CLIENT', ':443', ICON.clientUser, true));
-  if (ctx.certRef) {
-    nodes.push(flowNode('TLS - termination', 'TLS termination', ctx.certDomains || ctx.certRef, ICON.lock, false));
-  }
-  // An inline block sits at its kind's chain position, just outside the
-  // referenced middlewares of that kind - so the diagram has to show it, or a
-  // host gated only inline reads as ungated here.
-  if (ctx.inlineRateLimit) nodes.push(flowNode('rate-limit - inline', 'Rate limit', 'on this host', ICON.gauge, false));
+// The rail's request chain, in the order the data plane evaluates it: rate
+// limit, access lists, bouncer, sign-in, guard, headers, rewrite, then the
+// backend. An inline block sits at its kind's position, just before the
+// referenced middlewares of that kind.
+const CHAIN_TYPE_ORDER = ['rate-limit', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
+function renderRailChain(el, ctx) {
+  if (!el) return;
+  const byType = (t) => ctx.mwSelected.filter((m) => (ctx.mwType[m] || '') === t).map((m) => ({ name: m, kind: t }));
+  const items = [];
+  if (ctx.inlineRateLimit) items.push({ name: 'rate limit', kind: 'on this host' });
+  items.push(...byType('rate-limit'));
+  ctx.alSelected.forEach((a) => items.push({ name: a, kind: 'access list' }));
+  items.push(...byType('bouncer'));
+  if (ctx.inlineAuth) items.push({ name: ctx.inlineAuth, kind: 'sign-in' });
+  items.push(...byType('auth'));
+  ['guard', 'headers', 'rewrite'].forEach((t) => items.push(...byType(t)));
   ctx.mwSelected.forEach((m) => {
-    const ty = ctx.mwType[m] || 'middleware';
-    // The type is the node's label already; repeating it as the sub line
-    // was noise.
-    nodes.push(flowNode(`${ty}`, m, '', mwIcon(ty), false));
+    const t = ctx.mwType[m] || '';
+    if (CHAIN_TYPE_ORDER.indexOf(t) === -1) items.push({ name: m, kind: t || 'middleware' });
   });
-  if (ctx.inlineAuth) nodes.push(flowNode('auth - inline', 'Sign-in', ctx.inlineAuth, ICON.shieldCheck, false));
-  ctx.alSelected.forEach((a) => {
-    nodes.push(flowNode('access-list - ip', a, 'rules', ICON.list, false));
+  items.push({ name: ctx.upstreamStr, kind: 'backend', end: true });
+  el.innerHTML = items.map((it, i) => `<li${it.end ? ' class="end"' : ''}><span class="n">${i + 1}</span><span class="mono trunc" title="${esc(it.name)}">${esc(it.name)}</span><span class="kind">${esc(it.kind)}</span></li>`).join('');
+}
+
+// The YAML the config file holds for this host, from a dry run of the stored
+// object: the same serializer and checks as a save, nothing written. The dry
+// run stamps updatedAt with the current time, as a save would; every other
+// line is the file's.
+async function showHostYaml(h) {
+  let res;
+  try {
+    res = await api('/api/proxy-hosts/' + encodeURIComponent(h.name) + '?dryRun=1', { method: 'PUT', body: h });
+  } catch (e) { toastErr(e); return; }
+  const reply = res.data || {};
+  const text = reply.yaml || '';
+  await confirmModal({
+    title: h.name,
+    body: `<div class="yaml-view"><div class="code-head"><span>${esc(reply.path || '')}</span><button class="btn ghost sm" type="button" id="yaml-copy">Copy</button></div><pre class="code">${yamlHtml(text)}</pre></div>`,
+    confirmLabel: 'Close',
+    danger: false,
+    closeOnly: true,
+    wide: true,
+    onOpen: (wrap) => { const b = wrap.querySelector('#yaml-copy'); if (b) b.addEventListener('click', () => copyText(text, b)); },
   });
-  nodes.push(flowNode('', 'UPSTREAM', ctx.upstreamStr, ICON.server, true));
-  rootEl.innerHTML = nodes.join(connector);
 }
 
 async function hostEditor(c, name) {
@@ -4386,18 +4492,36 @@ async function hostEditor(c, name) {
   const tpSummary = tpMode === 'custom' ? `trusted proxies: ${tpList.join(', ')}`
     : (tpMode === 'none' ? 'trusted proxies: none (connection address only)' : 'trusted proxies inherited from Settings');
 
+  // Title-band tabs. A dot marks a tab holding a non-default value, so what is
+  // configured is visible from any tab; its title says what.
+  const tabDots = {
+    tls: [hsts.enabled ? 'HSTS on' : '', mtlsOn ? 'client certificates on' : '', tls.minTLSVersion === '1.3' ? 'TLS 1.3 only' : ''].filter(Boolean),
+    access: [h.auth ? 'sign-in on' : '', h.rateLimit ? 'rate limit on' : '',
+      selMw.length ? `${selMw.length} middleware${selMw.length === 1 ? '' : 's'}` : '',
+      selAl.length ? `${selAl.length} access list${selAl.length === 1 ? '' : 's'}` : ''].filter(Boolean),
+    headers: [secHdrCount ? `${secHdrCount} security header${secHdrCount === 1 ? '' : 's'}` : '', stripCount ? `strips ${stripSummary}` : ''].filter(Boolean),
+    advanced: [epParts.length ? 'error pages' : '', tpMode !== 'inherit' ? 'trusted proxies' : '', dnsParts.length ? 'DNS sync' : ''].filter(Boolean),
+  };
+  const HOST_TABS = [['routing', 'Routing'], ['tls', 'TLS'], ['access', 'Access'], ['headers', 'Headers'], ['advanced', 'Advanced']];
+  const hostTabsHtml = HOST_TABS.map(([id, label]) => {
+    const dots = tabDots[id] || [];
+    return `<button class="tab-btn" type="button" role="tab" id="host-tab-${id}" aria-controls="host-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}${dots.length ? `<span class="tab-dot" title="${esc(dots.join(', '))}"></span>` : ''}</button>`;
+  }).join('');
+  const panel = (id, body) => `<div class="tab-panel" data-tab="${id}" role="tabpanel" id="host-panel-${id}" aria-labelledby="host-tab-${id}" hidden><div class="stack">
+${body}      </div></div>`;
+  const mc = MANAGED_CHIPS[managedBy(h)];
+  const railManaged = mc ? `<span class="muted">${esc(mc.title)}</span>` : '';
+
   c.innerHTML = `
     ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), 'Edit routing, TLS, and the middleware chain for this host.',
-      `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name), statusChip)}
+      `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
+      statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
+      isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
+      hostTabsHtml)}
 
-    <div class="panel flow-panel">
-      <div class="flow-head"><h3>Request flow</h3><span class="chip">left to right, in pipeline order</span></div>
-      <div class="flow" id="flow"></div>
-    </div>
-
-    <div class="form-grid">
-      <div class="stack">
-        ${foldHtml('f-id-card', 'Identity', idSummary, isNew || idParts.length > 0, `
+    <div class="edit-grid">
+      <div class="edit-main">
+${panel('routing', `        ${foldHtml('f-id-card', 'Identity', idSummary, isNew || idParts.length > 0, `
           <div class="inline-fields">
             <div class="field-group">
               <label>Name</label>
@@ -4502,73 +4626,8 @@ async function hostEditor(c, name) {
           </div>
         `)}
 
-        ${foldHtml('f-errp-card', 'Error pages', epSummary, epParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
-          <div class="field-group">
-            <label>Templates directory</label>
-            <input class="field mono" id="f-errp-dir" data-hint="proxyHost.errorPages.dir" data-path="errorPages.dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
-            <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
-          </div>
-          <div class="field-group" style="margin-top:10px">
-            <label>Inline templates (JSON)</label>
-            <textarea class="field mono" id="f-errp-inline" data-hint="proxyHost.errorPages.inline" data-path="errorPages.inline" rows="4" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
-            <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
-          </div>
-          <div class="field-group" style="margin-top:10px">
-            <label>Also replace upstream errors for</label>
-            <input class="field mono" id="f-errp-intercept" data-hint="proxyHost.errorPages.interceptUpstream" data-path="errorPages.interceptUpstream" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
-            <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
-          </div>
-        `)}
-
-        ${foldHtml('f-sech-card', 'Response security headers', secHdrSummary, secHdrCount > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Overrides the fleet defaults (Settings) for this host, per header name - a name listed here replaces the settings value <b>and</b> its scope. Names not listed keep the settings-level header. Applied set-if-absent, so an upstream's own header is never clobbered.</p>
-          <div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>
-          <button class="btn ghost sm" id="f-secheaders-add" type="button" style="margin-top:6px">${ICON.plus}Add header</button>
-          <div class="hint" style="margin-top:6px">Scope: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Strict-Transport-Security is not settable here; HSTS lives in the TLS section.</div>
-        `)}
-
-        ${foldHtml('f-strip-card', 'Strip response headers', stripSummary, stripCount > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">This host's additions to the fleet strip list (Settings) - header names removed from proxied upstream responses before they reach the client. Only what the upstream sent is touched, never a header gpm adds.</p>
-          <div class="field-group"><label>Header names</label><div class="chip-input" id="f-striphdrs" data-hint="proxyHost.stripResponseHeaders" data-path="stripResponseHeaders"></div></div>
-          <div class="hint">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save.</div>
-        `)}
-
-        ${foldHtml('f-adv-card', 'Advanced', tpSummary, tpMode !== 'inherit', `
-          <div class="field-group">
-            <label>Trusted proxies (override)</label>
-            <div class="seg" id="f-tp-seg" data-hint="proxyHost.trustedProxies.mode">
-              <button type="button" class="seg-btn${tpMode === 'inherit' ? ' on' : ''}" data-tp="inherit" aria-pressed="${tpMode === 'inherit'}">Inherit fleet setting</button>
-              <button type="button" class="seg-btn${tpMode === 'none' ? ' on' : ''}" data-tp="none" aria-pressed="${tpMode === 'none'}">Trust nobody on this host</button>
-              <button type="button" class="seg-btn${tpMode === 'custom' ? ' on' : ''}" data-tp="custom" aria-pressed="${tpMode === 'custom'}">Custom list</button>
-            </div>
-            <div id="f-tp-custom"${tpMode === 'custom' ? '' : ' hidden'} style="margin-top:8px">
-              <div class="chip-input" id="f-trustedproxies" data-hint="proxyHost.trustedProxies" data-path="trustedProxies"></div>
-            </div>
-            <div class="hint"><b>Replaces</b> the fleet-wide trusted proxies for this host - it does not add to them. Set a custom list when this host sits behind a different proxy, or trust nobody to make this host read the connection address only while the fleet list stays non-empty.</div>
-            <div class="hint" id="f-trustedproxies-inherit"${tpMode === 'inherit' ? '' : ' hidden'}>${esc(fleetProxies.length ? 'Inheriting: ' + fleetProxies.join(', ') : 'Inheriting: nothing (the connection address is the client).')}</div>
-            <div class="hint" id="f-trustedproxies-none"${tpMode === 'none' ? '' : ' hidden'}>This host reads the client address from the connection only. <span class="mono">X-Forwarded-For</span> is ignored however the fleet list is set.</div>
-            <div class="hint warn" id="f-trustedproxies-warn" hidden>${esc(TRUSTED_WILDCARD_WARNING)}</div>
-          </div>
-        `)}
-
-        ${foldHtml('f-dns-card', 'DNS sync', dnsSummary, dnsParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
-          <div class="toggle-line">
-            <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
-            ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct', 'proxyHost.dns.lanDirect')}
-          </div>
-          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
-          <div class="toggle-line">
-            <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
-            ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME', 'proxyHost.dns.publicCname')}
-          </div>
-          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
-        `)}
-      </div>
-
-      <div class="stack">
-        <div class="card form-section">
+`)}
+${panel('tls', `        <div class="card form-section">
           <p class="section-label">TLS</p>
           <div class="field-group">
             <label>Certificate</label>
@@ -4625,7 +4684,8 @@ async function hostEditor(c, name) {
           </div>
         </div>
 
-        <div class="card form-section">
+`)}
+${panel('access', `        <div class="card form-section">
           <p class="section-label">Middleware chain</p>
           <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b>${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, auth, guard, headers, rewrite, then the upstream.</p>
           <div class="check-list" id="f-mw" data-hint="proxyHost.middlewares" data-path="middlewares">
@@ -4651,22 +4711,97 @@ async function hostEditor(c, name) {
 
         ${inlineFoldHtml('f-rl', 'Rate limit', 'Throttle this host per client IP. For a limit shared by several hosts, use a middleware instead.',
     !!h.rateLimit, rateFoldSummary(h.rateLimit), rateLimitBlockHtml('f-rl', h.rateLimit), 'proxyHost.rateLimit')}
-      </div>
-    </div>
+`)}
+${panel('headers', `        ${foldHtml('f-sech-card', 'Response security headers', secHdrSummary, secHdrCount > 0, `
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Overrides the fleet defaults (Settings) for this host, per header name - a name listed here replaces the settings value <b>and</b> its scope. Names not listed keep the settings-level header. Applied set-if-absent, so an upstream's own header is never clobbered.</p>
+          <div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>
+          <button class="btn ghost sm" id="f-secheaders-add" type="button" style="margin-top:6px">${ICON.plus}Add header</button>
+          <div class="hint" style="margin-top:6px">Scope: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Strict-Transport-Security is not settable here; HSTS lives in the TLS section.</div>
+        `)}
+
+        ${foldHtml('f-strip-card', 'Strip response headers', stripSummary, stripCount > 0, `
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">This host's additions to the fleet strip list (Settings) - header names removed from proxied upstream responses before they reach the client. Only what the upstream sent is touched, never a header gpm adds.</p>
+          <div class="field-group"><label>Header names</label><div class="chip-input" id="f-striphdrs" data-hint="proxyHost.stripResponseHeaders" data-path="stripResponseHeaders"></div></div>
+          <div class="hint">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save.</div>
+        `)}
+
+`)}
+${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary, epParts.length > 0, `
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (Settings) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the settings-level pages (or gpm's default output) in effect.</p>
+          <div class="field-group">
+            <label>Templates directory</label>
+            <input class="field mono" id="f-errp-dir" data-hint="proxyHost.errorPages.dir" data-path="errorPages.dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
+            <div class="hint">html/template files named "&lt;status&gt;.html" (e.g. 502.html) plus an optional default.html.</div>
+          </div>
+          <div class="field-group" style="margin-top:10px">
+            <label>Inline templates (JSON)</label>
+            <textarea class="field mono" id="f-errp-inline" data-hint="proxyHost.errorPages.inline" data-path="errorPages.inline" rows="4" placeholder='{"502": "&lt;h1&gt;...&lt;/h1&gt;", "default": "&lt;h1&gt;...&lt;/h1&gt;"}'>${esc(ep.inline ? JSON.stringify(ep.inline, null, 2) : '')}</textarea>
+            <div class="hint">Status code (or "default") to HTML source. Template vars: {{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}.</div>
+          </div>
+          <div class="field-group" style="margin-top:10px">
+            <label>Also replace upstream errors for</label>
+            <input class="field mono" id="f-errp-intercept" data-hint="proxyHost.errorPages.interceptUpstream" data-path="errorPages.interceptUpstream" value="${esc(arr(ep.interceptUpstream).join(', '))}" placeholder="502, 503" />
+            <div class="hint">Comma-separated status codes. Normally only gpm's own errors get the custom page; the upstream's own error body passes through untouched.</div>
+          </div>
+        `)}
+
+        ${foldHtml('f-adv-card', 'Client addresses', tpSummary, tpMode !== 'inherit', `
+          <div class="field-group">
+            <label>Trusted proxies (override)</label>
+            <div class="seg" id="f-tp-seg" data-hint="proxyHost.trustedProxies.mode">
+              <button type="button" class="seg-btn${tpMode === 'inherit' ? ' on' : ''}" data-tp="inherit" aria-pressed="${tpMode === 'inherit'}">Inherit fleet setting</button>
+              <button type="button" class="seg-btn${tpMode === 'none' ? ' on' : ''}" data-tp="none" aria-pressed="${tpMode === 'none'}">Trust nobody on this host</button>
+              <button type="button" class="seg-btn${tpMode === 'custom' ? ' on' : ''}" data-tp="custom" aria-pressed="${tpMode === 'custom'}">Custom list</button>
+            </div>
+            <div id="f-tp-custom"${tpMode === 'custom' ? '' : ' hidden'} style="margin-top:8px">
+              <div class="chip-input" id="f-trustedproxies" data-hint="proxyHost.trustedProxies" data-path="trustedProxies"></div>
+            </div>
+            <div class="hint"><b>Replaces</b> the fleet-wide trusted proxies for this host - it does not add to them. Set a custom list when this host sits behind a different proxy, or trust nobody to make this host read the connection address only while the fleet list stays non-empty.</div>
+            <div class="hint" id="f-trustedproxies-inherit"${tpMode === 'inherit' ? '' : ' hidden'}>${esc(fleetProxies.length ? 'Inheriting: ' + fleetProxies.join(', ') : 'Inheriting: nothing (the connection address is the client).')}</div>
+            <div class="hint" id="f-trustedproxies-none"${tpMode === 'none' ? '' : ' hidden'}>This host reads the client address from the connection only. <span class="mono">X-Forwarded-For</span> is ignored however the fleet list is set.</div>
+            <div class="hint warn" id="f-trustedproxies-warn" hidden>${esc(TRUSTED_WILDCARD_WARNING)}</div>
+          </div>
+        `)}
+
+        ${foldHtml('f-dns-card', 'DNS sync', dnsSummary, dnsParts.length > 0, `
+          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. Configure the backends under Settings.</p>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
+            ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct', 'proxyHost.dns.lanDirect')}
+          </div>
+          <div class="hint" id="f-dns-lan-hint" style="display:none">Pi-hole DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
+          <div class="toggle-line">
+            <div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">Record in the authoritative public zone (Cloudflare)</div></div>
+            ${switchHtml('f-dns-public', !!(h.dns && h.dns.publicCname), 'Public CNAME', 'proxyHost.dns.publicCname')}
+          </div>
+          <div class="hint" id="f-dns-public-hint" style="display:none">Cloudflare DNS sync is not configured yet - this will take effect when it is (Settings -> DNS sync).</div>
+        `)}
+`)}
 
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
-        ${isNew ? '' : `<button class="btn ghost" id="hostCloneBtn" type="button">Clone</button>`}
-        ${isNew ? '' : `<button class="btn danger" id="deleteBtn" type="button">${ICON.trash}Delete</button>`}
         <a class="btn ghost" href="#/hosts">Cancel</a>
         <button class="btn primary" id="saveBtn" type="button">Save changes</button>
       </div>
+    </div>
+      </div>
+
+      <aside class="rail">
+        <div class="card rail-card"><dl class="dl">
+          <div><dt>Status</dt><dd>${statusChip}${h.updatedAt ? `<span class="muted">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''}${railManaged}</dd></div>
+          <div><dt>Certificate</dt><dd id="railCert"></dd></div>
+          <div><dt>Request chain</dt><dd><ol class="chain" id="railChain"></ol></dd></div>
+          <div><dt>Config file</dt><dd><span class="mono">${esc(isNew ? 'proxy-hosts/<name>.yaml' : 'proxy-hosts/' + h.name + '.yaml')}</span><span class="muted">${isNew ? 'written by the first save' : 'one git commit per save, see <a href="#/history">History</a>'}</span></dd></div>
+        </dl></div>
+      </aside>
     </div>`;
+  wirePageTabs('routing');
 
   // domains chip input
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...', (d) => {
     $('#f-cert-auto').innerHTML = certCoverageHtml(certs, d);
+    refreshRailCert(d);
     refreshFlow();
   });
   const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
@@ -4881,26 +5016,36 @@ async function hostEditor(c, name) {
     ['#f-scheme', '#f-uphost', '#f-upport'].forEach((sel) => { $(sel).disabled = grouped; });
   }
 
-  // flow
-  const flowEl = $('#flow');
+  // rail: the request chain follows the form as it is edited
   function curMw() { return $$('#f-mw input:checked').map((i) => i.value); }
   function curAl() { return $$('#f-al input:checked').map((i) => i.value); }
   function refreshFlow() {
-    // The flow diagram shows the certificate the handshake will actually
-    // present, resolved from the first domain, not a stored certificateRef the
-    // L7 data plane never reads.
-    const autoCert = certForDomain(certs, domainsCtl.get()[0]);
-    const cert = autoCert ? autoCert.name : '';
     const uphost = $('#f-uphost').value || '?';
     const upport = $('#f-upport').value || '?';
-    renderHostFlow(flowEl, {
-      certRef: cert, certDomains: autoCert ? arr(autoCert.domains).join(', ') : cert,
+    renderRailChain($('#railChain'), {
       upstreamStr: curGroup() ? `group:${curGroup()}` : `${uphost}:${upport}`,
       mwSelected: curMw(), mwType, alSelected: curAl(),
       inlineAuth: isOn('f-auth-on') ? (($('#f-auth-idp') && $('#f-auth-idp').value) || 'credentials') : '',
       inlineRateLimit: isOn('f-rl-on'),
     });
   }
+  // rail: the certificate the handshake will present for the first domain,
+  // resolved by SNI matching, not a stored certificateRef the L7 data plane
+  // never reads.
+  function refreshRailCert(domains) {
+    const el = $('#railCert');
+    if (!el) return;
+    const d = arr(domains)[0];
+    if (!d) { el.innerHTML = '<span class="muted">Add a domain to see which certificate covers it.</span>'; return; }
+    const ct = certForDomain(certs, d);
+    if (!ct) {
+      el.innerHTML = `<span class="status-line"><i class="warn"></i>none covers ${esc(d)}</span><span class="muted">Issue or import one under <a href="#/certs">Certificates</a>.</span>`;
+      return;
+    }
+    const meta = [arr(ct.domains).join(', '), ct.type === 'acme' ? 'ACME' : (ct.type || ''), ct.notAfter ? `expires ${fmtDate(ct.notAfter)}` : ''].filter(Boolean).join(' - ');
+    el.innerHTML = `<a class="mono" href="#/certs/${encodeURIComponent(ct.name)}">${esc(ct.name)}</a><span class="muted">${esc(meta)}</span>`;
+  }
+  refreshRailCert(arr(h.domains));
   refreshUpstreamMode();
   refreshFlow();
   wireHstsPreload('f-hsts-preload');
@@ -5216,6 +5361,13 @@ async function hostEditor(c, name) {
     });
   }
   wireCloneButton('hosts', h, 'hostCloneBtn');
+  const yamlBtn = $('#hostYamlBtn');
+  if (yamlBtn) yamlBtn.addEventListener('click', () => showHostYaml(h));
+  // The band's buttons sit outside #content, so the read-only gate that runs
+  // over the page does not reach them.
+  if (isReadOnly()) {
+    ['#hostCloneBtn', '#deleteBtn'].forEach((sel) => { const b = $(sel); if (b) gateControl(b, false, readOnlyReason()); });
+  }
 }
 
 // Effective ACME challenge for a certificate: the explicit value, else dns-01
@@ -5334,7 +5486,6 @@ async function listCerts(c) {
       <td class="col-time">${certExpiryCellHtml(r.ct)}</td>
       <td class="col-actions"><div class="row-actions">
         ${r.type === 'acme' ? `<button class="btn ghost sm ct-renew" data-name="${esc(r.ct.name)}" type="button">Renew now</button>` : ''}
-        <button class="btn ghost sm ct-clone" data-name="${esc(r.ct.name)}" type="button">Clone</button>
       </div></td>
     </tr>`;
   }
@@ -5370,15 +5521,8 @@ async function listCerts(c) {
     });
     $$('#certRows tr.clickable').forEach((tr) => {
       tr.addEventListener('click', (e) => {
-        if (e.target.closest('.ct-clone') || e.target.closest('.ct-renew') || e.target.closest('a')) return;
+        if (e.target.closest('.ct-renew') || e.target.closest('a')) return;
         location.hash = '#/certs/' + encodeURIComponent(tr.dataset.name);
-      });
-    });
-    $$('#certRows .ct-clone').forEach((b) => {
-      b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const ct = certs.find((x) => x.name === b.dataset.name);
-        if (ct) startClone('certs', ct);
       });
     });
     $$('#certRows .ct-renew').forEach((b) => {
@@ -5720,7 +5864,6 @@ async function genericList(c, section) {
       <div class="card-head">
         <div class="card-title"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
         <div class="card-actions">
-          <button class="btn ghost sm gs-clone" data-name="${esc(o.name)}" type="button">Clone</button>
           <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
         </div>
       </div>
@@ -5754,16 +5897,9 @@ async function genericList(c, section) {
   $$('.cards .card[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
     // The name is the card's link for the keyboard and screen readers (the card
-    // itself is not a button: it holds Clone and Delete); the rest of the card
-    // stays clickable for the mouse.
-    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('.gs-clone') && !e.target.closest('a')) open(); });
-  });
-  $$('.gs-clone').forEach((b) => {
-    b.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const obj = items.find((x) => x.name === b.dataset.name);
-      if (obj) startClone(section, obj);
-    });
+    // itself is not a button: it holds Delete); the rest of the card stays
+    // clickable for the mouse.
+    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('a')) open(); });
   });
   $$('.gs-del').forEach((b) => {
     b.addEventListener('click', async (e) => {

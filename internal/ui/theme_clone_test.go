@@ -89,7 +89,8 @@ func TestStaticBundleHasCloneHelper(t *testing.T) {
 	for _, want := range []string{
 		"function cloneObject(obj, clearDomains)",
 		"function stripSecrets(v)",
-		"function startClone(section, obj)",
+		"function startClone(section, obj, newName)",
+		"function cloneFlow(section, obj)",
 		"function takeCloneSeed(section)",
 		"function wireCloneButton(section, orig, btnId)",
 		// the sentinel model.Secret.MarshalJSON uses for a literal secret -
@@ -103,25 +104,25 @@ func TestStaticBundleHasCloneHelper(t *testing.T) {
 		}
 	}
 
-	// Every list view for a kind with a "Clone" affordance must call the
-	// shared startClone helper rather than hand-rolling its own navigation -
-	// one call site per kind covers proxy hosts, certificates, and (via
-	// genericList) every other listed kind (redirects, streams, parked hosts,
-	// access lists, middlewares, upstream groups, identity/DNS providers,
-	// client CAs).
-	for _, want := range []string{
-		"startClone('hosts', h)",
-		"startClone('certs', ct)",
-		"startClone(section, obj)",
-	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("app.js list view no longer wires a Clone action via startClone (%q not found)", want)
+	// A clone is made from the object's own page, never from a list row: the
+	// list views carry no Clone button (the owner's call, 2026-10-19), and the
+	// one way to a copy is the naming step in cloneFlow, which is the only
+	// caller of startClone.
+	for _, stale := range []string{"host-clone", "sm ct-clone", "gs-clone", "startClone('hosts'", "startClone('certs'", "startClone(section, obj)"} {
+		if strings.Contains(js, stale) {
+			t.Errorf("app.js still carries a list-row Clone action (%q found)", stale)
 		}
 	}
+	if strings.Count(js, "startClone(") != 2 { // the definition and cloneFlow's call
+		t.Errorf("startClone must be reached only through cloneFlow's naming step (found %d references)", strings.Count(js, "startClone("))
+	}
+	if !strings.Contains(js, "startClone(section, obj, newName)") {
+		t.Errorf("cloneFlow no longer hands the chosen name to startClone")
+	}
 
-	// Every typed object editor wires its save-bar Clone button through the
-	// one shared wireCloneButton helper - a per-kind reimplementation here
-	// would be exactly the duplication the shared helper exists to avoid.
+	// Every typed object editor wires its Clone button through the one shared
+	// wireCloneButton helper - a per-kind reimplementation here would be
+	// exactly the duplication the shared helper exists to avoid.
 	for _, section := range []string{
 		"hosts", "certs", "redirects", "streams", "parked", "dns",
 		"access", "identity", "middleware", "clientcas", "upstreams",
