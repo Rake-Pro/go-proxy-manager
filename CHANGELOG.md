@@ -28,6 +28,11 @@ All notable changes to go-proxy-manager are documented here. The format follows
   "docker-managed" instead of naming the reconciler.
 - Dark mode: inline alerts, attention rows and banners keep a translucent
   tint of their severity colour instead of a neutral grey fill.
+- List cards (access lists, middleware, upstream groups, identity providers,
+  DNS providers, client CAs, redirects, parked hosts, streams) say they open:
+  a kind tile with the section's glyph and a round "go" mark at rest; on
+  hover or keyboard focus the card lifts, takes the brand ring, the name turns
+  brand and the hairline wire lights along its top edge.
 
 ### Fixed
 

@@ -89,7 +89,7 @@
   --btnd-bg:#faeae8; --btnd-text:#7d1007; --btnd-hover:#f4d6d2;
   --danger-solid:#c9190b; --danger-solid-hover:#a30000;
   --ok-bg2:#e1f3df; --warn-bg2:#fbefc9; --err-bg2:#f9dbd8; --info-bg2:#dbeafa; --cyan-bg2:#d9efef; --purple-bg2:#e6e1fb; --grey-bg2:#e6e6e6;
-  --num-bg:#f0f0f0; --chip-shadow:0 1px 2px rgba(0,41,82,.10);
+  --num-bg:#f0f0f0; --chip-shadow:0 1px 2px rgba(0,41,82,.10); --card-ring:rgba(0,102,204,.4);
   --shadow:var(--shadow-sm);
   --scrim:rgba(3,3,3,.62);
   --overlay-soft:rgba(3,3,3,.04);
@@ -126,7 +126,7 @@
     --btn2-bg:rgba(31,167,248,.16); --btn2-text:#73bcf7; --btn2-hover:rgba(31,167,248,.28); --btn2-hover-text:#a8d8fb;
     --btnd-bg:rgba(254,81,66,.16); --btnd-text:#ff7468; --btnd-hover:rgba(254,81,66,.28);
     --ok-bg2:rgba(91,163,82,.22); --warn-bg2:rgba(240,171,0,.2); --err-bg2:rgba(254,81,66,.2); --info-bg2:rgba(43,154,243,.22); --cyan-bg2:rgba(0,149,150,.26); --purple-bg2:rgba(132,118,209,.26); --grey-bg2:rgba(255,255,255,.09);
-    --num-bg:rgba(255,255,255,.12); --chip-shadow:none;
+    --num-bg:rgba(255,255,255,.12); --chip-shadow:none; --card-ring:rgba(31,167,248,.5);
     --scrim:rgba(3,3,3,.72); --overlay-soft:rgba(255,255,255,.04);
     color-scheme:dark;
   }
@@ -156,7 +156,7 @@
   --btn2-bg:rgba(31,167,248,.16); --btn2-text:#73bcf7; --btn2-hover:rgba(31,167,248,.28); --btn2-hover-text:#a8d8fb;
   --btnd-bg:rgba(254,81,66,.16); --btnd-text:#ff7468; --btnd-hover:rgba(254,81,66,.28);
   --ok-bg2:rgba(91,163,82,.22); --warn-bg2:rgba(240,171,0,.2); --err-bg2:rgba(254,81,66,.2); --info-bg2:rgba(43,154,243,.22); --cyan-bg2:rgba(0,149,150,.26); --purple-bg2:rgba(132,118,209,.26); --grey-bg2:rgba(255,255,255,.09);
-  --num-bg:rgba(255,255,255,.12); --chip-shadow:none;
+  --num-bg:rgba(255,255,255,.12); --chip-shadow:none; --card-ring:rgba(31,167,248,.5);
   --scrim:rgba(3,3,3,.72); --overlay-soft:rgba(255,255,255,.04);
   color-scheme:dark;
 }
@@ -741,11 +741,29 @@ a.rail-cert:hover .trunc { text-decoration:underline; }
 th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .col-actions { width:1%; white-space:nowrap; text-align:right; }
 .row-actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; }
-.card-head > .card-title { flex:1 1 auto; min-width:0; }
-.card-head > .card-title h3, .card-head > .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.card-head > .card-title, .card-head > .card-id { flex:1 1 auto; min-width:0; }
+.card-head .card-title h3, .card-head .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card-head > .card-actions { display:flex; gap:8px; flex:none; }
 .bulk-targets { margin:8px 0 12px; padding:6px 10px 6px 26px; max-height:180px; overflow:auto; border:0; background:var(--raised); border-radius:3px; font-size:13.5px; }
 .bulk-targets li { line-height:20px; }
+/* Clickable list cards say so twice: at rest a kind tile (the section's own
+   glyph) and a small round "go" mark at the top right; on hover or keyboard
+   focus the card lifts, takes the brand ring, the name turns brand and the
+   hairline wire (the one under the masthead) lights along its top edge. */
+.cards .card { position:relative; padding:18px 20px; transition:transform .12s ease, box-shadow .12s ease; }
+.cards .card::after { content:""; position:absolute; left:0; right:0; top:0; height:3px; background:var(--wire); opacity:0; transition:opacity .12s ease; pointer-events:none; }
+.cards .card:hover, .cards .card:focus-within { transform:translateY(-2px); box-shadow:var(--shadow-md), 0 0 0 1px var(--card-ring); }
+.cards .card:hover::after, .cards .card:focus-within::after { opacity:1; }
+.cards .card:hover .card-link, .cards .card:focus-within .card-link { color:var(--brand-text); }
+.cards .card .card-head { margin-bottom:12px; padding-right:36px; align-items:center; }
+.card-id { display:flex; align-items:center; gap:10px; min-width:0; }
+.card-id > .card-title { min-width:0; }
+.card-kind { width:30px; height:30px; border-radius:7px; background:var(--btn2-bg); color:var(--brand-text); display:grid; place-items:center; flex:none; }
+.card-kind svg { width:16px; height:16px; }
+.card-go { position:absolute; top:16px; right:16px; width:26px; height:26px; border-radius:50%; background:var(--num-bg); color:var(--muted); display:grid; place-items:center; transition:background .12s ease, color .12s ease; }
+.card-go svg { width:12px; height:12px; }
+.cards .card:hover .card-go, .cards .card:focus-within .card-go { background:var(--brand); color:#fff; box-shadow:var(--shadow-primary); }
+.cards .card .kv { border-top:1px solid var(--border-soft); padding-top:12px; }
 .card-title .card-name-row { display:flex; align-items:center; gap:8px; min-width:0; }
 .card-title .card-name-row h3 { min-width:0; }
 .card-title .card-name-row .chip { flex:none; }
@@ -810,6 +828,8 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   .toast { animation:none; }
   .modal { animation:none; }
   .switch, .switch::after, .nav-chev, .sidebar { transition:none; }
+  .cards .card, .cards .card::after, .card-go { transition:none; }
+  .cards .card:hover, .cards .card:focus-within { transform:none; }
 }
 
 /* ---------- tabs (PatternFly tabs) ---------- */

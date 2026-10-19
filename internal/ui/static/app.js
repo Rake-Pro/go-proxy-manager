@@ -1043,6 +1043,9 @@ function navGroupOpen(group) {
 function navItemHtml(n) {
   return `<button class="nav-item" data-view="${n.id}">${esc(n.label)}</button>`;
 }
+// Section id -> the glyph its nav item carries, for the list cards' kind tile.
+const SECTION_ICON = {};
+NAV_GROUPS.forEach((g) => g.items.forEach((i) => { SECTION_ICON[i.id] = i.icon; }));
 function navGroupHtml(group) {
   const items = group.items.map(navItemHtml).join('');
   if (!group.label) return `<div class="nav-group">${items}</div>`;
@@ -6326,6 +6329,10 @@ async function genericList(c, section) {
   // Redirects and parked hosts read like the Proxy Hosts list: the domain is
   // the title, the object name the subline, then status, tags and last change.
   const LIVE_CHIP = '<span class="chip flat ok"><span class="dot ok"></span>Live</span>';
+  // Each card carries its section's glyph (the nav's own) and a "go" mark, so
+  // it reads as something that opens before the pointer says so.
+  const kindIcon = SECTION_ICON[section] || ICON.layers;
+  const GO_MARK = `<span class="card-go" aria-hidden="true">${ICON.chevron}</span>`;
   const cardHtml = (o) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
     if (meta.domainFirst) {
@@ -6335,17 +6342,23 @@ async function genericList(c, section) {
       return `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
+        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
         <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12.5px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
+        </div>
       </div>
       <div class="kv">${meta.summary(o, ctx)}${tags.length ? `<span class="k">Tags</span><span class="v v-list">${tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</span>` : ''}${o.updatedAt ? `<span class="k">Updated</span><span class="v mono">${esc(fmtTime(o.updatedAt))}</span>` : ''}</div>
+      ${GO_MARK}
     </div>`;
     }
     return `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
+        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
         <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:13.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+        </div>
       </div>
       <div class="kv">${meta.summary(o, ctx)}</div>
+      ${GO_MARK}
     </div>`;
   };
   const cards = items.map(cardHtml).join('');
