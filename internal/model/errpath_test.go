@@ -8,7 +8,7 @@ import (
 // uiErrorPathRe is the expression the admin UI (internal/ui/static/app.js,
 // ERROR_PATH_RE) applies to a validation message to find the field it names.
 // A message that does not match it cannot be jumped to.
-var uiErrorPathRe = regexp.MustCompile(`^(?:[a-z][A-Za-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*`)
+var uiErrorPathRe = regexp.MustCompile(`^(?:[a-z][A-Za-z ]* "([^"]*)":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*`)
 
 // TestValidationErrorsLeadWithFieldPath pins the shape the UI relies on: a
 // message about one field starts with the field's dotted path, optionally
@@ -117,7 +117,7 @@ func TestValidationErrorsLeadWithFieldPath(t *testing.T) {
 				t.Fatalf("message = %q\nwant      %q", got, tc.wantMsg)
 			}
 			m := uiErrorPathRe.FindStringSubmatch(tc.err.Error())
-			if m == nil || m[1] != tc.wantPath {
+			if m == nil || m[2] != tc.wantPath {
 				t.Fatalf("UI path regex captured %v, want %q", m, tc.wantPath)
 			}
 		})
@@ -135,7 +135,7 @@ func TestUIErrorPathRegexRejectsObjectLevelMessages(t *testing.T) {
 		`access list "monitoring-probes" has path rules, which do not apply to a stream host`,
 	} {
 		if m := uiErrorPathRe.FindStringSubmatch(msg); m != nil {
-			t.Errorf("%q unexpectedly matched with path %q", msg, m[1])
+			t.Errorf("%q unexpectedly matched with path %q", msg, m[2])
 		}
 	}
 }

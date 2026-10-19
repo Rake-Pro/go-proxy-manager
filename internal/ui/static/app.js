@@ -576,7 +576,7 @@ function progressToast(title) {
 // top-level field is one bare segment ("stripResponseHeaders: ..."). The object
 // kind may hold capitals ("client CA \"x\": ...") and the first segment an
 // index ("upstreams[0].port: ...").
-const ERROR_PATH_RE = /^(?:[a-z][A-Za-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
+const ERROR_PATH_RE = /^(?:[a-z][A-Za-z ]* "([^"]*)":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
 
 function clearEditorBanner() {
   $$('#content .editor-error').forEach((el) => el.remove());
@@ -606,19 +606,27 @@ function pathsFromHints(root) {
 function errorFieldFor(msg) {
   const m = ERROR_PATH_RE.exec(String(msg || ''));
   if (!m) return null;
+  // A conflict can be reported against the OTHER object ("proxy host \"b\":
+  // domains: ... claimed by \"a\"" while editing "a"); flagging this page's
+  // field for it would point at the wrong thing.
+  const about = m[1] || '';
+  const nameEl = document.querySelector('#content [data-path="name"]');
+  const editing = nameEl ? String(nameEl.value !== undefined ? nameEl.value : nameEl.textContent).trim() : '';
+  if (about && editing && about !== editing) return null;
+  const fieldPath = m[2];
   pathsFromHints($('#content'));
-  const parts = m[1].split('.');
+  const parts = fieldPath.split('.');
   for (let n = parts.length; n > 0; n--) {
     const path = parts.slice(0, n).join('.');
     const el = document.querySelector(`#content [data-path="${path}"]`);
-    if (el) return { el, path: m[1] };
+    if (el) return { el, path: fieldPath };
     // A repeater's fields carry the path without the index (every member row
     // is "upstreams.port"): "upstreams[1].port" is the second of them.
     const idx = /\[(\d+)\]/.exec(path);
     if (idx) {
       const all = document.querySelectorAll(`#content [data-path="${path.replace(/\[\d+\]/g, '')}"]`);
       const hit = all[Number(idx[1])] || all[0];
-      if (hit) return { el: hit, path: m[1] };
+      if (hit) return { el: hit, path: fieldPath };
     }
   }
   return null;
@@ -1132,6 +1140,9 @@ function buildShell() {
   $('#scrim').addEventListener('click', closeNav);
   document.addEventListener('keydown', (e) => {
     if (!document.body.classList.contains('nav-open')) return;
+    // A dialog or wizard above the drawer owns the keys: its own trap must not
+    // be undercut by moving focus into the sidebar behind it.
+    if (document.querySelector('.modal-scrim')) return;
     if (e.key === 'Escape' && !e.defaultPrevented) {
       closeNav();
       $('#menuBtn').focus();
@@ -2548,7 +2559,10 @@ async function cloneFlow(section, obj) {
   const origName = (obj && obj.name) || '';
   const singular = CLONE_SINGULAR[section] || (SECTION_META[section] && SECTION_META[section].singular) || 'object';
   let names = null;
+  const page = location.hash;
   try { names = arr((await api('/api/' + PLURAL[section])).data).map((o) => o.name); } catch (e) { names = null; }
+  // The lookup took time; the page it was for may be gone.
+  if (location.hash !== page) return;
   const newName = await confirmModal({
     title: `Clone ${origName}`,
     body: cloneNotesHtml(section, obj, singular),
@@ -6427,7 +6441,11 @@ async function deleteObject(section, kind, name, path, btn) {
   if (btn.dataset.busy) return;
   btn.dataset.busy = '1';
   let refs = [];
+  const page = location.hash;
   try { refs = await usedBy(section, name); } finally { delete btn.dataset.busy; }
+  // The lookup took time; a dialog must not open over a page the user has
+  // since left, let alone be confirmed there.
+  if (location.hash !== page) return;
   const ok = await confirmModal({
     title: `Delete ${kind} ${name}?`,
     body: `<p>${esc(DELETE_CONSEQUENCE[section] || '')}</p>`
@@ -10288,7 +10306,7 @@ async function runHostWizard() {
       // silently drops a field; the full editor keeps all of them.
       const empty = (v) => v == null || v === false || v === '' || v === 0
         || (Array.isArray(v) ? !v.length : (typeof v === 'object' && Object.keys(v).every((k) => empty(v[k]))));
-      const skip = ['name', 'domains', 'upstream', 'tls', 'auth', 'accessLists', 'middlewares', 'createdAt', 'updatedAt', 'websocketsUpgrade'];
+      const skip = ['name', 'domains', 'upstream', 'tls', 'auth', 'accessLists', 'middlewares', 'createdAt', 'updatedAt', 'websocketsUpgrade', 'labels'];
       const extra = Object.keys(o).filter((k) => skip.indexOf(k) === -1 && !empty(o[k]));
       Object.keys(up).forEach((k) => { if (['scheme', 'host', 'port', 'path'].indexOf(k) === -1 && !empty(up[k])) extra.push('upstream.' + k); });
       Object.keys(tls).forEach((k) => { if (['forceSSL', 'hsts'].indexOf(k) === -1 && !empty(tls[k])) extra.push('tls.' + k); });
@@ -10299,7 +10317,15 @@ async function runHostWizard() {
         draft: nd,
         invalid: data.valid === false ? (data.error || 'The server could not validate this object.') : '',
         note,
-        full: () => { cloneSeed = { section: 'hosts', origName: '', data: o }; location.hash = '#/hosts/_new'; },
+        // The editor opens on the pasted object minus what a hand-made host
+        // must not carry: ownership labels (discovery would delete the host as
+        // its own on the next pass) and the pasted timestamps.
+        full: () => {
+          const seed = Object.assign({}, o);
+          delete seed.labels; delete seed.createdAt; delete seed.updatedAt;
+          cloneSeed = { section: 'hosts', origName: '', data: seed };
+          location.hash = '#/hosts/_new';
+        },
       };
     },
     onFinish: async (d) => {
