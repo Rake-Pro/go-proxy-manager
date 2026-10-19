@@ -8,7 +8,7 @@ import (
 // uiErrorPathRe is the expression the admin UI (internal/ui/static/app.js,
 // ERROR_PATH_RE) applies to a validation message to find the field it names.
 // A message that does not match it cannot be jumped to.
-var uiErrorPathRe = regexp.MustCompile(`^(?:[a-z][a-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*`)
+var uiErrorPathRe = regexp.MustCompile(`^(?:[a-z][A-Za-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*`)
 
 // TestValidationErrorsLeadWithFieldPath pins the shape the UI relies on: a
 // message about one field starts with the field's dotted path, optionally
@@ -85,6 +85,21 @@ func TestValidationErrorsLeadWithFieldPath(t *testing.T) {
 			err:      Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) { h.TLS.CertificateRef = "ghost" })}}.Validate(),
 			wantMsg:  `proxy host "app": tls.certificateRef: references unknown certificate "ghost"`,
 			wantPath: "tls.certificateRef",
+		},
+		{
+			name:     "object kind with capitals",
+			err:      ClientCA{ObjectMeta: ObjectMeta{Name: "x"}}.Validate(),
+			wantMsg:  `client CA "x": caPEM: is required`,
+			wantPath: "caPEM",
+		},
+		{
+			name: "indexed first segment",
+			err: UpstreamGroup{ObjectMeta: ObjectMeta{Name: "pool"}, Upstreams: []GroupUpstream{
+				{Upstream: Upstream{Scheme: "http", Host: "10.0.0.1", Port: 80}},
+				{Upstream: Upstream{Scheme: "http", Host: "10.0.0.2", Port: 99999}},
+			}}.Validate(),
+			wantMsg:  `upstream group "pool": upstreams[1].port: 99999 is out of range (1-65535)`,
+			wantPath: "upstreams[1].port",
 		},
 		{
 			name:     "settings error has no object prefix",

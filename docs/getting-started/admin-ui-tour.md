@@ -34,12 +34,13 @@ code or a lockout re-renders the page with the reason and keeps the username.
 | Area | Holds |
 |---|---|
 | Masthead | The instance name, the theme button (auto, light, dark) and the account menu: who is signed in, role and sign-in method, the instance address, API tokens, History, the setup wizard, Sign out |
-| Sidebar | Overview, then the groups Hosts, Security, Operations and a collapsed Advanced group (streams, parked hosts, upstream groups, client CAs, DNS providers, error pages, API tokens). The foot shows the running version and the current config commit |
+| Sidebar | Overview, then the groups Hosts (proxy hosts, redirects, parked hosts), Security, Operations and a collapsed Advanced group (streams, upstream groups, client CAs, DNS providers, error pages, API tokens). The foot shows the running version and the current config commit |
 | Title band | The page title and one line of context; on an object page also the breadcrumb, the status label, the object actions and the tabs |
 | Content | Cards, tables and forms, on a grey canvas |
 
-On a phone the sidebar becomes a drawer behind the menu button, tables scroll
-sideways, and wizards open as full-screen sheets.
+On a phone or a portrait tablet the sidebar becomes a drawer behind the menu
+button, the proxy hosts table keeps Domain and Status only (other tables scroll
+sideways), and wizards open as full-screen sheets.
 
 ## Overview
 

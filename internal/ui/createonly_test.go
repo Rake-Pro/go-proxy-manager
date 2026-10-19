@@ -133,3 +133,57 @@ func TestWizardBatchMarkers(t *testing.T) {
 		}
 	}
 }
+
+// The lists and shell batch: hosts sort by Domain from the first paint and
+// group by the primary domain's zone, tags fold to three chips, the phone
+// table keeps Domain and Status, the drawer toggles and holds Tab, the help
+// popover sits after its owner, and the main landmark holds the title band.
+func TestListsAndShellBatchMarkers(t *testing.T) {
+	js := loadAppJS(t)
+	for _, want := range []string{
+		"let sort = { key: 'domains', dir: 1 };",
+		"const zoneOk = !showZones || !r.zone || !zonesOff.has(r.zone);",
+		"r.tags.length > 3 ? moreToggle(r.tags.slice(3)",
+		"{ key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },",
+		`<table class="hosts-table">`,
+		"Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance",
+		", ${maintHosts.length} in maintenance",
+		"domainFirst: true,",
+		"if (v == null || typeof v === 'boolean') return;",
+		"aria-controls=\"tok-form\"",
+		"tok-toggle",
+		"title=\"${esc(fmtTime(e.time, true))}\">${esc(fmtClock(e.time))}</td>",
+		".join(', ') || '0'}</span>` +\n      upstreamHealthKv(o, ctx)",
+		"b.setAttribute('aria-label', 'Close navigation');",
+		"if (m) m.inert = true;",
+		`<a class="skip-link" id="skipLink" href="#content">Skip to content</a>`,
+		`<main class="main" id="main">`,
+		"host.insertAdjacentElement('afterend', el);",
+		"el.setAttribute('aria-label', 'Help');",
+		`aria-controls="hint-pop"`,
+		"function scheduleHintPopClose()",
+		`(?:\[\d+\])?`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing lists/shell marker %q", want)
+		}
+	}
+	for _, gone := range []string{`aria-haspopup="true"`, `<main class="content"`, "join(' -&gt; ')", "No ${meta.singular === 'middleware'"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still contains %q", gone)
+		}
+	}
+	css := readStatic(t, "static/app.css")
+	for _, want := range []string{
+		"summary:focus-visible, [tabindex]:focus-visible",
+		".tab-btn:focus-visible { outline-offset:-2px; }",
+		"@media (max-width:800px) {",
+		".hosts-table .hide-sm { display:none; }",
+		".hosts-table .hide-md { display:none; }",
+		":root[data-theme=\"dark\"] .hint-pop { border:1px solid var(--border); }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("app.css missing lists/shell marker %q", want)
+		}
+	}
+}

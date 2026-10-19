@@ -142,9 +142,12 @@ h1, h2, h3, h4 { margin:0; font-weight:500; line-height:1.3; }
 
 /* focus */
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
-[tabindex]:focus-visible, .switch:focus-visible {
+summary:focus-visible, [tabindex]:focus-visible, .switch:focus-visible {
   outline:2px solid var(--brand); outline-offset:2px;
 }
+/* Skip link: off screen until it takes focus, then the first thing shown. */
+.skip-link { position:absolute; left:8px; top:-48px; z-index:200; padding:8px 16px; background:var(--panel); color:var(--brand-text); box-shadow:var(--shadow-md); }
+.skip-link:focus { top:8px; }
 /* Text controls show focus as the 2px primary bottom edge instead of a ring;
    checkboxes, radios and every other control keep the ring. */
 input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visible, .chip-input input:focus-visible { outline:0; }
@@ -170,6 +173,9 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 }
 .tool-btn:hover, .masthead .menu-btn:hover { background:var(--masthead-hover); color:#fff; }
 .tool-btn svg, .masthead .menu-btn svg { width:18px; height:18px; }
+/* The theme button names its mode next to the glyph. */
+#themeBtn { width:auto; gap:6px; padding:0 8px; }
+.tool-btn .tool-label { font-size:13px; }
 .masthead .menu-btn { display:none; margin-right:2px; }
 .user-btn {
   display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 6px 0 4px; border:0;
@@ -354,7 +360,10 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .feed-row.attn .feed-msg { order:1; }
 .feed-row.attn:has(.feed-tick.err) { border-top-color:var(--err); background:var(--err-bg); }
 .feed-row.attn:has(.feed-tick.warn) { border-top-color:var(--warn); background:var(--warn-bg); }
+.feed-row.attn:has(.feed-tick.info) { border-top-color:var(--info); background:var(--info-bg); }
 .feed-tick.err { background:var(--err); }
+.feed-tick.info { background:var(--info); }
+.ov-summary { margin:4px 0 0; font-size:13px; }
 .feed-tick.warn { background:var(--warn); }
 /* Revert controls are <button>: they commit a config change, so they must be
    tabbable and Enter/Space operable. */
@@ -638,6 +647,13 @@ a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
 .cell-main > :not(.trunc), .cell-sub > :not(.trunc) { flex:none; }
 .cell-sub { margin-top:3px; min-height:22px; overflow:hidden; font-size:13px; color:var(--muted); }
 .cell-sub .chip { line-height:20px; }
+/* Next to the tag chips the name gives way first, down to the minimum width
+   the row sets on it (a few characters); only then do the chips shrink. */
+.cell-sub > .trunc { flex-shrink:1000; }
+.cell-sub .chip.tag { display:inline-block; flex:0 1 auto; min-width:3em; max-width:16ch; overflow:hidden; text-overflow:ellipsis; }
+.hosts-table .cell-main, .hosts-table .cell-sub { max-width:320px; }
+.hosts-table .col-upstream .trunc { max-width:200px; }
+.col-domain .more-list.tag-list { display:flex; flex-wrap:wrap; gap:4px; white-space:normal; }
 .cell-sub .mono { font-size:12px; }
 .more-btn { flex:none; background:none; border:0; padding:0 2px; margin:0; font:inherit; font-size:12px; color:var(--muted); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; white-space:nowrap; }
 .more-btn:hover { color:var(--text); }
@@ -687,6 +703,11 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 @media (max-width:920px) {
   .grid-2, .form-grid { grid-template-columns:1fr; }
 }
+/* Portrait tablet: Upstream and Updated go first, so Status stays on screen. */
+@media (max-width:1000px) {
+  .hosts-table .hide-md { display:none; }
+  .hosts-table .cell-main, .hosts-table .cell-sub { max-width:300px; }
+}
 @media (max-width:720px) {
   .loc-row { flex-direction:column; align-items:stretch; gap:8px; }
   .loc-row > .field, .loc-row > input.field, .loc-row > select.field, .loc-row > textarea.field,
@@ -699,8 +720,15 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   .toolbar { flex-direction:column; align-items:stretch; }
   .toolbar .search { flex:0 0 auto; max-width:none; }
   .bulk-bar { flex-wrap:wrap; }
+  /* Phone: the hosts table keeps Domain and Status, the rest is one tap away
+     in the editor. */
+  table.hosts-table { min-width:0; }
+  .hosts-table .hide-sm { display:none; }
+  .hosts-table th, .hosts-table td { padding-left:8px; padding-right:8px; }
+  .hosts-table .col-domain { min-width:0; }
+  .hosts-table .cell-main, .hosts-table .cell-sub, .hosts-table .col-domain .more-list { max-width:calc(100vw - 200px); }
 }
-@media (max-width:760px) {
+@media (max-width:800px) {
   .page-body { grid-template-columns:1fr; }
   /* The sidebar becomes a drawer under the masthead. visibility, not just
      transform: an off-canvas drawer that is only moved off screen stays in
@@ -733,6 +761,9 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   font:inherit; font-size:14px; padding:8px 16px; cursor:pointer; margin-bottom:-1px; white-space:nowrap; position:relative; }
 .tab-btn:hover { color:var(--text); border-bottom-color:var(--border-2); }
 .tab-btn.on { color:var(--text); border-bottom-color:var(--brand); font-weight:400; }
+/* Inside the scroll box: .tabs scrolls sideways, so a ring drawn outside the
+   button was clipped to one edge. */
+.tab-btn:focus-visible { outline-offset:-2px; }
 .tab-panel[hidden] { display:none; }
 
 /* ---------- edit view: band actions and tabs, form column, rail ---------- */
@@ -805,9 +836,14 @@ details.sub-fold[open] > summary::before { content:"- "; }
 .hint-btn:hover, .hint-btn[aria-expanded="true"] { color:var(--brand-text); border-color:var(--brand-text); }
 .hint-btn:focus-visible { outline:2px solid var(--brand); outline-offset:1px; }
 .hint-pop {
-  position:absolute; z-index:130; max-width:320px; padding:12px 16px;
+  position:fixed; z-index:130; max-width:min(320px, calc(100vw - 24px)); padding:12px 16px;
   background:var(--panel); border:0; box-shadow:var(--shadow-md); color:var(--text); font-size:13px; line-height:1.5;
+  white-space:normal; text-align:left; font-weight:400;
 }
+/* On the dark canvas the shadow barely separates the popover from the card
+   under it; a 1px edge does. */
+:root[data-theme="dark"] .hint-pop { border:1px solid var(--border); }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) .hint-pop { border:1px solid var(--border); } }
 .hint-pop p { margin:0; }
 .hint-pop ul { margin:6px 0 0; padding-left:16px; }
 .hint-pop li { margin:2px 0; }

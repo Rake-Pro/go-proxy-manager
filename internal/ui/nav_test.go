@@ -113,3 +113,24 @@ func TestNavGroupsAreCollapsibleAndRemembered(t *testing.T) {
 		}
 	}
 }
+
+// TestParkedHostsSitInTheHostsGroup pins the grouping fix: parked hosts are
+// domains like proxy hosts and redirects, so they sit next to Redirects in the
+// Hosts group, not under Advanced.
+func TestParkedHostsSitInTheHostsGroup(t *testing.T) {
+	js := navBundle(t)
+	m := navGroupsRe.FindStringSubmatch(js)
+	if m == nil {
+		t.Fatal("app.js has no NAV_GROUPS block")
+	}
+	hosts := strings.Index(m[1], "label: 'Hosts'")
+	security := strings.Index(m[1], "label: 'Security'")
+	redirects := strings.Index(m[1], "id: 'redirects'")
+	parked := strings.Index(m[1], "id: 'parked'")
+	if hosts < 0 || security < 0 || redirects < 0 || parked < 0 {
+		t.Fatal("NAV_GROUPS lost the Hosts or Security group, or the redirects or parked entry")
+	}
+	if !(hosts < redirects && redirects < parked && parked < security) {
+		t.Error("Parked Hosts must follow Redirects inside the Hosts group")
+	}
+}

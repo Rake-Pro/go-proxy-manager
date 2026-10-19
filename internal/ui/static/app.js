@@ -61,6 +61,7 @@ const NAV_GROUPS = [
     label: 'Hosts', items: [
       { id: 'hosts', label: 'Proxy Hosts', icon: ICON.globe },
       { id: 'redirects', label: 'Redirects', icon: ICON.redirect },
+      { id: 'parked', label: 'Parked Hosts', icon: ICON.parked },
     ],
   },
   {
@@ -82,7 +83,6 @@ const NAV_GROUPS = [
   {
     label: 'Advanced', collapsible: true, items: [
       { id: 'streams', label: 'Streams', icon: ICON.stream, count: 'streamHosts' },
-      { id: 'parked', label: 'Parked Hosts', icon: ICON.parked, count: 'parkedHosts' },
       { id: 'upstreams', label: 'Upstream Groups', icon: ICON.server, count: 'upstreamGroups' },
       { id: 'clientcas', label: 'Client CAs', icon: ICON.clientUser, count: 'clientCAs' },
       { id: 'dns', label: 'DNS Providers', icon: ICON.dns, count: 'dnsProviders' },
@@ -170,11 +170,19 @@ function shortSha(s) { return (s || '').slice(0, 7); }
 // One helper for every count shown with a noun: plural(1, 'tag', 'tags') is
 // "1 tag", plural(2, 'tag', 'tags') is "2 tags".
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
-function fmtTime(s) {
+function fmtTime(s, seconds) {
   const d = new Date(s);
   if (isNaN(d.getTime())) return s || '';
   const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}${seconds ? ':' + p(d.getSeconds()) : ''}`;
+}
+// Clock time with seconds, for the access log where a burst of requests falls
+// inside one minute; the full timestamp goes in the cell's title.
+function fmtClock(s) {
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s || '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 // Date only, no time - for a compact reading next to a relative-label chip.
 // The full timestamp still goes in that chip's title tooltip via fmtTime.
@@ -254,20 +262,19 @@ function metaCarryForward(o) {
 function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 
-// Maps a domain to its "zone" (group) for the hosts list filter chips.
-// A leading "*." is stripped first; a wildcard's remainder already names the
-// zone (*.iot.example.com -> iot.example.com), so the label-drop below only runs
-// for non-wildcard domains with more than 2 labels (sensor.iot.example.com
-// -> iot.example.com, app.example.com -> example.com, example.com -> example.com).
+// Maps a domain to its registrable zone for the hosts list filter chips: the
+// last two labels, so www.notes.example.com and portal.internal.example.com
+// both belong to example.com. Where the last two labels are a public second
+// level (example.co.uk, example.com.au: a two-letter country code under co,
+// com, org and the like) the zone keeps one more label. A leading "*." is
+// ignored. A deeper name a host serves at its apex is not a zone of its own:
+// notes.example.com is a host under example.com, not a zone beside it.
+const PUBLIC_SECOND_LEVEL = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'ltd', 'plc', 'sch', 'nom', 'mil']);
 function domainZone(d) {
-  let s = String(d || '');
-  const wildcard = s.startsWith('*.');
-  if (wildcard) s = s.slice(2);
-  if (!wildcard) {
-    const parts = s.split('.').filter(Boolean);
-    if (parts.length > 2) return parts.slice(1).join('.');
-  }
-  return s;
+  const parts = String(d || '').toLowerCase().replace(/^\*\./, '').split('.').filter(Boolean);
+  const two = parts.slice(-2);
+  const publicSecond = parts.length > 2 && two[1].length === 2 && PUBLIC_SECOND_LEVEL.has(two[0]);
+  return parts.slice(publicSecond ? -3 : -2).join('.');
 }
 
 // ---------- enum labels ----------
@@ -566,8 +573,10 @@ function progressToast(title) {
 // a control registered as "tls.hsts" when the leaf has no control of its own.
 // A server complaint names the field it is about as a leading path ("tls.hsts
 // .maxAge: ..."), optionally behind the object ("proxy host \"app\": ..."); a
-// top-level field is one bare segment ("stripResponseHeaders: ...").
-const ERROR_PATH_RE = /^(?:[a-z][a-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
+// top-level field is one bare segment ("stripResponseHeaders: ..."). The object
+// kind may hold capitals ("client CA \"x\": ...") and the first segment an
+// index ("upstreams[0].port: ...").
+const ERROR_PATH_RE = /^(?:[a-z][A-Za-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\[\d+\])?(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
 
 function clearEditorBanner() {
   $$('#content .editor-error').forEach((el) => el.remove());
@@ -603,6 +612,14 @@ function errorFieldFor(msg) {
     const path = parts.slice(0, n).join('.');
     const el = document.querySelector(`#content [data-path="${path}"]`);
     if (el) return { el, path: m[1] };
+    // A repeater's fields carry the path without the index (every member row
+    // is "upstreams.port"): "upstreams[1].port" is the second of them.
+    const idx = /\[(\d+)\]/.exec(path);
+    if (idx) {
+      const all = document.querySelectorAll(`#content [data-path="${path.replace(/\[\d+\]/g, '')}"]`);
+      const hit = all[Number(idx[1])] || all[0];
+      if (hit) return { el: hit, path: m[1] };
+    }
   }
   return null;
 }
@@ -977,9 +994,11 @@ function updateThemeBtn() {
   const btn = $('#themeBtn');
   if (!btn) return;
   const t = getTheme();
-  // Icon only, in the masthead; the name travels in the accessible label.
+  // The glyph plus the mode's name in text, so the state is readable without
+  // hovering for the tooltip (keyboard and touch users never see one).
   const label = 'Theme: ' + themeLabel(t) + '. Click to change; auto follows your OS.';
-  btn.innerHTML = t === 'light' ? ICON.sun : t === 'dark' ? ICON.moon : ICON.contrast;
+  btn.innerHTML = (t === 'light' ? ICON.sun : t === 'dark' ? ICON.moon : ICON.contrast)
+    + `<span class="tool-label" aria-hidden="true">${themeLabel(t)}</span>`;
   btn.setAttribute('aria-label', label);
   btn.title = label;
 }
@@ -1051,16 +1070,17 @@ function buildShell() {
   // beneath it, the main column opens with a title band the views fill.
   app.innerHTML = `
     <div class="app">
+      <a class="skip-link" id="skipLink" href="#content">Skip to content</a>
       <header class="masthead">
         <button class="menu-btn" id="menuBtn" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">${ICON.menu}</button>
-        <a class="wordmark" href="#/overview">
+        <a class="wordmark" href="#/overview" title="${esc(state.appName)}">
           <span class="logo" aria-hidden="true">${ICON.fanout}</span>
           <span class="name">${esc(state.appName)}</span>
         </a>
         <div class="spacer"></div>
         <div class="tools">
           <button class="tool-btn" id="themeBtn" type="button"></button>
-          <button class="user-btn" id="userBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="userMenu" aria-label="Account menu"><span class="avatar" id="avatar">?</span>${ICON.caret}</button>
+          <button class="user-btn" id="userBtn" type="button" aria-expanded="false" aria-controls="userMenu" aria-label="Account menu"><span class="avatar" id="avatar">?</span>${ICON.caret}</button>
         </div>
         <div class="menu" id="userMenu" hidden></div>
       </header>
@@ -1072,14 +1092,14 @@ function buildShell() {
           </nav>
           <div class="side-foot" id="sideFoot"></div>
         </aside>
-        <div class="main">
-          <section class="page-head" id="pageHead">
+        <main class="main" id="main">
+          <div class="page-head" id="pageHead">
             <div class="page-crumb" id="pageCrumb"></div>
-            <div class="head-row"><div><h1 class="page-title" id="pageTitle">${esc(state.appName)}</h1><p class="page-sub" id="pageSub"></p><div class="head-labels" id="pageLabels"></div></div><div class="head-actions" id="pageActions"></div></div>
+            <div class="head-row"><div><h1 class="page-title" id="pageTitle" tabindex="-1">${esc(state.appName)}</h1><p class="page-sub" id="pageSub"></p><div class="head-labels" id="pageLabels"></div></div><div class="head-actions" id="pageActions"></div></div>
             <div class="tabs page-tabs" id="pageTabs" role="tablist"></div>
-          </section>
-          <main class="content" id="content"></main>
-        </div>
+          </div>
+          <div class="content" id="content"></div>
+        </main>
       </div>
     </div>`;
 
@@ -1097,20 +1117,42 @@ function buildShell() {
   $$('#nav .nav-group-head').forEach((b) => {
     b.addEventListener('click', () => setNavGroupOpen(b.dataset.group, b.getAttribute('aria-expanded') !== 'true', true));
   });
+  // The skip link is a hash link only for the platform's sake: the router owns
+  // the hash, so the jump is done here and lands on the page title.
+  $('#skipLink').addEventListener('click', (e) => {
+    e.preventDefault();
+    const t = $('#pageTitle');
+    if (t) t.focus();
+  });
+  // The hamburger is a toggle: a second tap closes the drawer it opened.
   $('#menuBtn').addEventListener('click', () => {
-    document.body.classList.add('nav-open');
-    $('#menuBtn').setAttribute('aria-expanded', 'true');
-    // The drawer is visibility:hidden while closed (out of the tab order), so
-    // keyboard focus is moved into it on open.
-    const first = $('#nav .nav-item.active') || $('#nav .nav-item');
-    if (first) first.focus();
+    if (document.body.classList.contains('nav-open')) { closeNav(); return; }
+    openNav();
   });
   $('#scrim').addEventListener('click', closeNav);
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || e.defaultPrevented || !document.body.classList.contains('nav-open')) return;
-    closeNav();
-    $('#menuBtn').focus();
+    if (!document.body.classList.contains('nav-open')) return;
+    if (e.key === 'Escape' && !e.defaultPrevented) {
+      closeNav();
+      $('#menuBtn').focus();
+      return;
+    }
+    // While the drawer is open the page behind the scrim is inert, and Tab
+    // cycles through the hamburger and the drawer only.
+    if (e.key !== 'Tab') return;
+    const ring = [$('#menuBtn')].concat($$('#sidebar a, #sidebar button').filter((el) => el.offsetParent !== null && !el.disabled));
+    const i = ring.indexOf(document.activeElement);
+    const n = ring.length;
+    e.preventDefault();
+    ring[i === -1 ? 0 : (i + (e.shiftKey ? n - 1 : 1)) % n].focus();
   });
+  // Widening the window past the drawer breakpoint while the drawer is open
+  // would leave the page inert behind a sidebar that is no longer a drawer.
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(min-width: 801px)');
+    const onWide = () => { if (mq.matches) closeNav(); };
+    if (mq.addEventListener) mq.addEventListener('change', onWide); else if (mq.addListener) mq.addListener(onWide);
+  }
   updateThemeBtn();
   $('#themeBtn').addEventListener('click', () => {
     const order = ['auto', 'light', 'dark'];
@@ -1143,10 +1185,24 @@ function setUserMenu(open) {
   um.hidden = !open;
   ub.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
+function openNav() {
+  document.body.classList.add('nav-open');
+  const b = $('#menuBtn');
+  b.setAttribute('aria-expanded', 'true');
+  b.setAttribute('aria-label', 'Close navigation');
+  const m = $('#main');
+  if (m) m.inert = true;
+  // The drawer is visibility:hidden while closed (out of the tab order), so
+  // keyboard focus is moved into it on open.
+  const first = $('#nav .nav-item.active') || $('#nav .nav-item');
+  if (first) first.focus();
+}
 function closeNav() {
   document.body.classList.remove('nav-open');
   const b = document.getElementById('menuBtn');
-  if (b) b.setAttribute('aria-expanded', 'false');
+  if (b) { b.setAttribute('aria-expanded', 'false'); b.setAttribute('aria-label', 'Open navigation'); }
+  const m = document.getElementById('main');
+  if (m) m.inert = false;
 }
 
 async function loadTopbar() {
@@ -1191,6 +1247,9 @@ async function loadTopbar() {
     state.appName = s.appName;
     const nm = document.querySelector('.wordmark .name');
     if (nm) nm.textContent = s.appName;
+    // The masthead ellipsizes a long name; the whole one is the link's tooltip.
+    const wm = document.querySelector('.wordmark');
+    if (wm) wm.title = s.appName;
     document.title = s.appName;
   }
 
@@ -1328,7 +1387,7 @@ function refListUnavailableHtml(what) {
 // this independently.
 const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '[data-revert]', '[data-revert-obj]',
-  '.tok-rotate', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
+  '.tok-rotate', '.tok-toggle', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
   '#ed-src-reconcile', '#logsToggle', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
@@ -1536,7 +1595,7 @@ function glossaryize(escaped) {
 // ---------- the "?" affordance ----------
 function hintHtml(id, label) {
   if (!HINTS[id]) return '';
-  return `<button type="button" class="hint-btn" data-hint-id="${esc(id)}" aria-expanded="false"`
+  return `<button type="button" class="hint-btn" data-hint-id="${esc(id)}" aria-expanded="false" aria-controls="hint-pop"`
     + ` aria-label="Help for ${esc(label || id)}">?</button>`;
 }
 // Where the "?" for one control goes: its field-group's label, or the name line
@@ -1628,8 +1687,14 @@ function labelFieldGroups(root) {
 
 // ---------- help popover ----------
 // One popover element for the whole app: opening a second closes the first, and
-// Escape or a click anywhere else dismisses it.
+// Escape or a click anywhere else dismisses it. It is inserted right after its
+// owner in the DOM, so Tab from the "?" or the glossary term reaches "Learn
+// more" inside it (also inside a wizard, whose focus trap only cycles through
+// its own dialog), and it closes once focus leaves the owner and popover pair.
+// position:fixed keeps it clear of the overflow and stacking of whatever the
+// owner sits in; it follows the owner on scroll.
 let hintPopOwner = null;
+let hintPopCloseTimer = 0;
 function hintPopEl() {
   let el = document.getElementById('hint-pop');
   if (!el) {
@@ -1637,12 +1702,17 @@ function hintPopEl() {
     el.id = 'hint-pop';
     el.className = 'hint-pop';
     el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-label', 'Help');
     el.hidden = true;
-    document.body.appendChild(el);
+    // A click inside the popover is not a click on the row or card it sits in.
+    el.addEventListener('click', (e) => e.stopPropagation());
+    el.addEventListener('mouseenter', () => clearTimeout(hintPopCloseTimer));
+    el.addEventListener('mouseleave', () => scheduleHintPopClose());
   }
   return el;
 }
 function closeHintPop() {
+  clearTimeout(hintPopCloseTimer);
   const el = document.getElementById('hint-pop');
   if (el) el.hidden = true;
   if (hintPopOwner) {
@@ -1650,25 +1720,54 @@ function closeHintPop() {
     hintPopOwner = null;
   }
 }
+// The pointer may cross the gap between a glossary term and its popover: the
+// close waits a moment and is dropped while the pointer or the focus is on
+// either of them.
+function scheduleHintPopClose() {
+  clearTimeout(hintPopCloseTimer);
+  hintPopCloseTimer = setTimeout(() => {
+    const el = document.getElementById('hint-pop');
+    const owner = hintPopOwner;
+    if (!owner || !el) return;
+    const inPair = (n) => n && (owner.contains(n) || el.contains(n));
+    if (owner.matches(':hover') || el.matches(':hover') || inPair(document.activeElement)) return;
+    closeHintPop();
+  }, 300);
+}
+function placeHintPop() {
+  const el = document.getElementById('hint-pop');
+  if (!el || el.hidden || !hintPopOwner) return;
+  if (!hintPopOwner.isConnected) { closeHintPop(); return; }
+  const r = hintPopOwner.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const left = Math.max(12, Math.min(r.left, vw - w - 12));
+  let top = r.bottom + 6;
+  if (top + h > vh - 8 && r.top - h - 6 > 8) top = r.top - h - 6;
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+}
 function openHintPop(owner, id) {
   const e = HINTS[id];
   if (!e) return;
+  clearTimeout(hintPopCloseTimer);
   const el = hintPopEl();
   const bullets = Array.isArray(e.bullets) ? e.bullets : [];
   el.innerHTML = `<p>${esc(e.text)}</p>`
     + (bullets.length ? `<ul>${bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : '')
     + (e.doc ? `<a href="${esc(docHref(e.doc))}" target="_blank" rel="noopener">Learn more</a>` : '');
+  // Right after the owner, or after the element the owner sits in when that
+  // element must not hold the popover: a <summary> (a click would toggle the
+  // fold), a <label> (it would forward the click), a button or a link.
+  const host = (owner.parentElement && owner.parentElement.closest('summary, label, button, a')) || owner;
+  if (host.nextElementSibling !== el) host.insertAdjacentElement('afterend', el);
   el.hidden = false;
   hintPopOwner = owner;
   if (owner.classList.contains('hint-btn')) owner.setAttribute('aria-expanded', 'true');
-  const r = owner.getBoundingClientRect();
-  const w = el.offsetWidth;
-  let left = r.left + window.scrollX;
-  const maxLeft = window.scrollX + document.documentElement.clientWidth - w - 12;
-  if (left > maxLeft) left = Math.max(window.scrollX + 12, maxLeft);
-  el.style.left = left + 'px';
-  el.style.top = (r.bottom + window.scrollY + 6) + 'px';
+  placeHintPop();
 }
+window.addEventListener('scroll', placeHintPop, true);
+window.addEventListener('resize', placeHintPop);
 document.addEventListener('click', (e) => {
   const btn = e.target.closest && e.target.closest('.hint-btn');
   if (btn) {
@@ -1680,26 +1779,43 @@ document.addEventListener('click', (e) => {
   }
   if (!(e.target.closest && e.target.closest('#hint-pop'))) closeHintPop();
 });
+// Escape closes it; focus that was inside the popover goes back to its owner.
+function dismissHintPop() {
+  const owner = hintPopOwner;
+  const el = document.getElementById('hint-pop');
+  const inside = el && el.contains(document.activeElement);
+  closeHintPop();
+  if (inside && owner && owner.isConnected) owner.focus();
+}
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeHintPop();
+  if (e.key === 'Escape' && hintPopOwner) dismissHintPop();
 });
 // Glossary terms are hover/focus, not click: they explain a word in a sentence
 // rather than opening a panel about a control.
 document.addEventListener('mouseover', (e) => {
   const g = e.target.closest && e.target.closest('.gloss');
-  if (g && hintPopOwner !== g) { closeHintPop(); openHintPop(g, g.getAttribute('data-hint')); }
+  if (!g) return;
+  if (hintPopOwner === g) { clearTimeout(hintPopCloseTimer); return; }
+  closeHintPop(); openHintPop(g, g.getAttribute('data-hint'));
 });
 document.addEventListener('mouseout', (e) => {
   const g = e.target.closest && e.target.closest('.gloss');
-  if (g && hintPopOwner === g) closeHintPop();
+  if (g && hintPopOwner === g) scheduleHintPopClose();
 });
 document.addEventListener('focusin', (e) => {
   const g = e.target.closest && e.target.closest('.gloss');
-  if (g) { closeHintPop(); openHintPop(g, g.getAttribute('data-hint')); }
+  if (g && hintPopOwner !== g) { closeHintPop(); openHintPop(g, g.getAttribute('data-hint')); }
 });
+// Focus leaving the owner and popover pair closes it. A focusout with no
+// related target (a click on plain text) is left to the click handler.
 document.addEventListener('focusout', (e) => {
-  const g = e.target.closest && e.target.closest('.gloss');
-  if (g && hintPopOwner === g) closeHintPop();
+  const owner = hintPopOwner;
+  const el = document.getElementById('hint-pop');
+  if (!owner || !el || el.hidden) return;
+  const from = e.target, to = e.relatedTarget;
+  if (!(owner.contains(from) || el.contains(from)) || !to) return;
+  if (owner.contains(to) || el.contains(to)) return;
+  closeHintPop();
 });
 
 // global switch toggle + keyboard
@@ -3902,11 +4018,13 @@ async function viewOverview(c) {
   // of failing the whole view. The two discovery status routes 501/404 when
   // the integration is not wired at all, which is not a failure - it just
   // means that source has nothing to report.
-  const [healthR, certsR, idR, dkrR] = await Promise.all([
+  const [healthR, certsR, idR, dkrR, hostsR] = await Promise.all([
     api('/api/health').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/certificates').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
     api('/api/ingress-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/docker-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
+    // For the hosts in maintenance: the summary counts only enabled and disabled.
+    memoGet('/api/proxy-hosts').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
   ]);
   // Only for the empty-state summary's "hosts live" figure. GET /config/summary
   // is the sidebar's counts-only read and is memoized per route, so this adds
@@ -3995,41 +4113,55 @@ async function viewOverview(c) {
     });
   }
 
+  // ---- hosts in maintenance: GET /api/proxy-hosts ----
+  // A host in maintenance answers every request with a 503: not a fault, but
+  // the one host state an operator must not forget, so each gets an info row.
+  const maintHosts = hostsR.ok ? hostsR.data.filter((h) => !h.disabled && h.maintenance) : [];
+  const infoRows = maintHosts.map((h) => attnRow('info',
+    `Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance`,
+    'It answers 503 instead of passing requests to its upstream.',
+    '#/hosts/' + encodeURIComponent(h.name), 'Open host'));
+
   const errCount = errRows.length;
   const warnCount = warnRows.length;
 
+  // The one-line summary: "N hosts live, M in maintenance", certificates,
+  // upstream members.
+  const disabledHosts = hostsR.ok ? hostsR.data.filter((h) => h.disabled).length
+    : ((state.summary && state.summary.disabled && state.summary.disabled['proxy-hosts']) || 0);
+  const totalHosts = hostsR.ok ? hostsR.data.length : (state.counts.proxyHosts || 0);
+  const liveHosts = Math.max(0, totalHosts - disabledHosts - maintHosts.length);
+  const validCerts = certsWithStatus.filter((ct) => ct.state === 'valid');
+  const upGroups = arr(health && health.upstreamGroups);
+  const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
+  const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
+  const parts = [`${plural(liveHosts, 'host', 'hosts')} live` + (maintHosts.length ? `, ${maintHosts.length} in maintenance` : '')];
+  if (validCerts.length) {
+    const soonest = validCerts.reduce((min, ct) =>
+      (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
+    parts.push(`${plural(validCerts.length, 'certificate', 'certificates')} valid`
+      + (soonest != null ? `, next expiry in ${plural(soonest, 'day', 'days')}` : ''));
+  }
+  parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
+
   let body;
-  if (errCount + warnCount > 0) {
+  if (errCount + warnCount + infoRows.length > 0) {
     const headParts = [];
     if (errCount) headParts.push(`<span class="err-text">${errCount}</span> ${errCount === 1 ? 'problem' : 'problems'}`);
     if (warnCount) headParts.push(`<span class="warn-text">${warnCount}</span> ${warnCount === 1 ? 'warning' : 'warnings'}`);
+    if (infoRows.length) headParts.push(`${plural(infoRows.length, 'host', 'hosts')} in maintenance`);
     body = `<div class="card">
       <div class="card-head">
         <div>
           <p class="section-label" style="margin:0 0 2px">Needs attention</p>
           <h3 style="margin:0">${headParts.join(' &middot; ')}</h3>
+          <p class="muted ov-summary">${parts.join(' &middot; ')}</p>
         </div>
         <button class="btn ghost sm" id="ov-refresh" type="button">Refresh</button>
       </div>
-      ${errRows.join('')}${warnRows.join('')}
+      ${errRows.join('')}${warnRows.join('')}${infoRows.join('')}
     </div>`;
   } else {
-    const disabledHosts = (state.summary && state.summary.disabled && state.summary.disabled['proxy-hosts']) || 0;
-    const liveHosts = Math.max(0, (state.counts.proxyHosts || 0) - disabledHosts);
-    const validCerts = certsWithStatus.filter((ct) => ct.state === 'valid');
-    const upGroups = arr(health && health.upstreamGroups);
-    const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
-    const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
-
-    const parts = [`${plural(liveHosts, 'host', 'hosts')} live`];
-    if (validCerts.length) {
-      const soonest = validCerts.reduce((min, ct) =>
-        (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
-      parts.push(`${plural(validCerts.length, 'certificate', 'certificates')} valid`
-        + (soonest != null ? `, next expiry in ${plural(soonest, 'day', 'days')}` : ''));
-    }
-    parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
-
     body = `<div class="empty-state">
       <div class="es-title">Nothing needs attention</div>
       <div class="es-sub">${parts.join(' &middot; ')}</div>
@@ -4126,8 +4258,10 @@ async function listHosts(c) {
   // renderer all read - so all three agree on what a column means.
   const recs = hosts.map((h) => {
     const domains = arr(h.domains);
-    const zones = Array.from(new Set(domains.map(domainZone).filter(Boolean)));
-    zones.forEach((z) => { zoneCounts[z] = (zoneCounts[z] || 0) + 1; });
+    // A host belongs to the zone of its primary domain, the one the row shows:
+    // switching a zone off hides exactly the hosts its chip counts.
+    const zone = domains.length ? domainZone(domains[0]) : '';
+    if (zone) zoneCounts[zone] = (zoneCounts[zone] || 0) + 1;
     const up = h.upstream || {};
     const upStr = h.upstreamGroupRef ? `group:${h.upstreamGroupRef}` : `${up.host || '?'}:${up.port != null ? up.port : '?'}`;
     const cert = certsOK ? certForDomain(certs, domains[0]) : null;
@@ -4141,7 +4275,7 @@ async function listHosts(c) {
     const tags = arr(h.tags);
     const managed = managedBy(h);
     return {
-      h, domains, zones, upStr, cert, authMw, authInline, managed, status, tags,
+      h, domains, zone, upStr, cert, authMw, authInline, managed, status, tags,
       name: h.name || '',
       display: h.displayName || '',
       updated: h.updatedAt || '',
@@ -4161,30 +4295,30 @@ async function listHosts(c) {
   zonesOff.forEach((z) => { if (!zoneCounts[z]) zonesOff.delete(z); });
   if (zonesOff.size !== zonesBefore) saveZonesOff();
 
-  let sort = { key: 'name', dir: 1 };
-  try {
-    const raw = localStorage.getItem(HOSTS_SORT_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.key) sort = { key: parsed.key, dir: parsed.dir === -1 ? -1 : 1 };
-    }
-  } catch (e) { /* ignore */ }
-
+  // The default order is the Domain column ascending, marked in its header from
+  // the first paint; a stored choice only counts when it names a column.
   const SORTS = {
-    name: (r) => (r.display || r.name).toLowerCase(),
     domains: (r) => (r.domains[0] || r.name).toLowerCase(),
     upstream: (r) => r.upStr.toLowerCase(),
     updated: (r) => r.updated || '',
   };
+  let sort = { key: 'domains', dir: 1 };
+  try {
+    const raw = localStorage.getItem(HOSTS_SORT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && SORTS[parsed.key]) sort = { key: parsed.key, dir: parsed.dir === -1 ? -1 : 1 };
+    }
+  } catch (e) { /* ignore */ }
   const selected = new Set();
 
   const COLUMNS = [
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
-    { key: 'upstream', label: 'Upstream', cls: 'col-upstream' },
-    { key: null, label: 'Certificate', cls: 'col-cert' },
-    { key: null, label: 'Sign-in', cls: 'col-auth' },
+    { key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },
+    { key: null, label: 'Certificate', cls: 'col-cert hide-sm' },
+    { key: null, label: 'Sign-in', cls: 'col-auth hide-sm' },
     { key: null, label: 'Status', cls: 'col-status' },
-    { key: 'updated', label: 'Updated', cls: 'col-updated' },
+    { key: 'updated', label: 'Updated', cls: 'col-updated hide-sm hide-md' },
   ];
   function headHtml() {
     return `<tr><th class="sel-cell"><input type="checkbox" id="hostSelAll" aria-label="Select all listed hosts" /></th>`
@@ -4204,10 +4338,10 @@ async function listHosts(c) {
     const out = recs.filter((r) => {
       // With no chip row there is no control to undo a zone filter, so it
       // does not apply.
-      const zoneOk = !showZones || r.zones.length === 0 || r.zones.some((z) => !zonesOff.has(z));
+      const zoneOk = !showZones || !r.zone || !zonesOff.has(r.zone);
       return zoneOk && (!q || r.blob.indexOf(q) !== -1);
     });
-    const get = SORTS[sort.key] || SORTS.name;
+    const get = SORTS[sort.key] || SORTS.domains;
     return out.sort((a, b) => {
       const av = get(a), bv = get(b);
       if (av === bv) return a.name.localeCompare(b.name);
@@ -4233,7 +4367,11 @@ async function listHosts(c) {
       : (r.status === 'maintenance'
         ? `<span class="chip warn"><span class="dot warn"></span>Maintenance</span>`
         : `<span class="chip flat ok"><span class="dot ok"></span>Live</span>`);
-    const tagChips = r.tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join('');
+    // Three tag chips, then "+N" that opens the rest under the cell, as the
+    // domains do.
+    const tagChip = (t) => `<span class="chip tag" title="${esc(t)}">${esc(t)}</span>`;
+    const moreTags = r.tags.length > 3 ? moreToggle(r.tags.slice(3), r.tags.slice(3).map(tagChip).join(''), true) : null;
+    const tagChips = r.tags.slice(0, 3).map(tagChip).join('') + (moreTags ? moreTags.btn : '');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
     // Every row has the same two lines whatever it holds: the domain, then
@@ -4247,14 +4385,14 @@ async function listHosts(c) {
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
       <td class="col-domain">
         <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}</div>
-        <div class="cell-sub"${subTitle ? ` title="${esc(subTitle)}"` : ''}>${managedChip}${sub ? `<span class="trunc">${esc(sub)}</span>` : ''}${tagChips}</div>
-        ${more ? more.list : ''}
+        <div class="cell-sub"${subTitle ? ` title="${esc(subTitle)}"` : ''}>${managedChip}${sub ? `<span class="trunc" style="min-width:${Math.min(sub.length, 12) / 2}em">${esc(sub)}</span>` : ''}${tagChips}</div>
+        ${more ? more.list : ''}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}
       </td>
-      <td class="mono col-upstream"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
-      <td class="col-cert">${tls}</td>
-      <td class="col-auth">${auth}</td>
+      <td class="mono col-upstream hide-sm hide-md"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
+      <td class="col-cert hide-sm">${tls}</td>
+      <td class="col-auth hide-sm">${auth}</td>
       <td class="col-status">${status}</td>
-      <td class="mono faint col-updated">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
+      <td class="mono faint col-updated hide-sm hide-md">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
     </tr>`;
   }
 
@@ -4272,7 +4410,7 @@ async function listHosts(c) {
     </div>
     <div id="hostBulk"></div>
     <div class="table-wrap">
-      <table>
+      <table class="hosts-table">
         <thead id="hostHead">${headHtml()}</thead>
         <tbody id="hostRows"></tbody>
       </table>
@@ -6010,6 +6148,7 @@ const SECTION_META = {
     title: 'Client CAs', sub: 'The authority a client certificate is checked against, for hosts that ask devices for one at the handshake.',
     empty: 'Generate a CA here and gpm can issue the client certificates too; paste an existing certificate if your organisation already runs a CA.',
     singular: 'client CA', addLabel: 'Add client CA',
+    filterHint: 'name, display name, tags, CRL file and policy',
     summary: (o) => `<span class="k">Revocation</span><span class="v">${o.crlFile ? 'file: ' + esc(o.crlFile) : (o.crlPEM ? 'inline CRL' : 'none')}</span>` +
       ((o.crlFile || o.crlPEM) ? `<span class="k">Policy</span><span class="v">${enumChip('crlPolicy', o.crlPolicy === 'fail-open' ? 'fail-open' : '')}</span>` : ''),
   },
@@ -6017,6 +6156,7 @@ const SECTION_META = {
     title: 'Identity Providers', sub: 'Where people prove who they are: an OIDC provider, a forward-auth proxy or an auth-request outpost.',
     empty: 'Add the provider first. A sign-in middleware then references it, and every host that picks up that middleware is protected by it.',
     singular: 'identity provider', addLabel: 'Add identity provider',
+    filterHint: 'name, display name, tags, type, issuer URL, client ID and headers',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('idpType', o.type || '')}</span>` +
       (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span><span class="k">Client ID</span><span class="v">${esc(o.oidc.clientID || '')}</span>` : '') +
       (o.forwardAuth ? `<span class="k">User header</span><span class="v">${esc(o.forwardAuth.userHeader || '')}</span>` : ''),
@@ -6025,6 +6165,7 @@ const SECTION_META = {
     title: 'Access Lists', sub: 'Who may reach a host, by IP range or country. Attach one to a host or to a single location.',
     empty: 'Start with a default action of deny plus one allow rule for your own network, then attach the list to a host.',
     singular: 'access list', addLabel: 'Add access list',
+    filterHint: 'name, display name, tags, default action, CIDRs, countries and sources',
     summary: (o) => `<span class="k">Rules</span><span class="v">${arr(o.rules).length}</span>` +
       `<span class="k">Sources</span><span class="v">${arr(o.sources).length}</span>` +
       (o.defaultAction ? `<span class="k">Default</span><span class="v">${esc(o.defaultAction)}</span>` : '') +
@@ -6035,7 +6176,8 @@ const SECTION_META = {
   middleware: {
     title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, guards, path rewrites and deny hooks.',
     empty: 'Most installs start with one sign-in middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
-    singular: 'middleware', addLabel: 'Add middleware',
+    singular: 'middleware', many: 'middleware', addLabel: 'Add middleware',
+    filterHint: 'name, display name, tags, type, identity provider and settings',
     intro: 'Evaluation order is fixed, whatever order a host lists them in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('middlewareType', o.type || '')}${(o.type === 'auth' && o.auth && o.auth.mode) ? ' - ' + esc(enumLabel('authMode', o.auth.mode).split(' - ')[0]) : ''}</span>` +
       (o.auth && o.auth.identityProvider ? `<span class="k">Identity provider</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
@@ -6049,6 +6191,7 @@ const SECTION_META = {
     title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into: ACME dns-01 challenges and DNS sync records.',
     empty: 'Add the provider that hosts your zone and give it a scoped API token, as a ${ENV:...} placeholder so no secret is committed.',
     singular: 'DNS provider', addLabel: 'Add DNS provider',
+    filterHint: 'name, display name, tags, provider and config values',
     summary: (o) => `<span class="k">Provider</span><span class="v">${esc(o.provider || '')}</span>` +
       (o.config ? `<span class="k">Config keys</span><span class="v v-list">${Object.keys(o.config).map((k) => `<span class="dl-item">${esc(k)}</span>`).join(', ')}</span>` : ''),
   },
@@ -6056,7 +6199,9 @@ const SECTION_META = {
     title: 'Redirects', sub: 'A domain that answers with a redirect: retired names, vanity hostnames, apex to www.',
     empty: 'Add the old domain, the target it should send visitors to, and whether the redirect is permanent.',
     singular: 'redirect', addLabel: 'Add redirect',
-    summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>` +
+    filterHint: 'domains, name, display name, tags, target and status code',
+    domainFirst: true,
+    summary: (o) => alsoDomainsKv(o) +
       (o.targetDomain ? `<span class="k">To</span><span class="v">${esc(((o.targetScheme && o.targetScheme !== 'auto') ? o.targetScheme + '://' : '') + o.targetDomain)}</span>` : '') +
       (o.statusCode ? `<span class="k">Code</span><span class="v">${esc(o.statusCode)}</span>` : ''),
   },
@@ -6064,6 +6209,7 @@ const SECTION_META = {
     title: 'Streams', sub: 'Raw TCP or UDP forwarding for services that do not speak HTTP, with optional SNI routing and TLS termination.',
     empty: 'Add the port gpm should listen on and the host and port behind it. Leave TLS on none unless you need SNI routing.',
     singular: 'stream', addLabel: 'Add stream',
+    filterHint: 'name, display name, tags, listen port, target and protocol',
     summary: (o) => (o.listenPort != null ? `<span class="k">Listen</span><span class="v">:${esc(o.listenPort)}</span>` : '') +
       (o.target && o.target.host ? `<span class="k">Target</span><span class="v">${esc(o.target.host + ':' + (o.target.port != null ? o.target.port : ''))}</span>` : '') +
       (o.protocol ? `<span class="k">Protocol</span><span class="v">${enumChip('streamProtocol', o.protocol)}</span>` : ''),
@@ -6072,18 +6218,43 @@ const SECTION_META = {
     title: 'Parked Hosts', sub: 'A domain that answers but serves nothing: a reserved name, or a clean 404 instead of another host.',
     empty: 'Add the domains to reserve. They answer 404 by default; change the status code if you want something else.',
     singular: 'parked host', addLabel: 'Add parked host',
-    summary: (o) => `<span class="k">Domains</span><span class="v">${domainListHtml(o.domains, arr(o.domains).length)}</span>`,
+    filterHint: 'domains, name, display name, tags and status code',
+    domainFirst: true,
+    summary: (o) => alsoDomainsKv(o) +
+      `<span class="k">Answers</span><span class="v">${esc(o.statusCode || 404)}</span>`,
   },
   upstreams: {
     title: 'Upstream Groups', sub: 'Several upstreams behind one name, with health checks and a load-distribution policy.',
     empty: 'Add two or more upstreams, then pick how requests are spread across them. A health check keeps a dead one out of the rotation.',
     singular: 'upstream group', addLabel: 'Add upstream group',
-    summary: (o) => `<span class="k">Upstreams</span><span class="v v-list">${arr(o.upstreams).map((u) => `<span class="dl-item">${esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))}</span>`).join(' -&gt; ') || '0'}</span>` +
+    filterHint: 'name, display name, tags, upstream addresses and policy',
+    // The members are a pool, not a chain: comma-joined. Health is the live
+    // probe state from /api/health, as on the Overview.
+    health: true,
+    summary: (o, ctx) => `<span class="k">Upstreams</span><span class="v v-list">${arr(o.upstreams).map((u) => `<span class="dl-item">${esc((u.host || '') + ':' + (u.port != null ? u.port : '') + (u.weight ? ' w' + u.weight : ''))}</span>`).join(', ') || '0'}</span>` +
+      upstreamHealthKv(o, ctx) +
       `<span class="k">Policy</span><span class="v">${enumChip('loadBalance', o.policy || '')}</span>` +
       (o.stickiness && o.stickiness.ttl ? `<span class="k">Sticky</span><span class="v">${esc(o.stickiness.ttl)}</span>` : '') +
       (o.healthCheck && o.healthCheck.path ? `<span class="k">Probe</span><span class="v">GET ${esc(o.healthCheck.path)}</span>` : `<span class="k">Probe</span><span class="v">TCP</span>`),
   },
 };
+
+// A domain-first card shows the first domain as its title; the rest are listed
+// under "Also".
+function alsoDomainsKv(o) {
+  const rest = arr(o.domains).slice(1);
+  return rest.length ? `<span class="k">Also</span><span class="v">${domainListHtml(rest, rest.length)}</span>` : '';
+}
+function upstreamHealthKv(o, ctx) {
+  const health = ctx && ctx.health;
+  if (!health) return '';
+  if (o.disabled) return '<span class="k">Health</span><span class="v faint">Not probed while disabled</span>';
+  const g = arr(health.upstreamGroups).find((x) => x.name === o.name);
+  if (!g) return '<span class="k">Health</span><span class="v faint">Not probed yet</span>';
+  const total = (g.healthy || 0) + (g.unhealthy || 0);
+  const cls = !g.unhealthy ? 'ok' : (g.healthy ? 'warn' : 'err');
+  return `<span class="k">Health</span><span class="v"><span class="chip ${cls}"><span class="dot ${cls}"></span>${g.healthy || 0} of ${total} healthy</span></span>`;
+}
 
 async function genericSection(c, section, sub) {
   if (sub === '_new') return EDITORS[section](c, null);
@@ -6094,41 +6265,73 @@ async function genericSection(c, section, sub) {
 // Every value a stored object holds, flattened to one lowercase haystack for
 // the list filter. Values only, never keys: matching on keys would make every
 // object match "name", "type" and "domains".
+// Booleans are not indexed (typing "true" matched every object with any switch
+// on); a disabled object is found by the word "disabled" instead.
 function objSearchBlob(o) {
   const out = [];
   (function walk(v) {
-    if (v == null) return;
+    if (v == null || typeof v === 'boolean') return;
     if (Array.isArray(v)) { v.forEach(walk); return; }
     if (typeof v === 'object') { Object.keys(v).forEach((k) => walk(v[k])); return; }
     out.push(String(v));
   })(o);
+  if (o && o.disabled) out.push('disabled');
   return out.join(' ').toLowerCase();
+}
+// A section title in running text: words in Title Case drop to lower case,
+// acronyms stay ("DNS Providers" -> "DNS providers", "Client CAs" -> "client CAs").
+function lowerTitle(t) {
+  return String(t).replace(/\b([A-Z])([a-z]+)\b/g, (m, a, b) => a.toLowerCase() + b);
 }
 
 async function genericList(c, section) {
   const meta = SECTION_META[section];
   const plural = PLURAL[section];
-  const items = arr((await api('/api/' + plural)).data);
+  const [itemsR, healthR] = await Promise.all([
+    api('/api/' + plural),
+    meta.health ? api('/api/health').catch(() => null) : Promise.resolve(null),
+  ]);
+  const items = arr(itemsR.data);
+  const ctx = { health: healthR && healthR.data };
   const head = viewHead(meta.title, meta.sub,
     `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`)
     + (meta.intro ? `<p class="muted list-intro">${esc(meta.intro)}</p>` : '');
   if (!items.length) {
-    c.innerHTML = head + emptyState(`No ${meta.singular === 'middleware' ? 'middleware' : meta.singular + 's'} yet`,
+    c.innerHTML = head + emptyState(`No ${meta.many || meta.singular + 's'} yet`,
       meta.empty || `Add your first ${meta.singular}.`, meta.addLabel, `#/${section}/_new`);
     return;
   }
   const blobs = {};
   items.forEach((o) => { blobs[o.name] = objSearchBlob(o); });
-  const cards = items.map((o) => `
+  // Redirects and parked hosts read like the Proxy Hosts list: the domain is
+  // the title, the object name the subline, then status, tags and last change.
+  const LIVE_CHIP = '<span class="chip flat ok"><span class="dot ok"></span>Live</span>';
+  const cardHtml = (o) => {
+    const href = `#/${section}/${encodeURIComponent(o.name)}`;
+    if (meta.domainFirst) {
+      const primary = arr(o.domains)[0] || o.name;
+      const subline = [o.name !== primary ? o.name : '', o.displayName || ''].filter(Boolean).join(' - ');
+      const tags = arr(o.tags);
+      return `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+        <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
       </div>
-      <div class="kv">${meta.summary(o)}</div>
-    </div>`).join('');
+      <div class="kv">${meta.summary(o, ctx)}${tags.length ? `<span class="k">Tags</span><span class="v v-list">${tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</span>` : ''}${o.updatedAt ? `<span class="k">Updated</span><span class="v mono">${esc(fmtTime(o.updatedAt))}</span>` : ''}</div>
+    </div>`;
+    }
+    return `
+    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
+      <div class="card-head">
+        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+      </div>
+      <div class="kv">${meta.summary(o, ctx)}</div>
+    </div>`;
+  };
+  const cards = items.map(cardHtml).join('');
   c.innerHTML = head + `
     <div class="toolbar cards-aligned">
-      <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(meta.title.toLowerCase())}..." title="Matches any stored value: name, display name, type, domains, targets..." aria-label="Filter ${esc(meta.title)}" /></div>
+      <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(lowerTitle(meta.title))}..." title="${esc(`Matches ${meta.filterHint || 'name, display name and tags'}, and the word "disabled"`)}" aria-label="Filter ${esc(meta.title)}" /></div>
     </div>
     <div class="cards" id="gsCards">${cards}</div>
     <div class="list-empty" id="gsNone" hidden>No ${esc(meta.singular)} matches this filter.</div>`;
@@ -8501,15 +8704,18 @@ async function viewTokens(c) {
       <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'Never'}</td>
       <td class="col-actions">
         <div class="row-actions">
+          <button class="btn ghost sm tok-toggle" data-name="${esc(t.name)}" type="button">${t.disabled ? 'Enable' : 'Disable'}</button>
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
           <button class="btn ghost sm danger tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
         </div>
       </td>
     </tr>`).join('');
 
+  // The list comes first; "Add token" opens the create form above it.
   c.innerHTML = viewHead('API Tokens',
-    'Credentials for scripts and CI, sent as a Bearer token. Scopes limit what each token can reach.') +
-    `<div class="card form-section" style="margin-bottom:16px">
+    'Credentials for scripts and CI, sent as a Bearer token. Scopes limit what each token can reach.',
+    `<button class="btn primary" id="tok-add" type="button" aria-expanded="false" aria-controls="tok-form">${ICON.plus}Add token</button>`) +
+    `<div class="card form-section" id="tok-form" style="margin-bottom:16px" hidden>
       <p class="section-label">Add token</p>
       <div class="inline-fields">
         <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" data-hint="apiToken.name" placeholder="ci-deploy" /></div>
@@ -8544,9 +8750,9 @@ async function viewTokens(c) {
         </div>
         <div class="hint" style="margin-top:8px">Write implies read - checking write ticks and locks read. <span class="mono">api-tokens</span>, <em>writing</em> <span class="mono">settings</span>, restore, whole-config revert and the pprof endpoints need Full admin.</div>
       </div>
-      <div class="row-between" style="margin-top:12px">
-        <span></span>
+      <div style="display:flex;gap:10px;margin-top:12px">
         <button class="btn primary" id="tok-create" type="button">${ICON.plus}Add token</button>
+        <button class="btn ghost" id="tok-cancel" type="button">Cancel</button>
       </div>
     </div>` +
     (tokens.length ? `<div class="toolbar">
@@ -8558,6 +8764,15 @@ async function viewTokens(c) {
       </table></div>`
       : emptyState('No API tokens yet',
         'Add one with only the scopes the script needs - write implies read, so a deploy job usually wants proxy-hosts:write and nothing else.'));
+
+  const tokForm = $('#tok-form'), tokAdd = $('#tok-add');
+  const showForm = (open) => {
+    tokForm.hidden = !open;
+    tokAdd.setAttribute('aria-expanded', String(open));
+    if (open) { $('#tok-name').focus(); } else { clearEditorError(); tokAdd.focus(); }
+  };
+  tokAdd.addEventListener('click', () => showForm(tokForm.hidden));
+  $('#tok-cancel').addEventListener('click', () => showForm(false));
 
   const tokFilter = $('#tokFilter');
   if (tokFilter) {
@@ -8651,6 +8866,26 @@ async function viewTokens(c) {
     }
   });
 
+  // Enable and disable are ordinary whole-object PUTs without ?rotate=1, so
+  // the stored secret is kept.
+  $$('.tok-toggle').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const nm = b.dataset.name;
+      const cur = tokens.find((t) => t.name === nm) || {};
+      const body = Object.assign(metaCarryForward(cur), { scopes: arr(cur.scopes) });
+      if (cur.displayName) body.displayName = cur.displayName;
+      if (cur.expiresAt) body.expiresAt = cur.expiresAt;
+      if (!cur.disabled) body.disabled = true;
+      clearEditorError();
+      b.disabled = true;
+      try {
+        const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body });
+        toastSaved(r.commit, 'Saved'); refreshHeadSha();
+        if (c.isConnected) await route();
+      } catch (e) { toastErr(e, cur.disabled ? `Could not enable ${nm}` : `Could not disable ${nm}`); b.disabled = false; }
+    });
+  });
+
   $$('.tok-rotate').forEach((b) => {
     b.addEventListener('click', async () => {
       const nm = b.dataset.name;
@@ -8712,7 +8947,7 @@ async function viewLogs(c) {
   const statusClass = (s) => (s >= 500 ? 'err' : s >= 400 ? 'warn' : 'ok');
   const rows = entries.map((e) => `
     <tr data-blob="${esc([e.method, e.host, e.path, e.status, e.client].join(' ').toLowerCase())}">
-      <td class="mono faint col-time">${esc(fmtTime(e.time))}</td>
+      <td class="mono faint col-time" title="${esc(fmtTime(e.time, true))}">${esc(fmtClock(e.time))}</td>
       <td class="mono col-method">${esc(e.method || '')}</td>
       <td class="mono col-host"><span class="trunc" title="${esc(e.host || '')}">${esc(e.host || '')}</span></td>
       <td class="mono col-path"><span class="trunc" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
@@ -8731,12 +8966,14 @@ async function viewLogs(c) {
       <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter requests..." title="Matches host, path, method, status code and client address" aria-label="Filter log entries" /></div>
     </div>` : ''}
     ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">-access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
-    <div class="table-wrap">
+    ${entries.length ? `<div class="table-wrap">
       <table>
         <thead><tr><th class="col-time">Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th class="col-num">Duration</th><th>Client</th></tr></thead>
-        <tbody id="logRows">${rows || `<tr><td colspan="7" class="muted" style="font-size:13px;padding:14px">${enabled ? 'No requests captured yet.' : 'Nothing to show while access logging is off.'}</td></tr>`}</tbody>
+        <tbody id="logRows">${rows}</tbody>
       </table>
-    </div>`;
+    </div>` : (enabled
+      ? emptyState('No requests captured yet', 'Requests that reach a proxy host appear here as they arrive. Refresh to load the latest.')
+      : emptyState('Nothing to show', 'Requests are recorded only while capture is on.'))}`;
 
   const logFilter = $('#logFilter');
   if (logFilter) {
@@ -9690,7 +9927,7 @@ function wizard(opts) {
         e.preventDefault();
         // A help popover open inside the wizard closes first, on its own.
         const hp = document.getElementById('hint-pop');
-        if (hp && !hp.hidden) { e.stopPropagation(); closeHintPop(); return; }
+        if (hp && !hp.hidden) { e.stopPropagation(); dismissHintPop(); return; }
         cancel();
         return;
       }
