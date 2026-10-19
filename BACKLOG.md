@@ -451,6 +451,13 @@ reports workspace.
 - [x] **HA followers answer 503 to `dryRun=1` and `_parse`**. Done 2026-10-18:
   `followerSafe` lets both through (`TestFollowerAllowsPreviews`).
 
+- [ ] **Flaky `TestRenewNowEndToEnd` (internal/acme) on the CI runner.** Seen
+  2026-10-19 on run 39182722808 ("second RenewNow: an order is already in
+  progress", "OnChange was not called within 5s"), green on rerun and locally;
+  the run also logs acme-dns "no such host" lookups. Make the stub CA test
+  independent of DNS and of the 5s wait, or make RenewNow's in-progress gate
+  observable so the test waits on it instead of on time.
+
 ## Upstream-group follow-ups
 
 - [x] **Per-location upstream group references.** `upstreamGroupRef` on Location
