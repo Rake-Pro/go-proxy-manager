@@ -482,9 +482,11 @@ function toast(title, msg, type, opts) {
     setTimeout(() => t.remove(), 300);
   }, type === 'err' ? 7000 : 4500);
 }
-function toastSaved(commit) {
+// The one commit toast: "Added" after a create, "Saved" after an edit,
+// "Deleted" after a delete, each with the commit when there is one.
+function toastSaved(commit, title) {
   const sha = shortSha(commit);
-  toast('Saved', sha ? `committed <span class="sha">${esc(sha)}</span>` : 'changes committed to git', 'ok', { html: true });
+  toast(title || 'Saved', sha ? `committed <span class="sha">${esc(sha)}</span>` : 'changes committed to git', 'ok', { html: true });
 }
 function toastErr(e) {
   toast('Something went wrong', e && e.message ? e.message : String(e), 'err');
@@ -532,16 +534,35 @@ function progressToast(title) {
 // top-level field is one bare segment ("stripResponseHeaders: ...").
 const ERROR_PATH_RE = /^(?:[a-z][a-z ]* "[^"]*":\s*)?([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_[\]-]+)*)\s*:\s*/;
 
-function clearEditorError() {
+function clearEditorBanner() {
   $$('#content .editor-error').forEach((el) => el.remove());
   $$('#content .field-flagged').forEach((el) => el.classList.remove('field-flagged'));
+}
+function clearEditorError() {
+  clearEditorBanner();
   // A row error left from an earlier attempt must not win the scroll over
   // this attempt's banner.
   clearRowErrors($('#content'));
 }
+// The typed editors' fields carry their model path in data-path too, so a
+// server error that names a field ("listenPort: ...") flags it and offers the
+// jump. Their help ids already spell that path after the kind
+// ("streamHost.listenPort"), so it is derived from data-hint for every field
+// without a data-path of its own (the proxy host and Settings set theirs by hand).
+const PATH_FROM_HINT_RE = /^(certificate|redirectHost|streamHost|parkedHost|dnsProvider|accessList|identityProvider|middleware|clientCA|upstreamGroup)\.(.+)$/;
+const NOT_A_PATH_RE = /^(generate|issue|renew)\.|\.form$|^rewrite\.rule\./;
+function pathsFromHints(root) {
+  if (!root) return;
+  $$('[data-hint]', root).forEach((el) => {
+    if (el.dataset.path) return;
+    const m = PATH_FROM_HINT_RE.exec(el.dataset.hint || '');
+    if (m && !NOT_A_PATH_RE.test(m[2])) el.dataset.path = m[2];
+  });
+}
 function errorFieldFor(msg) {
   const m = ERROR_PATH_RE.exec(String(msg || ''));
   if (!m) return null;
+  pathsFromHints($('#content'));
   const parts = m[1].split('.');
   for (let n = parts.length; n > 0; n--) {
     const path = parts.slice(0, n).join('.');
@@ -558,23 +579,39 @@ function focusErrorField(target) {
   // A field inside a collapsed <details> is worth nothing until it is open.
   let d = target.el.closest && target.el.closest('details');
   while (d) { d.open = true; d = d.parentElement && d.parentElement.closest('details'); }
-  if (target.el.focus) { try { target.el.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+  // A wrapper (chip input, row, check-list) is not focusable itself: its
+  // first control takes the focus instead.
+  const fe = target.el.matches && target.el.matches('input, select, textarea, button, [tabindex]')
+    ? target.el : (target.el.querySelector && target.el.querySelector('input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])'));
+  if (fe && fe.focus) { try { fe.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+}
+// A client-side check names its field directly: an element, or the field's
+// data-path. The jump button says the path when there is one, else the label.
+function invalidTarget(t) {
+  let el = t;
+  if (typeof t === 'string') el = document.querySelector(`#content [data-path="${t}"]`);
+  if (!el || !el.isConnected) return null;
+  const fg = el.closest && el.closest('.field-group');
+  const lab = fg && fg.querySelector('label');
+  return { el, path: (el.dataset && el.dataset.path) || '', label: (lab && lab.textContent.trim()) || el.getAttribute('aria-label') || 'field' };
 }
 // showSaveError(e, title) renders the banner and returns it. Call clearEditorError()
 // at the top of every save handler so a stale failure never outlives its cause.
-function showSaveError(e, title) {
+function showSaveError(e, title, field) {
   const c = $('#content');
   if (!c) { toastErr(e); return null; }
-  clearEditorError();
+  // The banner replaces the previous one; a row this attempt just marked
+  // (markRowError) keeps its mark - the save handler cleared stale ones first.
+  clearEditorBanner();
   const msg = (e && e.message) ? e.message : String(e);
-  const target = errorFieldFor(msg);
+  const target = (field && invalidTarget(field)) || errorFieldFor(msg);
   const banner = document.createElement('div');
   banner.className = 'editor-error';
   banner.setAttribute('role', 'alert');
   banner.innerHTML = `<div class="ee-body">
       <div class="ee-title">${esc(title || 'Could not save')}</div>
       <div class="ee-msg">${esc(msg)}</div>
-      ${target ? `<div class="ee-jump"><button class="btn ghost sm" type="button" id="ee-jump">Go to <span class="mono">${esc(target.path)}</span></button></div>` : ''}
+      ${target ? `<div class="ee-jump"><button class="btn ghost sm" type="button" id="ee-jump">Go to ${target.path ? `<span class="mono">${esc(target.path)}</span>` : esc(target.label)}</button></div>` : ''}
     </div>
     <button class="ee-close" type="button" aria-label="Dismiss">&times;</button>`;
   c.insertBefore(banner, c.firstChild);
@@ -585,15 +622,17 @@ function showSaveError(e, title) {
   // view rather than jumping to the banner at the top of a long page.
   const badRow = target ? null : c.querySelector('.row-bad');
   if (target) focusErrorField(target);
-  else if (badRow) { revealTabPanel(badRow); try { badRow.scrollIntoView({ block: 'center' }); } catch (e2) { badRow.scrollIntoView(); } }
+  else if (badRow) focusErrorField({ el: badRow });
   else window.scrollTo(0, 0);
   return banner;
 }
 
 // A blocking validation message is the same page state as a failed save: the
 // operator has to read it, fix a field and try again, which a 7-second toast
-// does not leave time for. So it gets the same sticky banner.
-function showInvalid(title, msg) { showSaveError(new Error(msg), title); }
+// does not leave time for. So it gets the same sticky banner. field is the
+// control the message is about (an element or its data-path): it is flagged,
+// its fold opened and its tab shown, wherever the Save was pressed from.
+function showInvalid(title, msg, field) { showSaveError(new Error(msg), title, field); }
 
 // Create is create-only: every new object's PUT carries If-None-Match: *, so a
 // name that is already stored answers 409 instead of being replaced (a PUT is
@@ -634,6 +673,19 @@ function markRowError(row, msg) {
   return msg;
 }
 
+// Focus goes back to whatever had it before a dialog or wizard opened. When that
+// element is gone or hidden by then (a route change removed it, a menu closed),
+// the page title takes it, as a nav click does, so the next Tab starts on the
+// page rather than at the top of the document.
+function restoreFocus(prev) {
+  if (prev && prev.isConnected && prev !== document.body && prev.focus && prev.getClientRects().length) {
+    try { prev.focus(); } catch (e) { /* ignore */ }
+    if (document.activeElement === prev) return;
+  }
+  const t = $('#pageTitle');
+  if (t) { t.tabIndex = -1; try { t.focus(); } catch (e) { /* ignore */ } }
+}
+
 // ---------- confirm modal ----------
 // The one confirmation primitive in this app. window.confirm() is a browser
 // chrome string with no room to explain a consequence, and it reads identically
@@ -650,8 +702,13 @@ function markRowError(row, msg) {
 //                that want a value and callers that want a boolean both read
 //                the result as truthy-or-not.
 //   danger       styles Confirm as destructive.
-// Resolves false on Cancel, Escape and a scrim click, so a dismissed dialog is
-// never a confirmation.
+//   keepOnNavigate  stays open on a navigation (only the unsaved-changes guard,
+//                which is itself the answer to that navigation).
+// Resolves false on Cancel, Escape, a scrim click and a navigation (browser
+// Back, a link): a dialog never outlives the page it was opened for, and a
+// dismissed dialog is never a confirmation. Enter confirms only from the
+// dialog's own inputs or its confirm button, so a button placed in the body
+// (Copy) answers its own Enter. Footer: the confirm button first, then Cancel.
 function confirmModal(opts) {
   opts = opts || {};
   return new Promise((resolve) => {
@@ -672,8 +729,8 @@ function confirmModal(opts) {
           <div class="hint warn" id="cm-prompt-err" hidden></div>
         </div>` : ''}
         <div class="modal-actions">
-          ${opts.closeOnly ? '' : '<button class="btn ghost" id="cm-cancel" type="button">Cancel</button>'}
           <button class="btn ${opts.danger === false ? 'primary' : 'danger'}" id="cm-ok" type="button">${esc(opts.confirmLabel || 'Confirm')}</button>
+          ${opts.closeOnly ? '' : '<button class="btn ghost" id="cm-cancel" type="button">Cancel</button>'}
         </div>
       </div>`;
     document.body.appendChild(wrap);
@@ -687,10 +744,12 @@ function confirmModal(opts) {
       if (done) return;
       done = true;
       document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('hashchange', onHash);
       wrap.remove();
-      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* ignore */ } }
+      restoreFocus(prevFocus);
       resolve(v);
     }
+    function onHash() { if (!opts.keepOnNavigate) finish(false); }
     // A prompt's validate(value) answers with the complaint, or '' when the
     // value is acceptable; the complaint shows under the field and holds the
     // confirm button.
@@ -714,7 +773,11 @@ function confirmModal(opts) {
     }
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); finish(false); return; }
-      if (e.key === 'Enter' && typedOK() && e.target !== cancelBtn) { e.preventDefault(); finish(answer()); }
+      if (e.key === 'Enter' && (e.target === okBtn || e.target === typedInput || e.target === promptInput)) {
+        e.preventDefault();
+        if (typedOK()) finish(answer());
+        return;
+      }
       // Crude focus trap: Tab out of the dialog wraps back into it.
       if (e.key === 'Tab') {
         const f = Array.from(wrap.querySelectorAll('button:not([disabled]), input'));
@@ -725,6 +788,7 @@ function confirmModal(opts) {
       }
     }
     document.addEventListener('keydown', onKey, true);
+    window.addEventListener('hashchange', onHash);
     wrap.addEventListener('click', (e) => { if (e.target === wrap) finish(false); });
     if (cancelBtn) cancelBtn.addEventListener('click', () => finish(false));
     okBtn.addEventListener('click', () => { if (typedOK()) finish(answer()); });
@@ -1232,6 +1296,9 @@ const RO_WRITE_CONTROLS = [
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
   '#ed-src-reconcile', '#logsToggle', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
+  // Clone leads to an editor whose Save a read-only caller cannot use, so it is
+  // gated like the proxy host band's Clone.
+  '#ed-clone', '#ct-clone',
   // The Proxy Hosts bulk bar issues ordinary PUTs, so it is a write control
   // like any other even though its buttons are styled ghost.
   '[data-bulk]',
@@ -1621,7 +1688,12 @@ document.addEventListener('keydown', (e) => {
 // resolve to).
 function makeChipInput(container, initial, placeholder, onChange) {
   const tokens = (initial || []).slice();
-  function changed() { if (onChange) onChange(tokens.slice()); }
+  // chipchange bubbles so a fold summary around the box can follow it: adding
+  // or removing a chip fires no input or change event of its own.
+  function changed() {
+    if (onChange) onChange(tokens.slice());
+    container.dispatchEvent(new CustomEvent('chipchange', { bubbles: true }));
+  }
   function render() {
     // Keep the input's id across re-renders (the container's own, or the one
     // labelFieldGroups assigned), so a label's for= keeps pointing at it.
@@ -1900,6 +1972,11 @@ function wireAuthBlock(p, auth, idps) {
   sync();
   return {
     mode() { return modeSel.value; },
+    // What the block holds right now, unvalidated: for its fold summary.
+    peek() {
+      const m = modeSel.value;
+      return { mode: m, identityProvider: (m === 'client-cert' || m === 'basic') ? '' : idpSel.value, requiredRoles: rolesCtl.get() };
+    },
     // Returns the auth spec, or null after showing the first blocking message.
     get(label) {
       const m = modeSel.value;
@@ -1909,24 +1986,24 @@ function wireAuthBlock(p, auth, idps) {
       const certRoles = m === 'client-cert' ? certRolesCtl.get() : {};
       const where = label ? label + ': ' : '';
       if (m !== 'client-cert' && m !== 'basic' && !idp) {
-        showInvalid('Identity provider required', where + 'Select an identity provider.'); return null;
+        showInvalid('Identity provider required', where + 'Select an identity provider.', idpSel); return null;
       }
       if (m === 'auth-request' && roles.length) {
-        showInvalid('Roles unsupported', where + 'Required roles are not supported in auth-request mode - the auth server does authorization.'); return null;
+        showInvalid('Roles unsupported', where + 'Required roles are not supported in auth-request mode - the auth server does authorization.', $('#' + p + '-roles')); return null;
       }
       if (m === 'client-cert' && roles.length && !Object.keys(certRoles).length) {
-        showInvalid('Mapping required', where + 'Add at least one certificate subject role, or clear the required roles.'); return null;
+        showInvalid('Mapping required', where + 'Add at least one certificate subject role, or clear the required roles.', $('#' + p + '-certroles')); return null;
       }
       if (allow.length) {
         const bad = firstBadCidr(allow);
-        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`); return null; }
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, $('#' + p + '-allow')); return null; }
         if (m === 'oidc' || m === 'forward-auth') {
-          showInvalid('Exemption not applicable', where + 'Exempt networks apply only to auth-request, client-cert and basic modes.'); return null;
+          showInvalid('Exemption not applicable', where + 'Exempt networks apply only to auth-request, client-cert and basic modes.', $('#' + p + '-allow')); return null;
         }
         if (!m) {
           const t = (idps.find((x) => x.name === idp) || {}).type || '';
           if (t !== 'auth-request') {
-            showInvalid('Set a mode explicitly', where + `With no mode this uses ${idp}'s type (${t || 'unknown'}), where the exemption would be ignored.`); return null;
+            showInvalid('Set a mode explicitly', where + `With no mode this uses ${idp}'s type (${t || 'unknown'}), where the exemption would be ignored.`, modeSel); return null;
           }
         }
       }
@@ -1938,10 +2015,10 @@ function wireAuthBlock(p, auth, idps) {
       if (Object.keys(certRoles).length) spec.clientCertRoles = certRoles;
       if (m === 'basic') {
         const uerr = usersCtl.error();
-        if (uerr) { showInvalid('Credentials incomplete', where + uerr); return null; }
+        if (uerr) { showInvalid('Credentials incomplete', where + uerr, $('#' + p + '-users .row-bad') || $('#' + p + '-users')); return null; }
         const realm = $('#' + p + '-realm').value.trim();
         if (realm && (realm.length > 128 || /["\\]/.test(realm) || /[^\x20-\x7e]/.test(realm))) {
-          showInvalid('Invalid realm', where + 'Realm must be printable ASCII without " or \\ (it is sent verbatim in the WWW-Authenticate header).'); return null;
+          showInvalid('Invalid realm', where + 'Realm must be printable ASCII without " or \\ (it is sent verbatim in the WWW-Authenticate header).', $('#' + p + '-realm')); return null;
         }
         const b = { users: usersCtl.get() };
         if (realm) b.realm = realm;
@@ -2002,19 +2079,24 @@ function wireRateLimitBlock(p, rl) {
   winBtn.addEventListener('click', () => pick(false));
   secBtn.addEventListener('click', () => pick(true));
   return {
+    // What the block holds right now, unvalidated: for its fold summary.
+    peek() {
+      if (secBtn.classList.contains('on')) return { requestsPerSecond: parseFloat($('#' + p + '-rps').value) || 0 };
+      return { requests: parseFloat($('#' + p + '-req').value) || 0, window: $('#' + p + '-win').value.trim() };
+    },
     get(label) {
       const where = label ? label + ': ' : '';
       const perSecond = secBtn.classList.contains('on');
       const spec = {};
       if (perSecond) {
         const rps = parseFloat($('#' + p + '-rps').value);
-        if (isNaN(rps) || rps <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.'); return null; }
+        if (isNaN(rps) || rps <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.', $('#' + p + '-rps')); return null; }
         spec.requestsPerSecond = rps;
       } else {
         const req = parseFloat($('#' + p + '-req').value);
         const win = $('#' + p + '-win').value.trim();
-        if (isNaN(req) || req <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.'); return null; }
-        if (!GO_DURATION_RE.test(win)) { showInvalid('Invalid window', where + 'Window must be a duration such as 10s, 1m or 1h.'); return null; }
+        if (isNaN(req) || req <= 0) { showInvalid('Rate required', where + 'Set a rate: requests per second, or requests plus a window.', $('#' + p + '-req')); return null; }
+        if (!GO_DURATION_RE.test(win)) { showInvalid('Invalid window', where + 'Window must be a duration such as 10s, 1m or 1h.', $('#' + p + '-win')); return null; }
         spec.requests = req;
         spec.window = win;
       }
@@ -2023,12 +2105,12 @@ function wireRateLimitBlock(p, rl) {
       const allow = allowCtl.get();
       if (allow.length) {
         const bad = firstBadCidr(allow);
-        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`); return null; }
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, $('#' + p + '-allow')); return null; }
         spec.allowFrom = allow;
       }
       const block = $('#' + p + '-block').value.trim();
       if (block) {
-        if (!GO_DURATION_RE.test(block)) { showInvalid('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.'); return null; }
+        if (!GO_DURATION_RE.test(block)) { showInvalid('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.', $('#' + p + '-block')); return null; }
         spec.blockFor = block;
       }
       return spec;
@@ -2059,8 +2141,13 @@ function wireInlineFold(p) {
     if (card && isOn(p + '-on')) card.open = true;
   });
 }
-function authFoldSummary(auth) {
-  if (!auth) return 'off - this host is not gated by a sign-in';
+// loc, set for a location's fold, says whether the host itself has a sign-in
+// (inline, or an auth middleware): that one still applies on the path.
+function authFoldSummary(auth, loc) {
+  if (!auth) {
+    if (!loc) return 'off - this host is not gated by a sign-in';
+    return 'off - no extra sign-in on this path' + (loc.hostSignIn ? ', host sign-in still applies' : '');
+  }
   const parts = [];
   if (auth.mode) parts.push(enumLabel('authMode', auth.mode).split(' - ')[0]);
   if (auth.identityProvider) parts.push('via ' + auth.identityProvider);
@@ -2121,13 +2208,13 @@ function wireUpstreamExtra(p) {
       const out = {};
       const path = $('#' + p + '-uppath').value.trim();
       const perr = upstreamPathError(path);
-      if (perr) { showInvalid('Invalid base path', where + perr); return null; }
+      if (perr) { showInvalid('Invalid base path', where + perr, $('#' + p + '-uppath')); return null; }
       if (path) out.path = path;
       if (sel.value === 'upstream') out.hostHeader = 'upstream';
       else if (sel.value === 'custom') {
         const v = $('#' + p + '-uphh-custom').value.trim();
-        if (!v) { showInvalid('Host header required', where + 'Enter a hostname, or choose another option.'); return null; }
-        if (v.length > 253 || !HOSTHEADER_RE.test(v)) { showInvalid('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".'); return null; }
+        if (!v) { showInvalid('Host header required', where + 'Enter a hostname, or choose another option.', $('#' + p + '-uphh-custom')); return null; }
+        if (v.length > 253 || !HOSTHEADER_RE.test(v)) { showInvalid('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".', $('#' + p + '-uphh-custom')); return null; }
         out.hostHeader = v;
       }
       return out;
@@ -2467,6 +2554,7 @@ function settingsTabOf(hash) {
   const m = /^#\/settings(?:\/([^/]+))?$/.exec(hash || '');
   return m ? (m[1] || SETTINGS_TABS[0].id) : null;
 }
+let leavePrompt = false;
 async function onHashChange() {
   if (revertingHash) { revertingHash = false; currentHash = location.hash; return; }
   const nextTab = settingsTabOf(location.hash);
@@ -2476,12 +2564,22 @@ async function onHashChange() {
     return;
   }
   if (dirtyFlag && location.hash !== currentHash) {
-    const leave = await confirmModal({
-      title: 'You have unsaved changes',
-      body: '<p>Changes on this page are not committed yet. Leaving discards them.</p>',
-      confirmLabel: 'Discard and leave',
-    });
-    if (!leave) { revertingHash = true; location.hash = currentHash; return; }
+    // One prompt at a time: another navigation while it is open waits for its
+    // answer (which then leaves for the latest hash, or returns to this page).
+    if (leavePrompt) return;
+    leavePrompt = true;
+    let leave = false;
+    try {
+      leave = await confirmModal({
+        title: 'You have unsaved changes',
+        body: '<p>Changes on this page are not committed yet. Leaving discards them.</p>',
+        confirmLabel: 'Discard and leave',
+        // This prompt is the navigation guard itself, so a navigation must
+        // not dismiss it.
+        keepOnNavigate: true,
+      });
+    } finally { leavePrompt = false; }
+    if (!leave) { if (location.hash !== currentHash) { revertingHash = true; location.hash = currentHash; } return; }
   }
   currentHash = location.hash;
   clearDirty();
@@ -3495,7 +3593,7 @@ async function viewIntegrations(c) {
     const phPw = $('#set-ph-pw').value.trim();
     if (phPw === '***') {
       // A literal secret is redacted on read; saving it back would commit "***".
-      showInvalid('Secret masked', 'The Pi-hole app password reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.');
+      showInvalid('Secret masked', 'The Pi-hole app password reads ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.', $('#set-ph-pw'));
       return;
     }
     if (isOn('set-ph-on')) dnsSync.pihole.enabled = true;
@@ -3645,14 +3743,15 @@ async function viewIntegrations(c) {
     const dkrCert = $('#set-dkr-tlscert').value.trim();
     const dkrKey = $('#set-dkr-tlskey').value.trim();
     const dkrSuffixes = dkrSuffixCtl.get();
-    if (dkrOn && !dkrSuffixes.length) { showInvalid('Docker discovery', 'allowedDomainSuffixes is required when discovery is enabled'); return; }
-    if (dkrSocket && dkrSocket[0] !== '/') { showInvalid('Docker discovery', 'socket must be an absolute path'); return; }
-    if (dkrHost && !/^(tcp|https):\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'host must be an absolute tcp:// or https:// URL (e.g. tcp://socket-proxy:2375)'); return; }
-    if (!!dkrCert !== !!dkrKey) { showInvalid('Docker discovery', 'tlsCert and tlsKey must be set together'); return; }
-    if (dkrCert && !/^https:\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'tlsCert/tlsKey need an https:// host'); return; }
-    if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'publishedHost only applies with usePublishedPorts: true'); return; }
-    if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'network and usePublishedPorts are mutually exclusive'); return; }
-    if (dkrOn && !$('#set-dkr-cert').value.trim()) { showInvalid('Docker discovery', 'template.tls.certificateRef is required when discovery is enabled'); return; }
+    // Docker discovery checks name the fields by their labels on this page.
+    if (dkrOn && !dkrSuffixes.length) { showInvalid('Docker discovery', 'Add at least one allowed domain suffix. It is required while Docker discovery is on.', $('#set-dkr-suffixes')); return; }
+    if (dkrSocket && dkrSocket[0] !== '/') { showInvalid('Docker discovery', 'Socket must be an absolute path, such as /var/run/docker.sock.', $('#set-dkr-socket')); return; }
+    if (dkrHost && !/^(tcp|https):\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'Host URL must start with tcp:// or https://, such as tcp://socket-proxy:2375.', $('#set-dkr-host')); return; }
+    if (!!dkrCert !== !!dkrKey) { showInvalid('Docker discovery', 'Set TLS client certificate and TLS client key together, or neither.', dkrCert ? $('#set-dkr-tlskey') : $('#set-dkr-tlscert')); return; }
+    if (dkrCert && !/^https:\/\//.test(dkrHost)) { showInvalid('Docker discovery', 'A TLS client certificate needs an https:// Host URL.', $('#set-dkr-host')); return; }
+    if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Published host applies only with Use published ports on. Turn it on, or clear Published host.', $('#set-dkr-pubhost')); return; }
+    if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Network and Use published ports cannot both be set. Clear Network, or turn Use published ports off.', $('#set-dkr-network')); return; }
+    if (dkrOn && !$('#set-dkr-cert').value.trim()) { showInvalid('Docker discovery', 'Set the template Certificate. It is required while Docker discovery is on.', $('#set-dkr-cert')); return; }
     const dockerDiscovery = {
       socket: dkrSocket || undefined,
       host: dkrHost || undefined,
@@ -4528,13 +4627,6 @@ async function hostEditor(c, name) {
   //
   // The four that stay open are the ones every host needs: domains, the
   // upstream, TLS, and the access/middleware chain.
-  const idParts = [];
-  if (h.displayName) idParts.push(h.displayName);
-  if (arr(h.tags).length) idParts.push(`${arr(h.tags).length} tag${arr(h.tags).length === 1 ? '' : 's'}`);
-  if (h.disabled) idParts.push('disabled');
-  if (h.maintenance) idParts.push('maintenance');
-  const idSummary = idParts.length ? idParts.join(' - ') : (h.name || 'name, tags, status');
-
   const locCount = arr(h.locations).length;
   const locSummary = locCount ? `${locCount} path override${locCount === 1 ? '' : 's'}` : 'none - every path goes to the upstream above';
 
@@ -4588,7 +4680,7 @@ ${body}      </div></div>`;
   const railManaged = mc ? `<span class="muted">${esc(mc.title)}</span>` : '';
 
   c.innerHTML = `
-    ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), 'Edit routing, TLS, and the middleware chain for this host.',
+    ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit routing, TLS, and the middleware chain for this host.',
       `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
       statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
       isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
@@ -4596,34 +4688,15 @@ ${body}      </div></div>`;
 
     <div class="edit-grid">
       <div class="edit-main">
-${panel('routing', `        ${foldHtml('f-id-card', 'Identity', idSummary, isNew || idParts.length > 0, `
-          <div class="inline-fields">
-            <div class="field-group">
-              <label>Name</label>
-              <input class="field mono" id="f-name" data-hint="common.name" data-path="name" value="${esc(h.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed && seed.origName ? seed.origName + '-copy' : 'internal-name')}" />
-              <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
-            </div>
-            <div class="field-group">
-              <label>Display name</label>
-              <input class="field" id="f-display" data-hint="common.displayName" data-path="displayName" value="${esc(h.displayName || '')}" placeholder="optional label" />
-            </div>
-          </div>
-          <div class="field-group">
-            <label>Tags</label>
-            <div class="chip-input" id="f-tags" data-hint="proxyHost.tags" data-path="tags"></div>
-            <div class="hint">Free-form labels for grouping and filtering. Press Enter to add.</div>
-          </div>
-          <div class="toggle-line" style="margin-top:6px">
-            <div class="tl-text"><div class="nm">Disabled</div><div class="ds">Stop serving this host</div></div>
-            ${switchHtml('f-disabled', !!h.disabled, 'Disabled', 'common.disabled')}
-          </div>
-          <div class="toggle-line" style="margin-top:6px">
+${panel('routing', `        ${identityCard('f', h, {
+    section: 'hosts', isNew, foldable: true, placeholder: seed && seed.origName ? seed.origName + '-copy' : 'internal-name',
+    extra: `<div class="toggle-line" style="margin-top:6px">
             <div class="tl-text"><div class="nm">Maintenance</div><div class="ds">${globalMaint
               ? 'Fleet-wide maintenance is on in <a href="#/settings">Settings</a>: every host serves the maintenance page regardless of this switch.'
               : 'Serve a 503 maintenance page instead of proxying. The host keeps its domains and certificate.'}</div></div>
             ${switchHtml('f-maintenance', !!h.maintenance, 'Maintenance', 'proxyHost.maintenance')}
-          </div>
-        `)}
+          </div>`,
+  })}
 
         <div class="card form-section">
           <p class="section-label">Domains</p>
@@ -4761,8 +4834,8 @@ ${panel('tls', `        <div class="card form-section">
 
 `)}
 ${panel('access', `        <div class="card form-section">
-          <p class="section-label">Middleware chain</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b>${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, auth, guard, headers, rewrite, then the upstream.</p>
+          <p class="section-label">Request chain</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-mw-attached">${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, auth, guard, headers, rewrite, then the upstream.</p>
           <div class="check-list" id="f-mw" data-hint="proxyHost.middlewares" data-path="middlewares">
             ${!mwListOK ? refListUnavailableHtml('the middleware list') : (mwSorted.length ? mwSorted.map((m) => `
               <label class="check-item"><input type="checkbox" value="${esc(m.name)}"${selMw.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>
@@ -4772,13 +4845,13 @@ ${panel('access', `        <div class="card form-section">
 
         <div class="card form-section">
           <p class="section-label">Access lists</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b>${esc(selAl.length ? selAl.join(', ') : 'none')}</b>. Who may reach this host, by IP range or country.</p>
+          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-al-attached">${esc(selAl.length ? selAl.join(', ') : 'none')}</b>. Who may reach this host, by IP range or country.</p>
           <div class="check-list" id="f-al" data-hint="proxyHost.accessLists" data-path="accessLists">
             ${!alListOK ? refListUnavailableHtml('the access list index') : (alSorted.length ? alSorted.map((a) => `
               <label class="check-item"><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}<span class="ci-ty">access-list</span></label>
             `).join('') : '<div class="check-empty">No access lists defined yet.</div>')}
           </div>
-          <div class="hint" id="f-inline-order"${(h.auth || h.rateLimit) ? '' : ' hidden'} style="margin-top:8px">Sign-in and rate limit set below run before the middlewares listed above.</div>
+          <div class="hint" id="f-inline-order"${(h.auth || h.rateLimit) ? '' : ' hidden'} style="margin-top:8px">Sign-in and rate limit set below each take the same place in the chain as a middleware of their kind, just before those middlewares. The Request chain in the rail shows the full order.</div>
         </div>
 
         ${inlineFoldHtml('f-auth', 'Sign-in', 'Gate this host through an identity provider. For a gate shared by several hosts, use a middleware instead.',
@@ -4857,7 +4930,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       <div class="save-note">${ICON.commit}Changes are committed to git as a new revision.</div>
       <div style="display:flex;gap:10px">
         <a class="btn ghost" href="#/hosts">Cancel</a>
-        <button class="btn primary" id="saveBtn" type="button">Save changes</button>
+        <button class="btn primary" id="saveBtn" type="button">${isNew ? 'Add proxy host' : 'Save changes'}</button>
       </div>
     </div>
       </div>
@@ -4882,7 +4955,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     refreshRailCert(d);
     refreshFlow();
   });
-  const tagsCtl = makeChipInput($('#f-tags'), arr(h.tags), 'add tag...');
+  const tagsCtl = wireIdentityCard('f', h);
 
   const secHdrCtl = makeSecurityHeaderRows($('#f-secheaders'), h.securityHeaders);
   $('#f-secheaders-add').addEventListener('click', () => secHdrCtl.addRow('', ''));
@@ -4940,6 +5013,54 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   dnsHint('#f-dns-lan-hint', hasCapability('dnsSync.piholeEnabled'));
   dnsHint('#f-dns-public-hint', hasCapability('dnsSync.cloudflareEnabled'));
 
+  // Fold summaries and the two "Attached:" lines follow the form: each fold's
+  // summary is recomputed from its controls on any edit in the editor (the
+  // same events that move the rail), so a collapsed fold never says what the
+  // host held when the page opened. Location rows add their own entries.
+  function hostHasSignIn() {
+    return isOn('f-auth-on') || $$('#f-mw input:checked').some((i) => mwType[i.value] === 'auth');
+  }
+  const foldSums = {
+    'f-locs-card': () => (locCtls.length ? `${locCtls.length} path override${locCtls.length === 1 ? '' : 's'}` : 'none - every path goes to the upstream above'),
+    'f-crawl-card': () => {
+      const parts = [];
+      const cs = parseInt($('#f-to-connect').value, 10); if (cs > 0) parts.push(`connect ${cs}s`);
+      const rs = parseInt($('#f-to-read').value, 10); if (rs > 0) parts.push(`read ${rs}s`);
+      if (isOn('f-robots')) parts.push('indexing discouraged');
+      return parts.length ? parts.join(', ') : 'defaults';
+    },
+    'f-comp-card': () => {
+      if (!isOn('f-gzip')) return 'off';
+      const mb = parseInt($('#f-gzip-min').value, 10);
+      const types = $('#f-gzip-types').value.split(',').map((s) => s.trim()).filter(Boolean).length;
+      return ['gzip on', mb > 0 ? `min ${mb} bytes` : '', types ? `${types} content types` : ''].filter(Boolean).join(', ');
+    },
+    'f-errp-card': () => {
+      const parts = [];
+      const dir = $('#f-errp-dir').value.trim(); if (dir) parts.push(`directory ${dir}`);
+      const raw = $('#f-errp-inline').value.trim();
+      if (raw) { try { const n = Object.keys(JSON.parse(raw) || {}).length; if (n) parts.push(`${n} inline`); } catch (e) { parts.push('inline (not valid JSON)'); } }
+      const ic = $('#f-errp-intercept').value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (ic.length) parts.push(`intercepts ${ic.join(', ')}`);
+      return parts.length ? parts.join(', ') : 'inherited from Settings';
+    },
+    'f-sech-card': () => { const n = $$('#f-secheaders > .loc-row').length; return n ? `${n} set` : 'fleet defaults'; },
+    'f-strip-card': () => { const n = stripCtl.get().length; return n ? `${n} header${n === 1 ? '' : 's'}` : 'none'; },
+    'f-adv-card': () => {
+      const mode = tpChoice();
+      if (mode === 'custom') { const l = trustedCtl.get(); return l.length ? `trusted proxies: ${l.join(', ')}` : 'trusted proxies: custom list (empty)'; }
+      return mode === 'none' ? 'trusted proxies: none (connection address only)' : 'trusted proxies inherited from Settings';
+    },
+    'f-dns-card': () => [isOn('f-dns-lan') ? 'LAN direct' : '', isOn('f-dns-public') ? 'public CNAME' : ''].filter(Boolean).join(', ') || 'off',
+    'f-auth-card': () => authFoldSummary(isOn('f-auth-on') ? hostAuthCtl.peek() : null),
+    'f-rl-card': () => rateFoldSummary(isOn('f-rl-on') ? hostRlCtl.peek() : null),
+  };
+  const refreshSums = liveFoldSummaries(c.querySelector('.edit-main'), foldSums);
+  function refreshAttached() {
+    const mw = $('#f-mw-attached'); if (mw) mw.textContent = mwListOK ? (curMw().join(', ') || 'none') : mw.textContent;
+    const al = $('#f-al-attached'); if (al) al.textContent = alListOK ? (curAl().join(', ') || 'none') : al.textContent;
+  }
+
   // locations. A location is a whole host in miniature now - its own upstream
   // (with the same base-path and Host-header escape hatches), its own middleware
   // and access-list picks, and its own inline sign-in and rate limit - so each
@@ -4987,7 +5108,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         </div>
       </div>
       ${inlineFoldHtml(p + '-auth', 'Sign-in', 'Gate this path. The host\'s own sign-in still applies here.',
-    !!loc.auth, authFoldSummary(loc.auth), authBlockHtml(p + '-auth', loc.auth, idps), 'proxyHost.locations.auth')}
+    !!loc.auth, authFoldSummary(loc.auth, { hostSignIn: hostHasSignIn() }), authBlockHtml(p + '-auth', loc.auth, idps), 'proxyHost.locations.auth')}
       ${inlineFoldHtml(p + '-rl', 'Rate limit', 'Throttle this path. The host\'s own rate limit still applies here.',
     !!loc.rateLimit, rateFoldSummary(loc.rateLimit), rateLimitBlockHtml(p + '-rl', loc.rateLimit), 'proxyHost.locations.rateLimit')}`;
     locsWrap.appendChild(div);
@@ -5001,6 +5122,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     wireInlineFold(p + '-auth');
     wireInlineFold(p + '-rl');
     locCtls.push(ctl);
+    foldSums[p + '-auth-card'] = () => authFoldSummary(isOn(p + '-auth-on') ? ctl.auth.peek() : null, { hostSignIn: hostHasSignIn() });
+    foldSums[p + '-rl-card'] = () => rateFoldSummary(isOn(p + '-rl-on') ? ctl.rl.peek() : null);
 
     // An untouched preselected scheme keeps following the host's (below); the
     // operator's own pick stops that.
@@ -5108,10 +5231,12 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   function curMw() { return $$('#f-mw input:checked').map((i) => i.value); }
   function curAl() { return $$('#f-al input:checked').map((i) => i.value); }
   function refreshFlow() {
-    const uphost = $('#f-uphost').value || '?';
-    const upport = $('#f-upport').value || '?';
+    const uphost = $('#f-uphost').value.trim();
+    const upport = $('#f-upport').value.trim();
+    refreshAttached();
+    refreshSums();
     renderRailChain($('#railChain'), {
-      upstreamStr: curGroup() ? `group:${curGroup()}` : `${uphost}:${upport}`,
+      upstreamStr: curGroup() ? `group:${curGroup()}` : ((uphost || upport) ? `${uphost || '?'}:${upport || '?'}` : 'upstream not set'),
       mwSelected: curMw(), mwType, alSelected: curAl(),
       inlineAuth: isOn('f-auth-on') ? (($('#f-auth-idp') && $('#f-auth-idp').value) || 'credentials') : '',
       inlineRateLimit: isOn('f-rl-on'),
@@ -5157,9 +5282,9 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     // A previous failure's banner belongs to the previous attempt.
     clearEditorError();
     const nm = isNew ? $('#f-name').value.trim() : h.name;
-    if (!nm) { showInvalid('Name required', 'Enter an internal name for this host.'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter an internal name for this host.', $('#f-name')); return; }
     const domains = domainsCtl.get();
-    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.', $('#f-domains')); return; }
     // A PUT is a whole-object replacement, so every ObjectMeta key this form
     // does NOT render has to be seeded from the loaded host or the save deletes
     // it. labels is the one that bites: it carries the discovery ownership
@@ -5175,7 +5300,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       obj.upstreamGroupRef = curGroup();
     } else {
       const portVal = parseInt($('#f-upport').value, 10);
-      if (!$('#f-uphost').value.trim() || isNaN(portVal)) { showInvalid('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.'); return; }
+      if (!$('#f-uphost').value.trim() || isNaN(portVal)) { showInvalid('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.', $('#f-uphost').value.trim() ? $('#f-upport') : $('#f-uphost')); return; }
       // MERGED over the stored upstream, never rebuilt from the three inputs:
       // Upstream also carries path and hostHeader, and a rebuild dropped both on
       // every save (silently undoing a git-authored escape hatch). The two
@@ -5229,7 +5354,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       if (errpDir) errp.dir = errpDir;
       if (errpInlineRaw) {
         try { errp.inline = JSON.parse(errpInlineRaw); }
-        catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).'); return; }
+        catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', $('#f-errp-inline')); return; }
       }
       if (errpIntercept.length) errp.interceptUpstream = errpIntercept;
       obj.errorPages = errp;
@@ -5242,7 +5367,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     // not understand verbatim, and returns null when there are no rows - which
     // leaves the key off the body entirely rather than committing an empty map.
     const secHdrErr = secHdrCtl.error();
-    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr); return; }
+    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr, $('#f-secheaders .row-bad') || $('#f-secheaders')); return; }
     const secHdrs = secHdrCtl.get();
     if (secHdrs) obj.securityHeaders = secHdrs;
 
@@ -5252,7 +5377,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     // committing an empty array.
     const stripHdrs = stripCtl.get();
     const stripErr = stripHeaderListError(stripHdrs);
-    if (stripErr) { showInvalid('Invalid strip header', stripErr); return; }
+    if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#f-striphdrs')); return; }
     if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;
 
     // certificateRef and http2 have no control on this form any more - the L7
@@ -5296,7 +5421,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       delete ca.identityHeaders;
       if (caListOK) {
         const caRefSel = $('#f-mtls-ca').value;
-        if (!caRefSel) { showInvalid('Client CA required', 'Select the client CA to verify certificates against, or turn client certificates off.'); return; }
+        if (!caRefSel) { showInvalid('Client CA required', 'Select the client CA to verify certificates against, or turn client certificates off.', $('#f-mtls-ca')); return; }
         ca.caRef = caRefSel;
         ca.mode = $('#f-mtls-mode').value;
       }
@@ -5333,9 +5458,9 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       obj.trustedProxies = [];
     } else if (tpPick === 'custom') {
       const trusted = trustedCtl.get();
-      if (!trusted.length) { showInvalid('Trusted proxies empty', 'Add at least one CIDR or IP, or choose "Inherit fleet setting" or "Trust nobody on this host".'); return; }
+      if (!trusted.length) { showInvalid('Trusted proxies empty', 'Add at least one CIDR or IP, or choose "Inherit fleet setting" or "Trust nobody on this host".', $('#f-trustedproxies')); return; }
       const badTp = firstBadCidr(trusted);
-      if (badTp) { showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`); return; }
+      if (badTp) { showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, $('#f-trustedproxies')); return; }
       obj.trustedProxies = trusted;
     }
 
@@ -5430,14 +5555,16 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       locs.push(Object.assign(orig, loc));
     }
     if (locAborted) return;
-    if (locErr) { showInvalid('Location incomplete', locErr); return; }
+    if (locErr) { showInvalid('Location incomplete', locErr, $('#f-locs .row-bad')); return; }
     if (locs.length) obj.locations = locs;
 
     const btn = $('#saveBtn'); btn.disabled = true;
     try {
       const r = await api('/api/proxy-hosts/' + encodeURIComponent(nm), { method: 'PUT', body: obj, headers: isNew ? { 'If-None-Match': '*' } : {} });
-      toastSaved(r.commit);
+      toastSaved(r.commit, isNew ? 'Added' : 'Saved');
       refreshHeadSha(); clearDirty();
+      // One landing rule for every editor: a create opens the new object's own
+      // page (as the wizard does), an edit returns to the list.
       if (isNew) location.hash = '#/hosts/' + encodeURIComponent(nm);
       else location.hash = '#/hosts';
     } catch (e) {
@@ -5449,16 +5576,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   // delete
   const del = $('#deleteBtn');
   if (del) {
-    del.addEventListener('click', async () => {
-      if (!confirm(`Delete proxy host "${h.name}"? This is committed to git.`)) return;
-      del.disabled = true;
-      try {
-        const r = await api('/api/proxy-hosts/' + encodeURIComponent(h.name), { method: 'DELETE' });
-        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'host removed', 'ok', { html: true });
-        refreshHeadSha(); clearDirty();
-        location.hash = '#/hosts';
-      } catch (e) { toastErr(e); del.disabled = false; }
-    });
+    del.addEventListener('click', () => deleteObject('hosts', 'proxy host', h.name, '/api/proxy-hosts/' + encodeURIComponent(h.name), del));
   }
   wireCloneButton('hosts', h, 'hostCloneBtn');
   const yamlBtn = $('#hostYamlBtn');
@@ -5688,13 +5806,9 @@ async function certEditor(c, name) {
     <div class="form-grid">
       <div class="stack">
       ${(!isNew && ct.state) ? certStatusCardHtml(ct) : ''}
+      ${identityCard('ct', ct, { section: 'certs', isNew, placeholder: seed ? seed.origName + '-copy' : 'wild' })}
       <div class="card form-section">
         <p class="section-label">Certificate</p>
-        <div class="field-group">
-          <label>Name</label>
-          <input class="field mono" id="ct-name" data-hint="common.name" data-path="name" value="${esc(ct.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed ? seed.origName + '-copy' : 'wild')}" />
-          <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
-        </div>
         <div class="field-group">
           <label>Type</label>
           <select class="field" id="ct-type" data-hint="certificate.type" data-path="type">
@@ -5758,11 +5872,13 @@ async function certEditor(c, name) {
         ${isNew ? '' : `<button class="btn ghost" id="ct-clone" type="button">Clone</button>`}
         ${isNew ? '' : `<button class="btn danger" id="ct-delete" type="button">${ICON.trash}Delete</button>`}
         <a class="btn ghost" href="#/certs">Cancel</a>
-        <button class="btn primary" id="ct-save" type="button">${isNew ? 'Issue certificate' : 'Save changes'}</button>
+        <button class="btn primary" id="ct-save" type="button">${isNew ? 'Add certificate' : 'Save changes'}</button>
       </div>
     </div>`;
 
   const domainsCtl = makeChipInput($('#ct-domains'), arr(ct.domains), 'add domain...');
+  const tagsCtl = wireIdentityCard('ct', ct);
+  pathsFromHints($('#content'));
   $('#ct-type').addEventListener('change', () => {
     const t = $('#ct-type').value;
     $('#acme-fields').style.display = t === 'acme' ? '' : 'none';
@@ -5779,15 +5895,16 @@ async function certEditor(c, name) {
   $('#ct-save').addEventListener('click', async () => {
     clearEditorError();
     const nm = isNew ? $('#ct-name').value.trim() : ct.name;
-    if (!nm) { showInvalid('Name required', 'Enter a certificate name.'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a certificate name.', $('#ct-name')); return; }
     const domains = domainsCtl.get();
-    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.', $('#ct-domains')); return; }
     const t = $('#ct-type').value;
     // Whole-object PUT: carry the meta this editor renders no control for
-    // (labels, tags, displayName, disabled), or a save deletes it.
+    // (labels), or a save deletes it. The name and status card owns the rest.
     const obj = Object.assign({}, metaCarryForward(ct), { name: nm, type: t, domains });
-    if (ct.displayName) obj.displayName = ct.displayName;
-    if (ct.disabled) obj.disabled = true;
+    const display = $('#ct-display').value.trim(); if (display) obj.displayName = display;
+    const tags = tagsCtl.get(); if (tags.length) obj.tags = tags; else delete obj.tags;
+    if (isOn('ct-disabled')) obj.disabled = true;
     if (t === 'acme') {
       const ch = $('#ct-challenge').value;
       const a = { email: $('#ct-email').value.trim(), challenge: ch };
@@ -5795,15 +5912,15 @@ async function certEditor(c, name) {
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
       if (ch === 'dns-01') {
         a.dnsProvider = $('#ct-dns').value;
-        if (!a.dnsProvider) { showInvalid('DNS provider required', 'Select a DNS provider for dns-01.'); return; }
+        if (!a.dnsProvider) { showInvalid('DNS provider required', 'Select a DNS provider for dns-01.', $('#ct-dns')); return; }
       } else if (domains.some((d) => d.startsWith('*.'))) {
-        showInvalid('Wildcard needs dns-01', 'A wildcard domain can only be validated over dns-01.'); return;
+        showInvalid('Wildcard needs dns-01', 'A wildcard domain can only be validated over dns-01.', $('#ct-challenge')); return;
       }
       if (isOn('ct-eab')) {
         const kid = $('#ct-eab-kid').value.trim();
         const hmac = $('#ct-eab-hmac').value.trim();
-        if (!kid || !hmac) { showInvalid('EAB incomplete', 'Enter both the EAB key ID and HMAC key.'); return; }
-        if (hmac === '***') { showInvalid('Secret masked', 'The EAB HMAC key reads *** - replace it with a real value or a ${ENV:...} placeholder.'); return; }
+        if (!kid || !hmac) { showInvalid('EAB incomplete', 'Enter both the EAB key ID and HMAC key.', kid ? $('#ct-eab-hmac') : $('#ct-eab-kid')); return; }
+        if (hmac === '***') { showInvalid('Secret masked', 'The EAB HMAC key reads *** - replace it with a real value or a ${ENV:...} placeholder.', $('#ct-eab-hmac')); return; }
         a.eab = { kid, hmacKey: hmac };
       }
       obj.acme = a;
@@ -5813,8 +5930,8 @@ async function certEditor(c, name) {
     const btn = $('#ct-save'); btn.disabled = true;
     try {
       const r = await api('/api/certificates/' + encodeURIComponent(nm), { method: 'PUT', body: obj, headers: isNew ? { 'If-None-Match': '*' } : {} });
-      toastSaved(r.commit); refreshHeadSha(); clearDirty();
-      location.hash = '#/certs';
+      toastSaved(r.commit, isNew ? 'Added' : 'Saved'); refreshHeadSha(); clearDirty();
+      location.hash = isNew ? '#/certs/' + encodeURIComponent(nm) : '#/certs';
     } catch (e) {
       if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate');
       btn.disabled = false;
@@ -5837,15 +5954,7 @@ async function certEditor(c, name) {
   });
 
   const del = $('#ct-delete');
-  if (del) del.addEventListener('click', async () => {
-    if (!confirm(`Delete certificate "${ct.name}"?`)) return;
-    del.disabled = true;
-    try {
-      const r = await api('/api/certificates/' + encodeURIComponent(ct.name), { method: 'DELETE' });
-      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
-      refreshHeadSha(); clearDirty(); location.hash = '#/certs';
-    } catch (e) { toastErr(e); del.disabled = false; }
-  });
+  if (del) del.addEventListener('click', () => deleteObject('certs', 'certificate', ct.name, '/api/certificates/' + encodeURIComponent(ct.name), del));
   wireCloneButton('certs', ct, 'ct-clone');
 }
 
@@ -5966,9 +6075,6 @@ async function genericList(c, section) {
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
         <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
-        <div class="card-actions">
-          <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
-        </div>
       </div>
       <div class="kv">${meta.summary(o)}</div>
     </div>`).join('');
@@ -5999,24 +6105,98 @@ async function genericList(c, section) {
 
   $$('.cards .card[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
-    // The name is the card's link for the keyboard and screen readers (the card
-    // itself is not a button: it holds Delete); the rest of the card stays
-    // clickable for the mouse.
-    el.addEventListener('click', (e) => { if (!e.target.closest('.gs-del') && !e.target.closest('a')) open(); });
+    // The name is the card's link for the keyboard and screen readers; the rest
+    // of the card stays clickable for the mouse. Delete is not offered here: it
+    // lives in the object's own save bar, as on proxy hosts and certificates.
+    el.addEventListener('click', (e) => { if (!e.target.closest('a')) open(); });
   });
-  $$('.gs-del').forEach((b) => {
-    b.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const nm = b.dataset.name;
-      if (!confirm(`Delete ${meta.singular} "${nm}"?`)) return;
-      b.disabled = true;
-      try {
-        const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'DELETE' });
-        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
-        refreshHeadSha(); route();
-      } catch (err) { toastErr(err); b.disabled = false; }
-    });
+}
+
+// ---------- delete ----------
+// Delete lives only on an object's own page (the save bar, or the proxy host's
+// title band), always behind confirmModal: the title names the object, one line
+// says what the delete does, the objects that still reference it are listed
+// (the API refuses the delete while any do), and the History line says it can
+// be undone.
+const DELETE_CONSEQUENCE = {
+  hosts: 'Its domains stop being served and are free for another host to claim.',
+  certs: 'Its domains are served by another matching certificate, or by none.',
+  redirects: 'Its domains stop redirecting and are free for another host to claim.',
+  parked: 'Its domains stop answering and are free for another host to claim.',
+  streams: 'Its listen port closes and its target is no longer reachable through gpm.',
+  access: 'An access list that a host still attaches cannot be deleted: detach it there first.',
+  middleware: 'A middleware that a host still attaches cannot be deleted: detach it there first.',
+  identity: 'An identity provider that a host or middleware still signs in through cannot be deleted: point those elsewhere first.',
+  upstreams: 'An upstream group that a host still routes to cannot be deleted: give those hosts another upstream first.',
+  clientcas: 'Client certificates it issued are no longer accepted, and a host that still verifies against it blocks the delete.',
+  dns: 'A certificate that still solves dns-01 through it blocks the delete: switch that certificate first.',
+};
+const DELETE_UNDO = 'Recorded as a commit; History can undo it.';
+// The names that reference section/name, for the delete dialog. Proxy hosts
+// (and their locations) by middlewares, accessLists, upstreamGroupRef, the
+// sign-in's identity provider and the mTLS client CA; a certificate by the
+// hosts whose domains it serves. Other kinds are named with their kind. A
+// failed fetch lists nothing: the API still refuses a referenced delete.
+async function usedBy(section, name) {
+  const get = (p) => api(p).then((r) => arr(r.data)).catch(() => []);
+  const inScope = (h, test) => [h].concat(arr(h.locations)).some(test);
+  const tests = {
+    middleware: (s) => arr(s.middlewares).indexOf(name) !== -1,
+    access: (s) => arr(s.accessLists).indexOf(name) !== -1,
+    upstreams: (s) => s.upstreamGroupRef === name,
+    identity: (s) => !!(s.auth && s.auth.identityProvider === name),
+    clientcas: (s) => !!(s.tls && s.tls.clientAuth && s.tls.clientAuth.caRef === name),
+  };
+  if (section === 'dns') {
+    return (await get('/api/certificates')).filter((ct) => ct.acme && ct.acme.dnsProvider === name).map((ct) => ct.name + ' (certificate)');
+  }
+  if (section === 'certs') {
+    const [hosts, certs, streams] = await Promise.all([get('/api/proxy-hosts'), get('/api/certificates'), get('/api/stream-hosts')]);
+    return hosts.filter((h) => arr(h.domains).some((d) => (certForDomain(certs, d) || {}).name === name)).map((h) => h.name)
+      .concat(streams.filter((s) => s.tls && s.tls.certificateRef === name).map((s) => s.name + ' (stream)'));
+  }
+  const test = tests[section];
+  if (!test) return [];
+  const [hosts, extra] = await Promise.all([
+    get('/api/proxy-hosts'),
+    section === 'identity' ? get('/api/middlewares') : (section === 'access' ? get('/api/stream-hosts') : Promise.resolve([])),
+  ]);
+  const out = hosts.filter((h) => inScope(h, test)).map((h) => h.name);
+  if (section === 'identity') extra.filter(test).forEach((m) => out.push(m.name + ' (middleware)'));
+  if (section === 'access') extra.filter(test).forEach((s) => out.push(s.name + ' (stream)'));
+  return out;
+}
+// deleteObject runs one Delete button: the dialog, the DELETE, the "Deleted"
+// toast and the way back to the list. A refused delete (still referenced, or
+// otherwise invalid) is the sticky editor banner, not a toast that is gone
+// before it is read.
+async function deleteObject(section, kind, name, path, btn) {
+  // Not disabled while the references load: a disabled button drops the focus
+  // the dialog hands back when it closes.
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  let refs = [];
+  try { refs = await usedBy(section, name); } finally { delete btn.dataset.busy; }
+  const ok = await confirmModal({
+    title: `Delete ${kind} ${name}?`,
+    body: `<p>${esc(DELETE_CONSEQUENCE[section] || '')}</p>`
+      + (refs.length ? `<p>Used by: <b>${refs.map(esc).join('</b>, <b>')}</b></p>` : '')
+      + `<p>${esc(DELETE_UNDO)}</p>`,
+    confirmLabel: `Delete ${kind}`,
   });
+  if (!ok) return;
+  clearEditorError();
+  btn.disabled = true;
+  try {
+    const r = await api(path, { method: 'DELETE' });
+    toastSaved(r.commit, 'Deleted');
+    refreshHeadSha(); clearDirty();
+    location.hash = '#/' + section;
+  } catch (e) {
+    if (e && (e.status === 409 || e.status === 400)) showSaveError(e, `Could not delete ${kind}`);
+    else toastErr(e);
+    btn.disabled = false;
+  }
 }
 
 // ---------- editor scaffolding shared by the typed object editors ----------
@@ -6035,27 +6215,51 @@ function saveBar(section, isNew, addLabel) {
     </div>
   </div>`;
 }
-// clonePlaceholder, when set (rendering a clone seed's editor), replaces the
-// generic "internal-name" placeholder with "<original>-copy".
+// ---------- name and status card ----------
+// One card on every editor: Name (immutable after creation), Display name,
+// Tags and Disabled. A host kind stops serving when disabled; any other kind
+// drops out of the running proxy. p prefixes the ids (f on the proxy host, ct
+// on the certificate, ed on the rest). opts.placeholder, when set (a clone
+// seed's editor), replaces the generic "internal-name" placeholder.
 //
-// foldable collapses the card to its one-line summary on the editors that have
-// enough other fields to need the room (redirect, stream, parked). It never
-// folds a NEW object's card - the name is required there and immutable
-// afterwards, so hiding the only chance to set it would be a trap - and never
-// folds one that already holds a display name or a disabled flag.
-function nameCard(obj, isNew, clonePlaceholder, foldable) {
+// opts.foldable collapses the card to its one-line summary on the editors that
+// have enough other fields to need the room (proxy host, redirect, stream,
+// parked). It never folds a NEW object's card - the name is required there and
+// immutable afterwards, so hiding the only chance to set it would be a trap -
+// and never folds one that holds a display name, tags or a status flag.
+const HOST_KINDS = new Set(['hosts', 'redirects', 'streams', 'parked']);
+function identityCard(p, obj, opts) {
+  obj = obj || {};
+  opts = opts || {};
   const body = `
     <div class="inline-fields">
-      <div class="field-group"><label>Name</label><input class="field mono" id="ed-name" data-hint="common.name" data-path="name" value="${esc(obj.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(clonePlaceholder || 'internal-name')}" /><div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
-      <div class="field-group"><label>Display name</label><input class="field" id="ed-display" data-hint="common.displayName" data-path="displayName" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
+      <div class="field-group"><label>Name</label><input class="field mono" id="${p}-name" data-hint="common.name" data-path="name" value="${esc(obj.name || '')}" ${opts.isNew ? '' : 'disabled'} placeholder="${esc(opts.placeholder || 'internal-name')}" /><div class="hint">${opts.isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div></div>
+      <div class="field-group"><label>Display name</label><input class="field" id="${p}-display" data-hint="common.displayName" data-path="displayName" value="${esc(obj.displayName || '')}" placeholder="optional label" /></div>
     </div>
-    <div class="toggle-line"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">Exclude from the running proxy</div></div>${switchHtml('ed-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>`;
-  if (!foldable) return `<div class="card form-section"><p class="section-label">Identity</p>${body}</div>`;
+    <div class="field-group"><label>Tags</label><div class="chip-input" id="${p}-tags" data-hint="${opts.section === 'hosts' ? 'proxyHost.tags' : 'common.tags'}" data-path="tags"></div><div class="hint">Free-form tags for grouping and filtering. Press Enter to add.</div></div>
+    <div class="toggle-line"><div class="tl-text"><div class="nm">Disabled</div><div class="ds">${HOST_KINDS.has(opts.section) ? 'Stop serving this host' : 'Exclude from the running proxy'}</div></div>${switchHtml(p + '-disabled', !!obj.disabled, 'Disabled', 'common.disabled')}</div>
+    ${opts.extra || ''}`;
+  if (!opts.foldable) return `<div class="card form-section" id="${p}-id-card"><p class="section-label">Name and status</p>${body}</div>`;
+  const sum = identitySummary(obj.displayName, arr(obj.tags).length, obj.disabled, obj.maintenance, obj.name);
+  return foldHtml(p + '-id-card', 'Name and status', sum.text, opts.isNew || sum.set, body);
+}
+function identitySummary(display, tagCount, disabled, maintenance, name) {
   const parts = [];
-  if (obj.displayName) parts.push(obj.displayName);
-  if (obj.disabled) parts.push('disabled');
-  const open = isNew || parts.length > 0;
-  return foldHtml('ed-id-card', 'Identity', parts.length ? parts.join(' - ') : (obj.name || 'name and status'), open, body);
+  if (display) parts.push(display);
+  if (tagCount) parts.push(`${tagCount} tag${tagCount === 1 ? '' : 's'}`);
+  if (disabled) parts.push('disabled');
+  if (maintenance) parts.push('maintenance');
+  return { set: parts.length > 0, text: parts.length ? parts.join(' - ') : (name || 'name, tags, status') };
+}
+// Wires the card's tag chips and keeps a folded card's summary following the
+// form. Returns the tags control.
+function wireIdentityCard(p, obj) {
+  const tagsCtl = makeChipInput($('#' + p + '-tags'), arr(obj && obj.tags), 'add tag...');
+  liveFoldSummaries($('#' + p + '-id-card'), {
+    [p + '-id-card']: () => identitySummary($('#' + p + '-display').value.trim(), tagsCtl.get().length,
+      isOn(p + '-disabled'), isOn(p + '-maintenance'), $('#' + p + '-name').value.trim()).text,
+  });
+  return tagsCtl;
 }
 // ---------- automatic certificate selection (L7) ----------
 // On an HTTP host (proxy, redirect, parked) gpm picks the certificate from the
@@ -6335,36 +6539,32 @@ function makeSecurityHeaderRows(wrap, initial) {
 // control. A PUT is a whole-object replacement, so without the carry-forward
 // every one of those saves silently deleted both keys.
 function wireEditor(section, plural, meta, isNew, origName, stored, buildBody) {
+  const tagsCtl = wireIdentityCard('ed', stored);
+  pathsFromHints($('#content'));
   $('#ed-save').addEventListener('click', async () => {
     clearEditorError();
     const nm = isNew ? $('#ed-name').value.trim() : origName;
-    if (!nm) { showInvalid('Name required', 'Enter a name.'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a name.', $('#ed-name')); return; }
     const body = buildBody(nm);
     if (!body) return;
     Object.assign(body, metaCarryForward(stored));
     body.name = nm;
     const disp = $('#ed-display'); if (disp && disp.value.trim()) body.displayName = disp.value.trim();
+    // The card owns tags: the stored ones were carried above, the chips replace them.
+    const tags = tagsCtl.get(); if (tags.length) body.tags = tags; else delete body.tags;
     if (isOn('ed-disabled')) body.disabled = true;
     const btn = $('#ed-save'); btn.disabled = true;
     try {
       const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'PUT', body, headers: isNew ? { 'If-None-Match': '*' } : {} });
-      toastSaved(r.commit); refreshHeadSha(); clearDirty();
-      location.hash = '#/' + section;
+      toastSaved(r.commit, isNew ? 'Added' : 'Saved'); refreshHeadSha(); clearDirty();
+      location.hash = '#/' + section + (isNew ? '/' + encodeURIComponent(nm) : '');
     } catch (e) {
       if (!(isNew && showNameTaken(e, meta.singular, nm, '#/' + section + '/' + encodeURIComponent(nm), `Could not add this ${meta.singular}`, $('#ed-name')))) showSaveError(e, `Could not save this ${meta.singular}`);
       btn.disabled = false;
     }
   });
   const del = $('#ed-delete');
-  if (del) del.addEventListener('click', async () => {
-    if (!confirm(`Delete ${meta.singular} "${origName}"?`)) return;
-    del.disabled = true;
-    try {
-      const r = await api('/api/' + plural + '/' + encodeURIComponent(origName), { method: 'DELETE' });
-      toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'removed', 'ok', { html: true });
-      refreshHeadSha(); clearDirty(); location.hash = '#/' + section;
-    } catch (e) { toastErr(e); del.disabled = false; }
-  });
+  if (del) del.addEventListener('click', () => deleteObject(section, meta.singular, origName, '/api/' + plural + '/' + encodeURIComponent(origName), del));
 }
 
 // ---------- REDIRECT HOST EDITOR ----------
@@ -6378,7 +6578,7 @@ async function redirectEditor(c, name) {
   const certs = arr(certsR);
   const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('redirects', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy', true)}
+    ${identityCard('ed', o, { section: 'redirects', isNew, placeholder: seed && seed.origName + '-copy', foldable: true })}
     <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="redirectHost.domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
     <div class="card form-section"><p class="section-label">Redirect target</p>
       <div class="inline-fields">
@@ -6398,9 +6598,9 @@ async function redirectEditor(c, name) {
   wireTls();
   wireEditor('redirects', 'redirect-hosts', meta, isNew, name || o.name, o, (nm) => {
     const domains = domainsCtl.get();
-    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return null; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.', $('#ed-domains')); return null; }
     const td = $('#ed-tdomain').value.trim();
-    if (!td) { showInvalid('Target required', 'Set the target domain.'); return null; }
+    if (!td) { showInvalid('Target required', 'Set the target domain.', $('#ed-tdomain')); return null; }
     // absent-stays-absent: both controls always SHOW a value, so sending them
     // unconditionally materialises `targetScheme: auto` / `statusCode: 301` into
     // a file that never carried the key. Send each only when it was already
@@ -6418,6 +6618,17 @@ async function redirectEditor(c, name) {
 }
 
 // ---------- STREAM HOST EDITOR ----------
+// Why an access list cannot gate a raw stream, or null when it can. Mirrors the
+// API's refusal: basic-auth users need an HTTP challenge, path- or
+// method-scoped rules need a request path, and source-backed rules are refused
+// on a stream as well.
+function streamAlUnavailable(a) {
+  if (arr(a.basicAuth).length) return { chip: 'basic-auth: not at L4', why: 'This list has basic-auth users, which a raw stream cannot evaluate.' };
+  const rules = arr(a.rules);
+  if (rules.some((r) => arr(r.paths).length || arr(r.methods).length)) return { chip: 'path rules: not at L4', why: 'This list has rules scoped to request paths or methods. A raw stream has no request path to match.' };
+  if (rules.some((r) => r.source)) return { chip: 'source rules: not at L4', why: 'This list has rules backed by a remote source, which the API refuses on a raw stream.' };
+  return null;
+}
 async function streamEditor(c, name) {
   const meta = SECTION_META.streams; const isNew = !name;
   const seed = isNew ? takeCloneSeed('streams') : null;
@@ -6427,9 +6638,8 @@ async function streamEditor(c, name) {
     isNew ? Promise.resolve({ data: {} }) : api('/api/stream-hosts/' + encodeURIComponent(name)),
   ]);
   const streamCerts = arr(certsR);
-  // A list with basic-auth users cannot be evaluated on a raw stream (there is
-  // no request to challenge), so it is offered but disabled rather than
-  // accepted-then-rejected by the API.
+  // A list the API refuses on a raw stream (streamAlUnavailable) is offered but
+  // disabled with the reason rather than accepted-then-rejected by the API.
   const streamAls = arr(alR);
   const o = seed ? seed.data : (objR.data || {});
   const stls = o.tls || {};
@@ -6440,7 +6650,7 @@ async function streamEditor(c, name) {
     : 'none - the bytes are forwarded blind';
   const streamAlSummary = selAl.length ? selAl.join(', ') : 'none - every client IP is accepted';
   c.innerHTML = editorHead('streams', meta, isNew, name) + `<div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy', true)}
+    ${identityCard('ed', o, { section: 'streams', isNew, placeholder: seed && seed.origName + '-copy', foldable: true })}
     <div class="card form-section"><p class="section-label">Forwarding</p>
       <div class="inline-fields">
         <div class="field-group"><label>Listen port</label><input class="field mono" id="ed-listen" data-hint="streamHost.listenPort" type="number" value="${esc(o.listenPort != null ? o.listenPort : '')}" placeholder="5353" /></div>
@@ -6474,11 +6684,11 @@ async function streamEditor(c, name) {
       </div>
     `)}
     ${foldHtml('ed-stream-al-card', 'Access lists', streamAlSummary, selAl.length > 0, `
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any backend is dialled. Only IP rules and geo apply at L4 - a list with basic-auth users cannot issue an HTTP challenge on a raw stream and is unavailable here.</p>
+      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any backend is dialled. Only literal IP rules and geo apply at L4. A list with basic-auth users, rules scoped to paths or methods, or rules backed by a source needs an HTTP request, so it is unavailable here.</p>
       <div class="check-list" id="ed-stream-al" data-hint="streamHost.accessLists">
         ${streamAls.length ? streamAls.map((a) => {
-    const hasBasic = arr(a.basicAuth).length > 0;
-    return `<label class="check-item"${hasBasic ? ' style="opacity:.5;cursor:not-allowed" title="This list has basic-auth users, which a raw stream cannot evaluate."' : ''}><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !hasBasic ? ' checked' : ''}${hasBasic ? ' disabled' : ''}/>${esc(a.name)}<span class="ci-ty">${hasBasic ? 'basic-auth: n/a at L4' : 'ip / geo'}</span></label>`;
+    const off = streamAlUnavailable(a);
+    return `<label class="check-item"${off ? ` style="opacity:.5;cursor:not-allowed" title="${esc(off.why)}"` : ''}><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !off ? ' checked' : ''}${off ? ' disabled' : ''}/>${esc(a.name)}<span class="ci-ty">${off ? esc(off.chip) : 'ip / geo'}</span></label>`;
   }).join('') : '<div class="check-empty">No access lists defined yet.</div>'}
       </div>
     `)}
@@ -6501,10 +6711,23 @@ async function streamEditor(c, name) {
   refreshStreamTLS();
   $('#ed-tlsmode').addEventListener('change', refreshStreamTLS);
   $('#ed-proto').addEventListener('change', refreshStreamTLS);
+  liveFoldSummaries($('#content'), {
+    'ed-stls-card': () => {
+      const mode = $('#ed-tlsmode').disabled ? '' : $('#ed-tlsmode').value;
+      if (!mode) return 'none - the bytes are forwarded blind';
+      const sni = sniCtl.get();
+      const ref = mode === 'terminate' ? $('#ed-streamcert').value : '';
+      return `${mode}${sni.length ? ', SNI ' + sni.join(', ') : ''}${ref ? ', cert ' + ref : ''}`;
+    },
+    'ed-stream-al-card': () => {
+      const als = $$('#ed-stream-al input:checked').map((i) => i.value);
+      return als.length ? als.join(', ') : 'none - every client IP is accepted';
+    },
+  });
   wireEditor('streams', 'stream-hosts', meta, isNew, name || o.name, o, () => {
     const lp = parseInt($('#ed-listen').value, 10); const fp = parseInt($('#ed-fport').value, 10); const fh = $('#ed-fhost').value.trim();
-    if (isNaN(lp)) { showInvalid('Listen port required', 'Enter a listen port.'); return null; }
-    if (!fh || isNaN(fp)) { showInvalid('Target required', 'Set target host and port.'); return null; }
+    if (isNaN(lp)) { showInvalid('Listen port required', 'Enter a listen port.', $('#ed-listen')); return null; }
+    if (!fh || isNaN(fp)) { showInvalid('Target required', 'Set target host and port.', fh ? $('#ed-fport') : $('#ed-fhost')); return null; }
     const proto = $('#ed-proto').value;
     const body = { listenPort: lp, protocol: proto, target: { host: fh, port: fp } };
     const mode = $('#ed-tlsmode').value;
@@ -6513,7 +6736,7 @@ async function streamEditor(c, name) {
       const sni = sniCtl.get(); if (sni.length) tls.sniMatch = sni;
       if (mode === 'terminate') {
         const ref = $('#ed-streamcert').value;
-        if (!ref) { showInvalid('Certificate required', 'Terminate mode needs a certificate to present.'); return null; }
+        if (!ref) { showInvalid('Certificate required', 'Terminate mode needs a certificate to present.', $('#ed-streamcert')); return null; }
         tls.certificateRef = ref;
       }
       body.tls = tls;
@@ -6536,7 +6759,7 @@ async function parkedEditor(c, name) {
   const certs = arr(certsR);
   const o = seed ? seed.data : (objR.data || {});
   c.innerHTML = editorHead('parked', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy', true)}
+    ${identityCard('ed', o, { section: 'parked', isNew, placeholder: seed && seed.origName + '-copy', foldable: true })}
     <div class="card form-section"><p class="section-label">Domains</p><div class="chip-input" id="ed-domains" data-hint="parkedHost.domains"></div><div class="hint">Press Enter to add. At least one domain is required.</div></div>
     <div class="card form-section"><p class="section-label">Response</p>
       <div class="field-group"><label>Status code</label><input class="field mono" id="ed-status" data-hint="parkedHost.statusCode" type="number" value="${esc(o.statusCode != null ? o.statusCode : 404)}" placeholder="404" /><div class="hint">Returned for every request to these domains. Default 404.</div></div>
@@ -6547,7 +6770,7 @@ async function parkedEditor(c, name) {
   wireTls();
   wireEditor('parked', 'parked-hosts', meta, isNew, name || o.name, o, () => {
     const domains = domainsCtl.get();
-    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.'); return null; }
+    if (!domains.length) { showInvalid('Domain required', 'Add at least one domain.', $('#ed-domains')); return null; }
     const body = { domains };
     // absent-stays-absent: the input renders 404 when the object has no status.
     const sc = parseInt($('#ed-status').value, 10);
@@ -6609,7 +6832,7 @@ async function dnsEditor(c, name) {
   const o = seed ? seed.data : (isNew ? { provider: 'cloudflare', config: { apiToken: '${ENV:CF_API_TOKEN}' } } : ((await api('/api/dns-providers/' + encodeURIComponent(name))).data || {}));
   const current = o.provider || 'cloudflare';
   c.innerHTML = editorHead('dns', meta, isNew, name) + `<div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'dns', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Provider</p>
       <div class="field-group"><label>Provider</label>
         <select class="field mono" id="ed-provider" data-hint="dnsProvider.provider" data-path="provider">
@@ -6675,7 +6898,7 @@ async function dnsEditor(c, name) {
 
   wireEditor('dns', 'dns-providers', meta, isNew, name || o.name, o, () => {
     const provId = $('#ed-provider').value.trim();
-    if (!provId) { showInvalid('Provider required', 'Select a provider.'); return null; }
+    if (!provId) { showInvalid('Provider required', 'Select a provider.', $('#ed-provider')); return null; }
     const p = dnsProvider(provId);
     let cfg;
     if (p.fields) {
@@ -6687,26 +6910,27 @@ async function dnsEditor(c, name) {
         if (v) cfg[el.dataset.key] = v;
       });
       if (Object.values(cfg).some((v) => v === '***')) {
-        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.'); return null;
+        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $$('#ed-typed .dnsf').find((el) => el.value.trim() === '***')); return null;
       }
       if (cfg.ttl != null) {
         const n = Number(cfg.ttl);
-        if (!Number.isInteger(n) || n < 1 || n > 86400) { showInvalid('Invalid TTL', 'config.ttl must be a whole number of seconds between 1 and 86400.'); return null; }
+        if (!Number.isInteger(n) || n < 1 || n > 86400) { showInvalid('Invalid TTL', 'config.ttl must be a whole number of seconds between 1 and 86400.', $('#ed-typed .dnsf[data-key="ttl"]')); return null; }
       }
       if (cfg.timeout && !GO_DURATION_RE.test(cfg.timeout)) {
-        showInvalid('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.'); return null;
+        showInvalid('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.', $('#ed-typed .dnsf[data-key="timeout"]')); return null;
       }
       if (cfg.baseURL && !/^https?:\/\//.test(cfg.baseURL)) {
-        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL.'); return null;
+        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL.', $('#ed-typed .dnsf[data-key="baseURL"]')); return null;
       }
     } else {
-      if (cfgCtl.masked()) { showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.'); return null; }
+      if (cfgCtl.masked()) { showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $('#ed-config')); return null; }
       cfg = cfgCtl.get();
     }
     const missing = arr(p.required).filter((k) => !cfg[k]);
     if (missing.length) {
-      if (p.missing) showInvalid('Missing credentials', p.missing);
-      else showInvalid('API token required', 'Every DNS provider needs a config.apiToken credential.');
+      const missingEl = $(`#ed-typed .dnsf[data-key="${missing[0]}"]`) || $('#ed-config');
+      if (p.missing) showInvalid('Missing credentials', p.missing, missingEl);
+      else showInvalid('API token required', 'Every DNS provider needs a config.apiToken credential.', missingEl);
       return null;
     }
     const body = { provider: provId };
@@ -6748,7 +6972,7 @@ async function accessEditor(c, name) {
   </div>` : '';
 
   c.innerHTML = editorHead('access', meta, isNew, name) + legacyCard + `<div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'access', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Policy</p>
       <div class="field-group"><label>Default action</label><select class="field mono" id="ed-default" data-hint="accessList.defaultAction" data-path="defaultAction">
         ${enumOptions('ruleAction', ['deny', 'allow'], o.defaultAction || 'deny')}
@@ -6950,7 +7174,7 @@ async function accessEditor(c, name) {
       }
       rules.push(rule);
     });
-    if (ruleErr) { showInvalid('Rule invalid', ruleErr); return null; }
+    if (ruleErr) { showInvalid('Rule invalid', ruleErr, $('#ed-rules .row-bad')); return null; }
     if (rules.length) body.rules = rules;
     const sources = []; let srcErr = '';
     clearRowErrors(sourcesWrap);
@@ -6972,7 +7196,7 @@ async function accessEditor(c, name) {
       }
       sources.push(src);
     });
-    if (srcErr) { showInvalid('Source invalid', srcErr); return null; }
+    if (srcErr) { showInvalid('Source invalid', srcErr, $('#ed-sources .row-bad')); return null; }
     if (sources.length) body.sources = sources;
     const geoAllow = geoAllowCtl.get(); const geoDeny = geoDenyCtl.get(); const onUnknown = $('#ed-geo-unknown').value;
     const geoBody = {};
@@ -7015,7 +7239,7 @@ async function migrateBasicAuth(listName, btn) {
   try {
     const r = await api('/api/access-lists/' + encodeURIComponent(listName) + '/migrate-basic-auth', { method: 'POST' });
     const mw = (r.data && r.data.middleware) || plan.middleware;
-    toast('Migrated', `Migrated to middleware ${mw}.` + (shortSha(r.commit) ? ' committed ' + shortSha(r.commit) : ''), 'ok');
+    toast('Migrated', `Migrated to middleware ${esc(mw)}.` + (shortSha(r.commit) ? ` committed <span class="sha">${esc(shortSha(r.commit))}</span>` : ''), 'ok', { html: true });
     refreshHeadSha();
     route();
   } catch (e) {
@@ -7036,7 +7260,7 @@ async function idpEditor(c, name) {
   const type = o.type || 'oidc';
   const oidc = o.oidc || {}; const fa = o.forwardAuth || {}; const ar = o.authRequest || {}; const rm = o.roleMapping || {};
   c.innerHTML = editorHead('identity', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'identity', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Provider type</label><select class="field mono" id="ed-type" data-hint="identityProvider.type">
         ${enumOptions('idpType', ['oidc', 'forward-auth', 'auth-request'], type)}
@@ -7096,9 +7320,9 @@ async function idpEditor(c, name) {
     const t = $('#ed-type').value; const body = { type: t };
     if (t === 'oidc') {
       const issuer = $('#oidc-issuer').value.trim(); const cid = $('#oidc-clientid').value.trim();
-      if (!issuer || !cid) { showInvalid('OIDC incomplete', 'Issuer URL and client ID are required.'); return null; }
+      if (!issuer || !cid) { showInvalid('OIDC incomplete', 'Issuer URL and client ID are required.', issuer ? $('#oidc-clientid') : $('#oidc-issuer')); return null; }
       const sec = $('#oidc-secret').value.trim();
-      if (sec === '***') { showInvalid('Secret masked', 'The client secret is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.'); return null; }
+      if (sec === '***') { showInvalid('Secret masked', 'The client secret is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', $('#oidc-secret')); return null; }
       const spec = { issuerURL: issuer, clientID: cid, usePKCE: isOn('oidc-pkce') };
       if (sec) spec.clientSecret = sec;
       const sc = scopesCtl.get(); if (sc.length) spec.scopes = sc;
@@ -7111,15 +7335,15 @@ async function idpEditor(c, name) {
       body.oidc = spec;
     } else if (t === 'forward-auth') {
       const tp = trustedCtl.get(); const uh = $('#fa-user').value.trim();
-      if (!tp.length) { showInvalid('Trusted proxies required', 'Add at least one trusted proxy CIDR.'); return null; }
-      if (!uh) { showInvalid('User header required', 'Set the user header.'); return null; }
+      if (!tp.length) { showInvalid('Trusted proxies required', 'Add at least one trusted proxy CIDR.', $('#fa-trusted')); return null; }
+      if (!uh) { showInvalid('User header required', 'Set the user header.', $('#fa-user')); return null; }
       const spec = { trustedProxies: tp, userHeader: uh };
       const fields = { emailHeader: 'fa-email', nameHeader: 'fa-name', groupsHeader: 'fa-groups', groupsDelimiter: 'fa-delim', amrHeader: 'fa-amr' };
       Object.keys(fields).forEach((k) => { const v = $('#' + fields[k]).value.trim(); if (v) spec[k] = v; });
       body.forwardAuth = spec;
     } else {
       const out = $('#ar-outpost').value.trim();
-      if (!out) { showInvalid('Outpost URL required', 'Set the outpost URL.'); return null; }
+      if (!out) { showInvalid('Outpost URL required', 'Set the outpost URL.', $('#ar-outpost')); return null; }
       const spec = { outpostURL: out };
       const pp = $('#ar-prefix').value.trim(); if (pp) spec.pathPrefix = pp;
       const ap = $('#ar-authpath').value.trim(); if (ap) spec.authPath = ap;
@@ -7149,7 +7373,7 @@ async function middlewareEditor(c, name) {
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
   const bo = o.bouncer || {};
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'middleware', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type" data-hint="middleware.type">
         ${enumOptions('middlewareType', ['auth', 'headers', 'guard', 'rate-limit', 'rewrite', 'bouncer'], type)}
@@ -7309,7 +7533,7 @@ async function middlewareEditor(c, name) {
       // Same rule as guard and rewrite: an empty spec is a middleware that does
       // nothing, and committing `headers: {}` looks like a configured object in
       // git while changing no request at all.
-      if (!Object.keys(spec).length) { showInvalid('Header rule required', 'Set or remove at least one request or response header.'); return null; }
+      if (!Object.keys(spec).length) { showInvalid('Header rule required', 'Set or remove at least one request or response header.', $('#hdr-setreq')); return null; }
       body.headers = spec;
     } else if (t === 'guard') {
       const triggers = [];
@@ -7320,7 +7544,7 @@ async function middlewareEditor(c, name) {
         if (Object.keys(q).length) tr.queryEquals = q;
         if (Object.keys(tr).length) triggers.push(tr);
       });
-      if (!triggers.length) { showInvalid('Trigger required', 'Add at least one guard trigger.'); return null; }
+      if (!triggers.length) { showInvalid('Trigger required', 'Add at least one guard trigger.', $('#guard-triggers')); return null; }
       const spec = { triggers };
       const allow = guardAllowCtl.get(); if (allow.length) spec.allowFrom = allow;
       const ds = parseInt($('#guard-deny').value, 10); if (!isNaN(ds)) spec.denyStatus = ds;
@@ -7332,10 +7556,10 @@ async function middlewareEditor(c, name) {
     } else if (t === 'bouncer') {
       const provider = $('#bo-provider').value;
       const url = $('#bo-url').value.trim();
-      if (!url) { showInvalid('URL required', 'Enter the bouncer URL.'); return null; }
+      if (!url) { showInvalid('URL required', 'Enter the bouncer URL.', $('#bo-url')); return null; }
       const apiKey = $('#bo-apikey').value.trim();
-      if (apiKey === '***') { showInvalid('Secret masked', 'The API key is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.'); return null; }
-      if (provider === 'crowdsec' && !apiKey) { showInvalid('API key required', 'The crowdsec provider needs an API key (cscli bouncers add gpm).'); return null; }
+      if (apiKey === '***') { showInvalid('Secret masked', 'The API key is masked as ***. Replace it with a real value or a ${ENV:...} placeholder.', $('#bo-apikey')); return null; }
+      if (provider === 'crowdsec' && !apiKey) { showInvalid('API key required', 'The crowdsec provider needs an API key (cscli bouncers add gpm).', $('#bo-apikey')); return null; }
       const spec = { provider, url };
       if (apiKey) spec.apiKey = apiKey;
       const timeout = $('#bo-timeout').value.trim(); if (timeout) spec.timeout = timeout;
@@ -7350,8 +7574,8 @@ async function middlewareEditor(c, name) {
       const rp = rwCtl.get();
       const entries = Object.entries(rp);
       for (const [k, v] of entries) {
-        if (!k.startsWith('/') || !v.startsWith('/')) { showInvalid('Invalid path', 'Path must be absolute (start with "/").'); return null; }
-        if (k === v) { showInvalid('No-op rewrite', `A path cannot be rewritten to itself ("${k}").`); return null; }
+        if (!k.startsWith('/') || !v.startsWith('/')) { showInvalid('Invalid path', 'Path must be absolute (start with "/").', $('#rw-replacepath')); return null; }
+        if (k === v) { showInvalid('No-op rewrite', `A path cannot be rewritten to itself ("${k}").`, $('#rw-replacepath')); return null; }
       }
       // Per-row validation, so the complaint lands on the row it belongs to
       // rather than in a page-level toast the operator has to map back by hand.
@@ -7378,11 +7602,11 @@ async function middlewareEditor(c, name) {
         return err ? { err } : { out };
       }
       const pre = readRules(rwPrefix, false);
-      if (pre.err) { showInvalid('Prefix rule invalid', pre.err); return null; }
+      if (pre.err) { showInvalid('Prefix rule invalid', pre.err, $('#rw-prefix .row-bad')); return null; }
       const rex = readRules(rwRegex, true);
-      if (rex.err) { showInvalid('Regex rule invalid', rex.err); return null; }
+      if (rex.err) { showInvalid('Regex rule invalid', rex.err, $('#rw-regex .row-bad')); return null; }
       if (!entries.length && !pre.out.length && !rex.out.length) {
-        showInvalid('Rule required', 'Add at least one rule.'); return null;
+        showInvalid('Rule required', 'Add at least one rule.', $('#rw-replacepath')); return null;
       }
       const spec = {};
       if (entries.length) spec.replacePath = rp;
@@ -7446,6 +7670,22 @@ function segValue(group) {
 // foldHtml is an optional section collapsed to a one-line summary of what it
 // holds. It opens automatically when it holds something, so a configured section
 // is never hidden from someone scanning the page.
+//
+// A fold's summary is rendered from the stored object; liveFoldSummaries then
+// keeps it equal to the form: map is {foldId: () => summary text}, recomputed
+// on every input, change, switchchange, chipchange and click inside root, so a
+// collapsed fold never shows a stale state. Entries may be added to map later
+// (a location row added after the page rendered).
+function liveFoldSummaries(root, map) {
+  const run = () => Object.keys(map).forEach((id) => {
+    const el = document.querySelector(`#${CSS.escape(id)} > summary .fold-sum`);
+    if (!el) return;
+    const s = map[id]();
+    if (s != null) el.innerHTML = glossaryize(esc(s));
+  });
+  if (root) ['input', 'change', 'switchchange', 'chipchange', 'click'].forEach((ev) => root.addEventListener(ev, run));
+  return run;
+}
 function foldHtml(id, label, summary, open, body) {
   return `<details class="card form-section fold" id="${esc(id)}"${open ? ' open' : ''}>
     <summary><span class="section-label">${esc(label)}</span><span class="fold-sum">${glossaryize(esc(summary))}</span></summary>
@@ -7530,7 +7770,7 @@ async function clientCAEditor(c, name) {
     </div>`);
 
   const configStack = `<div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'clientcas', isNew, placeholder: seed && seed.origName + '-copy' })}
     ${anchorCard}
     ${crlCard}
     ${keyCard}
@@ -7546,7 +7786,7 @@ async function clientCAEditor(c, name) {
 
   wireEditor('clientcas', 'client-cas', meta, isNew, name || o.name, o, () => {
     const caPEM = $('#ed-capem').value.trim();
-    if (!caPEM) { showInvalid('CA required', 'Paste the CA certificate PEM, or switch to "Generate new CA".'); return null; }
+    if (!caPEM) { showInvalid('CA required', 'Paste the CA certificate PEM, or switch to "Generate new CA".', $('#ed-capem')); return null; }
     // Each either/or pair resolves through resolvePair, so only one side is ever
     // submitted AND merely toggling the picker to look at the other side is a
     // no-op. Reading the selected control alone would silently wipe the stored
@@ -7564,7 +7804,7 @@ async function clientCAEditor(c, name) {
     }
     // Checked on the RESOLVED value, so the redaction guard still fires when the
     // masked key is being carried over from the unselected side of the picker.
-    if (keyPEM === '***') { showInvalid('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} placeholder or clear it.'); return null; }
+    if (keyPEM === '***') { showInvalid('Secret masked', 'The inline CA key is masked as ***. Replace it with a ${FILE:...} placeholder or clear it.', $('#ed-cakeypem')); return null; }
     const body = { caPEM };
     if (file) body.crlFile = file;
     if (inline) body.crlPEM = inline;
@@ -7576,7 +7816,7 @@ async function clientCAEditor(c, name) {
     // about has to be sent back or a UI save silently resets it to the default.
     const warnDays = parseInt($('#ed-warndays').value, 10);
     if (!isNaN(warnDays) && warnDays !== 0) {
-      if (warnDays < 0 || warnDays > 3650) { showInvalid('Warning window out of range', 'Expiry warning must be between 0 (default 30) and 3650 days.'); return null; }
+      if (warnDays < 0 || warnDays > 3650) { showInvalid('Warning window out of range', 'Expiry warning must be between 0 (default 30) and 3650 days.', $('#ed-warndays')); return null; }
       body.expiryWarningDays = warnDays;
     }
     return body;
@@ -7603,6 +7843,17 @@ async function clientCAEditor(c, name) {
     gateControl($('#ed-save'), !generating, 'Use "Generate CA" to create this CA, or switch to "Paste existing CA".');
   };
   wireSegs((group, v) => { if (group === 'anchor') syncAnchorMode(v); });
+  // The two folds' summaries follow the form, on the same rule as their render.
+  liveFoldSummaries($('#content'), {
+    'crl-card': () => {
+      const v = segValue('crl') === 'inline' ? ($('#ed-crlpem').value.trim() ? 'inline PEM' : '') : $('#ed-crlfile').value.trim();
+      return v ? `${v}, ${$('#ed-crlpolicy').value || 'fail-closed'}` : 'not configured - a revoked certificate passes until it expires';
+    },
+    'cakey-card': () => {
+      const v = segValue('cakey') === 'inline' ? ($('#ed-cakeypem').value.trim() ? 'inline key' : '') : $('#ed-cakeyfile').value.trim();
+      return v || 'not configured - issuance disabled';
+    },
+  });
   if (isNew) {
     syncAnchorMode(segValue('anchor'));
     wireClientCAGenerate();
@@ -7623,9 +7874,9 @@ function wireClientCAGenerate() {
   btn.addEventListener('click', async () => {
     clearEditorError();
     const nm = $('#ed-name').value.trim();
-    if (!nm) { showInvalid('Name required', 'Enter a name for the CA first.'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a name for the CA first.', $('#ed-name')); return; }
     const days = parseInt($('#gen-days').value, 10);
-    if (isNaN(days) || days < 1 || days > 7300) { showInvalid('Validity out of range', 'CA validity must be between 1 and 7300 days.'); return; }
+    if (isNaN(days) || days < 1 || days > 7300) { showInvalid('Validity out of range', 'CA validity must be between 1 and 7300 days.', $('#gen-days')); return; }
     const body = { validityDays: days };
     const cn = $('#gen-cn').value.trim(); if (cn) body.commonName = cn;
     const org = $('#gen-org').value.trim(); if (org) body.organization = org;
@@ -7633,10 +7884,10 @@ function wireClientCAGenerate() {
     // hidden while generating, except the identity card: say so before its
     // display name or disabled flag is dropped.
     const disp = $('#ed-display');
-    if ((disp && disp.value.trim()) || isOn('ed-disabled')) {
+    if ((disp && disp.value.trim()) || $$('#ed-tags .chip-tok').length || isOn('ed-disabled')) {
       const go = await confirmModal({
-        title: 'Display name and Disabled are not saved',
-        body: '<p>Generating creates the CA from its name and the fields in this panel only. Set the display name or the Disabled switch after it is created.</p>',
+        title: 'Display name, tags and Disabled are not saved',
+        body: '<p>Generating creates the CA from its name and the fields in this panel only. Set the display name, tags or the Disabled switch after it is created.</p>',
         confirmLabel: 'Generate anyway',
         danger: false,
       });
@@ -7645,7 +7896,7 @@ function wireClientCAGenerate() {
     btn.disabled = true;
     try {
       const r = await api('/api/client-cas/' + encodeURIComponent(nm) + '/generate', { method: 'POST', body });
-      toastSaved(r.commit); refreshHeadSha(); clearDirty();
+      toastSaved(r.commit, 'Added'); refreshHeadSha(); clearDirty();
       location.hash = '#/clientcas/' + encodeURIComponent(nm);
     } catch (e) { toastErr(e); btn.disabled = false; }
   });
@@ -7777,8 +8028,8 @@ async function refreshIssuedCerts(name, hasKey) {
 }
 
 // wireClientCertRenew wires the per-row Renew action. Clicking Renew only reveals
-// the form; the request is sent from "Confirm renewal", behind the same native
-// confirm() the delete flows use, with the consequences spelled out.
+// the form; the request is sent from "Confirm renewal", behind confirmModal
+// with the consequences spelled out.
 function wireClientCertRenew(name, hasKey) {
   $$('.ren-btn').forEach((b) => {
     // Without a signing key the CA can no longer sign anything, so renewal is as
@@ -7800,14 +8051,17 @@ function wireClientCertRenew(name, hasKey) {
       clearEditorError();
       const row = $('#ren-' + CSS.escape(b.dataset.serial));
       const pw = $('.ren-pw', row).value;
-      if (!pw) { showInvalid('Password required', 'The renewed PKCS#12 bundle must be password-protected.'); return; }
-      if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`); return; }
+      if (!pw) { showInvalid('Password required', 'The renewed PKCS#12 bundle must be password-protected.', $('.ren-pw', row)); return; }
+      if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, $('.ren-pw', row)); return; }
       const days = parseInt($('.ren-days', row).value, 10);
-      if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.'); return; }
-      if (!confirm(`Renew "${b.dataset.cn}"?\n\nA NEW private key and certificate will be generated. `
-        + `The download is the only copy - it is never stored and cannot be recovered.\n\n`
-        + `The current certificate is NOT revoked and keeps working until it expires, and every device `
-        + `using it must import the new .p12 by hand.`)) return;
+      if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.', $('.ren-days', row)); return; }
+      const go = await confirmModal({
+        title: `Renew certificate ${b.dataset.cn}?`,
+        body: '<p>A new private key and certificate are generated. The download is the only copy: it is never stored and cannot be recovered.</p>'
+          + '<p>The current certificate is <b>not</b> revoked and keeps working until it expires. Every device that uses it must import the new .p12 by hand.</p>',
+        confirmLabel: 'Renew certificate',
+      });
+      if (!go) return;
       b.disabled = true;
       try {
         await downloadP12('/api/client-cas/' + encodeURIComponent(name) + '/certificates/'
@@ -7831,12 +8085,12 @@ function wireClientCertIssue(name, hasKey) {
   btn.addEventListener('click', async () => {
     clearEditorError();
     const cn = $('#iss-cn').value.trim();
-    if (!cn) { showInvalid('Common name required', 'Enter the certificate common name.'); return; }
+    if (!cn) { showInvalid('Common name required', 'Enter the certificate common name.', $('#iss-cn')); return; }
     const pw = $('#iss-pw').value;
-    if (!pw) { showInvalid('Password required', 'The PKCS#12 bundle must be password-protected.'); return; }
-    if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`); return; }
+    if (!pw) { showInvalid('Password required', 'The PKCS#12 bundle must be password-protected.', $('#iss-pw')); return; }
+    if (pw.length < P12_MIN_PASSWORD) { showInvalid('Password too short', `Use at least ${P12_MIN_PASSWORD} characters: the legacy PKCS#12 encoder barely stretches it, so a short password is cheap to crack offline once the file leaves gpm.`, $('#iss-pw')); return; }
     const days = parseInt($('#iss-days').value, 10);
-    if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.'); return; }
+    if (isNaN(days) || days < 1 || days > 3650) { showInvalid('Validity out of range', 'Validity must be between 1 and 3650 days.', $('#iss-days')); return; }
     const sans = $('#iss-sans').value.split(',').map((v) => v.trim()).filter(Boolean);
     const body = { commonName: cn, validityDays: days, password: pw };
     if (sans.length) body.sans = sans;
@@ -7890,6 +8144,10 @@ function filenameFromDisposition(cd) {
 }
 
 // ---------- UPSTREAM GROUP EDITOR ----------
+function upExtraSummary(path, hostHeader) {
+  const parts = [path ? 'base path ' + path : '', hostHeader ? 'Host ' + hostHeader : ''].filter(Boolean);
+  return 'Advanced' + (parts.length ? ' - ' + parts.join(', ') : '');
+}
 async function upstreamGroupEditor(c, name) {
   const meta = SECTION_META.upstreams; const isNew = !name;
   const seed = isNew ? takeCloneSeed('upstreams') : null;
@@ -7913,7 +8171,7 @@ async function upstreamGroupEditor(c, name) {
       : '<span class="chip err" style="flex:0 0 auto"><span class="dot err"></span>down</span>';
   };
   c.innerHTML = editorHead('upstreams', meta, isNew, name) + `<div class="form-grid"><div class="stack">
-    ${nameCard(o, isNew, seed && seed.origName + '-copy')}
+    ${identityCard('ed', o, { section: 'upstreams', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Upstreams</p>
       <div id="ed-ups" data-hint="upstreamGroup.upstreams"></div>
       <button class="btn ghost sm" id="ed-addup" type="button" style="margin-top:6px">${ICON.plus}Add upstream</button>
@@ -7953,6 +8211,8 @@ async function upstreamGroupEditor(c, name) {
   </div></div>` + saveBar('upstreams', isNew, meta.addLabel);
 
   const upsWrap = $('#ed-ups');
+  const advSums = {};
+  liveFoldSummaries(upsWrap, advSums);
   const upCtls = [];
   let upSeq = 0;
   function upRow(u) {
@@ -7973,12 +8233,16 @@ async function upstreamGroupEditor(c, name) {
         ${u.host ? healthChip(u) : ''}
         <button class="icon-btn up-del" type="button" aria-label="Remove upstream">${ICON.x}</button>
       </div>
-      <details class="fold sub-fold"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">Advanced${hasExtra ? ' - ' + esc([u.path ? 'base path ' + u.path : '', u.hostHeader ? 'Host ' + u.hostHeader : ''].filter(Boolean).join(', ')) : ''}</span></summary>
+      <details class="fold sub-fold" id="${p}-adv"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">${esc(upExtraSummary(u.path, u.hostHeader))}</span></summary>
         ${upstreamExtraHtml(p, u)}
       </details>`;
     upsWrap.appendChild(div);
     const ctl = { div, _orig: u, extra: wireUpstreamExtra(p) };
     upCtls.push(ctl);
+    advSums[p + '-adv'] = () => {
+      const hh = $('#' + p + '-uphh').value;
+      return upExtraSummary($('#' + p + '-uppath').value.trim(), hh === 'custom' ? $('#' + p + '-uphh-custom').value.trim() : hh);
+    };
     div.querySelector('.up-del').addEventListener('click', () => {
       div.remove();
       const i = upCtls.indexOf(ctl);
@@ -7991,15 +8255,17 @@ async function upstreamGroupEditor(c, name) {
 
   wireEditor('upstreams', 'upstream-groups', meta, isNew, name || o.name, o, () => {
     const ups = [];
-    let bad = false;
+    let bad = null;
     let aborted = false;
+    clearRowErrors(upsWrap);
     for (const ctl of upCtls) {
       if (bad || aborted) break;
       const row = ctl.div;
       const host = row.querySelector('.up-host').value.trim();
       const port = parseInt(row.querySelector('.up-port').value, 10);
       if (!host && isNaN(port)) continue; // fully empty row: skip
-      if (!host || isNaN(port)) { bad = true; break; }
+      // A half-filled member is marked on its own row, like a location row.
+      if (!host || isNaN(port)) { markRowError(row, host ? 'This upstream needs a port.' : 'This upstream needs a host.'); bad = row.querySelector(host ? '.up-port' : '.up-host'); break; }
       // Merged over the stored member for the same reason as the host editor's
       // upstream: path and hostHeader must survive a save that does not touch them.
       const up = Object.assign({}, ctl._orig, { scheme: row.querySelector('.up-scheme').value, host, port });
@@ -8012,8 +8278,8 @@ async function upstreamGroupEditor(c, name) {
       ups.push(up);
     }
     if (aborted) return null;
-    if (bad) { showInvalid('Upstream incomplete', 'Every upstream needs a host and a port.'); return null; }
-    if (!ups.length) { showInvalid('Upstream required', 'Add at least one upstream.'); return null; }
+    if (bad) { showInvalid('Upstream incomplete', 'Every upstream needs a host and a port.', bad); return null; }
+    if (!ups.length) { showInvalid('Upstream required', 'Add at least one upstream.', $('#ed-ups .up-host')); return null; }
     const body = { upstreams: ups };
     const policy = $('#ed-policy').value; if (policy) body.policy = policy;
     const stickyTTL = $('#ed-sticky-ttl').value.trim();
@@ -8136,6 +8402,9 @@ function revealToken(secret) {
   $('#tok-dismiss').addEventListener('click', () => wrap.remove());
 }
 
+// A token's history cannot undo anything: the API refuses to revert an API
+// token, because that would bring a revoked secret back to life.
+const TOKEN_NO_UNDO = 'Recorded as a commit. History cannot bring a token back: reverting an API token is refused.';
 async function viewTokens(c) {
   // api-tokens is admin-scope for READS as well as writes, so the "user" role
   // gets a 403 on GET /api/api-tokens. The nav entry is hidden for that role
@@ -8228,7 +8497,7 @@ async function viewTokens(c) {
       </div>
       <div class="row-between" style="margin-top:12px">
         <span></span>
-        <button class="btn primary" id="tok-create" type="button">${ICON.plus}Create token</button>
+        <button class="btn primary" id="tok-create" type="button">${ICON.plus}Add token</button>
       </div>
     </div>` +
     (tokens.length ? `<div class="toolbar">
@@ -8311,16 +8580,16 @@ async function viewTokens(c) {
   $('#tok-create').addEventListener('click', async () => {
     clearEditorError();
     const nm = $('#tok-name').value.trim();
-    if (!nm) { showInvalid('Name required', 'Enter a token name.'); return; }
+    if (!nm) { showInvalid('Name required', 'Enter a token name.', $('#tok-name')); return; }
     const scopes = collectScopes();
-    if (!scopes.length) { showInvalid('Scope required', 'Pick at least one scope, or Full admin.'); return; }
+    if (!scopes.length) { showInvalid('Scope required', 'Pick at least one scope, or Full admin.', $('#tok-scopes')); return; }
     const body = { scopes };
     const exp = $('#tok-expires').value;
     if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
     const btn = $('#tok-create'); btn.disabled = true;
     try {
       const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body, headers: { 'If-None-Match': '*' } });
-      toastSaved(r.commit); refreshHeadSha();
+      toastSaved(r.commit, 'Added'); refreshHeadSha();
       const secret = r.data && r.data.token;
       // route(), not viewTokens(c), so the shell banners and gating survive.
       if (c.isConnected) await route();
@@ -8336,7 +8605,14 @@ async function viewTokens(c) {
   $$('.tok-rotate').forEach((b) => {
     b.addEventListener('click', async () => {
       const nm = b.dataset.name;
-      if (!confirm(`Rotate token "${nm}"? The current secret stops working immediately, and cannot be brought back - reverting an API token from history is refused so a rotation always means revocation.`)) return;
+      const go = await confirmModal({
+        title: `Rotate token ${nm}?`,
+        body: '<p>The current secret stops working immediately. The new one is shown once, right after the rotation.</p>'
+          + `<p>${esc(TOKEN_NO_UNDO)}</p>`,
+        confirmLabel: 'Rotate token',
+      });
+      if (!go) return;
+      clearEditorError();
       b.disabled = true;
       const cur = tokens.find((t) => t.name === nm) || {};
       // Whole-object PUT: carry the meta the rotate action has no control for.
@@ -8346,7 +8622,7 @@ async function viewTokens(c) {
       if (cur.disabled) body.disabled = true;
       try {
         const r = await api('/api/api-tokens/' + encodeURIComponent(nm) + '?rotate=1', { method: 'PUT', body });
-        toastSaved(r.commit); refreshHeadSha();
+        toastSaved(r.commit, 'Rotated'); refreshHeadSha();
         const secret = r.data && r.data.token;
         if (c.isConnected) await route();
         if (secret) revealToken(secret);
@@ -8357,13 +8633,24 @@ async function viewTokens(c) {
   $$('.tok-del').forEach((b) => {
     b.addEventListener('click', async () => {
       const nm = b.dataset.name;
-      if (!confirm(`Delete API token "${nm}"? Anything using it stops working immediately.`)) return;
+      const go = await confirmModal({
+        title: `Delete token ${nm}?`,
+        body: '<p>Anything that uses it stops working immediately.</p>'
+          + `<p>${esc(TOKEN_NO_UNDO)}</p>`,
+        confirmLabel: 'Delete token',
+      });
+      if (!go) return;
+      clearEditorError();
       b.disabled = true;
       try {
         const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'DELETE' });
-        toast('Deleted', shortSha(r.commit) ? `committed <span class="sha">${esc(shortSha(r.commit))}</span>` : 'token removed', 'ok', { html: true });
+        toastSaved(r.commit, 'Deleted');
         refreshHeadSha(); if (c.isConnected) await route();
-      } catch (e) { toastErr(e); b.disabled = false; }
+      } catch (e) {
+        if (e && (e.status === 409 || e.status === 400)) showSaveError(e, 'Could not delete token');
+        else toastErr(e);
+        b.disabled = false;
+      }
     });
   });
 }
@@ -8590,7 +8877,7 @@ async function viewErrorPages(c) {
     if (dir) errp.dir = dir;
     if (inlineRaw) {
       try { errp.inline = JSON.parse(inlineRaw); }
-      catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).'); return; }
+      catch (e) { showInvalid('Invalid error pages JSON', 'Inline templates must be valid JSON (status code or "default" -> HTML).', $('#errp-inline')); return; }
     }
     if (intercept.length) errp.interceptUpstream = intercept;
 
@@ -9028,7 +9315,7 @@ async function viewSettings(c, tab) {
     if (tp.length) {
       const badTp = firstBadCidr(tp);
       if (badTp) {
-        showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`);
+        showInvalid('Invalid trusted proxy', `"${badTp}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, $('#set-trustedproxies'));
         return;
       }
       body.trustedProxies = tp;
@@ -9046,7 +9333,7 @@ async function viewSettings(c, tab) {
     // without gaining a `maintenance: {}`.
     const maintRetry = parseInt($('#set-maint-retry').value, 10);
     if (!isNaN(maintRetry) && (maintRetry < 0 || maintRetry > 86400)) {
-      showInvalid('Retry-After out of range', 'Maintenance Retry-After must be between 0 and 86400 seconds (24h). Leave it blank for the 300s default.');
+      showInvalid('Retry-After out of range', 'Maintenance Retry-After must be between 0 and 86400 seconds (24h). Leave it blank for the 300s default.', $('#set-maint-retry'));
       return;
     }
     const maintenance = {};
@@ -9057,7 +9344,7 @@ async function viewSettings(c, tab) {
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();
     if (isOn('set-pp-on') && !ppCidrs.length) {
-      showInvalid('Trusted peers required', 'A PROXY header from an untrusted peer would let any client spoof its source IP. Add the CIDRs of your load balancers.');
+      showInvalid('Trusted peers required', 'A PROXY header from an untrusted peer would let any client spoof its source IP. Add the CIDRs of your load balancers.', $('#set-pp-cidrs'));
       return;
     }
     if (isOn('set-pp-on') || ppCidrs.length || ppTimeout) {
@@ -9075,7 +9362,7 @@ async function viewSettings(c, tab) {
     // verbatim, and returns null when there are no rows - which leaves the key
     // off the body entirely rather than committing an empty map.
     const secHdrErr = secHdrCtl.error();
-    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr); return; }
+    if (secHdrErr) { showInvalid('Invalid security header', secHdrErr, $('#set-secheaders .row-bad') || $('#set-secheaders')); return; }
     const secHdrs = secHdrCtl.get();
     if (secHdrs) body.securityHeaders = secHdrs;
 
@@ -9085,7 +9372,7 @@ async function viewSettings(c, tab) {
     // the body entirely rather than committing an empty array.
     const stripHdrs = stripCtl.get();
     const stripErr = stripHeaderListError(stripHdrs);
-    if (stripErr) { showInvalid('Invalid strip header', stripErr); return; }
+    if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#set-striphdrs')); return; }
     if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;
 
     // ingressDiscovery: this page owns only the shared annotation prefix and its
@@ -9221,7 +9508,7 @@ function wizard(opts) {
     let prompting = false;
     const prevFocus = document.activeElement;
     const wrap = document.createElement('div');
-    wrap.className = 'modal-scrim';
+    wrap.className = 'modal-scrim wz-scrim';
     wrap.innerHTML = `
       <div class="modal wizard" role="dialog" aria-modal="true" aria-labelledby="wz-title">
         <div class="wz-head"><div><h2 id="wz-title">${esc(opts.title)}</h2>${opts.desc ? `<p class="desc">${esc(opts.desc)}</p>` : ''}</div>
@@ -9230,7 +9517,7 @@ function wizard(opts) {
         <div class="wz-foot">
           <button class="btn primary" id="wz-next" type="button">Next</button>
           <button class="btn ghost" id="wz-back" type="button">Back</button>
-          <button class="btn link" id="wz-cancel" type="button">Cancel</button>
+          <button class="btn ghost" id="wz-cancel" type="button">Cancel</button>
           <span class="spacer"></span>
           ${opts.importYAML ? '<a href="#" id="wz-import">Import from YAML</a>' : ''}
           ${opts.altLink ? `<a href="${esc(opts.altLink.href)}" id="wz-alt">${esc(opts.altLink.label)}</a>` : ''}
@@ -9322,7 +9609,7 @@ function wizard(opts) {
       document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('hashchange', onHash);
       wrap.remove();
-      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* ignore */ } }
+      restoreFocus(prevFocus);
       resolve(v);
     }
     // The page underneath navigated (browser Back, a link in a step): the
@@ -9717,7 +10004,7 @@ async function runHostWizard() {
         if (e && e.status === 409) throw new Error(`A proxy host named "${d.name}" was created in the meantime. Pick another name on the Service step.`);
         throw e;
       }
-      toastSaved(res.commit);
+      toastSaved(res.commit, 'Added');
       refreshHeadSha();
       location.hash = '#/hosts/' + encodeURIComponent(d.name);
       return true;

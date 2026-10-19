@@ -55,6 +55,10 @@
     "text": "Keeps the object in config but excludes it from the running proxy. A disabled host releases its domains and withdraws its DNS records.",
     "doc": "concepts/config-model.md#common-fields-every-object"
   },
+  "common.tags": {
+    "text": "Free-form tags for grouping and filtering. They have no effect on how the object is served.",
+    "doc": "concepts/config-model.md#common-fields-every-object"
+  },
   "proxyHost.tags": {
     "text": "Free-form labels for grouping and filtering in the host list. They have no effect on how the host is served.",
     "doc": "concepts/config-model.md#common-fields-every-object"

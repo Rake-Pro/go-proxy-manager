@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -47,5 +48,53 @@ func TestHostWizardCarriesDraft(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing host wizard marker %q", want)
 		}
+	}
+}
+
+// Every confirmation goes through confirmModal: the browser's confirm() has no
+// room for a consequence, ignores the theme and starts on the wrong button.
+// Line comments are skipped (the confirmModal comment names window.confirm).
+func TestNoNativeConfirm(t *testing.T) {
+	js := loadAppJS(t)
+	for i, line := range strings.Split(js, "\n") {
+		code := line
+		if j := strings.Index(code, "//"); j >= 0 && !strings.Contains(code[:j], "'") && !strings.Contains(code[:j], "`") {
+			code = code[:j]
+		}
+		if nativeConfirmRe.MatchString(code) {
+			t.Errorf("app.js:%d calls the browser's confirm(): %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+var nativeConfirmRe = regexp.MustCompile(`(^|[^\w])confirm\(`)
+
+// Delete lives on the object's own page, never on a card list, and every
+// delete, token rotation and certificate renewal is a titled confirmModal.
+func TestDeleteGoesThroughConfirmModal(t *testing.T) {
+	js := loadAppJS(t)
+	for _, want := range []string{
+		"async function deleteObject(section, kind, name, path, btn)",
+		"title: `Delete ${kind} ${name}?`",
+		"confirmLabel: `Delete ${kind}`",
+		"const DELETE_UNDO = 'Recorded as a commit; History can undo it.';",
+		"showSaveError(e, `Could not delete ${kind}`)",
+		"deleteObject('hosts', 'proxy host', h.name,",
+		"deleteObject('certs', 'certificate', ct.name,",
+		"deleteObject(section, meta.singular, origName,",
+		"confirmLabel: 'Rotate token'",
+		"confirmLabel: 'Delete token'",
+		"confirmLabel: 'Renew certificate'",
+		// confirmModal closes on navigation and only its own inputs or confirm
+		// button take Enter.
+		"window.addEventListener('hashchange', onHash);\n    wrap.addEventListener('click', (e) => { if (e.target === wrap) finish(false); });",
+		"if (e.key === 'Enter' && (e.target === okBtn || e.target === typedInput || e.target === promptInput)) {",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing delete/confirm marker %q", want)
+		}
+	}
+	if strings.Contains(js, "gs-del") {
+		t.Error("the card lists carry a Delete button again (gs-del)")
 	}
 }

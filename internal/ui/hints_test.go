@@ -50,7 +50,7 @@ var hintExempt = map[string]string{
 	`value="${esc(m.name)}"`: "middleware check-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}`:                  "host access-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${d.accessLists.indexOf(a.name) !== -1 ? ' checked' : ''}`:          "host wizard access-list item; the check-list carries the hint",
-	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !hasBasic ? ' checked' : ''}`:     "stream access-list item; the check-list carries the hint",
+	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !off ? ' checked' : ''}`:          "stream access-list item; the check-list carries the hint",
 	`value="${esc(p.name)}"${storedProvs.indexOf(p.name) !== -1 ? ' checked' : ''}`:            "admin SSO provider item; the check-list carries the hint",
 	`<input type="checkbox" value="${esc(n)}" checked/`:                                        "admin SSO provider stored under a name this instance does not define",
 	`class="field mono sh-name" style="flex:1 1 160px" value="${esc(name || '')}" aria-label=`: "read-only row for a header value this editor cannot express",
