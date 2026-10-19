@@ -5,6 +5,25 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-19
+
+### Changed
+
+- Admin UI: the proxy host editor is five tabs in the title band (Routing,
+  TLS, Access, Headers, Advanced), a dot on every tab that holds a
+  non-default value, a rail (status, certificate, request chain in evaluation
+  order, config file) and the object actions YAML, Clone and Delete in the
+  band. The "Request flow" panel and the two-column card grid are gone; a
+  validation error switches to the tab of the field it names.
+- Admin UI: Clone left the list rows (proxy hosts, certificates and every
+  card list). It lives on the object's page and asks for the copy's name
+  first, checked against the names in use, before opening the editor on the
+  copy.
+- Admin UI: "YAML" on a proxy host shows the config file as the server writes
+  it (a dry run of the stored object; nothing is written).
+
+## [2.0.0] - 2026-10-18
+
 ### Added
 
 - Admin UI: a first-time setup wizard. A fresh instance (no proxy host, no
@@ -290,7 +309,9 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...v2.0.0
 [1.0.10]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.7...v1.0.8

@@ -433,11 +433,13 @@ reports workspace.
   `space-grotesk-latin.woff2` and `jetbrains-mono-latin.woff2` under
   `internal/ui/static/fonts/` (still embedded in the binary; left in place
   pending the owner's approval of the deletion).
-- [ ] **PR3: proxy host editor as tabs plus rail.** Routing, TLS, Access,
-  Headers, Advanced tabs with a dot on tabs holding non-default values; a rail
-  card with status, certificate coverage, the request chain in pipeline order
-  and the config file; YAML, Clone and Delete in the title band. Replaces the
-  "Request flow" panel and the card grid. Fixes round-1 B1 to B6.
+- [x] **PR3: proxy host editor as tabs plus rail.** Done 2026-10-19: Routing,
+  TLS, Access, Headers, Advanced tabs in the title band with a dot on tabs
+  holding non-default values; a rail card with status, certificate coverage,
+  the request chain in evaluation order and the config file; YAML, Clone and
+  Delete in the title band. The "Request flow" panel and the card grid are
+  gone. Same day: Clone left every list row and asks for the copy's name
+  first (`cloneFlow`).
 - [ ] **PR4: certificate wizard** (Domains, Authority with the CA preset
   picker, Validation, Review) and the certificate editor on the same tab/rail
   pattern.
