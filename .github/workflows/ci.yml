@@ -52,13 +52,38 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history and tags: the dev version is derived from the last
+          # release tag and the commit count since it.
+          fetch-depth: 0
+
+      # Dev builds carry a semver pre-release version: the next patch after the
+      # latest release, then -dev.N where N counts commits since that release
+      # (so 2.1.1-dev.3 sorts below 2.1.1 and below any 2.2.0, and every dev
+      # commit gets its own tag). Releases keep X.Y.Z; a host that chooses to run
+      # the dev channel pins one of these.
+      - name: Dev version
+        id: ver
+        run: |
+          set -euo pipefail
+          base=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -n "$base" ]; then
+            n=$(git rev-list --count "${base}..HEAD")
+          else
+            base=v0.0.0; n=$(git rev-list --count HEAD)
+          fi
+          IFS=. read -r major minor patch <<<"${base#v}"
+          version="${major}.${minor}.$((patch + 1))-dev.${n}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "dev version ${version} (${n} commits since ${base})"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Runs on every push to dev so the "build" check lands on the SHA the
       # dev -> main PR points at. Push events also publish the dev image
-      # (:dev + :dev-<sha>); pull requests only validate the build.
+      # (:dev, floating, and :X.Y.Z-dev.N); pull requests only validate the
+      # build.
       - name: Log in to GHCR
         if: github.event_name == 'push'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -74,7 +99,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=dev
-            type=sha,prefix=dev-,format=short
+            type=raw,value=${{ steps.ver.outputs.version }}
 
       - name: Build (push dev image on push events)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -84,6 +109,10 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=v${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.ver.outputs.date }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

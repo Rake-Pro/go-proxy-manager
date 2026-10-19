@@ -21,6 +21,18 @@ A successful verification prints the signature payload and confirms the image
 was built by the `release.yml` workflow in this repository from a `v*` tag,
 not from a fork, a different workflow, or a hand-pushed image.
 
+### Dev builds
+
+Every push to `dev` also publishes an image, for running ahead of a release:
+
+| Tag | Meaning |
+|---|---|
+| `X.Y.Z-dev.N` | one dev build: the next patch after the latest release, and `N` commits since it (`2.1.1-dev.3` sorts below `2.1.1`); the app reports `vX.Y.Z-dev.N` and the commit under `/version` |
+| `dev` | floating, the latest dev build |
+
+Dev images are built by `ci.yml` and are not cosign-signed; releases (`X.Y.Z`,
+`X.Y`, `latest`) stay the supported line.
+
 ## Compose file
 
 ```yaml

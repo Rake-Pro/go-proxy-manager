@@ -34,6 +34,12 @@ All notable changes to go-proxy-manager are documented here. The format follows
   hover or keyboard focus the card lifts, takes the brand ring, the name turns
   brand and the hairline wire lights along its top edge.
 
+- Dev builds are versioned: every push to `dev` publishes
+  `ghcr.io/rake-pro/go-proxy-manager:X.Y.Z-dev.N` (next patch after the latest
+  release, N commits since it) next to the floating `dev` tag, and the binary
+  reports that version, the commit and the build date under `/version`. The
+  `dev-<sha>` tag is no longer published.
+
 ### Fixed
 
 - Admin UI: on a phone the theme button shows only its glyph, so the instance
