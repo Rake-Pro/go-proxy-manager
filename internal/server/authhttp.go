@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -230,6 +231,7 @@ func (s *Server) renderLoginPage(w http.ResponseWriter, status int, returnTo, us
 		Error:        errMsg,
 		NoAdminLogin: s.authn.NoAdminLoginConfigured(),
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = loginPage.Execute(w, data)
@@ -247,23 +249,27 @@ func (s *Server) lockoutMessage(key string) string {
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	// The IdP's error code goes to the log, not the page: it is attacker-
-	// supplied text on a URL anyone can craft, and the operator reads logs.
+	state, code := q.Get("state"), q.Get("code")
+	// The state cookie is single use whatever happens next, and a pending login
+	// behind a callback that cannot complete is dropped with it.
+	cookieState := s.authn.LoginStateCookie(r)
+	s.authn.ClearLoginStateCookie(w, r)
+	// The IdP's error code goes to the log, trimmed, not to the page: it is
+	// attacker-supplied text on a URL anyone can send.
 	if e := q.Get("error"); e != "" {
-		log.Warn().Str("error", e).Msg("oidc callback refused by the identity provider")
+		log.Warn().Str("idp_error", idpErrorForLog(e)).Msg("oidc callback refused by the identity provider")
+		s.authn.AbandonLogin(state)
 		s.renderLoginPage(w, http.StatusUnauthorized, "/", "", msgSSOFailed)
 		return
 	}
-	state, code := q.Get("state"), q.Get("code")
 	if state == "" || code == "" {
+		s.authn.AbandonLogin(state)
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOIncomplete)
 		return
 	}
 	// Bind the flow to this browser: the state echoed by the IdP must match the
 	// cookie set at login start. This blocks login-CSRF / session-fixation where
 	// an attacker injects a callback URL carrying their own (server-valid) state.
-	cookieState := s.authn.LoginStateCookie(r)
-	s.authn.ClearLoginStateCookie(w, r)
 	if cookieState == "" || subtle.ConstantTimeCompare([]byte(cookieState), []byte(state)) != 1 {
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOWrongBrowser)
 		return
@@ -286,7 +292,7 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
 	username := r.PostForm.Get("username")
 	key := clientIPKey(r)
-	if s.authn.LoginThrottled(key) {
+	if !s.authn.LoginAttempt(key) {
 		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
 		return
 	}
@@ -337,7 +343,7 @@ func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
 	username := r.PostForm.Get("username")
 	key := clientIPKey(r)
-	if s.authn.LoginThrottled(key) {
+	if !s.authn.LoginAttempt(key) {
 		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
 		return
 	}
@@ -361,6 +367,7 @@ func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, userna
 		Return   string
 		Username string
 	}{AppName: s.authn.AppName(), Pending: pending, Return: returnTo, Username: username}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = totpPage.Execute(w, data)
 }
@@ -376,8 +383,32 @@ func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, userna
 // An untrusted peer's X-Forwarded-For is not read at all, so a direct client
 // cannot mint itself a fresh bucket per attempt. With no trusted proxies
 // configured this is exactly RemoteAddr, which is the previous behaviour.
+// clientIPKey is the login gates' key for a client. IPv6 clients are grouped
+// by /64: one subscriber holds a whole /64, so keying each address on its own
+// would hand them a fresh gate per address.
 func clientIPKey(r *http.Request) string {
-	return clientip.Key(r, clientip.Trusted())
+	k := clientip.Key(r, clientip.Trusted())
+	if ip := net.ParseIP(k); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return k
+}
+
+// idpErrorForLog trims an identity provider's error code to the RFC 6749
+// charset and 64 bytes: it arrives on a URL anyone can send, and the log line
+// is the only thing it may grow.
+func idpErrorForLog(e string) string {
+	var b strings.Builder
+	for i := 0; i < len(e) && b.Len() < 64; i++ {
+		c := e[i]
+		if c == 0x20 || c == 0x21 || (c >= 0x23 && c <= 0x5b) || (c >= 0x5d && c <= 0x7e) {
+			b.WriteByte(c)
+		}
+	}
+	if len(e) > 64 {
+		b.WriteString("...")
+	}
+	return b.String()
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

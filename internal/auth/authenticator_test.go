@@ -169,7 +169,7 @@ func TestLoginThrottle(t *testing.T) {
 		t.Fatal("fresh key must not be throttled")
 	}
 	for i := 0; i < maxLoginFails; i++ {
-		if a.LoginThrottled(key) {
+		if !a.LoginAttempt(key) {
 			t.Fatalf("must not lock out before %d failures (at %d)", maxLoginFails, i)
 		}
 		a.NoteLoginResult(key, false)

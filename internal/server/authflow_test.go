@@ -408,6 +408,9 @@ func TestCallbackRejectsBadState(t *testing.T) {
 		if strings.Contains(body, "access_denied") {
 			t.Fatal("the IdP error code must not be echoed into the page")
 		}
+		if c := cookie(t, res, "gpm_oidc_state"); c == nil || c.MaxAge >= 0 {
+			t.Fatal("the state cookie must be cleared on an IdP error")
+		}
 	})
 
 	t.Run("unknown state is not in the pending map", func(t *testing.T) {
@@ -836,7 +839,7 @@ func TestClientIPKey(t *testing.T) {
 		want       string
 	}{
 		{"host:port", "203.0.113.7:44321", nil, "203.0.113.7"},
-		{"ipv6 host:port", "[2001:db8::1]:44321", nil, "2001:db8::1"},
+		{"ipv6 host:port", "[2001:db8::1]:44321", nil, "2001:db8::/64"},
 		{"no port falls back to the raw value", "203.0.113.7", nil, "203.0.113.7"},
 		{"empty remote addr", "", nil, ""},
 		{"x-forwarded-for is ignored", "203.0.113.7:44321",
