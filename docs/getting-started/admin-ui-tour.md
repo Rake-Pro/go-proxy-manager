@@ -85,8 +85,8 @@ object. With nothing to report it says so and shows the live counts.
 - The title band carries the breadcrumb, the live status, the last change and
   the object actions: **YAML** (the config file as the server writes it),
   **Clone** and **Delete**.
-- Five tabs split the form: Routing, TLS, Access, Headers, Advanced. A dot on
-  a tab means it holds a non-default value; its tooltip says what.
+- Five tabs split the form: Routing, TLS, Access, Headers, Advanced. Every
+  optional section says in its summary line what it holds.
 - The rail keeps the status, the certificate the handshake will present, the
   request chain in evaluation order and the config file path in view while
   you edit.

@@ -4492,21 +4492,11 @@ async function hostEditor(c, name) {
   const tpSummary = tpMode === 'custom' ? `trusted proxies: ${tpList.join(', ')}`
     : (tpMode === 'none' ? 'trusted proxies: none (connection address only)' : 'trusted proxies inherited from Settings');
 
-  // Title-band tabs. A dot marks a tab holding a non-default value, so what is
-  // configured is visible from any tab; its title says what.
-  const tabDots = {
-    tls: [hsts.enabled ? 'HSTS on' : '', mtlsOn ? 'client certificates on' : '', tls.minTLSVersion === '1.3' ? 'TLS 1.3 only' : ''].filter(Boolean),
-    access: [h.auth ? 'sign-in on' : '', h.rateLimit ? 'rate limit on' : '',
-      selMw.length ? `${selMw.length} middleware${selMw.length === 1 ? '' : 's'}` : '',
-      selAl.length ? `${selAl.length} access list${selAl.length === 1 ? '' : 's'}` : ''].filter(Boolean),
-    headers: [secHdrCount ? `${secHdrCount} security header${secHdrCount === 1 ? '' : 's'}` : '', stripCount ? `strips ${stripSummary}` : ''].filter(Boolean),
-    advanced: [epParts.length ? 'error pages' : '', tpMode !== 'inherit' ? 'trusted proxies' : '', dnsParts.length ? 'DNS sync' : ''].filter(Boolean),
-  };
+  // Title-band tabs. Nothing on a tab marks a non-default value: every optional
+  // section says in its fold summary what it holds, and the rail shows the
+  // certificate and the request chain.
   const HOST_TABS = [['routing', 'Routing'], ['tls', 'TLS'], ['access', 'Access'], ['headers', 'Headers'], ['advanced', 'Advanced']];
-  const hostTabsHtml = HOST_TABS.map(([id, label]) => {
-    const dots = tabDots[id] || [];
-    return `<button class="tab-btn" type="button" role="tab" id="host-tab-${id}" aria-controls="host-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}${dots.length ? `<span class="tab-dot" title="${esc(dots.join(', '))}"></span>` : ''}</button>`;
-  }).join('');
+  const hostTabsHtml = HOST_TABS.map(([id, label]) => `<button class="tab-btn" type="button" role="tab" id="host-tab-${id}" aria-controls="host-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
   const panel = (id, body) => `<div class="tab-panel" data-tab="${id}" role="tabpanel" id="host-panel-${id}" aria-labelledby="host-tab-${id}" hidden><div class="stack">
 ${body}      </div></div>`;
   const mc = MANAGED_CHIPS[managedBy(h)];

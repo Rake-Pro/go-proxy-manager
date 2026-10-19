@@ -5,6 +5,12 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Admin UI: the dot that marked a host editor tab holding a non-default
+  value is gone; it read as an unread badge. The fold summaries inside each
+  tab and the rail carry that information.
+
 ## [2.0.1] - 2026-10-19
 
 ### Changed

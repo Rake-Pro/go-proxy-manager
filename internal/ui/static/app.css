@@ -721,7 +721,6 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   font:inherit; font-size:14px; padding:8px 16px; cursor:pointer; margin-bottom:-1px; white-space:nowrap; position:relative; }
 .tab-btn:hover { color:var(--text); border-bottom-color:var(--border-2); }
 .tab-btn.on { color:var(--text); border-bottom-color:var(--brand); font-weight:400; }
-.tab-btn .tab-dot { position:absolute; top:8px; right:6px; width:6px; height:6px; border-radius:50%; background:var(--brand); }
 .tab-panel[hidden] { display:none; }
 
 /* ---------- edit view: band actions and tabs, form column, rail ---------- */
