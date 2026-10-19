@@ -27,7 +27,7 @@ Every push to `dev` also publishes an image, for running ahead of a release:
 
 | Tag | Meaning |
 |---|---|
-| `X.Y.Z-dev.N` | one dev build: the next patch after the latest release, and `N` commits since it (`2.1.1-dev.3` sorts below `2.1.1`); the app reports `vX.Y.Z-dev.N` and the commit under `/version` |
+| `dev-<sha>` | one dev build, named by its short commit hash; the app reports the same `dev-<sha>` under `/version` and in the admin shell |
 | `dev` | floating, the latest dev build |
 
 Dev images are built by `ci.yml` and are not cosign-signed; releases (`X.Y.Z`,
