@@ -75,6 +75,11 @@ All findings from that review are remediated in the same change (see CHANGELOG
 
 ## Functionality gaps
 
+- [ ] **Edit an API token's scopes after creation.** The token editor only
+  creates, rotates, enables/disables and deletes; changing permissions means
+  delete and recreate, which rotates the secret. Add an edit path for scopes
+  (and expiry) that keeps the secret. Owner: minor, later (2026-10-19).
+
 ### Inline host/location `auth` and `rateLimit` (follow-ups)
 
 - [ ] **Discovery templates do not carry the inline blocks.**
