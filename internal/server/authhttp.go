@@ -169,7 +169,7 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, idp, returnT
 	authURL, state, err := s.authn.BeginLogin(r.Context(), idp, returnTo, clientIPKey(r))
 	if err != nil {
 		log.Warn().Str("idp", idp).Err(err).Msg("begin login failed")
-		http.Error(w, "login unavailable", http.StatusBadGateway)
+		s.renderLoginPage(w, http.StatusBadGateway, returnTo, "", msgSSOUnavailable)
 		return
 	}
 	s.authn.SetLoginStateCookie(w, r, state)
@@ -199,6 +199,10 @@ const (
 	msgWrongCredentials = "Wrong username or password."
 	msgWrongCode        = "Wrong code. Enter your password, then a new code."
 	msgBadForm          = "The form could not be read. Try again."
+	msgSSOFailed        = "Sign-in with the identity provider failed. Try again."
+	msgSSOIncomplete    = "The sign-in reply was incomplete. Try again."
+	msgSSOWrongBrowser  = "This sign-in did not start in this browser. Try again."
+	msgSSOUnavailable   = "Sign-in is unavailable right now. Try again in a moment."
 )
 
 // renderLoginPage draws step one of local login with the given status. A
@@ -243,13 +247,16 @@ func (s *Server) lockoutMessage(key string) string {
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	// The IdP's error code goes to the log, not the page: it is attacker-
+	// supplied text on a URL anyone can craft, and the operator reads logs.
 	if e := q.Get("error"); e != "" {
-		http.Error(w, "login error: "+e, http.StatusUnauthorized)
+		log.Warn().Str("error", e).Msg("oidc callback refused by the identity provider")
+		s.renderLoginPage(w, http.StatusUnauthorized, "/", "", msgSSOFailed)
 		return
 	}
 	state, code := q.Get("state"), q.Get("code")
 	if state == "" || code == "" {
-		http.Error(w, "missing state or code", http.StatusBadRequest)
+		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOIncomplete)
 		return
 	}
 	// Bind the flow to this browser: the state echoed by the IdP must match the
@@ -258,13 +265,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	cookieState := s.authn.LoginStateCookie(r)
 	s.authn.ClearLoginStateCookie(w, r)
 	if cookieState == "" || subtle.ConstantTimeCompare([]byte(cookieState), []byte(state)) != 1 {
-		http.Error(w, "invalid login state", http.StatusBadRequest)
+		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOWrongBrowser)
 		return
 	}
 	sess, returnTo, err := s.authn.CompleteLogin(r.Context(), state, code)
 	if err != nil {
 		log.Warn().Err(err).Msg("oidc callback failed")
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		s.renderLoginPage(w, http.StatusUnauthorized, "/", "", msgSSOFailed)
 		return
 	}
 	s.authn.IssueCookie(w, r, sess)

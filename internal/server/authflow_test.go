@@ -395,9 +395,18 @@ func TestCallbackRejectsBadState(t *testing.T) {
 
 	t.Run("idp reported error", func(t *testing.T) {
 		e := newTestEnv(t, envOpts{})
-		res := e.get("/auth/callback?error=access_denied")
+		res := e.get("/auth/callback?error=access_denied%3Cb%3Ex")
 		if res.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("got %d, want 401", res.StatusCode)
+		}
+		// The refusal is the login page again with a reason, never the IdP's
+		// own error text (attacker-supplied) and never text/plain.
+		body := readBody(t, res)
+		if !strings.Contains(body, msgSSOFailed) || !strings.Contains(body, "<form") {
+			t.Fatalf("expected the login page with %q, got: %.200s", msgSSOFailed, body)
+		}
+		if strings.Contains(body, "access_denied") {
+			t.Fatal("the IdP error code must not be echoed into the page")
 		}
 	})
 
