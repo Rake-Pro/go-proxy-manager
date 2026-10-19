@@ -2884,7 +2884,7 @@ async function viewIntegrations(c) {
     + `
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a DNS server on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a DNS server on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
       <div class="grid-2">
         <div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Pi-hole (LAN)</div><div class="ds">Local CNAMEs on the LAN resolver</div></div>${switchHtml('set-ph-on', !!ds.pihole.enabled, 'Pi-hole DNS sync', 'settings.dnsSync.pihole.enabled')}</div>
@@ -2911,7 +2911,7 @@ async function viewIntegrations(c) {
 
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Kubernetes Ingress discovery</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">${esc(resolvedPrefix)}/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">${esc(resolvedPrefix)}/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template or a named profile below, so a cluster manifest can never supply an upstream, a certificate or a middleware - only the <em>name</em> of a chain you wrote here. The prefix is set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">${esc(resolvedPrefix)}/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">${esc(resolvedPrefix)}/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template or a named profile below, so a cluster manifest can never supply an upstream, a certificate or a middleware - only the <em>name</em> of a chain you wrote here. The prefix is set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>.</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Ingress discovery</div><div class="ds">Reconcile annotated cluster Ingresses into managed proxy hosts</div></div>${switchHtml('set-id-on', !!idc.enabled, 'Ingress discovery', 'settings.ingressDiscovery.enabled')}</div>
       ${foldHtml('id-conn-card', 'Connection', idc.apiURL || 'in-cluster endpoint', !!idc.enabled, `
         <div class="grid-2">
@@ -2941,7 +2941,7 @@ async function viewIntegrations(c) {
         </div>
       `)}
       ${foldHtml('id-tmpl-card', 'Default host template', idt.tls.certificateRef ? 'certificate ' + idt.tls.certificateRef : 'no certificate set', !!idc.enabled, `
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">gpm runs outside the cluster, so in-cluster Service DNS is not resolvable: the upstream is the <strong>ingress controller's</strong> address, and the controller routes by vhost using the Host header gpm forwards. Prefer <span class="mono">http</span> to its plain port; with <span class="mono">https</span> the upstream host is what SNI and certificate verification use.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">gpm runs outside the cluster, so in-cluster Service DNS is not resolvable: the upstream is the <strong>ingress controller's</strong> address, and the controller routes by vhost using the Host header gpm forwards. Prefer <span class="mono">http</span> to its plain port; with <span class="mono">https</span> the upstream host is what SNI and certificate verification use.</p>
         <div class="grid-2">
           <div>
             <div class="field-group">
@@ -2984,12 +2984,12 @@ async function viewIntegrations(c) {
         </div>
       `)}
       ${foldHtml('id-profiles-card', 'Named profiles', Object.keys(idProfiles).length ? Object.keys(idProfiles).sort().join(', ') : 'none - every Ingress gets the template', Object.keys(idProfiles).length > 0, `
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">One template only fits a uniform fleet. Define a profile per chain you actually run - a deliberately public one with a rate limit and no access list, an SSO-gated one behind the VPN list - and an Ingress picks one with <span class="mono">${esc(resolvedPrefix)}/profile: "&lt;name&gt;"</span>. <strong>The annotation carries a name and nothing else.</strong> <strong>Every profile is selectable by every annotating Ingress - define only profiles you are willing for any cluster tenant to choose.</strong> An Ingress naming a profile that does not exist is <strong>skipped</strong>, and if it already had a derived host, that host is <strong>disabled</strong>.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">One template only fits a uniform fleet. Define a profile per chain you actually run - a deliberately public one with a rate limit and no access list, an SSO-gated one behind the VPN list - and an Ingress picks one with <span class="mono">${esc(resolvedPrefix)}/profile: "&lt;name&gt;"</span>. <strong>The annotation carries a name and nothing else.</strong> <strong>Every profile is selectable by every annotating Ingress - define only profiles you are willing for any cluster tenant to choose.</strong> An Ingress naming a profile that does not exist is <strong>skipped</strong>, and if it already had a derived host, that host is <strong>disabled</strong>.</p>
         <div id="set-id-profiles" data-hint="settings.ingressDiscovery.profiles"></div>
         <button class="btn ghost sm" id="addIdProfile" type="button" style="margin-top:6px">${ICON.plus}Add profile</button>
       `)}
       ${foldHtml('id-rules-card', 'Profile selection rules', arr(idc.profileRules).length ? plural(arr(idc.profileRules).length, 'rule', 'rules') : 'none - the annotation decides', arr(idc.profileRules).length > 0, `
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules let YOU route an Ingress to a profile by namespace and/or label, with no say from the Ingress author at all - stronger than the annotation. Evaluated in order; the first match wins.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Rules let YOU route an Ingress to a profile by namespace and/or label, with no say from the Ingress author at all - stronger than the annotation. Evaluated in order; the first match wins.</p>
         <div class="field-group" style="max-width:380px"><label>Mode</label>
           <select class="field mono" id="set-id-profile-selection" data-hint="settings.ingressDiscovery.profileSelection" data-path="ingressDiscovery.profileSelection">
             ${enumOptions('profileSelection', ['', 'rules-only'], idc.profileSelection === 'rules-only' ? 'rules-only' : '')}
@@ -3010,7 +3010,7 @@ async function viewIntegrations(c) {
 
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Docker discovery</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Derives proxy hosts from labelled Docker containers. Uses the same templates, profiles and label prefix as Kubernetes Ingress discovery - only the source differs. Label prefix: <span class="mono">${esc(resolvedPrefix)}</span> (set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>).</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Derives proxy hosts from labelled Docker containers. Uses the same templates, profiles and label prefix as Kubernetes Ingress discovery - only the source differs. Label prefix: <span class="mono">${esc(resolvedPrefix)}</span> (set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>).</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Docker discovery</div><div class="ds">Turn container discovery on. Everything below is only validated when this is on.</div></div>${switchHtml('set-dkr-on', !!dd.enabled, 'Docker discovery', 'settings.dockerDiscovery.enabled')}</div>
       <div id="dkr-fields">
         ${foldHtml('dkr-conn-card', 'Engine connection', dd.host || dd.socket || '/var/run/docker.sock', !!dd.enabled, `
@@ -3045,7 +3045,7 @@ async function viewIntegrations(c) {
           </div>
         `)}
         ${foldHtml('dkr-tmpl-card', 'Default host template', ddt.tls.certificateRef ? 'certificate ' + ddt.tls.certificateRef : 'no certificate set', !!dd.enabled, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">The default chain every derived host takes. The upstream is the container's own address, so there is nothing to set here.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 10px">The default chain every derived host takes. The upstream is the container's own address, so there is nothing to set here.</p>
           <div class="grid-2">
             <div>
               <div class="field-group"><label>Certificate</label><input class="field mono" id="set-dkr-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" data-path="dockerDiscovery.template.tls.certificateRef" value="${esc(ddt.tls.certificateRef || '')}" placeholder="wildcard" /></div>
@@ -3070,7 +3070,7 @@ async function viewIntegrations(c) {
           </div>
         `)}
         ${foldHtml('dkr-profiles-card', 'Named profiles', Object.keys(ddProfiles).length ? Object.keys(ddProfiles).sort().join(', ') : 'none - containers use the Ingress discovery profiles', Object.keys(ddProfiles).length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Leave empty to use the Ingress discovery profiles. Add rows only to give containers a different set.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 10px">Leave empty to use the Ingress discovery profiles. Add rows only to give containers a different set.</p>
           <div id="set-dkr-profiles" data-hint="settings.dockerDiscovery.profiles"></div>
           <button class="btn ghost sm" id="addDkrProfile" type="button" style="margin-top:6px">${ICON.plus}Add profile</button>
         `)}
@@ -3085,7 +3085,7 @@ async function viewIntegrations(c) {
 
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Access-list sync</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Keeps access lists that declare a remote <b>source</b> (an IP feed fetched over http(s)) up to date. The interval below is only how often the loop asks whether any source is <i>due</i>; each source carries its own fetch interval, so polling often is cheap. A list with no source costs nothing either way.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Keeps access lists that declare a remote <b>source</b> (an IP feed fetched over http(s)) up to date. The interval below is only how often the loop asks whether any source is <i>due</i>; each source carries its own fetch interval, so polling often is cheap. A list with no source costs nothing either way.</p>
       <div class="toggle-line"><div class="tl-text"><div class="nm">Fetch remote sources</div><div class="ds">On by default; turning it off freezes every list at its last fetch</div></div>${switchHtml('set-als-on', alsEnabled, 'Fetch remote access-list sources', 'settings.accessListSync.enabled')}</div>
       <div class="field-group" style="margin-top:10px;max-width:220px">
         <label>Poll interval</label>
@@ -3099,7 +3099,7 @@ async function viewIntegrations(c) {
 
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Lifecycle webhooks</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
       <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, with the same <span class="mono">X-GPM-Webhook-Secret</span> header a real event carries.</div>
@@ -3108,7 +3108,7 @@ async function viewIntegrations(c) {
 
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Notifications</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Alerts to ntfy, Discord, or a generic webhook on ACME renewal failure, certificate expiry, upstream health flaps, and a frozen discovery reconciler. Delivery is async and best-effort, so a slow receiver never blocks a save.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Alerts to ntfy, Discord, or a generic webhook on ACME renewal failure, certificate expiry, upstream health flaps, and a frozen discovery reconciler. Delivery is async and best-effort, so a slow receiver never blocks a save.</p>
       <div class="field-group" style="max-width:260px">
         <label>Expiry digest threshold (days)</label>
         <input class="field mono" id="set-ntf-days" data-hint="settings.notifications.expiringThresholdDays" data-path="notifications.expiringThresholdDays" type="number" min="1" max="365" value="${esc((s.notifications && s.notifications.expiringThresholdDays) || '')}" placeholder="14" />
@@ -4913,7 +4913,7 @@ ${panel('routing', `        ${identityCard('f', h, {
         </div>
 
         ${foldHtml('f-locs-card', 'Locations', locSummary, locCount > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">A path prefix that overrides the host's upstream and chain. Path order: location match, then Strip prefix, then rewrite rules, then the upstream base path. Security controls always evaluate the ORIGINAL client path.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 8px">A path prefix that overrides the host's upstream and chain. Path order: location match, then Strip prefix, then rewrite rules, then the upstream base path. Security controls always evaluate the ORIGINAL client path.</p>
           <div id="f-locs" data-path="locations"></div>
           <button class="btn ghost sm" id="addLoc" type="button" style="margin-top:6px">${ICON.plus}Add path override</button>
         `)}
@@ -5014,7 +5014,7 @@ ${panel('tls', `        <div class="card form-section">
 `)}
 ${panel('access', `        <div class="card form-section">
           <p class="section-label">Request chain</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-mw-attached">${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 10px">Attached: <b id="f-mw-attached">${esc(selMw.length ? selMw.join(', ') : 'none')}</b>. Evaluation order is fixed whatever order they are ticked in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.</p>
           <div class="check-list" id="f-mw" data-hint="proxyHost.middlewares" data-path="middlewares">
             ${!mwListOK ? refListUnavailableHtml('the middleware list') : (mwSorted.length ? mwSorted.map((m) => `
               <label class="check-item"><input type="checkbox" value="${esc(m.name)}"${selMw.indexOf(m.name) !== -1 ? ' checked' : ''}/>${esc(m.name)}<span class="ci-ty">${esc(m.type || '')}</span></label>
@@ -5024,7 +5024,7 @@ ${panel('access', `        <div class="card form-section">
 
         <div class="card form-section">
           <p class="section-label">Access lists</p>
-          <p class="muted" style="font-size:11.5px;margin:0 0 10px">Attached: <b id="f-al-attached">${esc(selAl.length ? selAl.join(', ') : 'none')}</b>. Who may reach this host, by IP range or country.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 10px">Attached: <b id="f-al-attached">${esc(selAl.length ? selAl.join(', ') : 'none')}</b>. Who may reach this host, by IP range or country.</p>
           <div class="check-list" id="f-al" data-hint="proxyHost.accessLists" data-path="accessLists">
             ${!alListOK ? refListUnavailableHtml('the access list index') : (alSorted.length ? alSorted.map((a) => `
               <label class="check-item"><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}<span class="ci-ty">access-list</span></label>
@@ -5040,21 +5040,21 @@ ${panel('access', `        <div class="card form-section">
     !!h.rateLimit, rateFoldSummary(h.rateLimit), rateLimitBlockHtml('f-rl', h.rateLimit), 'proxyHost.rateLimit')}
 `)}
 ${panel('headers', `        ${foldHtml('f-sech-card', 'Response security headers', secHdrSummary, secHdrCount > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Overrides the fleet defaults (Settings) for this host, per header name - a name listed here replaces the settings value <b>and</b> its scope. Names not listed keep the settings-level header. Applied set-if-absent, so an upstream's own header is never clobbered.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 8px">Overrides the fleet defaults (Settings) for this host, per header name - a name listed here replaces the settings value <b>and</b> its scope. Names not listed keep the settings-level header. Applied set-if-absent, so an upstream's own header is never clobbered.</p>
           <div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>
           <button class="btn ghost sm" id="f-secheaders-add" type="button" style="margin-top:6px">${ICON.plus}Add header</button>
           <div class="hint" style="margin-top:6px">Scope: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Strict-Transport-Security is not settable here; HSTS lives in the TLS section.</div>
         `)}
 
         ${foldHtml('f-strip-card', 'Strip response headers', stripSummary, stripCount > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">This host's additions to the fleet strip list (Settings) - header names removed from proxied upstream responses before they reach the client. Only what the upstream sent is touched, never a header gpm adds.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 8px">This host's additions to the fleet strip list (Settings) - header names removed from proxied upstream responses before they reach the client. Only what the upstream sent is touched, never a header gpm adds.</p>
           <div class="field-group"><label>Header names</label><div class="chip-input" id="f-striphdrs" data-hint="proxyHost.stripResponseHeaders" data-path="stripResponseHeaders"></div></div>
           <div class="hint">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save.</div>
         `)}
 
 `)}
 ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary, epParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Override the global error pages (<a href="#/errorpages">Error Pages</a>) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the global pages (or gpm's default output) in effect.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 8px">Override the global error pages (<a href="#/errorpages">Error Pages</a>) for this host's own errors - upstream unreachable, access denied, rate limited, an auth refusal (401/403/503), a dangling middleware reference. Blank leaves the global pages (or gpm's default output) in effect.</p>
           <div class="field-group">
             <label>Templates directory</label>
             <input class="field mono" id="f-errp-dir" data-hint="proxyHost.errorPages.dir" data-path="errorPages.dir" value="${esc(ep.dir || '')}" placeholder="relative to the cert store, e.g. errorpages/app" />
@@ -5091,7 +5091,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         `)}
 
         ${foldHtml('f-dns-card', 'DNS sync', dnsSummary, dnsParts.length > 0, `
-          <p class="muted" style="font-size:11.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. The DNS servers are set under <a href="#/integrations">Integrations &gt; DNS sync</a>.</p>
+          <p class="muted" style="font-size:13.5px;margin:0 0 8px">Publish this host's domains as CNAMEs pointing at the edge. The DNS servers are set under <a href="#/integrations">Integrations &gt; DNS sync</a>.</p>
           <div class="toggle-line">
             <div class="tl-text"><div class="nm">LAN direct</div><div class="ds">Local CNAME on the LAN resolver (Pi-hole)</div></div>
             ${switchHtml('f-dns-lan', !!(h.dns && h.dns.lanDirect), 'LAN direct', 'proxyHost.dns.lanDirect')}
@@ -6315,7 +6315,7 @@ async function genericList(c, section) {
       return `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
+        <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12.5px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
       </div>
       <div class="kv">${meta.summary(o, ctx)}${tags.length ? `<span class="k">Tags</span><span class="v v-list">${tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</span>` : ''}${o.updatedAt ? `<span class="k">Updated</span><span class="v mono">${esc(fmtTime(o.updatedAt))}</span>` : ''}</div>
     </div>`;
@@ -6323,7 +6323,7 @@ async function genericList(c, section) {
     return `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:13.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
       </div>
       <div class="kv">${meta.summary(o, ctx)}</div>
     </div>`;
@@ -6936,7 +6936,7 @@ async function streamEditor(c, name) {
       </div>
     `)}
     ${foldHtml('ed-stream-al-card', 'Access lists', streamAlSummary, selAl.length > 0, `
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Evaluated on the client IP before any upstream is dialled. Only literal IP rules and geo apply at L4. A list with basic-auth users, rules scoped to paths or methods, or rules backed by a source needs an HTTP request, so it is unavailable here.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Evaluated on the client IP before any upstream is dialled. Only literal IP rules and geo apply at L4. A list with basic-auth users, rules scoped to paths or methods, or rules backed by a source needs an HTTP request, so it is unavailable here.</p>
       <div class="check-list" id="ed-stream-al" data-hint="streamHost.accessLists">
         ${streamAls.length ? streamAls.map((a) => {
     const off = streamAlUnavailable(a);
@@ -7348,8 +7348,8 @@ async function accessEditor(c, name) {
       card.style.display = '';
       el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
         <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
-        <span class="muted" style="font-size:11px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + plural(s.entryCount || 0, 'entry', 'entries') : 'Never'}</span>
-        ${s.lastError ? `<span class="muted" style="font-size:11px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
+        <span class="muted" style="font-size:12.5px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + plural(s.entryCount || 0, 'entry', 'entries') : 'Never'}</span>
+        ${s.lastError ? `<span class="muted" style="font-size:12.5px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
     } catch (e) {
       card.style.display = arr(o.sources).length ? '' : 'none';
@@ -7680,7 +7680,7 @@ async function middlewareEditor(c, name) {
       <div class="toggle-line" id="bo-stream-line"><div class="tl-text"><div class="nm">Stream mode (crowdsec only)</div><div class="ds">Pull the whole decision set once, then deltas every cache TTL, so the request path is a local lookup with no per-request LAPI call</div></div>${switchHtml('bo-stream', !!bo.stream, 'Stream mode', 'middleware.bouncer.stream')}</div>
     </div>
     <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
-      <p class="muted" style="font-size:11.5px;margin:0 0 10px">Rules are tried in order: exact, then prefix (longest first), then regex. The first match wins, and a rewrite is never a redirect - the method, body and query string reach the upstream unchanged. Security controls (rate limit, access list, bouncer, sign-in, guards) always evaluate the ORIGINAL client path.</p>
+      <p class="muted" style="font-size:13.5px;margin:0 0 10px">Rules are tried in order: exact, then prefix (longest first), then regex. The first match wins, and a rewrite is never a redirect - the method, body and query string reach the upstream unchanged. Security controls (rate limit, access list, bouncer, sign-in, guards) always evaluate the ORIGINAL client path.</p>
       <div class="field-group"><label>Exact</label>
         <div class="hint" style="margin:0 0 6px">The request path must equal "From" exactly.</div>
         <div id="rw-replacepath" data-hint="middleware.rewrite.replacePath"></div>
@@ -8636,7 +8636,7 @@ function revealToken(secret) {
   wrap.style.cssText = 'border-color:var(--brand);margin-bottom:16px';
   wrap.innerHTML = `
     <p class="section-label">New token - shown once</p>
-    <p class="muted" style="font-size:11.5px;margin:0 0 10px">Copy this now. Only its SHA-256 digest is stored, so it cannot be shown again. Lost it? Rotate the token.</p>
+    <p class="muted" style="font-size:13.5px;margin:0 0 10px">Copy this now. Only its SHA-256 digest is stored, so it cannot be shown again. Lost it? Rotate the token.</p>
     <div class="loc-row">
       <input class="field mono" id="tok-reveal" readonly value="${esc(secret)}" aria-label="New API token" style="flex:3 1 260px" />
       <button class="btn primary sm" id="tok-copy" type="button">Copy</button>
@@ -9031,7 +9031,7 @@ async function viewHistory(c) {
           <div class="tl-msg" title="${esc(h.message || '')}">${esc(historyText(h.message))}</div>
           <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${scoped}${whole}</div>
         </div>`;
-      }).join('')}</div>` : '<div class="muted" style="font-size:13px">No commits yet.</div>'}
+      }).join('')}</div>` : '<div class="muted" style="font-size:13.5px">No commits yet.</div>'}
     </div>`;
 
   const histFilter = $('#histFilter');
@@ -9125,7 +9125,7 @@ async function viewErrorPages(c) {
     'Custom HTML for the errors gpm itself generates. Applies to every host unless a host overrides it.')
     + `<div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">What these replace</p>
-      <p class="muted" style="font-size:11.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), a sign-in refusal (401/403, and the 502/503 an unavailable auth server or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
+      <p class="muted" style="font-size:13.5px;margin:0">Errors <b>gpm itself</b> generates: an unreachable or timed-out upstream (502/504), an access-list, guard or bouncer denial, a rate limit (429), a sign-in refusal (401/403, and the 502/503 an unavailable auth server or an uncompilable middleware produces), and a parked host. The upstream's own error response passes through untouched unless you list its status below. Sign-in redirects and pages served by an identity provider are never replaced.</p>
     </div>
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Templates</p>
@@ -9226,7 +9226,7 @@ const RECOMMENDED_SECURITY_HEADERS = {
 function runtimeCardHtml(rt) {
   if (!rt || rt._error) {
     return `<div class="card form-section"><p class="section-label">Runtime</p>
-      <p class="muted" style="font-size:11.5px;margin:0">Runtime details are not available to this token.</p></div>`;
+      <p class="muted" style="font-size:13.5px;margin:0">Runtime details are not available to this token.</p></div>`;
   }
   const listeners = rt.listeners || {};
   const paths = rt.paths || {};
@@ -9236,7 +9236,7 @@ function runtimeCardHtml(rt) {
   const row = (k, v, help) => `<span class="k">${esc(k)}</span><span class="v">${v}${help ? `<div class="hint">${help}</div>` : ''}</span>`;
   return `<div class="card form-section" id="set-runtime">
     <p class="section-label">Runtime</p>
-    <p class="muted" style="font-size:11.5px;margin:0 0 10px">What this process is. Everything here is set at startup and needs a restart to change.</p>
+    <p class="muted" style="font-size:13.5px;margin:0 0 10px">What this process is. Everything here is set at startup and needs a restart to change.</p>
     <div class="kv">
       ${row('Version', mono(rt.version || 'unknown'))}
       ${row('HA role', rt.haRole === 'follower' ? '<span class="chip warn">Follower (read-only)</span>' : '<span class="chip">Leader</span>')}
@@ -9332,7 +9332,7 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Client addresses</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Which proxies in front of gpm may set the client address.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Which proxies in front of gpm may set the client address.</p>
         <div class="field-group">
           <label>Trusted proxies</label>
           <div class="chip-input" id="set-trustedproxies" data-hint="settings.trustedProxies" data-path="trustedProxies"></div>
@@ -9343,7 +9343,7 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">TLS</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">The floor every HTTPS and stream-terminate listener negotiates, for the whole fleet.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">The floor every HTTPS and stream-terminate listener negotiates, for the whole fleet.</p>
         <div class="field-group">
           <label>Minimum TLS version</label>
           <select class="field mono" id="set-mintls" data-hint="settings.tls.minVersion" data-path="tls.minVersion">
@@ -9360,7 +9360,7 @@ async function viewSettings(c, tab) {
     <div class="tab-panel" data-tab="headers" id="set-panel-headers" role="tabpanel" aria-labelledby="set-tab-headers" hidden>
       <div class="card form-section">
         <p class="section-label">Response security headers</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Fleet-default response headers, applied set-if-absent so an app's own header is never clobbered. Scope selects which responses each one lands on: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Any proxy host can override a header (value and scope) in its own editor. Empty ships nothing.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Fleet-default response headers, applied set-if-absent so an app's own header is never clobbered. Scope selects which responses each one lands on: <span class="mono">all</span>, <span class="mono">generated-only</span> (only responses gpm writes itself - denials, sign-in redirects, error pages) or <span class="mono">proxied-only</span>. Any proxy host can override a header (value and scope) in its own editor. Empty ships nothing.</p>
         <div id="set-secheaders" data-hint="settings.securityHeaders" data-path="securityHeaders"></div>
         <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
           <button class="btn ghost sm" id="set-secheaders-add" type="button">${ICON.plus}Add header</button>
@@ -9370,13 +9370,13 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Strip upstream response headers</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Fleet-default list of header names removed from proxied upstream responses (<span class="mono">Server</span>, <span class="mono">X-Powered-By</span>, ...). Only what the upstream sent is touched - never a header gpm adds. Any proxy host can add its own names in its editor; the lists are unioned.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Fleet-default list of header names removed from proxied upstream responses (<span class="mono">Server</span>, <span class="mono">X-Powered-By</span>, ...). Only what the upstream sent is touched - never a header gpm adds. Any proxy host can add its own names in its editor; the lists are unioned.</p>
         <div class="chip-input" id="set-striphdrs" data-hint="settings.stripResponseHeaders" data-path="stripResponseHeaders"></div>
         <div class="hint" style="margin-top:6px">Hop-by-hop and response-semantic names (Content-Type, Content-Length, Content-Encoding, Location, Vary, the WebSocket handshake) are refused on save. Set-Cookie and WWW-Authenticate are allowed but sharp: stripping them breaks the app's own sessions or its basic-auth challenge.</div>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Error pages</p>
-        <p class="muted" style="font-size:11.5px;margin:0">Custom HTML for gpm-generated errors has its own section: <a href="#/errorpages">Error pages</a>. It edits the same <span class="mono">settings.errorPages</span> config.</p>
+        <p class="muted" style="font-size:13.5px;margin:0">Custom HTML for gpm-generated errors has its own section: <a href="#/errorpages">Error pages</a>. It edits the same <span class="mono">settings.errorPages</span> config.</p>
       </div>
       ${settingsSaveBar('set-save-headers')}
     </div>
@@ -9384,7 +9384,7 @@ async function viewSettings(c, tab) {
     <div class="tab-panel" data-tab="advanced" id="set-panel-advanced" role="tabpanel" aria-labelledby="set-tab-advanced" hidden>
       <div class="card form-section">
         <p class="section-label">PROXY protocol (inbound)</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. This is the L4 half of the same question the Client addresses card answers at L7. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below. UDP stream listeners are unaffected.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Read the real client address out of the HAProxy PROXY protocol header (v1 and v2) on the <span class="mono">:80</span>/<span class="mono">:443</span> listeners and every TCP stream listener, so gpm behind an L4 load balancer sees the client rather than the balancer. This is the L4 half of the same question the Client addresses card answers at L7. The header is an unauthenticated claim, so it is honoured <b>only</b> from the trusted peers below. UDP stream listeners are unaffected.</p>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Accept PROXY headers</div><div class="ds">From the trusted peers below only</div></div>${switchHtml('set-pp-on', !!pp.enabled, 'Accept PROXY headers', 'settings.proxyProtocol.enabled')}</div>
         <div class="grid-2" style="margin-top:10px">
           <div class="field-group"><label>Trusted peers</label><div class="chip-input" id="set-pp-cidrs" data-hint="settings.proxyProtocol.trustedCIDRs" data-path="proxyProtocol.trustedCIDRs"></div>
@@ -9397,7 +9397,7 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Annotation and label prefix</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">One prefix per deployment, shared by Kubernetes Ingress discovery and Docker discovery: it names every annotation and label they read (<span class="mono">.../managed</span>, <span class="mono">.../profile</span>) and the <span class="mono">managed-by</span> / <span class="mono">disabled-by</span> labels gpm writes on derived hosts.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">One prefix per deployment, shared by Kubernetes Ingress discovery and Docker discovery: it names every annotation and label they read (<span class="mono">.../managed</span>, <span class="mono">.../profile</span>) and the <span class="mono">managed-by</span> / <span class="mono">disabled-by</span> labels gpm writes on derived hosts.</p>
         <div class="field-group" style="max-width:320px"><label>Prefix</label>
           <input class="field mono" id="set-id-annprefix" data-hint="settings.ingressDiscovery.annotationPrefix" data-path="ingressDiscovery.annotationPrefix" value="${esc(idc.annotationPrefix || '')}" placeholder="gpm.rake.pro" />
           <div class="hint">Leave blank for the default. Changing it does not relabel existing hosts by itself.</div>
@@ -9406,12 +9406,12 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section" id="set-metrics" style="margin-top:16px">
         <p class="section-label">Prometheus metrics</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Opt-in scrape endpoint on this admin listener, enabled with <span class="mono">GPM_METRICS=1</span> (a flag, not a saved setting - it needs a restart). An API token with the <span class="mono">metrics:read</span> scope can scrape it; your admin session can open it directly.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Opt-in scrape endpoint on this admin listener, enabled with <span class="mono">GPM_METRICS=1</span> (a flag, not a saved setting - it needs a restart). An API token with the <span class="mono">metrics:read</span> scope can scrape it; your admin session can open it directly.</p>
         <a class="btn ghost sm" id="set-metrics-link" href="/metrics" target="_blank" rel="noopener">Open /metrics</a>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">High availability</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">HA is decided at startup, not here. One instance is the leader and owns every write - config commits, ACME orders, DNS and discovery reconciles. A follower serves traffic from the replicated config and refuses config writes with a <span class="mono">503</span>, which is why its write controls are greyed out.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">HA is decided at startup, not here. One instance is the leader and owns every write - config commits, ACME orders, DNS and discovery reconciles. A follower serves traffic from the replicated config and refuses config writes with a <span class="mono">503</span>, which is why its write controls are greyed out.</p>
         <div class="kv">
           <span class="k">This instance</span><span class="v">${(rt && rt.haRole === 'follower') ? '<span class="chip warn">Follower (read-only)</span>' : '<span class="chip">Leader</span>'}</span>
           <span class="k">Config repo</span><span class="v"><span class="mono">${esc((rt && rt.paths && rt.paths.configDir) || '-')}</span><div class="hint">Replicate this directory to the follower; it is the whole state.</div></span>
@@ -9423,11 +9423,11 @@ async function viewSettings(c, tab) {
     <div class="tab-panel" data-tab="operations" id="set-panel-operations" role="tabpanel" aria-labelledby="set-tab-operations" hidden>
       <div class="card form-section danger-zone">
         <p class="section-label">Danger zone</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Two actions that affect every host or every signed-in user at once. Both are deliberate, both are confirmed, and neither has a partial version.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Two actions that affect every host or every signed-in user at once. Both are deliberate, both are confirmed, and neither has a partial version.</p>
       </div>
       <div class="card form-section danger-zone" style="margin-top:16px">
         <p class="section-label">Fleet-wide maintenance</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">Takes <b>every proxy host</b> out of service for a downtime window: gpm answers each request itself with a <span class="mono">503</span> and a <span class="mono">Retry-After</span> instead of dialling the upstream. It wins over each host's own Maintenance switch, so turning it off returns hosts to whatever they were individually set to. Redirect, parked and stream hosts proxy nothing and keep serving; ACME HTTP-01 is answered before host routing, so certificates still renew. The page served is the <a href="#/errorpages">error page</a> configured for <span class="mono">503</span> (a host's own override first), or gpm's built-in maintenance page when none is.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Takes <b>every proxy host</b> out of service for a downtime window: gpm answers each request itself with a <span class="mono">503</span> and a <span class="mono">Retry-After</span> instead of dialling the upstream. It wins over each host's own Maintenance switch, so turning it off returns hosts to whatever they were individually set to. Redirect, parked and stream hosts proxy nothing and keep serving; ACME HTTP-01 is answered before host routing, so certificates still renew. The page served is the <a href="#/errorpages">error page</a> configured for <span class="mono">503</span> (a host's own override first), or gpm's built-in maintenance page when none is.</p>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Fleet-wide maintenance</div><div class="ds">All proxy hosts serve the maintenance page</div></div>${switchHtml('set-maint-on', !!maint.enabled, 'Fleet-wide maintenance', 'settings.maintenance.enabled')}</div>
         <div class="field-group" style="margin-top:10px;max-width:220px">
           <label>Retry-After (seconds)</label>
@@ -9437,7 +9437,7 @@ async function viewSettings(c, tab) {
       </div>
       <div class="card form-section danger-zone" style="margin-top:16px">
         <p class="section-label">Per-host SSO sessions</p>
-        <p class="muted" style="font-size:11.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request. This takes effect at once and is not part of a save.</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request. This takes effect at once and is not part of a save.</p>
         <button class="btn danger sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
       </div>
       ${settingsSaveBar('set-save-operations')}
