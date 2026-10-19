@@ -236,7 +236,7 @@
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream-group-ref"
   },
   "proxyHost.locations.upstream.scheme": {
-    "text": "Scheme for this path's own backend. Blank falls back to the host's scheme.",
+    "text": "Scheme for this path's own backend. A new path override starts on the host's scheme and follows it until you pick one.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-upstream"
   },
   "proxyHost.locations.upstream.host": {

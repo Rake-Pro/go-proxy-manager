@@ -98,6 +98,13 @@ func TestStaticBundleHasCloneHelper(t *testing.T) {
 		// ${ENV:...}/${FILE:...}-shaped string: some of those are legitimate
 		// non-secret fields, e.g. a client CA's caPEM).
 		"val === '***'",
+		// labels carry discovery ownership and createdAt/updatedAt belong to
+		// the source: none of them reach the copy.
+		"delete copy.labels;",
+		"delete copy.createdAt;",
+		"delete copy.updatedAt;",
+		// a stream copy cannot share the source's listen port.
+		"if (section === 'streams') delete data.listenPort;",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing clone helper marker %q", want)

@@ -645,8 +645,13 @@ a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
 .col-domain, .col-domains { min-width:200px; }
 .col-upstream { min-width:140px; }
 .col-upstream .trunc { max-width:240px; }
-.col-tls { white-space:nowrap; }
-.col-tls .lock { max-width:220px; }
+.col-cert { white-space:nowrap; }
+.col-cert .lock { max-width:220px; }
+.lock.cert-cover svg { color:var(--ok); }
+.chip.cert-cover .trunc { max-width:18ch; }
+a.rail-cert .lock .trunc { color:var(--brand-text); }
+a.rail-cert:hover { text-decoration:none; }
+a.rail-cert:hover .trunc { text-decoration:underline; }
 .lock .trunc { max-width:24ch; }
 .col-auth { white-space:nowrap; }
 .col-auth .chip { display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
@@ -667,6 +672,11 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .card-head > .card-title { flex:1 1 auto; min-width:0; }
 .card-head > .card-title h3, .card-head > .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card-head > .card-actions { display:flex; gap:8px; flex:none; }
+.bulk-targets { margin:8px 0 12px; padding:6px 10px 6px 26px; max-height:180px; overflow:auto; border:1px solid var(--border); border-radius:3px; font-size:12.5px; }
+.bulk-targets li { line-height:20px; }
+.card-title .card-name-row { display:flex; align-items:center; gap:8px; min-width:0; }
+.card-title .card-name-row h3 { min-width:0; }
+.card-title .card-name-row .chip { flex:none; }
 .cards .kv .v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cards .kv .v .domain-list, .cards .kv .v.v-list { white-space:normal; }
 .view-head > div { min-width:0; max-width:100%; }

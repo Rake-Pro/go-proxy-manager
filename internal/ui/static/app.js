@@ -595,6 +595,24 @@ function showSaveError(e, title) {
 // does not leave time for. So it gets the same sticky banner.
 function showInvalid(title, msg) { showSaveError(new Error(msg), title); }
 
+// Create is create-only: every new object's PUT carries If-None-Match: *, so a
+// name that is already stored answers 409 instead of being replaced (a PUT is
+// otherwise an upsert). showNameTaken turns that 409 into the editor banner,
+// with a link to the stored object when it has a page of its own (href), and
+// flags the name field. Returns false for any other error.
+function showNameTaken(e, singular, name, href, title, nameEl) {
+  if (!e || e.status !== 409) return false;
+  const article = /^[aeiou]/i.test(singular) ? 'An' : 'A';
+  const banner = showSaveError(new Error(`${article} ${singular} named ${name} already exists.`), title);
+  const msg = banner && banner.querySelector('.ee-msg');
+  if (msg) {
+    msg.innerHTML = `${article} ${esc(singular)} named <b class="mono">${esc(name)}</b> already exists. `
+      + (href ? `Pick another name, or open <a href="${esc(href)}">${esc(name)}</a> to edit it.` : 'Pick another name.');
+  }
+  if (nameEl) nameEl.classList.add('field-flagged');
+  return true;
+}
+
 // ---------- inline row validation ----------
 // The row editors (locations, access-list rules, sources, basic-auth users)
 // used to DROP a half-filled row silently at save time - the operator typed an
@@ -2159,6 +2177,25 @@ function certStateChip(ct) {
   const chipCls = flat ? `chip flat${cls ? ' ' + cls : ''}` : `chip ${cls}`;
   return `<span class="${chipCls}" title="${esc(title)}"><span class="dot ${cls}"></span>${esc(label)}</span>`;
 }
+// The certificate a domain resolves to (certForDomain), as one chip: the hosts
+// list's Certificate column and the host editor rail. Covered and valid: a
+// green lock and the name. Inside the renewal window (state "expiring"):
+// amber, with "expires in N days". Expired or failed: red. Not issued yet:
+// amber. Nothing covers the domain: amber "no certificate".
+function certCoverHtml(ct, domain) {
+  if (!ct) return `<span class="chip warn cert-cover" title="${esc(domain ? 'No certificate covers ' + domain : 'No domain')}">no certificate</span>`;
+  const st = ct.state || '';
+  const when = ct.notAfter ? ', expires ' + fmtDate(ct.notAfter) : '';
+  if (st === 'expiring' || st === 'expired' || st === 'error' || st === 'pending') {
+    const cls = (st === 'expiring' || st === 'pending') ? 'warn' : 'err';
+    const days = ct.daysRemaining;
+    let label = certExpiryLabel(st, days);
+    if (st === 'expiring') label = days != null && days >= 0 ? 'expires ' + label : 'expiring';
+    const title = `Certificate ${ct.name}: ${label}${when}${ct.lastError ? '; ' + ct.lastError : ''}`;
+    return `<span class="chip ${cls} cert-cover" title="${esc(title)}"><span class="dot ${cls}"></span><span class="trunc">${esc(ct.name)}</span>${esc(label)}</span>`;
+  }
+  return `<span class="lock ok cert-cover" title="${esc('Certificate ' + ct.name + when)}">${ICON.lock}<span class="trunc">${esc(ct.name)}</span></span>`;
+}
 // Expiry column cell: the state chip plus the plain absolute date beside it
 // (no time - the full timestamp is the chip's tooltip already). Used only
 // where there is room for both; certStateChip alone covers every other spot
@@ -2222,10 +2259,17 @@ function stripSecrets(v) {
 // these carry functions/undefined), blanks its name so the editor prompts for a
 // new one, strips every secret-bearing field, and clears .domains for the kinds
 // that need it. tags and disabled are left as-is (both should survive a clone).
+// labels are dropped whole: they carry discovery ownership (<prefix>/managed-by),
+// and a hand-made copy that kept it would belong to the reconciler, which
+// deletes managed objects it has no source for. createdAt/updatedAt belong to
+// the source; the store stamps the copy's own on its first save.
 function cloneObject(obj, clearDomains) {
   const copy = JSON.parse(JSON.stringify(obj || {}));
   copy.name = '';
   if (clearDomains) copy.domains = [];
+  delete copy.labels;
+  delete copy.createdAt;
+  delete copy.updatedAt;
   stripSecrets(copy);
   return copy;
 }
@@ -2237,6 +2281,9 @@ function cloneObject(obj, clearDomains) {
 let cloneSeed = null;
 function startClone(section, obj, newName) {
   const data = cloneObject(obj, CLONE_CLEAR_DOMAINS.has(section));
+  // Two streams cannot share a listen port (without SNI routing), so the copy
+  // starts without one and the dialog says to pick it.
+  if (section === 'streams') delete data.listenPort;
   data.name = newName || '';
   cloneSeed = { section, origName: (obj && obj.name) || '', data };
   location.hash = '#/' + section + '/_new';
@@ -2247,6 +2294,9 @@ function cloneNotesHtml(section, obj, singular) {
   const name = (obj && obj.name) || '';
   const notes = [`<p>Every setting of <b>${esc(name)}</b> is copied into a new ${esc(singular)}. Nothing is saved until you press Save in the editor.</p>`];
   if (CLONE_CLEAR_DOMAINS.has(section)) notes.push('<p>The copy starts with no domains: a domain belongs to one host.</p>');
+  if (section === 'streams') notes.push('<p>The copy starts with no listen port: pick a free one in the editor.</p>');
+  if (section === 'certs') notes.push(`<p>The copy claims the same domains as <b>${esc(name)}</b>. Only one certificate is presented per name, so change the domains unless the copy is meant to replace it.</p>`);
+  if (obj && obj.labels && Object.keys(obj.labels).length) notes.push('<p>Labels are not copied: the copy is managed by hand.</p>');
   if (JSON.stringify(obj || {}).indexOf('"***"') !== -1) notes.push('<p>Secrets are not copied; enter them again in the copy.</p>');
   return notes.join('');
 }
@@ -2446,8 +2496,8 @@ function applyMaintenanceBanner(container) {
   if (!container || !hasCapability('maintenance.globalEnabled')) return;
   const banner = document.createElement('div');
   banner.className = 'ro-banner warn';
-  banner.innerHTML = '<b>Maintenance mode is ON for all hosts.</b> Every proxy host answers 503 instead of dialling its upstream. '
-    + 'Turn it off under <a href="#/settings">Settings</a> -> Maintenance mode.';
+  banner.innerHTML = '<b>Maintenance is on for every proxy host.</b> Each one answers 503 instead of dialling its upstream. '
+    + 'Turn off Fleet-wide maintenance under <a href="#/settings/operations">Settings &gt; Operations</a>.';
   container.prepend(banner);
 }
 
@@ -3885,17 +3935,27 @@ function managedBy(h) {
   }
   return '';
 }
+// The one "disabled" marker: a muted dot plus the word, the quiet style of the
+// hosts list's Status column. Every list that shows a disabled object (cards,
+// the certificates table, API tokens) uses this, so it means one thing.
+const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>disabled</span>';
 const MANAGED_CHIPS = {
   'ingress-discovery': { text: 'ingress', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
   'docker-discovery': { text: 'docker', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
 };
 
 async function listHosts(c) {
-  const [hostsR, mwR] = await Promise.all([
+  const [hostsR, mwR, certsR] = await Promise.all([
     api('/api/proxy-hosts'),
     refList('/api/middlewares', 'middlewares'),
+    refList('/api/certificates', 'certificates'),
   ]);
   const hosts = arr(hostsR.data);
+  // The Certificate column is what the handshake presents for the primary
+  // domain, resolved like the editor's rail; tls.certificateRef is not read on
+  // an HTTP host. A list that did not load says so instead of "no certificate".
+  const certsOK = certsR !== null;
+  const certs = arr(certsR);
   const mwType = {};
   arr(mwR).forEach((m) => { mwType[m.name] = m.type; });
 
@@ -3932,7 +3992,8 @@ async function listHosts(c) {
     zones.forEach((z) => { zoneCounts[z] = (zoneCounts[z] || 0) + 1; });
     const up = h.upstream || {};
     const upStr = h.upstreamGroupRef ? `group:${h.upstreamGroupRef}` : `${up.host || '?'}:${up.port != null ? up.port : '?'}`;
-    const certRef = (h.tls && h.tls.certificateRef) || '';
+    const cert = certsOK ? certForDomain(certs, domains[0]) : null;
+    const certName = cert ? cert.name : (certsOK ? 'no certificate' : '');
     const authMw = arr(h.middlewares).find((m) => mwType[m] === 'auth') || '';
     // "This host requires sign-in" is ONE fact whichever way it was configured,
     // so an inline auth block reads the same in this column as an attached auth
@@ -3942,13 +4003,13 @@ async function listHosts(c) {
     const tags = arr(h.tags);
     const managed = managedBy(h);
     return {
-      h, domains, zones, upStr, certRef, authMw, authInline, managed, status, tags,
+      h, domains, zones, upStr, cert, authMw, authInline, managed, status, tags,
       name: h.name || '',
       display: h.displayName || '',
       updated: h.updatedAt || '',
       // The filter haystack: every value the row is BUILT from, never the
       // markup it renders to.
-      blob: [h.name, h.displayName, domains.join(' '), upStr, certRef, authMw, authInline ? 'sign-in' : '', managed, status, tags.join(' ')]
+      blob: [h.name, h.displayName, domains.join(' '), upStr, certName, authMw, authInline ? 'sign-in' : '', managed, status, tags.join(' ')]
         .join(' ').toLowerCase(),
     };
   });
@@ -3982,7 +4043,7 @@ async function listHosts(c) {
   const COLUMNS = [
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
     { key: 'upstream', label: 'Upstream', cls: 'col-upstream' },
-    { key: null, label: 'TLS', cls: 'col-tls' },
+    { key: null, label: 'Certificate', cls: 'col-cert' },
     { key: null, label: 'Auth', cls: 'col-auth' },
     { key: null, label: 'Status', cls: 'col-status' },
     { key: 'updated', label: 'Updated', cls: 'col-updated' },
@@ -4021,16 +4082,16 @@ async function listHosts(c) {
     const rest = r.domains.slice(1);
     // The other domains open as their own block under line 2, one per line.
     const more = rest.length ? moreToggle(rest, rest.map((d) => `<span class="trunc" title="${esc(d)}">${esc(d)}</span>`).join(''), true) : null;
-    const tls = r.certRef
-      ? `<span class="lock ok" title="Certificate ${esc(r.certRef)}">${ICON.lock}<span class="trunc">${esc(r.certRef)}</span></span>`
-      : `<span class="chip">none</span>`;
+    const tls = certsOK
+      ? certCoverHtml(r.cert, r.domains[0] || '')
+      : '<span class="faint" title="The certificate list did not load.">-</span>';
     const auth = r.authMw
       ? `<span class="chip brand" title="${esc(r.authMw)}">${esc(r.authMw)}</span>`
       : (r.authInline ? `<span class="chip brand" title="Configured inline on this host, under Sign-in.">sign-in</span>` : `<span class="chip">none</span>`);
     // live/disabled are the quiet states (dot + text, no pill); maintenance is
     // the one that should draw the eye, so it keeps the filled/bordered pill.
     const status = r.status === 'disabled'
-      ? `<span class="chip flat muted"><span class="dot muted"></span>disabled</span>`
+      ? DISABLED_CHIP
       : (r.status === 'maintenance'
         ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
         : `<span class="chip flat ok"><span class="dot ok"></span>live</span>`);
@@ -4052,7 +4113,7 @@ async function listHosts(c) {
         ${more ? more.list : ''}
       </td>
       <td class="mono col-upstream"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
-      <td class="col-tls">${tls}</td>
+      <td class="col-cert">${tls}</td>
       <td class="col-auth">${auth}</td>
       <td class="col-status">${status}</td>
       <td class="mono faint col-updated">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
@@ -4105,6 +4166,10 @@ async function listHosts(c) {
 
   function render() {
     const rows = visible();
+    // A bulk action applies to what the operator can see: a name the filter or
+    // a zone chip now hides leaves the selection.
+    const shown = new Set(rows.map((r) => r.name));
+    Array.from(selected).forEach((n) => { if (!shown.has(n)) selected.delete(n); });
     $('#hostHead').innerHTML = headHtml();
     $('#hostRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
@@ -4165,9 +4230,28 @@ async function listHosts(c) {
   async function runBulk(action) {
     if (action === 'clear') { selected.clear(); render(); return; }
     const names = Array.from(selected);
-    const targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
+    let targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
     if (!targets.length) return;
-    const many = `<b>${targets.length}</b> proxy host${targets.length === 1 ? '' : 's'}`;
+    // Discovery rewrites a managed host's tags from its template on the next
+    // reconcile, so a tag change there would be reverted: those are skipped,
+    // and the dialog and the result say so.
+    let skipped = [];
+    if (action === 'tag-add' || action === 'tag-remove') {
+      skipped = targets.filter((h) => managedBy(h));
+      targets = targets.filter((h) => !managedBy(h));
+      if (!targets.length) {
+        toast('No hosts to change', `The selected host${skipped.length === 1 ? ' is' : 's are'} discovery-managed: tags come from the discovery template.`, 'err');
+        return;
+      }
+    }
+    const one = targets.length === 1;
+    const many = `<b>${targets.length}</b> proxy host${one ? '' : 's'}`;
+    // Every confirm names its targets, so a selection is never acted on blind.
+    const shownNames = targets.slice(0, 12).map((h) => `<li class="mono">${esc(arr(h.domains)[0] || h.name)}</li>`).join('');
+    const listHtml = `<ul class="bulk-targets">${shownNames}${targets.length > 12 ? `<li class="muted">and ${targets.length - 12} more</li>` : ''}</ul>`;
+    const skipHtml = skipped.length
+      ? `<p class="muted">${skipped.length} discovery-managed host${skipped.length === 1 ? '' : 's'} skipped (${skipped.map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}): tags come from the discovery template.</p>`
+      : '';
     let mutate, title, confirmLabel, body, tag = '';
 
     if (action === 'enable' || action === 'disable') {
@@ -4175,14 +4259,14 @@ async function listHosts(c) {
       title = off ? 'Disable the selected hosts?' : 'Enable the selected hosts?';
       confirmLabel = off ? 'Disable hosts' : 'Enable hosts';
       body = off
-        ? `<p>${many} stop being served: gpm answers on their domains as if they were not configured. Their config is kept.</p><p>Each host is committed to git separately.</p>`
-        : `<p>${many} start being served again with the config they already hold.</p><p>Each host is committed to git separately.</p>`;
+        ? `<p>${many} ${one ? 'stops' : 'stop'} being served: gpm answers on ${one ? 'its domains' : 'their domains'} as if ${one ? 'it was' : 'they were'} not configured. ${one ? 'Its' : 'Their'} config is kept.</p>${listHtml}<p>Each host is committed to git separately.</p>`
+        : `<p>${many} ${one ? 'starts' : 'start'} being served again with the config ${one ? 'it already holds' : 'they already hold'}.</p>${listHtml}<p>Each host is committed to git separately.</p>`;
       mutate = (h) => { const o = Object.assign({}, h); if (off) o.disabled = true; else delete o.disabled; return o; };
     } else if (action === 'tag-add' || action === 'tag-remove') {
       const add = action === 'tag-add';
       const answered = await confirmModal({
         title: add ? 'Add a tag to the selected hosts?' : 'Remove a tag from the selected hosts?',
-        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>`,
+        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>${listHtml}${skipHtml}`,
         confirmLabel: add ? 'Add tag' : 'Remove tag',
         danger: false,
         prompt: { label: add ? 'Tag to add' : 'Tag to remove', placeholder: 'e.g. internal' },
@@ -4225,7 +4309,8 @@ async function listHosts(c) {
         return;
       }
     }
-    prog.done('Done', `${done} host${done === 1 ? '' : 's'} updated and committed.`, 'ok');
+    prog.done('Done', `${done} host${done === 1 ? '' : 's'} updated and committed.`
+      + (skipped.length ? ` ${skipped.length} discovery-managed host${skipped.length === 1 ? '' : 's'} skipped.` : ''), 'ok');
     refreshHeadSha();
     if (c.isConnected) await route();
   }
@@ -4429,7 +4514,7 @@ async function hostEditor(c, name) {
   // Same markup as the hosts list's Status column: live and disabled are the
   // quiet .flat states, maintenance keeps the pill.
   const statusChip = h.disabled
-    ? `<span class="chip flat muted"><span class="dot muted"></span>disabled</span>`
+    ? DISABLED_CHIP
     : ((h.maintenance || globalMaint) && !isNew
       ? `<span class="chip warn"><span class="dot warn"></span>maintenance</span>`
       : `<span class="chip flat ok"><span class="dot ok"></span>${isNew ? 'new' : 'live'}</span>`);
@@ -4515,7 +4600,7 @@ ${panel('routing', `        ${foldHtml('f-id-card', 'Identity', idSummary, isNew
           <div class="inline-fields">
             <div class="field-group">
               <label>Name</label>
-              <input class="field mono" id="f-name" data-hint="common.name" data-path="name" value="${esc(h.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed ? seed.origName + '-copy' : 'internal-name')}" />
+              <input class="field mono" id="f-name" data-hint="common.name" data-path="name" value="${esc(h.name || '')}" ${isNew ? '' : 'disabled'} placeholder="${esc(seed && seed.origName ? seed.origName + '-copy' : 'internal-name')}" />
               <div class="hint">${isNew ? 'Immutable after creation.' : 'Name is immutable.'}</div>
             </div>
             <div class="field-group">
@@ -4782,11 +4867,14 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
           <div><dt>Status</dt><dd>${statusChip}${h.updatedAt ? `<span class="muted">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''}${railManaged}</dd></div>
           <div><dt>Certificate</dt><dd id="railCert"></dd></div>
           <div><dt>Request chain</dt><dd><ol class="chain" id="railChain"></ol></dd></div>
-          <div><dt>Config file</dt><dd><span class="mono">${esc(isNew ? 'proxy-hosts/<name>.yaml' : 'proxy-hosts/' + h.name + '.yaml')}</span><span class="muted">${isNew ? 'written by the first save' : 'one git commit per save, see <a href="#/history">History</a>'}</span></dd></div>
+          <div><dt>Config file</dt><dd><span class="mono" id="railPath">${esc('proxy-hosts/' + (h.name || '<name>') + '.yaml')}</span><span class="muted">${isNew ? 'written by the first save' : 'one git commit per save, see <a href="#/history">History</a>'}</span></dd></div>
         </dl></div>
       </aside>
     </div>`;
   wirePageTabs('routing');
+  // A new host's config path follows the name being typed (a clone arrives
+  // with the name chosen in its dialog already filled in).
+  if (isNew) $('#f-name').addEventListener('input', () => { $('#railPath').textContent = 'proxy-hosts/' + ($('#f-name').value.trim() || '<name>') + '.yaml'; });
 
   // domains chip input
   const domainsCtl = makeChipInput($('#f-domains'), arr(h.domains), 'add domain...', (d) => {
@@ -4862,6 +4950,9 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   function locRow(loc) {
     loc = loc || {};
     const lu = loc.upstream || {};
+    // A path override has its own explicit scheme (the model has no fallback):
+    // a row without one starts on the host's current scheme.
+    const lScheme = lu.scheme || $('#f-scheme').value || 'http';
     const p = 'loc' + (++locSeq);
     const div = document.createElement('div');
     div.className = 'sub-block loc-block';
@@ -4876,7 +4967,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       <div class="loc-row">
         <input class="field mono loc-path" data-hint="proxyHost.locations.path" style="flex:1 1 120px" value="${esc(loc.path || '')}" placeholder="/api" aria-label="Path" />
         <span class="arrow">${ICON.arrow}</span>${groupSel}
-        <select class="field mono loc-scheme" data-hint="proxyHost.locations.upstream.scheme" style="flex:0 0 90px" aria-label="Upstream scheme"><option value="">(host default)</option><option value="http"${lu.scheme === 'http' ? ' selected' : ''}>http</option><option value="https"${lu.scheme === 'https' ? ' selected' : ''}>https</option></select>
+        <select class="field mono loc-scheme" data-hint="proxyHost.locations.upstream.scheme" style="flex:0 0 90px" aria-label="Upstream scheme"${lu.scheme ? '' : ' data-follow="1"'}><option value="http"${lScheme === 'http' ? ' selected' : ''}>http</option><option value="https"${lScheme === 'https' ? ' selected' : ''}>https</option></select>
         <input class="field mono loc-host" data-hint="proxyHost.locations.upstream.host" style="flex:1 1 110px" value="${esc(lu.host || '')}" placeholder="host (optional)" aria-label="Upstream host" />
         <input class="field mono loc-port" data-hint="proxyHost.locations.upstream.port" type="number" style="flex:0 0 80px" value="${esc(lu.port != null ? lu.port : '')}" placeholder="port" aria-label="Upstream port" />
         <button class="icon-btn loc-del" type="button" aria-label="Remove location">${ICON.x}</button>
@@ -4911,6 +5002,10 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     wireInlineFold(p + '-rl');
     locCtls.push(ctl);
 
+    // An untouched preselected scheme keeps following the host's (below); the
+    // operator's own pick stops that.
+    const schemeSel = div.querySelector('.loc-scheme');
+    schemeSel.addEventListener('change', () => { delete schemeSel.dataset.follow; });
     div.querySelector('.loc-del').addEventListener('click', () => {
       div.remove();
       const i = locCtls.indexOf(ctl);
@@ -4947,6 +5042,9 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   }
   arr(h.locations).forEach(locRow);
   $('#addLoc').addEventListener('click', () => locRow({}));
+  $('#f-scheme').addEventListener('change', () => {
+    $$('#f-locs .loc-scheme[data-follow]').forEach((s) => { s.value = $('#f-scheme').value; });
+  });
 
   // HSTS show/hide
   $('#f-hsts').addEventListener('switchchange', () => {
@@ -5021,19 +5119,28 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   }
   // rail: the certificate the handshake will present for the first domain,
   // resolved by SNI matching, not a stored certificateRef the L7 data plane
-  // never reads.
+  // never reads. Same chip as the hosts list's Certificate column, plus how
+  // many of the host's domains a certificate covers.
   function refreshRailCert(domains) {
     const el = $('#railCert');
     if (!el) return;
-    const d = arr(domains)[0];
+    const list = arr(domains).filter(Boolean);
+    const d = list[0];
     if (!d) { el.innerHTML = '<span class="muted">Add a domain to see which certificate covers it.</span>'; return; }
     const ct = certForDomain(certs, d);
-    if (!ct) {
-      el.innerHTML = `<span class="status-line"><i class="warn"></i>none covers ${esc(d)}</span><span class="muted">Issue or import one under <a href="#/certs">Certificates</a>.</span>`;
-      return;
+    const uncovered = list.filter((x) => !certForDomain(certs, x));
+    const parts = [];
+    parts.push(ct ? `<a class="rail-cert" href="#/certs/${encodeURIComponent(ct.name)}">${certCoverHtml(ct, d)}</a>` : certCoverHtml(null, d));
+    if (ct) {
+      const meta = [ct.type === 'acme' ? 'ACME' : (ct.type || ''), ct.notAfter ? `expires ${fmtDate(ct.notAfter)}` : ''].filter(Boolean).join(' - ');
+      if (meta) parts.push(`<span class="muted">${esc(meta)}</span>`);
     }
-    const meta = [arr(ct.domains).join(', '), ct.type === 'acme' ? 'ACME' : (ct.type || ''), ct.notAfter ? `expires ${fmtDate(ct.notAfter)}` : ''].filter(Boolean).join(' - ');
-    el.innerHTML = `<a class="mono" href="#/certs/${encodeURIComponent(ct.name)}">${esc(ct.name)}</a><span class="muted">${esc(meta)}</span>`;
+    if (list.length > 1) {
+      parts.push(`<span class="muted">${list.length - uncovered.length} of ${list.length} domains covered</span>`);
+      if (uncovered.length && uncovered.length < list.length) parts.push(`<span class="muted">not covered: <span class="mono">${uncovered.map(esc).join(', ')}</span></span>`);
+    }
+    if (uncovered.length) parts.push('<span class="muted">Issue or import one under <a href="#/certs">Certificates</a>.</span>');
+    el.innerHTML = parts.join('');
   }
   refreshRailCert(arr(h.domains));
   refreshUpstreamMode();
@@ -5288,7 +5395,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         }
         // Merged over the stored upstream for the same reason as the host's:
         // path and hostHeader have to survive a save that does not touch them.
-        const lup = Object.assign({}, origUp, { scheme: ls || 'http', host: lh, port: lp });
+        const lup = Object.assign({}, origUp, { scheme: ls, host: lh, port: lp });
         const lextra = ctl.up.get('location ' + path);
         if (!lextra) { locAborted = true; break; }
         delete lup.path; delete lup.hostHeader;
@@ -5328,12 +5435,15 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
 
     const btn = $('#saveBtn'); btn.disabled = true;
     try {
-      const r = await api('/api/proxy-hosts/' + encodeURIComponent(nm), { method: 'PUT', body: obj });
+      const r = await api('/api/proxy-hosts/' + encodeURIComponent(nm), { method: 'PUT', body: obj, headers: isNew ? { 'If-None-Match': '*' } : {} });
       toastSaved(r.commit);
       refreshHeadSha(); clearDirty();
       if (isNew) location.hash = '#/hosts/' + encodeURIComponent(nm);
       else location.hash = '#/hosts';
-    } catch (e) { showSaveError(e, 'Could not save this proxy host'); btn.disabled = false; }
+    } catch (e) {
+      if (!(isNew && showNameTaken(e, 'proxy host', nm, '#/hosts/' + encodeURIComponent(nm), 'Could not add this proxy host', $('#f-name')))) showSaveError(e, 'Could not save this proxy host');
+      btn.disabled = false;
+    }
   });
 
   // delete
@@ -5465,7 +5575,7 @@ async function listCerts(c) {
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
       <td class="col-name">
         <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a></div>
-        <div class="cell-sub">${r.ct.displayName ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
+        <div class="cell-sub">${r.ct.disabled ? DISABLED_CHIP : ''}${r.ct.displayName ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
       </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td class="col-type">
@@ -5702,10 +5812,13 @@ async function certEditor(c, name) {
     }
     const btn = $('#ct-save'); btn.disabled = true;
     try {
-      const r = await api('/api/certificates/' + encodeURIComponent(nm), { method: 'PUT', body: obj });
+      const r = await api('/api/certificates/' + encodeURIComponent(nm), { method: 'PUT', body: obj, headers: isNew ? { 'If-None-Match': '*' } : {} });
       toastSaved(r.commit); refreshHeadSha(); clearDirty();
       location.hash = '#/certs';
-    } catch (e) { showSaveError(e, 'Could not save this certificate'); btn.disabled = false; }
+    } catch (e) {
+      if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate');
+      btn.disabled = false;
+    }
   });
 
   // Renew now: same shared action as the list's per-row button. The order runs
@@ -5852,7 +5965,7 @@ async function genericList(c, section) {
   const cards = items.map((o) => `
     <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
       <div class="card-head">
-        <div class="card-title"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
+        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="#/${section}/${encodeURIComponent(o.name)}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:11.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
         <div class="card-actions">
           <button class="btn ghost sm danger gs-del" data-name="${esc(o.name)}" type="button">Delete</button>
         </div>
@@ -6234,10 +6347,13 @@ function wireEditor(section, plural, meta, isNew, origName, stored, buildBody) {
     if (isOn('ed-disabled')) body.disabled = true;
     const btn = $('#ed-save'); btn.disabled = true;
     try {
-      const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'PUT', body });
+      const r = await api('/api/' + plural + '/' + encodeURIComponent(nm), { method: 'PUT', body, headers: isNew ? { 'If-None-Match': '*' } : {} });
       toastSaved(r.commit); refreshHeadSha(); clearDirty();
       location.hash = '#/' + section;
-    } catch (e) { showSaveError(e, `Could not save this ${meta.singular}`); btn.disabled = false; }
+    } catch (e) {
+      if (!(isNew && showNameTaken(e, meta.singular, nm, '#/' + section + '/' + encodeURIComponent(nm), `Could not add this ${meta.singular}`, $('#ed-name')))) showSaveError(e, `Could not save this ${meta.singular}`);
+      btn.disabled = false;
+    }
   });
   const del = $('#ed-delete');
   if (del) del.addEventListener('click', async () => {
@@ -8060,7 +8176,7 @@ async function viewTokens(c) {
     <tr data-name="${esc(t.name)}" data-blob="${esc([t.name, t.displayName, arr(t.scopes).join(' '), t.disabled ? 'disabled' : ''].join(' ').toLowerCase())}">
       <td class="col-name">
         <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span></div>
-        <div class="cell-sub">${t.disabled ? '<span class="chip warn">disabled</span>' : ''}${t.createdAt ? `<span class="trunc mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}</div>
+        <div class="cell-sub">${t.disabled ? DISABLED_CHIP : ''}${t.createdAt ? `<span class="trunc mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}</div>
       </td>
       <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
       <td class="mono col-time">${tokenExpiryLabel(t)}</td>
@@ -8203,13 +8319,18 @@ async function viewTokens(c) {
     if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
     const btn = $('#tok-create'); btn.disabled = true;
     try {
-      const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body });
+      const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body, headers: { 'If-None-Match': '*' } });
       toastSaved(r.commit); refreshHeadSha();
       const secret = r.data && r.data.token;
       // route(), not viewTokens(c), so the shell banners and gating survive.
       if (c.isConnected) await route();
       if (secret) revealToken(secret);
-    } catch (e) { toastErr(e); btn.disabled = false; }
+    } catch (e) {
+      // A token has no page of its own: the stored one is in the list below,
+      // where Rotate replaces its secret.
+      if (!showNameTaken(e, 'token', nm, '', 'Could not add this token', $('#tok-name'))) toastErr(e);
+      btn.disabled = false;
+    }
   });
 
   $$('.tok-rotate').forEach((b) => {
@@ -9086,6 +9207,8 @@ function applyNavGroupDefaults() {
 //   opts.onFinish(draft) performs the write; a thrown error shows in the footer.
 //   opts.importYAML(text) -> { draft, invalid, note, full } fills the steps
 //   from pasted YAML (see openHostWizard for the shape).
+//   opts.altLink = { label, href, carry(draft)? } is the footer's way out to
+//   the full editor; carry, when set, receives the committed draft.
 function wizard(opts) {
   return new Promise((resolve) => {
     const steps = opts.steps;
@@ -9286,8 +9409,17 @@ function wizard(opts) {
     nextBtn.addEventListener('click', () => { if (cur === steps.length - 1) finish(); else go(cur + 1); });
     const imp = wrap.querySelector('#wz-import');
     if (imp) imp.addEventListener('click', (e) => { e.preventDefault(); showImport(); });
+    // The alternative link hands the draft over when the caller can take it
+    // (altLink.carry): the current step is committed first and nothing is
+    // lost, so there is no discard prompt. Without carry it is a plain exit.
     const alt = wrap.querySelector('#wz-alt');
-    if (alt) alt.addEventListener('click', () => close(null));
+    if (alt) alt.addEventListener('click', (e) => {
+      if (!opts.altLink.carry) { close(null); return; }
+      e.preventDefault();
+      commit();
+      close(null);
+      opts.altLink.carry(draft);
+    });
     show(0);
   });
 }
@@ -9345,7 +9477,20 @@ async function runHostWizard() {
   // PUT is an upsert, so a name that already exists would silently replace
   // that host. The wizard only ever creates; the editor is where edits go.
   const existing = new Set(arr(hostsR).map((h) => h.name));
-  const draft = { name: '', domains: [], scheme: 'http', host: '', port: '', path: '', forceSSL: null, hsts: false, idp: '', accessLists: [], middlewares: [] };
+  // forceSSLTouched: Force SSL follows the domains' coverage (on only when
+  // every domain is covered) until the operator flips the switch.
+  const draft = { name: '', domains: [], scheme: 'http', host: '', port: '', path: '', forceSSL: null, forceSSLTouched: false, hsts: false, idp: '', accessLists: [], middlewares: [] };
+  const allCovered = (d) => d.domains.length > 0 && d.domains.every((x) => certForDomain(certs, x));
+  // One coverage phrase for the step list and Review: which certificate covers
+  // the host, or how many of its domains are covered when only some are.
+  const coverText = (d) => {
+    const cov = d.domains.map((x) => certForDomain(certs, x));
+    const n = cov.filter(Boolean).length;
+    if (!n) return 'no certificate yet';
+    if (n < d.domains.length) return `${n} of ${d.domains.length} domains covered`;
+    const names = Array.from(new Set(cov.map((ct) => ct.name)));
+    return `covered by <span class="mono">${names.map(esc).join(', ')}</span>`;
+  };
   let reviewErr = '';
   let reviewSeq = 0;
 
@@ -9375,6 +9520,9 @@ async function runHostWizard() {
         return {
           read(dd) {
             dd.domains = chips.get().map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+            // A changed domain list re-derives the Force SSL default, even
+            // when the Certificate step is not shown again.
+            if (!dd.forceSSLTouched) dd.forceSSL = allCovered(dd);
             dd.name = nameEl.value.trim();
             dd.scheme = pane.querySelector('#wz-scheme').value;
             dd.host = pane.querySelector('#wz-host').value.trim();
@@ -9410,14 +9558,22 @@ async function runHostWizard() {
       id: 'cert', title: 'Certificate',
       render(pane, d) {
         const covered = d.domains.map((x) => certForDomain(certs, x));
-        const anyCovered = covered.some(Boolean);
-        if (d.forceSSL === null) d.forceSSL = anyCovered;
+        const nCovered = covered.filter(Boolean).length;
+        const every = allCovered(d);
+        if (!d.forceSSLTouched) d.forceSSL = every;
+        const sslWhy = every
+          ? (d.domains.length > 1 ? 'On because a certificate covers every domain.' : 'On because a certificate covers the domain.')
+          : (nCovered
+            ? `Off because only ${nCovered} of ${d.domains.length} domains are covered, so visitors to the others would be sent to a handshake that fails.`
+            : 'Off until a certificate covers the domain, so visitors are not sent to a handshake that fails.');
         pane.innerHTML = `<h3>Certificate</h3><p class="lead">How ${esc(d.domains[0])} is served over HTTPS.</p>
           <div class="field-group"><label>Coverage</label>${certCoverageHtml(certs, d.domains)}
             <div class="hint">${CERT_AUTO_HINT}</div></div>
-          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Send http:// visitors to https://. ${anyCovered ? 'On because a certificate covers the domain.' : 'Off until a certificate covers the domain, so visitors are not sent to a handshake that fails.'}</div></div>${switchHtml('wz-forcessl', !!d.forceSSL, 'Force SSL', 'proxyHost.tls.forceSSL')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Send http:// visitors to https://. ${sslWhy}</div></div>${switchHtml('wz-forcessl', !!d.forceSSL, 'Force SSL', 'proxyHost.tls.forceSSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">HSTS</div><div class="ds">Tell browsers to use HTTPS only. Turn it on once HTTPS works for good; it is hard to undo for visitors.</div></div>${switchHtml('wz-hsts', !!d.hsts, 'HSTS', 'proxyHost.tls.hsts.enabled')}</div>
           <p class="hint" style="margin-top:12px">Minimum TLS version and client certificates (mTLS) are in the host editor after creation.</p>`;
+        const sslSw = pane.querySelector('#wz-forcessl');
+        if (sslSw) sslSw.addEventListener('switchchange', () => { d.forceSSLTouched = true; });
         return { read(dd) { dd.forceSSL = isOn('wz-forcessl'); dd.hsts = isOn('wz-hsts'); } };
       },
       validate(d) {
@@ -9425,8 +9581,7 @@ async function runHostWizard() {
         return '';
       },
       summary(d) {
-        const ct = certForDomain(certs, d.domains[0]);
-        return `${ct ? `covered by <span class="mono">${esc(ct.name)}</span>` : 'no certificate yet'}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}`;
+        return `${coverText(d)}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}`;
       },
     },
     {
@@ -9464,13 +9619,12 @@ async function runHostWizard() {
       async render(pane, d) {
         reviewErr = '';
         const tok = ++reviewSeq; // a reply from an earlier render is dropped
-        const ct = certForDomain(certs, d.domains[0]);
         pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you create the host.</p>
           <dl class="dl-h" style="margin-bottom:20px">
             <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
             <dt>Name</dt><dd class="mono">${esc(d.name)}</dd>
             <dt>Backend</dt><dd class="mono">${esc(d.scheme)}://${esc(d.host)}:${esc(d.port)}${esc(d.path)}</dd>
-            <dt>Certificate</dt><dd>${ct ? `<span class="mono">${esc(ct.name)}</span>` : 'none yet'}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}</dd>
+            <dt>Certificate</dt><dd>${coverText(d)}, Force SSL ${d.forceSSL ? 'on' : 'off'}${d.hsts ? ', HSTS on' : ''}</dd>
             <dt>Sign-in</dt><dd>${d.idp ? esc(d.idp) : 'none'}</dd>
             <dt>Access lists</dt><dd>${d.accessLists.length ? `<span class="mono">${d.accessLists.map(esc).join(', ')}</span>` : 'none'}</dd>
             <dt>Middleware</dt><dd>${d.middlewares.length ? `<span class="mono">${d.middlewares.map(esc).join(', ')}</span>` : 'none'}</dd>
@@ -9510,7 +9664,18 @@ async function runHostWizard() {
     noun: 'host',
     steps, draft,
     finishLabel: 'Create host',
-    altLink: { label: 'Open the full editor instead', href: '#/hosts/_new' },
+    // The full editor opens on what the steps hold so far, through the same
+    // clone-seed hand-over as "Open the full editor with everything".
+    altLink: {
+      label: 'Open the full editor instead', href: '#/hosts/_new',
+      carry: (d) => {
+        const o = hostWizardObject(d);
+        if (!o.upstream.host) delete o.upstream.host;
+        if (isNaN(o.upstream.port)) delete o.upstream.port;
+        cloneSeed = { section: 'hosts', origName: '', data: o };
+        location.hash = '#/hosts/_new';
+      },
+    },
     importPlaceholder: 'name: app\ndomains: [app.example.com]\nupstream: { scheme: http, host: 10.0.0.5, port: 3000 }',
     importYAML: async (text) => {
       if (!String(text).trim()) throw new Error('Paste a YAML document first.');
@@ -9520,7 +9685,7 @@ async function runHostWizard() {
       const up = o.upstream || {}, tls = o.tls || {}, auth = o.auth || {};
       const nd = {
         name: data.name || o.name || '', domains: arr(o.domains), scheme: up.scheme || 'http', host: up.host || '',
-        port: up.port != null ? String(up.port) : '', path: up.path || '', forceSSL: !!tls.forceSSL,
+        port: up.port != null ? String(up.port) : '', path: up.path || '', forceSSL: !!tls.forceSSL, forceSSLTouched: true,
         hsts: !!(tls.hsts && tls.hsts.enabled), idp: auth.identityProvider || '',
         accessLists: arr(o.accessLists), middlewares: arr(o.middlewares),
       };
