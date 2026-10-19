@@ -1397,7 +1397,7 @@ function refListUnavailableHtml(what) {
 // change the API will reject. Runs after each view renders; the server enforces
 // this independently.
 const RO_WRITE_CONTROLS = [
-  '.btn.primary', '.btn.danger', '[data-revert]', '[data-revert-obj]',
+  '.btn.primary', '.btn.danger', '.btn.danger-soft', '[data-revert]', '[data-revert-obj]',
   '.tok-rotate', '.tok-toggle', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
   '#ed-src-reconcile', '#logsToggle', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
@@ -2727,7 +2727,7 @@ let leavePrompt = false;
 async function onHashChange() {
   if (revertingHash) { revertingHash = false; currentHash = location.hash; return; }
   const nextTab = settingsTabOf(location.hash);
-  if (nextTab && settingsTabOf(currentHash) && document.getElementById('set-tabs')) {
+  if (nextTab && settingsTabOf(currentHash) && document.getElementById('set-panel-general')) {
     currentHash = location.hash;
     showSettingsTab(nextTab);
     return;
@@ -4224,8 +4224,8 @@ function managedBy(h) {
 // the certificates table, API tokens) uses this, so it means one thing.
 const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>Disabled</span>';
 const MANAGED_CHIPS = {
-  'ingress-discovery': { text: 'ingress', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
-  'docker-discovery': { text: 'docker', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
+  'ingress-discovery': { text: 'k8s-managed', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
+  'docker-discovery': { text: 'docker-managed', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
 };
 
 async function listHosts(c) {
@@ -4641,11 +4641,19 @@ function showPageTab(id) {
   $$('#content .tab-panel[data-tab]').forEach((p) => { p.hidden = p.dataset.tab !== id; });
 }
 function wirePageTabs(initial) {
-  const bar = $('#pageTabs');
   const tabs = $$('#pageTabs .tab-btn');
-  if (!bar || !tabs.length) return;
+  if (!tabs.length) return;
   tabs.forEach((b) => b.addEventListener('click', () => showPageTab(b.dataset.tab)));
-  // The bar outlives every page, so its key handler is attached once.
+  wirePageTabKeys();
+  showPageTab(initial || tabs[0].dataset.tab);
+}
+// Arrow, Home and End keys move between the band's tabs and activate the one
+// they land on (a click, so a view that routes its tabs through the hash, as
+// Settings does, sees it the same way). The bar outlives every page, so its
+// key handler is attached once.
+function wirePageTabKeys() {
+  const bar = $('#pageTabs');
+  if (!bar) return;
   if (!bar.dataset.wired) {
     bar.dataset.wired = '1';
     bar.addEventListener('keydown', (e) => {
@@ -4663,7 +4671,6 @@ function wirePageTabs(initial) {
       all[j].click();
     });
   }
-  showPageTab(initial || tabs[0].dataset.tab);
 }
 // A field on a hidden tab panel is worth nothing until its tab is shown.
 function revealTabPanel(el) {
@@ -4876,7 +4883,7 @@ ${body}      </div></div>`;
     ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit this proxy host.',
       `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
       statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
-      isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
+      isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger-soft sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
       hostTabsHtml)}
 
     <div class="edit-grid">
@@ -5122,8 +5129,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
-        <a class="btn ghost" href="#/hosts">Cancel</a>
         <button class="btn primary" id="saveBtn" type="button">${isNew ? 'Add proxy host' : 'Save changes'}</button>
+        <a class="btn ghost" href="#/hosts">Cancel</a>
       </div>
     </div>
       </div>
@@ -5999,7 +6006,8 @@ async function certEditor(c, name) {
 
   c.innerHTML = `
     ${pageHead(esc(isNew ? 'New certificate' : ct.name), isNew ? 'Add a certificate.' : 'Edit this certificate.',
-      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name)}
+      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name, '',
+      editorActions(isNew, (!isNew && type === 'acme') ? '<button class="btn ghost sm" id="ed-renew" type="button">Renew now</button>' : '', 'ct-clone', 'ct-delete'))}
 
     <div class="form-grid">
       <div class="stack">
@@ -6066,11 +6074,8 @@ async function certEditor(c, name) {
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
-        ${(!isNew && type === 'acme') ? `<button class="btn ghost" id="ed-renew" type="button">Renew now</button>` : ''}
-        ${isNew ? '' : `<button class="btn ghost" id="ct-clone" type="button">Clone</button>`}
-        ${isNew ? '' : `<button class="btn danger" id="ct-delete" type="button">${ICON.trash}Delete</button>`}
-        <a class="btn ghost" href="#/certs">Cancel</a>
         <button class="btn primary" id="ct-save" type="button">${isNew ? 'Add certificate' : 'Save changes'}</button>
+        <a class="btn ghost" href="#/certs">Cancel</a>
       </div>
     </div>`;
 
@@ -6154,6 +6159,7 @@ async function certEditor(c, name) {
   const del = $('#ct-delete');
   if (del) del.addEventListener('click', () => deleteObject('certs', 'certificate', ct.name, '/api/certificates/' + encodeURIComponent(ct.name), del));
   wireCloneButton('certs', ct, 'ct-clone');
+  gateBandActions(['ed-renew', 'ct-clone', 'ct-delete']);
 }
 
 // ---------- GENERIC SECTIONS (list + JSON-editor form) ----------
@@ -6469,19 +6475,32 @@ async function deleteObject(section, kind, name, path, btn) {
 }
 
 // ---------- editor scaffolding shared by the typed object editors ----------
+// Object actions (Clone, Delete, and whatever the editor adds in front of them)
+// sit in the title band on every editor, as they do on the proxy host editor;
+// the save bar holds only Save and Cancel. On a new object there is nothing to
+// act on, so the band stays empty.
+function editorActions(isNew, extraHtml, cloneId, deleteId) {
+  if (isNew) return '';
+  return `${extraHtml || ''}<button class="btn ghost sm" id="${cloneId || 'ed-clone'}" type="button">Clone</button><button class="btn danger-soft sm" id="${deleteId || 'ed-delete'}" type="button">${ICON.trash}Delete</button>`;
+}
+// The band's buttons sit outside #content, so the read-only gate that runs over
+// the page does not reach them; every editor gates its own.
+function gateBandActions(ids) {
+  if (!isReadOnly()) return;
+  ids.forEach((id) => { const b = $('#' + id); if (b) gateControl(b, false, readOnlyReason()); });
+}
 function editorHead(section, meta, isNew, name) {
   const crumb = `<a href="#/${section}">${esc(meta.title)}</a>${ICON.chevron}<span>${isNew ? 'new' : esc(name)}</span>`;
   const article = /^[aeiou]/i.test(meta.singular) ? 'an' : 'a';
-  return pageHead(esc(isNew ? 'New ' + meta.singular : name), esc(isNew ? `Add ${article} ${meta.singular}.` : `Edit this ${meta.singular}.`), crumb, isNew ? '' : name);
+  return pageHead(esc(isNew ? 'New ' + meta.singular : name), esc(isNew ? `Add ${article} ${meta.singular}.` : `Edit this ${meta.singular}.`), crumb, isNew ? '' : name, '', editorActions(isNew));
 }
+// Save bars put the primary first, as dialogs and the wizard footer do.
 function saveBar(section, isNew, addLabel) {
   return `<div class="panel save-bar">
     <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
     <div style="display:flex;gap:10px">
-      ${isNew ? '' : `<button class="btn ghost" id="ed-clone" type="button">Clone</button>`}
-      ${isNew ? '' : `<button class="btn danger" id="ed-delete" type="button">${ICON.trash}Delete</button>`}
-      <a class="btn ghost" href="#/${section}">Cancel</a>
       <button class="btn primary" id="ed-save" type="button">${esc(isNew ? addLabel : 'Save changes')}</button>
+      <a class="btn ghost" href="#/${section}">Cancel</a>
     </div>
   </div>`;
 }
@@ -6835,6 +6854,7 @@ function wireEditor(section, plural, meta, isNew, origName, stored, buildBody) {
   });
   const del = $('#ed-delete');
   if (del) del.addEventListener('click', () => deleteObject(section, meta.singular, origName, '/api/' + plural + '/' + encodeURIComponent(origName), del));
+  gateBandActions(['ed-clone', 'ed-delete']);
 }
 
 // ---------- REDIRECT HOST EDITOR ----------
@@ -8724,7 +8744,7 @@ async function viewTokens(c) {
         <div class="row-actions">
           <button class="btn ghost sm tok-toggle" data-name="${esc(t.name)}" type="button">${t.disabled ? 'Enable' : 'Disable'}</button>
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
-          <button class="btn ghost sm danger tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
+          <button class="btn danger-soft sm tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
         </div>
       </td>
     </tr>`).join('');
@@ -9215,7 +9235,7 @@ const SETTINGS_TABS = [
 ];
 function showSettingsTab(id) {
   const known = SETTINGS_TABS.some((t) => t.id === id) ? id : SETTINGS_TABS[0].id;
-  $$('#set-tabs .tab-btn').forEach((b) => {
+  $$('#pageTabs .tab-btn').forEach((b) => {
     const on = b.dataset.tab === known;
     b.classList.toggle('on', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
@@ -9311,10 +9331,8 @@ async function viewSettings(c, tab) {
   const stls = s.tls || {};
 
   c.innerHTML = `
-    ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound systems are under <a href="#/integrations">Integrations</a>.')}
-    <div class="tabs" id="set-tabs" role="tablist">
-      ${SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="set-tab-${esc(t.id)}" aria-controls="set-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join('')}
-    </div>
+    ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound systems are under <a href="#/integrations">Integrations</a>.', '', '', '', '',
+      SETTINGS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="set-tab-${esc(t.id)}" aria-controls="set-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join(''))}
 
     <div class="tab-panel" data-tab="general" id="set-panel-general" role="tabpanel" aria-labelledby="set-tab-general" hidden>
       ${runtimeCardHtml(rt)}
@@ -9456,29 +9474,18 @@ async function viewSettings(c, tab) {
       <div class="card form-section danger-zone" style="margin-top:16px">
         <p class="section-label">Per-host SSO sessions</p>
         <p class="muted" style="font-size:13.5px;margin:0 0 10px">SSO cookies on proxied hosts are stateless with a 1-hour cap. Revoking invalidates every outstanding session immediately; users re-authenticate at the identity provider on their next request. This takes effect at once and is not part of a save.</p>
-        <button class="btn danger sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
+        <button class="btn danger-soft sm" id="set-sso-revoke" type="button">Revoke all SSO sessions</button>
       </div>
       ${settingsSaveBar('set-save-operations')}
     </div>`;
 
   showSettingsTab(tab || SETTINGS_TABS[0].id);
-  $$('#set-tabs .tab-btn').forEach((b) => {
+  // Each tab is a route (#/settings/<tab>), so a click sets the hash and
+  // onHashChange shows the panel; the band's shared key handler does the rest.
+  $$('#pageTabs .tab-btn').forEach((b) => {
     b.addEventListener('click', () => { location.hash = '#/settings/' + b.dataset.tab; });
   });
-  $('#set-tabs').addEventListener('keydown', (e) => {
-    const tabs = $$('#set-tabs .tab-btn');
-    const i = tabs.indexOf(document.activeElement);
-    if (i === -1) return;
-    let j = -1;
-    if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = tabs.length - 1;
-    if (j === -1) return;
-    e.preventDefault();
-    tabs[j].focus();
-    tabs[j].click();
-  });
+  wirePageTabKeys();
 
   // Metrics endpoint: greyed out (with the reason) unless the daemon reports it
   // mounted, rather than linking at a route that answers 404.

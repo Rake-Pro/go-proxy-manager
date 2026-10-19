@@ -463,6 +463,13 @@ reports workspace.
   independent of DNS and of the 5s wait, or make RenewNow's in-progress gate
   observable so the test waits on it instead of on time.
 
+## Before the next main release (drift design, 2026-10-19)
+
+- Regenerate the admin UI tour screenshots and both GIFs under
+  `docs/assets/ui/` (sign-in, lists, editors, dialogs, wizard, setup, phone,
+  dark) on the drift design, and fix the tour text that still says the other
+  editors keep Clone and Delete in the save bar (they are in the title band now).
+
 ## Admin UI consistency round (2026-10-19) leftovers
 
 Source: the adversarial review report `2026-10-19_gpm-ui-adversarial-review`
