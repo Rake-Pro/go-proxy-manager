@@ -115,7 +115,7 @@ func (g *rateGate) atLimit(key string, evictExpired bool) bool {
 	defer g.mu.Unlock()
 	e := g.entries[key]
 	if e == nil {
-		return len(g.entries) >= g.maxKeys
+		return g.saturatedLocked(time.Now())
 	}
 	if time.Now().After(e.resetAt) {
 		if evictExpired {
@@ -137,15 +137,8 @@ func (g *rateGate) record(key string) {
 	now := time.Now()
 	e := g.entries[key]
 	if e == nil || now.After(e.resetAt) {
-		if e == nil && len(g.entries) >= g.maxKeys {
-			for k, ev := range g.entries {
-				if now.After(ev.resetAt) {
-					delete(g.entries, k)
-				}
-			}
-			if len(g.entries) >= g.maxKeys {
-				return
-			}
+		if e == nil && g.saturatedLocked(now) {
+			return
 		}
 		e = &gateEntry{}
 		g.entries[key] = e
@@ -154,11 +147,79 @@ func (g *rateGate) record(key string) {
 	e.resetAt = now.Add(g.window)
 }
 
+// tryBegin reserves one attempt for key, or reports that key is at its limit.
+// Reserve-then-verify under one lock: the check and the count happen together,
+// so a burst of parallel requests cannot all read "not at limit" before any of
+// them is counted. A successful attempt is forgiven with clear(); a failed one
+// stays counted. Refused attempts do not extend the lockout.
+func (g *rateGate) tryBegin(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	e := g.entries[key]
+	if e != nil && now.After(e.resetAt) {
+		delete(g.entries, key)
+		e = nil
+	}
+	if e == nil {
+		if g.saturatedLocked(now) {
+			return false
+		}
+		e = &gateEntry{}
+		g.entries[key] = e
+	} else if e.fails >= g.limit {
+		return false
+	}
+	e.fails++
+	e.resetAt = now.Add(g.window)
+	return true
+}
+
+// sweepLocked drops every entry whose window has passed. Called with g.mu held.
+func (g *rateGate) sweepLocked(now time.Time) {
+	for k, ev := range g.entries {
+		if now.After(ev.resetAt) {
+			delete(g.entries, k)
+		}
+	}
+}
+
+// saturatedLocked reports whether the map is full of LIVE entries, sweeping
+// expired ones first: a map full of dead entries must not keep every new
+// client locked out until the process restarts. Called with g.mu held.
+func (g *rateGate) saturatedLocked(now time.Time) bool {
+	if len(g.entries) < g.maxKeys {
+		return false
+	}
+	g.sweepLocked(now)
+	return len(g.entries) >= g.maxKeys
+}
+
 // clear removes key's entry, e.g. a successful login resets its gate.
 func (g *rateGate) clear(key string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.entries, key)
+}
+
+// remaining reports how long key stays at its limit, or zero when it is not.
+// A key left untracked by a saturated map is at limit (see atLimit) for as long
+// as a fresh window, which is the most a tracked key could wait.
+func (g *rateGate) remaining(key string) time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.entries[key]
+	if e == nil {
+		if g.saturatedLocked(time.Now()) {
+			return g.window
+		}
+		return 0
+	}
+	d := time.Until(e.resetAt)
+	if d <= 0 || e.fails < g.limit {
+		return 0
+	}
+	return d
 }
 
 const (
@@ -577,14 +638,39 @@ func (a *Authenticator) LoginThrottled(key string) bool {
 	return a.loginGate.atLimit(key, true)
 }
 
-// NoteLoginResult records the outcome of a local-login attempt for throttling:
-// success clears the gate, failure increments it and (re)arms the window.
+// LoginLockoutRemaining reports how much longer key is locked out of local
+// login, or zero when it is not, so the login page can say when to retry.
+func (a *Authenticator) LoginLockoutRemaining(key string) time.Duration {
+	return a.loginGate.remaining(key)
+}
+
+// LoginAttempt reserves one local-login attempt for key and reports whether
+// it may proceed. The attempt is counted before the credential is checked, so
+// parallel guesses cannot slip past the limit; a completed login clears the
+// count through NoteLoginResult.
+func (a *Authenticator) LoginAttempt(key string) bool {
+	return a.loginGate.tryBegin(key)
+}
+
+// NoteLoginResult records the outcome of a local-login attempt reserved with
+// LoginAttempt: a completed login clears the key's count, a failure stays
+// counted (it was counted when the attempt was reserved).
 func (a *Authenticator) NoteLoginResult(key string, ok bool) {
 	if ok {
 		a.loginGate.clear(key)
+	}
+}
+
+// AbandonLogin drops a pending OIDC login that will not complete (the IdP
+// refused it, or the callback came back without a code), so its state cannot
+// be redeemed later within the TTL.
+func (a *Authenticator) AbandonLogin(state string) {
+	if state == "" {
 		return
 	}
-	a.loginGate.record(key)
+	a.pmu.Lock()
+	delete(a.pending, state)
+	a.pmu.Unlock()
 }
 
 // pendingLoginAtCap reports whether key has already hit its per-IP pending-login

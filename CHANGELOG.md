@@ -5,6 +5,108 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-19
+
+### Changed
+
+- Admin UI: the dot that marked a host editor tab holding a non-default
+  value is gone; it read as an unread badge. The fold summaries inside each
+  tab and the rail carry that information.
+- Admin UI consistency round, from an adversarial review of every page:
+  - Sign-in page on the app's design and theme; a refused sign-in (wrong
+    password, wrong code, lockout, failed SSO callback) re-renders the page
+    with the reason and the username kept instead of a plain-text error.
+  - Delete left the list cards. Every delete, token rotate and client
+    certificate renew asks in the app's own dialog, naming the hosts that
+    still use the object; a refused delete is a banner, not a toast.
+  - One vocabulary: Upstream (not Backend), Sign-in (not Auth), Sign out,
+    Client addresses, Exempt networks, Request chain, commit (not revision).
+    Pointers name the real page: Integrations > DNS sync, Error Pages,
+    Settings > Operations for fleet-wide maintenance, "Public URL of this
+    panel", "Admin sign-in > Single sign-on providers". History and the
+    revert dialog use the UI's names for object kinds.
+  - Hosts list: the TLS column is now "Certificate", resolved by domain the
+    way the handshake does, with the certificate's state (amber inside the
+    renewal window, red when expired, "no certificate" when nothing covers
+    the domain); the rail says "N of M domains covered". A muted "disabled"
+    chip marks disabled objects on every list.
+  - Editors: one "Name and status" card on every kind (certificates gain
+    display name, tags and disabled); "Add <kind>" on every new object, a
+    create opens the object's page, an edit returns to the list; fold
+    summaries and "Attached:" lines follow your edits; client-side
+    validation flags the field, opens its fold and switches to its tab;
+    the Access card is "Request chain" and its order text matches the rail;
+    the stream editor greys out access lists with path rules; the host
+    editor's Advanced tab is "More".
+  - Wizards: the name follows the first domain again after Back; a dirty
+    wizard keeps its page when a leave prompt is declined; the setup wizard
+    checks for unsaved edits first and hands off to the host wizard only on
+    an instance with no host; Force SSL defaults on only when every domain
+    is covered and follows the domain list; "Open the full editor instead"
+    carries the draft; the Review leaves out the timestamps; wizards and
+    editors apply one rule per field (wildcard proxies warn, HSTS needs
+    Force SSL).
+  - Dialogs: closed on navigation; Enter confirms only from the dialog's own
+    controls; natural height on phones; one footer convention; toasts above
+    the scrim; focus returns to the page title when the opener is gone.
+  - Text: plurals through one helper, subtitles on one line, sentence-case
+    chips and buttons, failure toasts named for the action, help popovers
+    that add to the inline line instead of repeating it (a test keeps it
+    so), the sidebar foot without "(none)".
+  - Lists: the Overview counts hosts in maintenance apart and lists them
+    under Needs attention; the hosts list sorts by Domain with the header
+    marked, zone chips group by the primary domain's zone and hide exactly
+    what they count, tags cap at three plus "+N"; Redirects and Parked
+    Hosts lead with the domain, status, tags and last change, and Parked
+    Hosts moved into the Hosts group; API Tokens shows the list first with
+    "Add token" and Enable/Disable per row; upstream group cards show
+    health; access log times carry seconds; per-list filter hints.
+  - Phone and tablet: below 1000 px the hosts table drops Upstream and
+    Updated, below 720 px it shows Domain and Status with no sideways
+    scroll; the sidebar becomes a drawer below 800 px, the menu button
+    toggles and the page behind it is inert.
+  - Keyboard and screen readers: a "Skip to content" link, the title band
+    inside the main landmark, the same focus ring on fold summaries and
+    tabs, help popovers reachable by Tab with "Learn more" inside, the
+    theme button showing its state as text, the masthead name with a
+    tooltip.
+  - Typography: 15 px base, no thin antialiasing, darker secondary text in
+    light mode, secondary text half a step larger, no 11 px text.
+- API and model: validation errors lead with the dotted path of the field
+  they are about (`proxy host "app": upstream.port: ...`), cross-object
+  conflicts name the field of the object being saved, and the store's
+  "rejecting save:" wrapper is gone. Scripts that matched the old text need
+  updating.
+
+### Fixed
+
+- Admin UI: a location's "(host default)" scheme saved `http` on an https
+  host; the option is gone and a new row starts on the host's scheme.
+- Admin UI: bulk actions reached hosts the filter had hidden; the selection
+  now follows the filter and every bulk dialog lists the targets. Tag
+  changes skip discovery-managed hosts and say so.
+- Admin UI: a clone kept the source's labels (including the discovery
+  ownership label, so the copy was deleted on the next reconcile) and its
+  timestamps; stream clones kept the listen port.
+- Admin UI: the fleet-wide maintenance banner linked to a control that does
+  not exist.
+
+### Security
+
+- Admin UI: creating an object through any editor could silently replace an
+  existing object of the same name with a plain upsert; recreating an API
+  token raised the existing token's scopes and kept its secret. Every create
+  is now create-only (`If-None-Match: *`) and a duplicate name is refused
+  with a link to the existing object.
+- Sign-in: an identity provider's error code from the SSO callback is logged,
+  not echoed into the page, trimmed to the RFC 6749 charset and 64 bytes.
+- Local sign-in lockout: the attempt is now counted before the credential is
+  checked, so a burst of parallel guesses from one address cannot exceed the
+  limit; a gate full of expired entries no longer keeps every new client
+  locked out until a restart; IPv6 clients are keyed by /64. The callback
+  clears the state cookie and drops the pending login on every failure path.
+  The sign-in and TOTP pages send `Cache-Control: no-store`.
+
 ## [2.0.1] - 2026-10-19
 
 ### Changed
@@ -309,7 +411,8 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...v2.0.0
 [1.0.10]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.9...v1.0.10

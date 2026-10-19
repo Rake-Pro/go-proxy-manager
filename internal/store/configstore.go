@@ -391,7 +391,7 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
-		return "", nil, false, fmt.Errorf("rejecting save: %w", err)
+		return "", nil, false, err
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
 		return "", nil, false, err

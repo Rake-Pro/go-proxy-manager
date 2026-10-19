@@ -576,7 +576,7 @@ func TestLocalLoginLockoutExpiresWithWindow(t *testing.T) {
 	const key = "203.0.113.7"
 	// attempt mirrors what handleLocalLogin does: gate first, then verify.
 	attempt := func(pass string) (throttled bool, ok bool) {
-		if a.LoginThrottled(key) {
+		if !a.LoginAttempt(key) {
 			return true, false
 		}
 		_, _, err := a.LocalLogin(ctx, "admin", pass)

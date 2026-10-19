@@ -90,9 +90,9 @@ func TestClientCASigningKeyValidation(t *testing.T) {
 		{"maximum warning window", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM,
 			ExpiryWarningDays: MaxExpiryWarningDays}, ""},
 		{"negative warning window", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM,
-			ExpiryWarningDays: -1}, "expiryWarningDays must be between"},
+			ExpiryWarningDays: -1}, "expiryWarningDays: must be between"},
 		{"warning window over the cap", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM,
-			ExpiryWarningDays: MaxExpiryWarningDays + 1}, "expiryWarningDays must be between"},
+			ExpiryWarningDays: MaxExpiryWarningDays + 1}, "expiryWarningDays: must be between"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

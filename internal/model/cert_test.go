@@ -61,7 +61,7 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 		{
 			name:    "dns-01 without provider",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, Challenge: ChallengeDNS01}),
-			wantErr: "dnsProvider is required",
+			wantErr: "dnsProvider: is required",
 		},
 		{
 			name:    "http-01 with provider",
@@ -81,12 +81,12 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 		{
 			name:    "unknown challenge",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, Challenge: "tls-alpn-01"}),
-			wantErr: "acme.challenge must be",
+			wantErr: "acme.challenge: must be",
 		},
 		{
 			name:    "missing email",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Challenge: ChallengeHTTP01}),
-			wantErr: "acme.email is required",
+			wantErr: "acme.email: is required",
 		},
 		{
 			name: "eab complete",
@@ -95,12 +95,12 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 		{
 			name:    "eab without kid",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, EAB: &EABSpec{HMACKey: "abc"}}),
-			wantErr: "acme.eab.kid is required",
+			wantErr: "acme.eab.kid: is required",
 		},
 		{
 			name:    "eab without hmac key",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, EAB: &EABSpec{KID: "k"}}),
-			wantErr: "acme.eab.hmacKey is required",
+			wantErr: "acme.eab.hmacKey: is required",
 		},
 		{
 			name: "keyType ecdsa is accepted",
@@ -109,7 +109,7 @@ func TestCertificateValidateChallengeMatrix(t *testing.T) {
 		{
 			name:    "keyType rsa is rejected at validate time",
 			cert:    base([]string{"app.example.com"}, &ACMESpec{Email: email, KeyType: "rsa"}),
-			wantErr: "acme.keyType \"rsa\" is not supported",
+			wantErr: "acme.keyType: \"rsa\" is not supported",
 		},
 	}
 
@@ -204,37 +204,37 @@ func TestDNSProviderValidate(t *testing.T) {
 		{
 			name:    "unknown provider",
 			p:       DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: "route53", Config: withToken},
-			wantErr: "provider must be one of",
+			wantErr: "provider: must be one of",
 		},
 		{
 			name:    "missing provider",
 			p:       DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Config: withToken},
-			wantErr: "provider is required",
+			wantErr: "provider: is required",
 		},
 		{
 			name:    "missing api token",
 			p:       DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: "hetzner"},
-			wantErr: "config.apiToken is required",
+			wantErr: "config.apiToken: is required",
 		},
 		{
 			name:    "rfc2136 missing server",
 			p:       rfc2136(map[string]Secret{"server": ""}),
-			wantErr: "config.server is required for provider rfc2136",
+			wantErr: "config.server: is required for provider rfc2136",
 		},
 		{
 			name:    "rfc2136 missing zone",
 			p:       rfc2136(map[string]Secret{"zone": ""}),
-			wantErr: "config.zone is required for provider rfc2136",
+			wantErr: "config.zone: is required for provider rfc2136",
 		},
 		{
 			name:    "rfc2136 missing tsig key name",
 			p:       rfc2136(map[string]Secret{"tsigKeyName": ""}),
-			wantErr: "config.tsigKeyName is required",
+			wantErr: "config.tsigKeyName: is required",
 		},
 		{
 			name:    "rfc2136 missing tsig secret",
 			p:       rfc2136(map[string]Secret{"tsigSecret": ""}),
-			wantErr: "config.tsigSecret is required",
+			wantErr: "config.tsigSecret: is required",
 		},
 		{
 			name:    "rfc2136 hmac-md5 refused",
@@ -244,37 +244,37 @@ func TestDNSProviderValidate(t *testing.T) {
 		{
 			name:    "rfc2136 unknown algorithm",
 			p:       rfc2136(map[string]Secret{"tsigAlgorithm": "hmac-sha3"}),
-			wantErr: "config.tsigAlgorithm must be one of",
+			wantErr: "config.tsigAlgorithm: must be one of",
 		},
 		{
 			name:    "rfc2136 bad transport",
 			p:       rfc2136(map[string]Secret{"transport": "quic"}),
-			wantErr: "config.transport must be tcp or udp",
+			wantErr: "config.transport: must be tcp or udp",
 		},
 		{
 			name:    "rfc2136 bad ttl",
 			p:       rfc2136(map[string]Secret{"ttl": "0"}),
-			wantErr: "config.ttl must be a whole number",
+			wantErr: "config.ttl: must be a whole number",
 		},
 		{
 			name:    "rfc2136 bad timeout",
 			p:       rfc2136(map[string]Secret{"timeout": "30"}),
-			wantErr: "config.timeout must be a positive Go duration",
+			wantErr: "config.timeout: must be a positive Go duration",
 		},
 		{
 			name:    "acme-dns missing subdomain",
 			p:       acmeDNS(map[string]Secret{"subdomain": ""}),
-			wantErr: "config.subdomain is required for provider acme-dns",
+			wantErr: "config.subdomain: is required for provider acme-dns",
 		},
 		{
 			name:    "acme-dns missing password",
 			p:       acmeDNS(map[string]Secret{"password": ""}),
-			wantErr: "config.password is required",
+			wantErr: "config.password: is required",
 		},
 		{
 			name:    "acme-dns bad base url",
 			p:       acmeDNS(map[string]Secret{"baseURL": "acme-dns.example.com"}),
-			wantErr: "config.baseURL must be an http or https URL",
+			wantErr: "config.baseURL: must be an http or https URL",
 		},
 	}
 	for _, tc := range cases {

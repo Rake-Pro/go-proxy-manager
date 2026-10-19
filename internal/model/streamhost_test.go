@@ -52,7 +52,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: "sniff"}
 				return h
 			}(),
-			wantErr: "tls.mode must be",
+			wantErr: "tls.mode: must be",
 		},
 		{
 			name: "terminate without a certificate",
@@ -61,7 +61,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: StreamTLSTerminate}
 				return h
 			}(),
-			wantErr: "tls.certificateRef is required",
+			wantErr: "tls.certificateRef: is required",
 		},
 		{
 			name: "passthrough with a certificate",
@@ -79,7 +79,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: StreamTLSPassthrough, SNIMatch: []string{"a.example.com"}}
 				return h
 			}(),
-			wantErr: "tls requires protocol tcp",
+			wantErr: "tls: requires protocol tcp",
 		},
 		{
 			name: "tls on a tcp+udp stream",
@@ -88,7 +88,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: StreamTLSPassthrough, SNIMatch: []string{"a.example.com"}}
 				return h
 			}(),
-			wantErr: "tls requires protocol tcp",
+			wantErr: "tls: requires protocol tcp",
 		},
 		{
 			name: "malformed sni",
@@ -97,7 +97,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: StreamTLSPassthrough, SNIMatch: []string{"not a hostname"}}
 				return h
 			}(),
-			wantErr: "invalid tls.sniMatch",
+			wantErr: "tls.sniMatch: ",
 		},
 		{
 			name: "duplicate sni within one host",
@@ -106,7 +106,7 @@ func TestStreamHostTLSValidation(t *testing.T) {
 				h.TLS = &StreamTLS{Mode: StreamTLSPassthrough, SNIMatch: []string{"a.example.com", "A.example.com"}}
 				return h
 			}(),
-			wantErr: "duplicate tls.sniMatch",
+			wantErr: "tls.sniMatch: duplicate entry",
 		},
 	}
 	for _, tc := range cases {
@@ -159,7 +159,7 @@ func TestStreamHostConfigValidation(t *testing.T) {
 				streamHost("a", 5432, "tcp"),
 				streamHost("b", 5432, "tcp"),
 			}},
-			wantErr: "sets no tls.sniMatch",
+			wantErr: "set tls.sniMatch on both or pick another port",
 		},
 		{
 			name: "mixing an SNI host with a blind host on one port is rejected",
@@ -167,7 +167,7 @@ func TestStreamHostConfigValidation(t *testing.T) {
 				sniHost("a", 443, "a.example.com"),
 				streamHost("b", 443, "tcp"),
 			}},
-			wantErr: "sets no tls.sniMatch",
+			wantErr: "set tls.sniMatch on both or pick another port",
 		},
 		{
 			name: "two hosts claiming the same sni on one port is rejected",
@@ -175,7 +175,7 @@ func TestStreamHostConfigValidation(t *testing.T) {
 				sniHost("a", 443, "same.example.com"),
 				sniHost("b", 443, "same.example.com"),
 			}},
-			wantErr: `both claim sni "same.example.com"`,
+			wantErr: `tls.sniMatch: "same.example.com" is already claimed on tcp port`,
 		},
 		{
 			name: "a disabled host does not claim its port",
@@ -190,7 +190,7 @@ func TestStreamHostConfigValidation(t *testing.T) {
 				streamHost("a", 5353, "udp"),
 				streamHost("b", 5353, "udp"),
 			}},
-			wantErr: "both listen on udp port",
+			wantErr: "listenPort: udp ",
 		},
 		{
 			name: "an unknown access list is rejected",
@@ -211,7 +211,7 @@ func TestStreamHostConfigValidation(t *testing.T) {
 					func() StreamHost { h := streamHost("a", 5432, "tcp"); h.AccessLists = []string{"creds"}; return h }(),
 				},
 			},
-			wantErr: "basic auth cannot be evaluated on a raw stream",
+			wantErr: "has basicAuth users, which do not apply at L4",
 		},
 		{
 			name: "an ip-and-geo access list is accepted for a stream",
@@ -274,7 +274,7 @@ func TestProxyProtocolSettingsValidation(t *testing.T) {
 		{
 			name:    "enabled with no cidrs",
 			p:       &ProxyProtocolSettings{Enabled: true},
-			wantErr: "trustedCIDRs is required",
+			wantErr: "trustedCIDRs: is required",
 		},
 		{
 			name:    "enabled with a malformed cidr",

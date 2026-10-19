@@ -74,9 +74,9 @@ func (a AdminAuthSettings) ValidateRefs(cfg Config) error {
 		t, ok := types[name]
 		switch {
 		case !ok:
-			errs = append(errs, fmt.Errorf("settings: adminAuth.providers names identityProvider %q, which does not exist; with adminAuth.ssoOnly there is no local password form either, so this would leave the login page with no way in at all (fix the name or turn ssoOnly off)", name))
+			errs = append(errs, fmt.Errorf("adminAuth.providers: names identityProvider %q, which does not exist; with adminAuth.ssoOnly there is no local password form either, so this would leave the login page with no way in at all (fix the name or turn ssoOnly off)", name))
 		case !adminLoginCapable(t):
-			errs = append(errs, fmt.Errorf("settings: adminAuth.providers names identityProvider %q, whose type is %q; only %s providers render an admin sign-in button (a %q provider gates proxy hosts through an auth middleware instead), so with adminAuth.ssoOnly this would leave the login page with no way in at all", name, t, strings.Join(AdminLoginProviderTypes, ", "), t))
+			errs = append(errs, fmt.Errorf("adminAuth.providers: names identityProvider %q, whose type is %q; only %s providers render an admin sign-in button (a %q provider gates proxy hosts through an auth middleware instead), so with adminAuth.ssoOnly this would leave the login page with no way in at all", name, t, strings.Join(AdminLoginProviderTypes, ", "), t))
 		default:
 			usable++
 		}
@@ -84,7 +84,7 @@ func (a AdminAuthSettings) ValidateRefs(cfg Config) error {
 	if len(errs) == 0 && usable == 0 {
 		// Reachable only when Providers is empty, which Validate already refuses;
 		// kept so a future caller cannot get a silent pass out of this function.
-		errs = append(errs, errors.New("settings: adminAuth.ssoOnly needs at least one adminAuth.providers entry that resolves to an "+IdPTypeOIDC+" identity provider"))
+		errs = append(errs, errors.New("adminAuth.ssoOnly: needs at least one adminAuth.providers entry that resolves to an "+IdPTypeOIDC+" identity provider"))
 	}
 	return errors.Join(errs...)
 }
@@ -213,33 +213,33 @@ func (n NotificationsSettings) validate() error {
 	seen := map[string]struct{}{}
 	for i, t := range n.Targets {
 		if err := ValidateName(t.Name); err != nil {
-			return fmt.Errorf("settings: notifications.targets[%d]: %w", i, err)
+			return fmt.Errorf("notifications.targets[%d]: %w", i, err)
 		}
 		if _, dup := seen[t.Name]; dup {
-			return fmt.Errorf("settings: duplicate notification target name %q", t.Name)
+			return fmt.Errorf("notifications.targets: duplicate target name %q", t.Name)
 		}
 		seen[t.Name] = struct{}{}
 		switch t.Type {
 		case NotificationTypeNtfy, NotificationTypeDiscord, NotificationTypeGeneric:
 		default:
-			return fmt.Errorf("settings: notification target %q: type must be one of %s/%s/%s, got %q",
+			return fmt.Errorf("notifications.targets: target %q type must be one of %s/%s/%s, got %q",
 				t.Name, NotificationTypeNtfy, NotificationTypeDiscord, NotificationTypeGeneric, t.Type)
 		}
 		u, err := url.Parse(t.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("settings: notification target %q: url must be an absolute http(s) URL, got %q", t.Name, t.URL)
+			return fmt.Errorf("notifications.targets: target %q url must be an absolute http(s) URL, got %q", t.Name, t.URL)
 		}
 		if t.Type == NotificationTypeDiscord && !strings.Contains(t.URL, "/api/webhooks/") {
-			return fmt.Errorf("settings: notification target %q: a discord url must contain \"/api/webhooks/\"", t.Name)
+			return fmt.Errorf("notifications.targets: target %q is a discord target, so its url must contain \"/api/webhooks/\"", t.Name)
 		}
 		for _, ev := range t.Events {
 			if !isNotificationEventKind(ev) {
-				return fmt.Errorf("settings: notification target %q: unknown event kind %q", t.Name, ev)
+				return fmt.Errorf("notifications.targets: target %q has unknown event kind %q", t.Name, ev)
 			}
 		}
 	}
 	if n.ExpiringThresholdDays < 0 {
-		return fmt.Errorf("settings: notifications.expiringThresholdDays must not be negative, got %d", n.ExpiringThresholdDays)
+		return fmt.Errorf("notifications.expiringThresholdDays: must not be negative, got %d", n.ExpiringThresholdDays)
 	}
 	return nil
 }
@@ -298,22 +298,22 @@ func (p *ProxyProtocolSettings) validate() error {
 		return nil
 	}
 	if len(p.TrustedCIDRs) == 0 {
-		return fmt.Errorf("settings: proxyProtocol.trustedCIDRs is required when proxyProtocol.enabled is true (a PROXY header from an untrusted peer would let any client spoof its source IP)")
+		return fmt.Errorf("proxyProtocol.trustedCIDRs: is required when proxyProtocol.enabled is true (a PROXY header from an untrusted peer would let any client spoof its source IP)")
 	}
 	for _, c := range p.TrustedCIDRs {
 		if _, _, err := net.ParseCIDR(c); err != nil {
 			if net.ParseIP(c) == nil {
-				return fmt.Errorf("settings: proxyProtocol.trustedCIDRs: invalid cidr/ip %q", c)
+				return fmt.Errorf("proxyProtocol.trustedCIDRs: invalid cidr/ip %q", c)
 			}
 		}
 	}
 	if p.Timeout != "" {
 		d, err := time.ParseDuration(p.Timeout)
 		if err != nil {
-			return fmt.Errorf("settings: proxyProtocol.timeout %q is not a duration (e.g. 5s)", p.Timeout)
+			return fmt.Errorf("proxyProtocol.timeout: %q is not a duration (e.g. 5s)", p.Timeout)
 		}
 		if d <= 0 || d > maxProxyProtocolTimeout {
-			return fmt.Errorf("settings: proxyProtocol.timeout %s out of range (0 < timeout <= %s)", d, maxProxyProtocolTimeout)
+			return fmt.Errorf("proxyProtocol.timeout: %s is out of range (0 < timeout <= %s)", d, maxProxyProtocolTimeout)
 		}
 	}
 	return nil
@@ -427,7 +427,7 @@ func (m MaintenanceSettings) EffectiveRetryAfter() int {
 
 func (m MaintenanceSettings) validate() error {
 	if m.RetryAfterSeconds < 0 || m.RetryAfterSeconds > maxMaintenanceRetryAfter {
-		return fmt.Errorf("maintenance.retryAfterSeconds %d out of range (0-%d)", m.RetryAfterSeconds, maxMaintenanceRetryAfter)
+		return fmt.Errorf("maintenance.retryAfterSeconds: %d is out of range (0-%d)", m.RetryAfterSeconds, maxMaintenanceRetryAfter)
 	}
 	return nil
 }
@@ -599,12 +599,12 @@ func validateSecurityHeaders(m map[string]SecurityHeaderValue) error {
 		}
 		seen[lk] = struct{}{}
 		if !validHeaderValue(v.Value) {
-			return fmt.Errorf("securityHeaders[%q]: value contains an invalid character (CR/LF/control)", k)
+			return fmt.Errorf("securityHeaders: header %q value contains an invalid character (CR/LF/control)", k)
 		}
 		switch v.Scope {
 		case "", SecurityScopeAll, SecurityScopeGenerated, SecurityScopeProxied:
 		default:
-			return fmt.Errorf("securityHeaders[%q]: unknown scope %q (want %q, %q, or %q)", k, v.Scope, SecurityScopeAll, SecurityScopeGenerated, SecurityScopeProxied)
+			return fmt.Errorf("securityHeaders: header %q has unknown scope %q (want %q, %q, or %q)", k, v.Scope, SecurityScopeAll, SecurityScopeGenerated, SecurityScopeProxied)
 		}
 	}
 	return nil
@@ -696,14 +696,14 @@ func (e ErrorPagesConfig) validate() error {
 	if f := e.Dir; f != "" {
 		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
 		if filepath.IsAbs(f) || strings.HasPrefix(f, "/") || strings.HasPrefix(f, `\`) || strings.Contains(filepath.Clean(f), "..") {
-			return fmt.Errorf("errorPages.dir %q must be relative to the cert store (no absolute or .. paths)", f)
+			return fmt.Errorf("errorPages.dir: %q must be relative to the cert store (no absolute or .. paths)", f)
 		}
 	}
 	for k, src := range e.Inline {
 		if k != "default" {
 			n, err := strconv.Atoi(k)
 			if err != nil || n < 100 || n > 599 {
-				return fmt.Errorf(`errorPages.inline key %q must be a 3-digit status code or "default"`, k)
+				return fmt.Errorf(`errorPages.inline: key %q must be a 3-digit status code or "default"`, k)
 			}
 		}
 		// Parse-check at WRITE time. Without it a broken inline template commits
@@ -712,12 +712,12 @@ func (e ErrorPagesConfig) validate() error {
 		// a config error that only bites hours later, on the one path where it
 		// is hardest to diagnose. The UI's inline editor makes it easy to hit.
 		if _, err := template.New(k).Parse(src); err != nil {
-			return fmt.Errorf("errorPages.inline[%q]: %w", k, err)
+			return fmt.Errorf("errorPages.inline: template %q does not parse: %w", k, err)
 		}
 	}
 	for _, s := range e.InterceptUpstream {
 		if s < 400 || s > 599 {
-			return fmt.Errorf("errorPages.interceptUpstream %d must be a 4xx/5xx status code", s)
+			return fmt.Errorf("errorPages.interceptUpstream: %d must be a 4xx/5xx status code", s)
 		}
 	}
 	return nil
@@ -742,7 +742,7 @@ func (t TLSFleetSettings) validate() error {
 	switch t.MinVersion {
 	case "", "1.2", "1.3":
 	default:
-		return fmt.Errorf(`tls.minVersion must be "1.2" or "1.3", got %q`, t.MinVersion)
+		return fmt.Errorf(`tls.minVersion: must be "1.2" or "1.3", got %q`, t.MinVersion)
 	}
 	return nil
 }
@@ -913,10 +913,10 @@ func (a AccessListSyncSettings) Validate() error {
 	}
 	d, err := time.ParseDuration(a.PollInterval)
 	if err != nil {
-		return fmt.Errorf("settings: accessListSync.pollInterval must be a Go duration (e.g. \"15m\"), got %q: %w", a.PollInterval, err)
+		return fmt.Errorf("accessListSync.pollInterval: must be a Go duration (e.g. \"15m\"), got %q: %w", a.PollInterval, err)
 	}
 	if d < MinAccessListSyncPollInterval {
-		return fmt.Errorf("settings: accessListSync.pollInterval must be at least %s, got %q", MinAccessListSyncPollInterval, a.PollInterval)
+		return fmt.Errorf("accessListSync.pollInterval: must be at least %s, got %q", MinAccessListSyncPollInterval, a.PollInterval)
 	}
 	return nil
 }
@@ -927,35 +927,35 @@ func (s Settings) Validate() error {
 	if s.ExternalBaseURL != "" {
 		u, err := url.Parse(s.ExternalBaseURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("settings: externalBaseURL must be an absolute URL, got %q", s.ExternalBaseURL)
+			return fmt.Errorf("externalBaseURL: must be an absolute URL, got %q", s.ExternalBaseURL)
 		}
 	}
 	if s.AdminAuth.SSOOnly && len(s.AdminAuth.Providers) == 0 {
-		return fmt.Errorf("settings: ssoOnly requires at least one adminAuth.providers entry")
+		return fmt.Errorf("ssoOnly: requires at least one adminAuth.providers entry")
 	}
 	// Anti-lockout: at least one admin login method must remain. Without local
 	// login AND without any SSO provider there is no way into the panel; reject the
 	// commit instead of silently locking the operator out (recoverable only by a
 	// redeploy). ssoOnly+providers and localLoginEnabled each satisfy this.
 	if !s.AdminAuth.LocalLoginEnabled && len(s.AdminAuth.Providers) == 0 {
-		return fmt.Errorf("settings: no admin login method configured (enable adminAuth.localLoginEnabled or add adminAuth.providers)")
+		return fmt.Errorf("adminAuth.localLoginEnabled: no admin login method configured (enable it or add adminAuth.providers)")
 	}
 	seen := map[string]struct{}{}
 	for i, w := range s.Webhooks {
 		if err := ValidateName(w.Name); err != nil {
-			return fmt.Errorf("settings: webhook[%d]: %w", i, err)
+			return fmt.Errorf("webhooks: entry %d: %w", i, err)
 		}
 		if _, dup := seen[w.Name]; dup {
-			return fmt.Errorf("settings: duplicate webhook name %q", w.Name)
+			return fmt.Errorf("webhooks: duplicate webhook name %q", w.Name)
 		}
 		seen[w.Name] = struct{}{}
 		u, err := url.Parse(w.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("settings: webhook %q: url must be an absolute http(s) URL, got %q", w.Name, w.URL)
+			return fmt.Errorf("webhooks: webhook %q url must be an absolute http(s) URL, got %q", w.Name, w.URL)
 		}
 	}
 	if err := s.TLS.validate(); err != nil {
-		return fmt.Errorf("settings: %w", err)
+		return err
 	}
 	if err := s.ProxyProtocol.validate(); err != nil {
 		return err
@@ -981,16 +981,16 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := s.ErrorPages.validate(); err != nil {
-		return fmt.Errorf("settings: %w", err)
+		return err
 	}
 	if err := s.Maintenance.validate(); err != nil {
-		return fmt.Errorf("settings: %w", err)
+		return err
 	}
 	if err := validateSecurityHeaders(s.SecurityHeaders); err != nil {
-		return fmt.Errorf("settings: %w", err)
+		return err
 	}
 	if err := validateStripResponseHeaders(s.StripResponseHeaders); err != nil {
-		return fmt.Errorf("settings: %w", err)
+		return err
 	}
 	return nil
 }

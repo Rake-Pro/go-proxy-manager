@@ -98,14 +98,14 @@ func (s Stickiness) ParseTTL() (time.Duration, error) {
 
 func (s Stickiness) validate(group string) error {
 	if s.Cookie != "" && !cookieNameRe.MatchString(s.Cookie) {
-		return fmt.Errorf("upstream group %q: stickiness.cookie %q is not a valid cookie name", group, s.Cookie)
+		return fmt.Errorf("upstream group %q: stickiness.cookie: %q is not a valid cookie name", group, s.Cookie)
 	}
 	d, err := s.ParseTTL()
 	if err != nil {
 		return fmt.Errorf("upstream group %q: stickiness.ttl: %v", group, err)
 	}
 	if d <= 0 {
-		return fmt.Errorf("upstream group %q: stickiness.ttl must be > 0, got %q", group, s.TTL)
+		return fmt.Errorf("upstream group %q: stickiness.ttl: must be > 0, got %q", group, s.TTL)
 	}
 	return nil
 }
@@ -164,24 +164,24 @@ func (g UpstreamGroup) Validate() error {
 		return err
 	}
 	if len(g.Upstreams) == 0 {
-		return fmt.Errorf("upstream group %q: at least one upstream is required", g.Name)
+		return fmt.Errorf("upstream group %q: upstreams: at least one upstream is required", g.Name)
 	}
 	switch g.Policy {
 	case "", PolicyFailover, PolicyRoundRobin, PolicyLeastConnections, PolicyIPHash:
 	default:
-		return fmt.Errorf("upstream group %q: policy must be failover|round-robin|least-connections|ip-hash, got %q", g.Name, g.Policy)
+		return fmt.Errorf("upstream group %q: policy: must be failover|round-robin|least-connections|ip-hash, got %q", g.Name, g.Policy)
 	}
 	seen := map[string]bool{}
 	for i, u := range g.Upstreams {
-		if err := u.Upstream.validate(); err != nil {
-			return fmt.Errorf("upstream group %q upstream[%d]: %w", g.Name, i, err)
+		if err := u.Upstream.validate(fmt.Sprintf("upstreams[%d]", i)); err != nil {
+			return fmt.Errorf("upstream group %q: %w", g.Name, err)
 		}
 		if u.Weight < 0 || u.Weight > 256 {
-			return fmt.Errorf("upstream group %q upstream[%d]: weight %d out of range (0-256)", g.Name, i, u.Weight)
+			return fmt.Errorf("upstream group %q: upstreams[%d].weight: %d is out of range (0-256)", g.Name, i, u.Weight)
 		}
 		key := fmt.Sprintf("%s://%s:%d", u.Scheme, strings.ToLower(u.Host), u.Port)
 		if seen[key] {
-			return fmt.Errorf("upstream group %q: duplicate upstream %s", g.Name, key)
+			return fmt.Errorf("upstream group %q: upstreams: duplicate upstream %s", g.Name, key)
 		}
 		seen[key] = true
 	}
@@ -195,19 +195,19 @@ func (g UpstreamGroup) Validate() error {
 
 func (h HealthCheck) validate(group string) error {
 	if h.Path != "" && !strings.HasPrefix(h.Path, "/") {
-		return fmt.Errorf("upstream group %q: healthCheck.path must start with \"/\", got %q", group, h.Path)
+		return fmt.Errorf("upstream group %q: healthCheck.path: must start with \"/\", got %q", group, h.Path)
 	}
 	if h.IntervalSeconds < 0 || h.IntervalSeconds > 3600 {
-		return fmt.Errorf("upstream group %q: healthCheck.intervalSeconds %d out of range (0-3600)", group, h.IntervalSeconds)
+		return fmt.Errorf("upstream group %q: healthCheck.intervalSeconds: %d is out of range (0-3600)", group, h.IntervalSeconds)
 	}
 	if h.TimeoutSeconds < 0 || h.TimeoutSeconds > 60 {
-		return fmt.Errorf("upstream group %q: healthCheck.timeoutSeconds %d out of range (0-60)", group, h.TimeoutSeconds)
+		return fmt.Errorf("upstream group %q: healthCheck.timeoutSeconds: %d is out of range (0-60)", group, h.TimeoutSeconds)
 	}
 	if h.Rise < 0 || h.Rise > 10 {
-		return fmt.Errorf("upstream group %q: healthCheck.rise %d out of range (0-10)", group, h.Rise)
+		return fmt.Errorf("upstream group %q: healthCheck.rise: %d is out of range (0-10)", group, h.Rise)
 	}
 	if h.Fall < 0 || h.Fall > 10 {
-		return fmt.Errorf("upstream group %q: healthCheck.fall %d out of range (0-10)", group, h.Fall)
+		return fmt.Errorf("upstream group %q: healthCheck.fall: %d is out of range (0-10)", group, h.Fall)
 	}
 	return nil
 }

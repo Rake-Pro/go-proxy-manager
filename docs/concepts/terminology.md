@@ -76,10 +76,10 @@ Left-nav groups:
 
 | Group | Routes it holds |
 |---|---|
-| Hosts | Proxy Hosts, Redirects |
+| Hosts | Proxy Hosts, Redirects, Parked Hosts |
 | Security | Certificates, Access Lists, Identity Providers, Middleware |
 | Operations | Integrations, Access Logs, History, Settings |
-| Advanced (collapsible) | Streams, Parked Hosts, Upstream Groups, Client CAs, DNS Providers, Error Pages, API Tokens |
+| Advanced (collapsible) | Streams, Upstream Groups, Client CAs, DNS Providers, Error Pages, API Tokens |
 
 Settings-page tabs (`#/settings/<tab>`; every tab's Save sends the whole
 settings object, since `PUT /api/settings` is a full replacement):

@@ -549,7 +549,7 @@ func (d IngressDiscoverySettings) Validate() error {
 	if d.APIURL != "" {
 		u, err := url.Parse(d.APIURL)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("settings: ingressDiscovery.apiURL must be an absolute https URL, got %q", d.APIURL)
+			return fmt.Errorf("ingressDiscovery.apiURL: must be an absolute https URL, got %q", d.APIURL)
 		}
 	}
 	for _, f := range []struct{ label, path string }{
@@ -557,35 +557,35 @@ func (d IngressDiscoverySettings) Validate() error {
 		{"caFile", d.CAFile},
 	} {
 		if f.path != "" && !strings.HasPrefix(f.path, "/") {
-			return fmt.Errorf("settings: ingressDiscovery.%s must be an absolute path, got %q", f.label, f.path)
+			return fmt.Errorf("ingressDiscovery.%s: must be an absolute path, got %q", f.label, f.path)
 		}
 	}
 	if d.Namespace != "" && !dnsLabelRe.MatchString(d.Namespace) {
-		return fmt.Errorf("settings: ingressDiscovery.namespace %q is not a valid Kubernetes namespace", d.Namespace)
+		return fmt.Errorf("ingressDiscovery.namespace: %q is not a valid Kubernetes namespace", d.Namespace)
 	}
 	if d.AnnotationPrefix != "" {
 		if len(d.AnnotationPrefix) > 253 || !annotationPrefixRe.MatchString(d.AnnotationPrefix) {
-			return fmt.Errorf("settings: ingressDiscovery.annotationPrefix %q is not a valid annotation prefix (lowercase alphanumerics, '-' and '.', no leading/trailing dot, no slash, at most 253 characters)", d.AnnotationPrefix)
+			return fmt.Errorf("ingressDiscovery.annotationPrefix: %q is not a valid annotation prefix (lowercase alphanumerics, '-' and '.', no leading/trailing dot, no slash, at most 253 characters)", d.AnnotationPrefix)
 		}
 	}
 	if strings.ContainsAny(d.LabelSelector, "\r\n") {
-		return fmt.Errorf("settings: ingressDiscovery.labelSelector must not contain newlines")
+		return fmt.Errorf("ingressDiscovery.labelSelector: must not contain newlines")
 	}
 	if d.PollInterval != "" {
 		v, err := time.ParseDuration(d.PollInterval)
 		if err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.pollInterval must be a Go duration (e.g. \"60s\", \"5m\"), got %q: %w", d.PollInterval, err)
+			return fmt.Errorf("ingressDiscovery.pollInterval: must be a Go duration (e.g. \"60s\", \"5m\"), got %q: %w", d.PollInterval, err)
 		}
 		if v < minimumIngressPollInterval {
-			return fmt.Errorf("settings: ingressDiscovery.pollInterval must be at least %s, got %q", minimumIngressPollInterval, d.PollInterval)
+			return fmt.Errorf("ingressDiscovery.pollInterval: must be at least %s, got %q", minimumIngressPollInterval, d.PollInterval)
 		}
 	}
 	if len(d.AllowedDomainSuffixes) == 0 {
-		return fmt.Errorf("settings: ingressDiscovery.allowedDomainSuffixes is required when discovery is enabled (it bounds which hostnames a cluster manifest can publish at the edge)")
+		return fmt.Errorf("ingressDiscovery.allowedDomainSuffixes: is required when discovery is enabled (it bounds which hostnames a cluster manifest can publish at the edge)")
 	}
 	for i, s := range d.AllowedDomainSuffixes {
 		if !IsHostname(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), ".")) {
-			return fmt.Errorf("settings: ingressDiscovery.allowedDomainSuffixes[%d] %q is not a valid domain suffix", i, s)
+			return fmt.Errorf("ingressDiscovery.allowedDomainSuffixes[%d]: %q is not a valid domain suffix", i, s)
 		}
 	}
 	// The default block and every named profile are held to IDENTICAL standards.
@@ -597,12 +597,12 @@ func (d IngressDiscoverySettings) Validate() error {
 	}
 	for _, name := range d.ProfileNames() {
 		if name == DefaultProfileName {
-			return fmt.Errorf("settings: ingressDiscovery.profiles[%q] is reserved for the default template block; pick another name", name)
+			return fmt.Errorf("ingressDiscovery.profiles: profile %q is reserved for the default template block; pick another name", name)
 		}
 		if err := ValidateName(name); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.profiles: %w", err)
+			return fmt.Errorf("ingressDiscovery.profiles: %w", err)
 		}
-		if err := d.Profiles[name].validate(fmt.Sprintf("profiles[%q]", name)); err != nil {
+		if err := d.Profiles[name].validate("profiles." + name); err != nil {
 			return err
 		}
 	}
@@ -613,7 +613,7 @@ func (d IngressDiscoverySettings) Validate() error {
 		return err
 	}
 	for _, name := range d.ProfileNames() {
-		path := fmt.Sprintf("profiles[%q]", name)
+		path := "profiles." + name
 		if err := validateSuffixSubset(path, d.Profiles[name].AllowedDomainSuffixes, d.AllowedDomainSuffixes); err != nil {
 			return err
 		}
@@ -621,25 +621,25 @@ func (d IngressDiscoverySettings) Validate() error {
 	switch d.ProfileSelection {
 	case "", ProfileSelectionAnnotationOrRules, ProfileSelectionRulesOnly:
 	default:
-		return fmt.Errorf("settings: ingressDiscovery.profileSelection must be %q or %q, got %q",
+		return fmt.Errorf("ingressDiscovery.profileSelection: must be %q or %q, got %q",
 			ProfileSelectionAnnotationOrRules, ProfileSelectionRulesOnly, d.ProfileSelection)
 	}
 	for i, rule := range d.ProfileRules {
 		path := fmt.Sprintf("ingressDiscovery.profileRules[%d]", i)
 		if rule.Namespace != "" && !dnsLabelRe.MatchString(rule.Namespace) {
-			return fmt.Errorf("settings: %s.namespace %q is not a valid Kubernetes namespace", path, rule.Namespace)
+			return fmt.Errorf("%s.namespace: %q is not a valid Kubernetes namespace", path, rule.Namespace)
 		}
 		for k := range rule.MatchLabels {
 			if k == "" {
-				return fmt.Errorf("settings: %s.matchLabels has an empty key", path)
+				return fmt.Errorf("%s.matchLabels: has an empty key", path)
 			}
 		}
 		if rule.Profile == "" {
-			return fmt.Errorf("settings: %s.profile is required", path)
+			return fmt.Errorf("%s.profile: is required", path)
 		}
 		if rule.Profile != DefaultProfileName {
 			if _, ok := d.Profiles[rule.Profile]; !ok {
-				return fmt.Errorf("settings: %s.profile %q is not defined in ingressDiscovery.profiles", path, rule.Profile)
+				return fmt.Errorf("%s.profile: %q is not defined in ingressDiscovery.profiles", path, rule.Profile)
 			}
 		}
 	}
@@ -653,11 +653,11 @@ func (d IngressDiscoverySettings) Validate() error {
 func validateSuffixSubset(path string, narrow, global []string) error {
 	for i, s := range narrow {
 		if !IsHostname(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), ".")) {
-			return fmt.Errorf("settings: ingressDiscovery.%s.allowedDomainSuffixes[%d] %q is not a valid domain suffix", path, i, s)
+			return fmt.Errorf("ingressDiscovery.%s.allowedDomainSuffixes[%d]: %q is not a valid domain suffix", path, i, s)
 		}
 	}
 	if bad, ok := suffixesSubsetOf(narrow, global); !ok {
-		return fmt.Errorf("settings: ingressDiscovery.%s.allowedDomainSuffixes %q is not covered by the global allowedDomainSuffixes (a profile may only narrow the global list, never widen it)", path, bad)
+		return fmt.Errorf("ingressDiscovery.%s.allowedDomainSuffixes: %q is not covered by the global allowedDomainSuffixes (a profile may only narrow the global list, never widen it)", path, bad)
 	}
 	return nil
 }
@@ -724,20 +724,20 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 
 	var errs []error
 	check := func(path string, t IngressHostTemplate) {
-		owner := "settings.ingressDiscovery." + path
-		checkRef(&errs, "ingress discovery", owner, "certificate", t.TLS.CertificateRef, certs)
-		checkRef(&errs, "ingress discovery", owner, "upstreamGroup", t.UpstreamGroupRef, ugs)
-		checkClientAuthRef(&errs, "ingress discovery", owner, t.TLS, clientCAs, disabledClientCAs)
+		owner := "ingressDiscovery." + path
+		checkRef(&errs, "", owner, "tls.certificateRef", "certificate", t.TLS.CertificateRef, certs)
+		checkRef(&errs, "", owner, "upstreamGroupRef", "upstreamGroup", t.UpstreamGroupRef, ugs)
+		checkClientAuthRef(&errs, "", owner, t.TLS, clientCAs, disabledClientCAs)
 		for _, m := range t.Middlewares {
-			checkRef(&errs, "ingress discovery", owner, "middleware", m, mws)
+			checkRef(&errs, "", owner, "middlewares", "middleware", m, mws)
 		}
 		for _, a := range t.AccessLists {
-			checkRef(&errs, "ingress discovery", owner, "accessList", a, als)
+			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
 		}
 	}
 	check(DefaultProfileName, d.Template)
 	for _, name := range d.ProfileNames() {
-		check(fmt.Sprintf("profiles[%q]", name), d.Profiles[name])
+		check("profiles."+name, d.Profiles[name])
 	}
 	return errors.Join(errs...)
 }
@@ -769,7 +769,7 @@ func (d IngressDiscoverySettings) checkAnnotationPrefixMigration(cfg Config) err
 	if stale == 0 {
 		return nil
 	}
-	return fmt.Errorf("settings: ingressDiscovery.annotationPrefix %q would orphan %d proxy host(s) still labelled managed-by under a different prefix; "+
+	return fmt.Errorf("ingressDiscovery.annotationPrefix: %q would orphan %d proxy host(s) still labelled managed-by under a different prefix; "+
 		"re-label them first, or set ingressDiscovery.annotationPrefixMigrate: true to relabel them automatically in the next reconcile", d.Prefix(), stale)
 }
 
@@ -794,47 +794,47 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 	if !requireUpstream && t.UpstreamGroupRef == "" && t.Upstream == (Upstream{}) {
 		// The upstream is derived per object; there is nothing to validate.
 	} else if t.UpstreamGroupRef == "" {
-		if err := t.Upstream.validate(); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.%s.upstream: %w", path, err)
+		if err := t.Upstream.validate("upstream"); err != nil {
+			return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 		}
 	} else {
 		if t.Upstream != (Upstream{}) {
-			return fmt.Errorf("settings: ingressDiscovery.%s: upstream and upstreamGroupRef are mutually exclusive", path)
+			return fmt.Errorf("ingressDiscovery.%s.upstream: upstream and upstreamGroupRef are mutually exclusive", path)
 		}
 		if err := ValidateName(t.UpstreamGroupRef); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.%s.upstreamGroupRef: %w", path, err)
+			return fmt.Errorf("ingressDiscovery.%s.upstreamGroupRef: %w", path, err)
 		}
 	}
 	if err := ValidateName(t.TLS.CertificateRef); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.%s.tls.certificateRef is required when discovery is enabled (discovery never issues per-host certificates): %w", path, err)
+		return fmt.Errorf("ingressDiscovery.%s.tls.certificateRef: is required when discovery is enabled (discovery never issues per-host certificates): %w", path, err)
 	}
 	if err := t.TLS.validate(); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.%s.tls: %w", path, err)
+		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 	}
 	// The SAME helper ProxyHost.Validate uses, not a re-statement of its rules: a
 	// template that would produce a host the config validator rejects has to fail
 	// the settings WRITE, and it has to fail it for the same reasons.
 	if err := t.Timeouts.validate(); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.%s: %w", path, err)
+		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 	}
 	for i, m := range t.Middlewares {
 		if err := ValidateName(m); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.%s.middlewares[%d]: %w", path, i, err)
+			return fmt.Errorf("ingressDiscovery.%s.middlewares[%d]: %w", path, i, err)
 		}
 	}
 	for i, a := range t.AccessLists {
 		if err := ValidateName(a); err != nil {
-			return fmt.Errorf("settings: ingressDiscovery.%s.accessLists[%d]: %w", path, i, err)
+			return fmt.Errorf("ingressDiscovery.%s.accessLists[%d]: %w", path, i, err)
 		}
 	}
 	// Same helper the ProxyHost and Settings paths use, for the same reason as
 	// Timeouts above: a template that would derive a host the config validator
 	// rejects must fail the settings write.
 	if err := validateStripResponseHeaders(t.StripResponseHeaders); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.%s: %w", path, err)
+		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 	}
 	if err := validateSecurityHeaders(t.SecurityHeaders); err != nil {
-		return fmt.Errorf("settings: ingressDiscovery.%s: %w", path, err)
+		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 	}
 	return nil
 }

@@ -22,19 +22,25 @@ Settings.
   from the account menu (**Setup wizard**).
 - Read-only roles and HA followers never see it.
 
+## Signing in
+
+The sign-in page shares the app's design and theme. A wrong password, a wrong
+code or a lockout re-renders the page with the reason and keeps the username.
+
 ## The frame
 
 ![Account menu open on the Proxy Hosts page](../assets/ui/account-menu.png)
 
 | Area | Holds |
 |---|---|
-| Masthead | The instance name, the theme button (auto, light, dark) and the account menu: who is signed in, role and sign-in method, the instance address, API tokens, History, the setup wizard, Log out |
-| Sidebar | Overview, then the groups Hosts, Security, Operations and a collapsed Advanced group (streams, parked hosts, upstream groups, client CAs, DNS providers, error pages, API tokens). The foot shows the running version and the current config commit |
+| Masthead | The instance name, the theme button (auto, light, dark) and the account menu: who is signed in, role and sign-in method, the instance address, API tokens, History, the setup wizard, Sign out |
+| Sidebar | Overview, then the groups Hosts (proxy hosts, redirects, parked hosts), Security, Operations and a collapsed Advanced group (streams, upstream groups, client CAs, DNS providers, error pages, API tokens). The foot shows the running version and the current config commit |
 | Title band | The page title and one line of context; on an object page also the breadcrumb, the status label, the object actions and the tabs |
 | Content | Cards, tables and forms, on a grey canvas |
 
-On a phone the sidebar becomes a drawer behind the menu button, tables scroll
-sideways, and wizards open as full-screen sheets.
+On a phone or a portrait tablet the sidebar becomes a drawer behind the menu
+button, the proxy hosts table keeps Domain and Status only (other tables scroll
+sideways), and wizards open as full-screen sheets.
 
 ## Overview
 
@@ -49,7 +55,9 @@ object. With nothing to report it says so and shows the live counts.
 ![Proxy hosts list](../assets/ui/proxy-hosts.png)
 
 - One row per host: domains with their tags and a managed-by label, the
-  upstream, the certificate, the sign-in gate, the status and the last change.
+  upstream, the certificate that covers the first domain with its state (amber
+  inside the renewal window, red when expired, "no certificate" when nothing
+  covers it), the sign-in gate, the status and the last change.
 - Filter by text or by zone (the domain group chips). Sort by domain, upstream
   or last change.
 - Select rows for bulk actions. Clone, YAML and Delete live on the host's own
@@ -63,8 +71,8 @@ object. With nothing to report it says so and shows the live counts.
 
 | Step | Asks for |
 |---|---|
-| Service | Domains, the internal name (derived from the first domain), the backend scheme, host and port; a base path under **More routing** |
-| Certificate | Which certificate already covers the domains (chosen by SNI at the handshake, nothing to pick), Force SSL, HSTS |
+| Service | Domains, the internal name (derived from the first domain), the upstream scheme, host and port; a base path under **More routing** |
+| Certificate | Which certificate already covers the domains (chosen by SNI at the handshake, nothing to pick), Force SSL (on by default only when every domain is covered), HSTS |
 | Access | A sign-in provider, access lists, middleware |
 | Review | A summary and the exact YAML the server would commit, produced by a dry run with the same checks a save runs |
 
@@ -75,8 +83,10 @@ object. With nothing to report it says so and shows the live counts.
 
 ![Import from YAML naming the fields the wizard does not cover](../assets/ui/wizard-import-yaml.png)
 
-- **Create host** writes the object with a create-only request, so a name that
-  already exists is refused rather than replaced.
+- **Add proxy host** writes the object with a create-only request, so a name
+  that already exists is refused rather than replaced. Every editor's first
+  save works the same way.
+- **Open the full editor instead** carries what was typed into the editor.
 
 ## Editing a proxy host
 
@@ -85,23 +95,26 @@ object. With nothing to report it says so and shows the live counts.
 - The title band carries the breadcrumb, the live status, the last change and
   the object actions: **YAML** (the config file as the server writes it),
   **Clone** and **Delete**.
-- Five tabs split the form: Routing, TLS, Access, Headers, Advanced. A dot on
-  a tab means it holds a non-default value; its tooltip says what.
+- Five tabs split the form: Routing, TLS, Access, Headers, More. Every
+  optional section says in its summary line what it holds, and the line
+  follows your edits.
 - The rail keeps the status, the certificate the handshake will present, the
   request chain in evaluation order and the config file path in view while
   you edit.
 - Sections are cards; rarely used settings sit behind expandable rows that
   summarize what they hold ("base path none, host header kept").
 - A `?` next to a field opens its help, with a link into this documentation.
-- **Save changes** commits one git revision. Validation errors stay on screen
+- **Save changes** makes one git commit. Validation errors stay on screen
   until the next attempt, point at the field and switch to its tab.
+- **Delete** asks in a dialog that names the hosts still using the object; a
+  refused delete stays on screen with the reason.
 
 ![Clone dialog asking for the copy's name](../assets/ui/clone-dialog.png)
 
 - **Clone** asks for the copy's name first, checked against the names in use,
   then opens the editor on the copy. Nothing is saved until you press Save.
-  Domains are cleared, since a domain belongs to one host, and secrets are not
-  copied.
+  Domains are cleared, since a domain belongs to one host; labels and
+  secrets are not copied.
 - The other object editors are one page of cards with Clone and Delete in the
   save bar; Clone asks for the name the same way.
 

@@ -75,6 +75,11 @@ All findings from that review are remediated in the same change (see CHANGELOG
 
 ## Functionality gaps
 
+- [ ] **Edit an API token's scopes after creation.** The token editor only
+  creates, rotates, enables/disables and deletes; changing permissions means
+  delete and recreate, which rotates the secret. Add an edit path for scopes
+  (and expiry) that keeps the secret. Owner: minor, later (2026-10-19).
+
 ### Inline host/location `auth` and `rateLimit` (follow-ups)
 
 - [ ] **Discovery templates do not carry the inline blocks.**
@@ -450,6 +455,37 @@ reports workspace.
   of Needs attention; first consumer of the host-status aggregator.
 - [x] **HA followers answer 503 to `dryRun=1` and `_parse`**. Done 2026-10-18:
   `followerSafe` lets both through (`TestFollowerAllowsPreviews`).
+
+- [ ] **Flaky `TestRenewNowEndToEnd` (internal/acme) on the CI runner.** Seen
+  2026-10-19 on run 39182722808 ("second RenewNow: an order is already in
+  progress", "OnChange was not called within 5s"), green on rerun and locally;
+  the run also logs acme-dns "no such host" lookups. Make the stub CA test
+  independent of DNS and of the 5s wait, or make RenewNow's in-progress gate
+  observable so the test waits on it instead of on time.
+
+## Admin UI consistency round (2026-10-19) leftovers
+
+Source: the adversarial review report `2026-10-19_gpm-ui-adversarial-review`
+in the owner's reports workspace; 88 findings, all addressed on dev except:
+
+- [ ] **Phone, hosts with many tags.** At 390 px a host with a dozen tags
+  shows its chips as stubs and the "+N" is clipped; hide tags below 720 px or
+  move them into the "+N" block.
+- [ ] **A Save with no changes still makes a commit** (updatedAt is
+  restamped). A store-side no-op check would keep History clean.
+- [ ] **Domain conflicts name the other host's kind** to a write-scoped token
+  (the name was already disclosed). Accepted; redact when the caller lacks
+  read on that kind if it ever matters.
+- [ ] **Middleware check-lists show the raw type** ("auth") where the rest of
+  the UI says "sign-in". Map the type label in the check-list and the rail.
+- [ ] **Tags on discovery-managed hosts are owned by the template.** The
+  reconciler carries only `maintenance` and `disabled` across a sync
+  (`internal/discovery/plan.go`, the keep list) and replaces tags with the
+  template's, so a tag added by hand is gone on the next pass. The UI now
+  skips managed hosts in bulk tag changes and says so (review L7). Follow-up:
+  let the reconciler keep hand-added tags (merge the template's tags with the
+  stored ones, or an annotation that carries per-host tags), so tags work on
+  every host.
 
 ## Upstream-group follow-ups
 

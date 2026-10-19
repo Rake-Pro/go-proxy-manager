@@ -114,44 +114,44 @@ func (p IdentityProvider) Validate() error {
 	switch p.Type {
 	case IdPTypeOIDC:
 		if p.OIDC == nil {
-			return fmt.Errorf("identity provider %q: oidc spec required", p.Name)
+			return fmt.Errorf("identity provider %q: oidc: spec required", p.Name)
 		}
 		if p.OIDC.IssuerURL == "" || p.OIDC.ClientID == "" {
-			return fmt.Errorf("identity provider %q: oidc issuerURL and clientID are required", p.Name)
+			return fmt.Errorf("identity provider %q: oidc: issuerURL and clientID are required", p.Name)
 		}
 	case IdPTypeForwardAuth:
 		if p.ForwardAuth == nil {
-			return fmt.Errorf("identity provider %q: forwardAuth spec required", p.Name)
+			return fmt.Errorf("identity provider %q: forwardAuth: spec required", p.Name)
 		}
 		if len(p.ForwardAuth.TrustedProxies) == 0 {
-			return fmt.Errorf("identity provider %q: forwardAuth.trustedProxies is required (refuse to trust identity headers from anywhere)", p.Name)
+			return fmt.Errorf("identity provider %q: forwardAuth.trustedProxies: is required (refuse to trust identity headers from anywhere)", p.Name)
 		}
 		if p.ForwardAuth.UserHeader == "" {
-			return fmt.Errorf("identity provider %q: forwardAuth.userHeader is required", p.Name)
+			return fmt.Errorf("identity provider %q: forwardAuth.userHeader: is required", p.Name)
 		}
 	case IdPTypeAuthRequest:
 		if p.AuthRequest == nil {
-			return fmt.Errorf("identity provider %q: authRequest spec required", p.Name)
+			return fmt.Errorf("identity provider %q: authRequest: spec required", p.Name)
 		}
 		u, err := url.Parse(p.AuthRequest.OutpostURL)
 		if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("identity provider %q: authRequest.outpostURL must be an http(s) URL with a host, got %q", p.Name, p.AuthRequest.OutpostURL)
+			return fmt.Errorf("identity provider %q: authRequest.outpostURL: must be an http(s) URL with a host, got %q", p.Name, p.AuthRequest.OutpostURL)
 		}
 		if pp := p.AuthRequest.PathPrefix; pp != "" && pp[0] != '/' {
-			return fmt.Errorf("identity provider %q: authRequest.pathPrefix must start with /, got %q", p.Name, pp)
+			return fmt.Errorf("identity provider %q: authRequest.pathPrefix: must start with /, got %q", p.Name, pp)
 		}
 	default:
-		return fmt.Errorf("identity provider %q: type must be oidc, forward-auth or auth-request, got %q", p.Name, p.Type)
+		return fmt.Errorf("identity provider %q: type: must be oidc, forward-auth or auth-request, got %q", p.Name, p.Type)
 	}
 	if rm := p.RoleMapping; rm != nil {
 		switch rm.DefaultRole {
 		case "", "user":
 		case "admin":
 			if !rm.AllowDefaultAdmin {
-				return fmt.Errorf("identity provider %q: roleMapping.defaultRole %q grants admin to EVERY authenticated user with no group gating; set roleMapping.allowDefaultAdmin: true to confirm this is intended, or use adminGroups instead", p.Name, rm.DefaultRole)
+				return fmt.Errorf("identity provider %q: roleMapping.defaultRole: %q grants admin to EVERY authenticated user with no group gating; set roleMapping.allowDefaultAdmin: true to confirm this is intended, or use adminGroups instead", p.Name, rm.DefaultRole)
 			}
 		default:
-			return fmt.Errorf("identity provider %q: roleMapping.defaultRole must be \"\", \"user\", or \"admin\", got %q", p.Name, rm.DefaultRole)
+			return fmt.Errorf("identity provider %q: roleMapping.defaultRole: must be \"\", \"user\", or \"admin\", got %q", p.Name, rm.DefaultRole)
 		}
 	}
 	return nil

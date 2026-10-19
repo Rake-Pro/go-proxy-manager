@@ -82,7 +82,7 @@ func decodeError(err error) error {
 		if typeErr.Field == "" {
 			return fmt.Errorf("the request body expects %s, got %s", want, got)
 		}
-		return fmt.Errorf("field %s expects %s, got %s", typeErr.Field, want, got)
+		return fmt.Errorf("%s: expects %s, got %s", typeErr.Field, want, got)
 	}
 	var syntaxErr *json.SyntaxError
 	if errors.As(err, &syntaxErr) {
@@ -90,7 +90,7 @@ func decodeError(err error) error {
 	}
 	msg := err.Error()
 	if field, ok := unknownFieldName(msg); ok {
-		return fmt.Errorf("unknown field %s", field)
+		return fmt.Errorf("%s: unknown field", field)
 	}
 	// Anything else encoding/json produces (a bare "unexpected end of JSON input",
 	// or a "Go value of type ..." for a non-struct target) still carries package

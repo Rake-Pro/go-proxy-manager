@@ -101,27 +101,27 @@ func TestDecodeError(t *testing.T) {
 		{
 			name: "wrong type on a nested field names the JSON path",
 			err:  decode(`{"tls":{"forceSSL":"yes"}}`),
-			want: "field tls.forceSSL expects true or false, got a string",
+			want: "tls.forceSSL: expects true or false, got a string",
 		},
 		{
 			name: "wrong type on a nested number field",
 			err:  decode(`{"tls":{"port":"8080"}}`),
-			want: "field tls.port expects a number, got a string",
+			want: "tls.port: expects a number, got a string",
 		},
 		{
 			name: "object where a list is expected",
 			err:  decode(`{"domains":{"a":1}}`),
-			want: "field domains expects a list, got an object",
+			want: "domains: expects a list, got an object",
 		},
 		{
 			name: "list where an object is expected",
 			err:  decode(`{"labels":[1,2]}`),
-			want: "field labels expects an object, got a list",
+			want: "labels: expects an object, got a list",
 		},
 		{
 			name: "number where a string is expected",
 			err:  decode(`{"name":7}`),
-			want: "field name expects a string, got a number",
+			want: "name: expects a string, got a number",
 		},
 		{
 			name: "a non-object body has no field to name",
@@ -150,7 +150,7 @@ func TestDecodeError(t *testing.T) {
 		{
 			name:     "unknown field is named",
 			err:      errors.New(`json: unknown field "wibble"`),
-			contains: []string{"unknown field wibble"},
+			contains: []string{"wibble: unknown field"},
 			absent:   []string{"json:"},
 		},
 		{

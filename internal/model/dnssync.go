@@ -70,21 +70,21 @@ func (d DNSSyncSettings) Validate() error {
 	if d.Pihole.Enabled {
 		u, err := url.Parse(d.Pihole.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("settings: dnsSync.pihole.url must be an absolute http(s) URL, got %q", d.Pihole.URL)
+			return fmt.Errorf("dnsSync.pihole.url: must be an absolute http(s) URL, got %q", d.Pihole.URL)
 		}
 		if d.Pihole.ApexTarget == "" {
-			return fmt.Errorf("settings: dnsSync.pihole.apexTarget is required when pihole sync is enabled")
+			return fmt.Errorf("dnsSync.pihole.apexTarget: is required when pihole sync is enabled")
 		}
 	}
 	if d.Cloudflare.Enabled {
 		if err := ValidateName(d.Cloudflare.DNSProviderRef); err != nil {
-			return fmt.Errorf("settings: dnsSync.cloudflare.dnsProviderRef: %w", err)
+			return fmt.Errorf("dnsSync.cloudflare.dnsProviderRef: %w", err)
 		}
 		if d.Cloudflare.ZoneName == "" {
-			return fmt.Errorf("settings: dnsSync.cloudflare.zoneName is required when cloudflare sync is enabled")
+			return fmt.Errorf("dnsSync.cloudflare.zoneName: is required when cloudflare sync is enabled")
 		}
 		if d.Cloudflare.ApexTarget == "" {
-			return fmt.Errorf("settings: dnsSync.cloudflare.apexTarget is required when cloudflare sync is enabled")
+			return fmt.Errorf("dnsSync.cloudflare.apexTarget: is required when cloudflare sync is enabled")
 		}
 	}
 	return nil

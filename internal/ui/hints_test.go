@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,7 +51,7 @@ var hintExempt = map[string]string{
 	`value="${esc(m.name)}"`: "middleware check-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}`:                  "host access-list item; the check-list carries the hint",
 	`value="${esc(a.name)}"${d.accessLists.indexOf(a.name) !== -1 ? ' checked' : ''}`:          "host wizard access-list item; the check-list carries the hint",
-	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !hasBasic ? ' checked' : ''}`:     "stream access-list item; the check-list carries the hint",
+	`value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 && !off ? ' checked' : ''}`:          "stream access-list item; the check-list carries the hint",
 	`value="${esc(p.name)}"${storedProvs.indexOf(p.name) !== -1 ? ' checked' : ''}`:            "admin SSO provider item; the check-list carries the hint",
 	`<input type="checkbox" value="${esc(n)}" checked/`:                                        "admin SSO provider stored under a name this instance does not define",
 	`class="field mono sh-name" style="flex:1 1 160px" value="${esc(name || '')}" aria-label=`: "read-only row for a header value this editor cannot express",
@@ -277,4 +278,82 @@ func sortedKeys(m map[string]hintEntry) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// The "?" popover is for what the field's inline hint does not already say: a
+// popover that repeats the line printed under the same field teaches people to
+// ignore the icon. Each data-hint (or switchHtml hint id) is compared with the
+// inline text of its own field: the .ds line of a toggle row, or any .hint
+// line inside its field group.
+var (
+	switchHintRe = regexp.MustCompile(`switchHtml\('[^']*',[^;\n]*?'([A-Za-z][\w-]*\.[\w.-]+)'\)`)
+	inlineHintRe = regexp.MustCompile(`(?s)class="hint"[^>]*>(.*?)</div>`)
+	inlineDsRe   = regexp.MustCompile(`(?s)class="ds"[^>]*>(.*?)</div>`)
+	tagRe        = regexp.MustCompile(`<[^>]+>`)
+	spaceRe      = regexp.MustCompile(`\s+`)
+)
+
+func normHintText(s string) string {
+	s = tagRe.ReplaceAllString(s, "")
+	s = strings.NewReplacer(`\$`, "$", "&quot;", `"`, "&gt;", ">", "&lt;", "<", "&amp;", "&").Replace(s)
+	s = strings.ToLower(strings.TrimSpace(spaceRe.ReplaceAllString(s, " ")))
+	return strings.TrimRight(s, ". ")
+}
+
+func popoverDuplicates(js string, reg map[string]hintEntry) []string {
+	var out []string
+	check := func(id string, start, end int) {
+		e, ok := reg[id]
+		if !ok {
+			return
+		}
+		want := normHintText(e.Text)
+		before := js[max(0, start-700):start]
+		var inline []string
+		lt, lf := strings.LastIndex(before, "toggle-line"), strings.LastIndex(before, "field-group")
+		if lt > lf {
+			if m := inlineDsRe.FindStringSubmatch(before[lt:]); m != nil {
+				inline = append(inline, m[1])
+			}
+		} else {
+			after := js[end:min(len(js), end+1500)]
+			stop := len(after)
+			for _, k := range []string{`field-group"`, `toggle-line"`, `section-label"`, `class="card`} {
+				if i := strings.Index(after, k); i != -1 && i < stop {
+					stop = i
+				}
+			}
+			seg := after[:stop]
+			if lf != -1 {
+				seg = before[lf:] + seg
+			}
+			for _, m := range inlineHintRe.FindAllStringSubmatch(seg, -1) {
+				inline = append(inline, m[1])
+			}
+		}
+		for _, txt := range inline {
+			if normHintText(txt) == want {
+				line := strings.Count(js[:start], "\n") + 1
+				out = append(out, id+" (app.js:"+strconv.Itoa(line)+")")
+			}
+		}
+	}
+	for _, m := range dataHintRe.FindAllStringSubmatchIndex(js, -1) {
+		check(js[m[2]:m[3]], m[0], m[1])
+	}
+	for _, m := range switchHintRe.FindAllStringSubmatchIndex(js, -1) {
+		check(js[m[2]:m[3]], m[0], m[1])
+	}
+	return out
+}
+
+func TestPopoverAddsToInlineHint(t *testing.T) {
+	// The checker itself: a field whose popover equals its inline line is caught.
+	probe := `<div class="field-group"><label>X</label><input data-hint="probe.x" /><div class="hint">Same words here.</div></div>`
+	if got := popoverDuplicates(probe, map[string]hintEntry{"probe.x": {Text: "Same words here."}}); len(got) != 1 {
+		t.Fatalf("duplicate checker missed a verbatim popover: %v", got)
+	}
+	for _, d := range popoverDuplicates(loadAppJS(t), loadHintRegistry(t)) {
+		t.Errorf("the popover for %s repeats the inline hint under the same field word for word; make the popover add the default, an example or the consequence, or drop the inline line", d)
+	}
 }

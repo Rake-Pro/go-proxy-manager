@@ -33,20 +33,22 @@ type Upstream struct {
 	HostHeader string `json:"hostHeader,omitempty" yaml:"hostHeader,omitempty"`
 }
 
-func (u Upstream) validate() error {
+// validate checks the upstream; path is the dotted JSON path of the upstream
+// object ("upstream" on a host), which every message leads with.
+func (u Upstream) validate(path string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("upstream scheme must be http or https, got %q", u.Scheme)
+		return fmt.Errorf("%s.scheme: must be http or https, got %q", path, u.Scheme)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("upstream host is required")
+		return fmt.Errorf("%s.host: is required", path)
 	}
 	if u.Port < 1 || u.Port > 65535 {
-		return fmt.Errorf("upstream port %d out of range", u.Port)
+		return fmt.Errorf("%s.port: %d is out of range (1-65535)", path, u.Port)
 	}
-	if err := validateUpstreamPath(u.Path); err != nil {
+	if err := validateUpstreamPath(path+".path", u.Path); err != nil {
 		return err
 	}
-	return validateUpstreamHostHeader(u.HostHeader)
+	return validateUpstreamHostHeader(path+".hostHeader", u.HostHeader)
 }
 
 // validateUpstreamPath checks an Upstream.Path base path. It must be absolute,
@@ -54,22 +56,22 @@ func (u Upstream) validate() error {
 // would let a base path climb back out of the namespace it is supposed to pin
 // the backend into, which is exactly the confusion normalizeRequestPath exists
 // to prevent on the client side.
-func validateUpstreamPath(p string) error {
+func validateUpstreamPath(field, p string) error {
 	if p == "" {
 		return nil
 	}
 	if !strings.HasPrefix(p, "/") {
-		return fmt.Errorf("upstream path %q must be absolute (start with %q)", p, "/")
+		return fmt.Errorf("%s: %q must be absolute (start with %q)", field, p, "/")
 	}
 	if strings.ContainsAny(p, "?#") {
-		return fmt.Errorf("upstream path %q must not contain a query string or fragment", p)
+		return fmt.Errorf("%s: %q must not contain a query string or fragment", field, p)
 	}
 	if strings.ContainsAny(p, `\;`) {
-		return fmt.Errorf("upstream path %q must not contain %q or %q", p, `\`, ";")
+		return fmt.Errorf("%s: %q must not contain %q or %q", field, p, `\`, ";")
 	}
 	for _, seg := range strings.Split(p, "/") {
 		if seg == "." || seg == ".." {
-			return fmt.Errorf("upstream path %q must not contain %q or %q segments", p, ".", "..")
+			return fmt.Errorf("%s: %q must not contain %q or %q segments", field, p, ".", "..")
 		}
 	}
 	return nil
@@ -81,12 +83,12 @@ func validateUpstreamPath(p string) error {
 // anything else into the outbound request line.
 var upstreamHostHeaderRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$`)
 
-func validateUpstreamHostHeader(h string) error {
+func validateUpstreamHostHeader(field, h string) error {
 	if h == "" || h == UpstreamHostHeaderUpstream {
 		return nil
 	}
 	if len(h) > 253 || !upstreamHostHeaderRe.MatchString(h) {
-		return fmt.Errorf("upstream hostHeader %q must be %q or a hostname (optionally %q)", h, UpstreamHostHeaderUpstream, "host:port")
+		return fmt.Errorf("%s: %q must be %q or a hostname (optionally %q)", field, h, UpstreamHostHeaderUpstream, "host:port")
 	}
 	return nil
 }
@@ -173,28 +175,28 @@ func (t TLSSettings) validate() error {
 	switch t.MinTLSVersion {
 	case "", "1.2", "1.3":
 	default:
-		return fmt.Errorf(`tls.minTLSVersion must be "1.2" or "1.3", got %q`, t.MinTLSVersion)
+		return fmt.Errorf(`tls.minTLSVersion: must be "1.2" or "1.3", got %q`, t.MinTLSVersion)
 	}
 	if t.ClientAuth != nil {
 		// mTLS must never be servable in the clear: require forceSSL so the plaintext
 		// listener redirects to HTTPS where the per-request client-cert gate applies.
 		if !t.ForceSSL {
-			return fmt.Errorf("tls.clientAuth requires forceSSL: true")
+			return fmt.Errorf("tls.clientAuth: requires forceSSL: true")
 		}
 		if t.ClientAuth.CARef == "" {
-			return fmt.Errorf("tls.clientAuth.caRef is required when clientAuth is set")
+			return fmt.Errorf("tls.clientAuth.caRef: is required when clientAuth is set")
 		}
 		switch t.ClientAuth.Mode {
 		case "", "require", "optional":
 		default:
-			return fmt.Errorf(`tls.clientAuth.mode must be "require" or "optional", got %q`, t.ClientAuth.Mode)
+			return fmt.Errorf(`tls.clientAuth.mode: must be "require" or "optional", got %q`, t.ClientAuth.Mode)
 		}
 		if ih := t.ClientAuth.IdentityHeaders; ih != nil && ih.SubjectHeader != "" {
 			if !validHeaderName(ih.SubjectHeader) {
-				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader %q is not a valid header name", ih.SubjectHeader)
+				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader: %q is not a valid header name", ih.SubjectHeader)
 			}
 			if strings.HasPrefix(strings.ToLower(ih.SubjectHeader), "x-forwarded-") {
-				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader must not be an X-Forwarded-* header (gpm sets those itself), got %q", ih.SubjectHeader)
+				return fmt.Errorf("tls.clientAuth.identityHeaders.subjectHeader: must not be an X-Forwarded-* header (gpm sets those itself), got %q", ih.SubjectHeader)
 			}
 		}
 	}
@@ -237,10 +239,10 @@ func (t *HostTimeouts) validate() error {
 		return nil
 	}
 	if t.ConnectSeconds < 0 || t.ConnectSeconds > 3600 {
-		return fmt.Errorf("timeouts.connectSeconds %d out of range (0-3600)", t.ConnectSeconds)
+		return fmt.Errorf("timeouts.connectSeconds: %d is out of range (0-3600)", t.ConnectSeconds)
 	}
 	if t.ReadSeconds < 0 || t.ReadSeconds > 3600 {
-		return fmt.Errorf("timeouts.readSeconds %d out of range (0-3600)", t.ReadSeconds)
+		return fmt.Errorf("timeouts.readSeconds: %d is out of range (0-3600)", t.ReadSeconds)
 	}
 	return nil
 }
@@ -329,11 +331,11 @@ func (c Compression) validate() error {
 		return nil
 	}
 	if c.MinBytes < 0 {
-		return fmt.Errorf("compression.minBytes must be >= 0, got %d", c.MinBytes)
+		return fmt.Errorf("compression.minBytes: must be >= 0, got %d", c.MinBytes)
 	}
 	for _, t := range c.Types {
 		if strings.TrimSpace(t) == "" {
-			return fmt.Errorf("compression.types entries must not be empty")
+			return fmt.Errorf("compression.types: entries must not be empty")
 		}
 	}
 	return nil
@@ -470,14 +472,14 @@ func (h ProxyHost) Validate() error {
 		return err
 	}
 	if len(h.Domains) == 0 {
-		return fmt.Errorf("proxy host %q: at least one domain is required", h.Name)
+		return fmt.Errorf("proxy host %q: domains: at least one domain is required", h.Name)
 	}
 	if h.UpstreamGroupRef == "" {
-		if err := h.Upstream.validate(); err != nil {
+		if err := h.Upstream.validate("upstream"); err != nil {
 			return fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 	} else if h.Upstream != (Upstream{}) {
-		return fmt.Errorf("proxy host %q: upstream and upstreamGroupRef are mutually exclusive", h.Name)
+		return fmt.Errorf("proxy host %q: upstream: upstream and upstreamGroupRef are mutually exclusive", h.Name)
 	}
 	if err := h.TLS.validate(); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
@@ -516,17 +518,17 @@ func (h ProxyHost) Validate() error {
 	}
 	for _, l := range h.Locations {
 		if l.Path == "" {
-			return fmt.Errorf("proxy host %q: location with empty path", h.Name)
+			return fmt.Errorf("proxy host %q: locations: location with empty path", h.Name)
 		}
 		if l.Upstream != nil {
 			if l.UpstreamGroupRef != "" {
-				return fmt.Errorf("proxy host %q location %q: upstream and upstreamGroupRef are mutually exclusive", h.Name, l.Path)
+				return fmt.Errorf("proxy host %q: locations: location %q: upstream and upstreamGroupRef are mutually exclusive", h.Name, l.Path)
 			}
-			if err := l.Upstream.validate(); err != nil {
-				return fmt.Errorf("proxy host %q location %q: %w", h.Name, l.Path, err)
+			if err := l.Upstream.validate("upstream"); err != nil {
+				return fmt.Errorf("proxy host %q: locations: location %q: %w", h.Name, l.Path, err)
 			}
 		}
-		owner := fmt.Sprintf("proxy host %q location %q", h.Name, l.Path)
+		owner := fmt.Sprintf("proxy host %q: locations: location %q", h.Name, l.Path)
 		if err := l.Auth.validateInline(owner); err != nil {
 			return err
 		}
@@ -556,15 +558,15 @@ func (h RedirectHost) Validate() error {
 		return err
 	}
 	if len(h.Domains) == 0 {
-		return fmt.Errorf("redirect host %q: at least one domain is required", h.Name)
+		return fmt.Errorf("redirect host %q: domains: at least one domain is required", h.Name)
 	}
 	if h.TargetDomain == "" {
-		return fmt.Errorf("redirect host %q: targetDomain is required", h.Name)
+		return fmt.Errorf("redirect host %q: targetDomain: is required", h.Name)
 	}
 	switch h.StatusCode {
 	case 0, 301, 302, 307, 308:
 	default:
-		return fmt.Errorf("redirect host %q: invalid statusCode %d", h.Name, h.StatusCode)
+		return fmt.Errorf("redirect host %q: statusCode: %d is not valid (want 301, 302, 307 or 308)", h.Name, h.StatusCode)
 	}
 	return nil
 }
@@ -606,31 +608,31 @@ func (t *StreamTLS) validate(hostName, protocol string) error {
 		return nil
 	}
 	if protocol != "tcp" {
-		return fmt.Errorf("stream host %q: tls requires protocol tcp (TLS/SNI has no meaning for udp), got %q", hostName, protocol)
+		return fmt.Errorf("stream host %q: tls: requires protocol tcp (TLS/SNI has no meaning for udp), got %q", hostName, protocol)
 	}
 	switch t.Mode {
 	case StreamTLSPassthrough:
 		if t.CertificateRef != "" {
-			return fmt.Errorf("stream host %q: tls.certificateRef is not allowed in passthrough mode (the connection is never decrypted)", hostName)
+			return fmt.Errorf("stream host %q: tls.certificateRef: is not allowed in passthrough mode (the connection is never decrypted)", hostName)
 		}
 	case StreamTLSTerminate:
 		if t.CertificateRef == "" {
-			return fmt.Errorf("stream host %q: tls.certificateRef is required in terminate mode", hostName)
+			return fmt.Errorf("stream host %q: tls.certificateRef: is required in terminate mode", hostName)
 		}
 	default:
-		return fmt.Errorf("stream host %q: tls.mode must be %s|%s, got %q", hostName, StreamTLSPassthrough, StreamTLSTerminate, t.Mode)
+		return fmt.Errorf("stream host %q: tls.mode: must be %s|%s, got %q", hostName, StreamTLSPassthrough, StreamTLSTerminate, t.Mode)
 	}
 	seen := map[string]bool{}
 	for _, n := range t.SNIMatch {
 		name := strings.ToLower(strings.TrimSpace(n))
 		if name == "" {
-			return fmt.Errorf("stream host %q: tls.sniMatch contains an empty server name", hostName)
+			return fmt.Errorf("stream host %q: tls.sniMatch: contains an empty server name", hostName)
 		}
 		if !validSNIMatch(name) {
-			return fmt.Errorf("stream host %q: invalid tls.sniMatch %q (want a hostname or a *.suffix wildcard)", hostName, n)
+			return fmt.Errorf("stream host %q: tls.sniMatch: %q is invalid (want a hostname or a *.suffix wildcard)", hostName, n)
 		}
 		if seen[name] {
-			return fmt.Errorf("stream host %q: duplicate tls.sniMatch %q", hostName, name)
+			return fmt.Errorf("stream host %q: tls.sniMatch: duplicate entry %q", hostName, name)
 		}
 		seen[name] = true
 	}
@@ -664,10 +666,10 @@ type StreamTarget struct {
 
 func (t StreamTarget) validate(hostName string) error {
 	if t.Host == "" {
-		return fmt.Errorf("stream host %q: target.host is required", hostName)
+		return fmt.Errorf("stream host %q: target.host: is required", hostName)
 	}
 	if t.Port < 1 || t.Port > 65535 {
-		return fmt.Errorf("stream host %q: target.port %d out of range", hostName, t.Port)
+		return fmt.Errorf("stream host %q: target.port: %d is out of range (1-65535)", hostName, t.Port)
 	}
 	return nil
 }
@@ -711,13 +713,13 @@ func (h StreamHost) Validate() error {
 	switch h.Protocol {
 	case "tcp", "udp", "both":
 	default:
-		return fmt.Errorf("stream host %q: protocol must be tcp|udp|both, got %q", h.Name, h.Protocol)
+		return fmt.Errorf("stream host %q: protocol: must be tcp|udp|both, got %q", h.Name, h.Protocol)
 	}
 	if h.ListenPort < 1 || h.ListenPort > 65535 {
-		return fmt.Errorf("stream host %q: listenPort %d out of range", h.Name, h.ListenPort)
+		return fmt.Errorf("stream host %q: listenPort: %d is out of range (1-65535)", h.Name, h.ListenPort)
 	}
 	if h.LegacyForwardHost != "" || h.LegacyForwardPort != 0 {
-		return fmt.Errorf("stream host %q: forwardHost/forwardPort were replaced by a single target; write `target: {host: <host>, port: <port>}` instead", h.Name)
+		return fmt.Errorf("stream host %q: target: forwardHost/forwardPort were replaced by a single target; write `target: {host: <host>, port: <port>}` instead", h.Name)
 	}
 	if err := h.Target.validate(h.Name); err != nil {
 		return err
@@ -759,7 +761,7 @@ func (h ParkedHost) Validate() error {
 		return err
 	}
 	if len(h.Domains) == 0 {
-		return fmt.Errorf("parked host %q: at least one domain is required", h.Name)
+		return fmt.Errorf("parked host %q: domains: at least one domain is required", h.Name)
 	}
 	return nil
 }

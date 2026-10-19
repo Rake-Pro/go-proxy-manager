@@ -27,15 +27,15 @@ func TestDockerDiscoveryValidate(t *testing.T) {
 			d.AllowedDomainSuffixes = nil
 			d.Template = IngressHostTemplate{}
 		}, ""},
-		{"allowedDomainSuffixes is required", func(d *DockerDiscoverySettings) {
+		{"allowedDomainSuffixes: is required", func(d *DockerDiscoverySettings) {
 			d.AllowedDomainSuffixes = nil
-		}, "allowedDomainSuffixes is required"},
+		}, "allowedDomainSuffixes: is required"},
 		{"certificateRef is required", func(d *DockerDiscoverySettings) {
 			d.Template.TLS.CertificateRef = ""
-		}, "dockerDiscovery.template.tls.certificateRef is required"},
+		}, "dockerDiscovery.template.tls.certificateRef: is required"},
 		{"relative socket", func(d *DockerDiscoverySettings) {
 			d.Socket = "docker.sock"
-		}, "socket must be an absolute path"},
+		}, "socket: must be an absolute path"},
 		{"absolute socket is fine", func(d *DockerDiscoverySettings) {
 			d.Socket = "/run/docker.sock"
 		}, ""},
@@ -55,7 +55,7 @@ func TestDockerDiscoveryValidate(t *testing.T) {
 		}, "must be set together"},
 		{"relative tls path", func(d *DockerDiscoverySettings) {
 			d.TLSCA = "ca.pem"
-		}, "tlsCA must be an absolute path"},
+		}, "tlsCA: must be an absolute path"},
 		{"publishedHost without usePublishedPorts", func(d *DockerDiscoverySettings) {
 			d.PublishedHost = "127.0.0.1"
 		}, "only applies with"},
@@ -92,7 +92,7 @@ func TestDockerDiscoveryValidate(t *testing.T) {
 				TLS:      TLSSettings{CertificateRef: "wildcard"},
 				Upstream: Upstream{Scheme: "gopher", Host: "10.0.0.1", Port: 80},
 			}}
-		}, "upstream scheme must be http or https"},
+		}, "upstream.scheme: must be http or https"},
 	}
 
 	for _, tc := range tests {

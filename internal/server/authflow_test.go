@@ -395,9 +395,21 @@ func TestCallbackRejectsBadState(t *testing.T) {
 
 	t.Run("idp reported error", func(t *testing.T) {
 		e := newTestEnv(t, envOpts{})
-		res := e.get("/auth/callback?error=access_denied")
+		res := e.get("/auth/callback?error=access_denied%3Cb%3Ex")
 		if res.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("got %d, want 401", res.StatusCode)
+		}
+		// The refusal is the login page again with a reason, never the IdP's
+		// own error text (attacker-supplied) and never text/plain.
+		body := readBody(t, res)
+		if !strings.Contains(body, msgSSOFailed) || !strings.Contains(body, "login-err") {
+			t.Fatalf("expected the login page with %q, got: %.200s", msgSSOFailed, body)
+		}
+		if strings.Contains(body, "access_denied") {
+			t.Fatal("the IdP error code must not be echoed into the page")
+		}
+		if c := cookie(t, res, "gpm_oidc_state"); c == nil || c.MaxAge >= 0 {
+			t.Fatal("the state cookie must be cleared on an IdP error")
 		}
 	})
 
@@ -529,7 +541,7 @@ func TestLoginPageRendering(t *testing.T) {
 			t.Fatalf("Content-Type = %q", ct)
 		}
 		body := readBody(t, res)
-		for _, want := range []string{"GPM Test", "Login with Acme SSO", `action="/auth/local"`} {
+		for _, want := range []string{"GPM Test", "Sign in with Acme SSO", `action="/auth/local"`} {
 			if !strings.Contains(body, want) {
 				t.Fatalf("login page missing %q:\n%s", want, body)
 			}
@@ -553,7 +565,7 @@ func TestLoginPageRendering(t *testing.T) {
 		if res.StatusCode != http.StatusOK {
 			t.Fatalf("got %d, want 200", res.StatusCode)
 		}
-		if !strings.Contains(readBody(t, res), "Login with Acme SSO") {
+		if !strings.Contains(readBody(t, res), "Sign in with Acme SSO") {
 			t.Fatal("chooser should list the provider")
 		}
 	})
@@ -564,7 +576,7 @@ func TestLoginPageRendering(t *testing.T) {
 		if res.StatusCode != http.StatusOK {
 			t.Fatalf("got %d, want 200", res.StatusCode)
 		}
-		if !strings.Contains(readBody(t, res), "No login methods are available") {
+		if !strings.Contains(readBody(t, res), "No sign-in methods are available") {
 			t.Fatal("expected the empty-state message")
 		}
 	})
@@ -827,7 +839,7 @@ func TestClientIPKey(t *testing.T) {
 		want       string
 	}{
 		{"host:port", "203.0.113.7:44321", nil, "203.0.113.7"},
-		{"ipv6 host:port", "[2001:db8::1]:44321", nil, "2001:db8::1"},
+		{"ipv6 host:port", "[2001:db8::1]:44321", nil, "2001:db8::/64"},
 		{"no port falls back to the raw value", "203.0.113.7", nil, "203.0.113.7"},
 		{"empty remote addr", "", nil, ""},
 		{"x-forwarded-for is ignored", "203.0.113.7:44321",

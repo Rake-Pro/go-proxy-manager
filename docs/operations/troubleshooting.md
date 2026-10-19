@@ -31,7 +31,7 @@ below map each row's wording to its cause and fix.
 |---|---|---|
 | Login page loads, password never works, no error shown | The bcrypt hash file is unreadable by the non-root container user | `chmod 644` the secret file and restart ([Install with Docker](../getting-started/install-docker.md)) |
 | Banner: no administrator login is configured | No usable local credential **and** no `oidc` provider in `adminAuth.providers` | Set `GPM_LOCAL_ADMIN_USER` plus a hash, or finish [admin OIDC](../how-to/admin-oidc-sso.md) |
-| Login form answers "authentication failed" every time | `GPM_LOCAL_ADMIN_USER` is set but the hash is missing or unreadable | Generate it with `gpm hashpw` and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
+| Login page answers "Wrong username or password." every time | `GPM_LOCAL_ADMIN_USER` is set but the hash is missing or unreadable | Generate it with `gpm hashpw` and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
 | Login page has no buttons and no password form | `ssoOnly: true` with a provider name that does not resolve to an `oidc` provider | Recover by editing `config/settings.yaml` and redeploying ([Admin authentication](../reference/config/settings/admin-auth.md)) |
 | Login "does nothing" over `http://127.0.0.1:8081` | `GPM_COOKIE_SECURE=1` forces `Secure`, and a browser refuses to store a `Secure` cookie received over plain HTTP: the POST succeeds and the next request is anonymous | Leave `GPM_COOKIE_SECURE` at its `auto` default, which issues the cookie without `Secure` on a plain-HTTP request and turns `Secure` on by itself under TLS ([Hardening](hardening.md)) |
 | The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin panel with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
@@ -45,7 +45,7 @@ below map each row's wording to its cause and fix.
 | Every code is rejected | Server and phone clocks differ by more than 30 seconds | Fix NTP on the host ([TOTP](../how-to/totp.md)) |
 | Every code is rejected, log says the secret is not usable base32 | Stale container: gpm refuses to start on an unparseable secret | Regenerate with `gpm totp-secret` and restart |
 | A code that just worked is refused | Codes are single-use; the accepted step cannot be replayed | Wait for the next 30-second step |
-| `429 too many login attempts` | Five failed attempts from one client IP within 15 minutes | Wait 15 minutes, or restart (the lockout is in memory only) |
+| Login page says "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts from one client IP within 15 minutes | Wait the minutes shown, or restart (the lockout is in memory only) |
 | Locked out with no authenticator | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*`, restart, sign in, enrol a new secret |
 
 ## Certificates
@@ -69,7 +69,7 @@ below map each row's wording to its cause and fix.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check `domains` and `disabled`; two enabled hosts cannot share a domain |
-| Config write refused: two hosts claim one domain | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
+| Config write refused: `domains: <name> is already claimed by proxy host "<other>"` | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
 | `503` on every request to one host | The host references a middleware or access list that does not exist | Fix the reference; the proxy listeners fail that one host closed |
 | The backend receives the wrong path | Location match, `stripPrefix`, rewrite rules and the upstream base `path` compose in a fixed order | See [Path composition](../concepts/request-pipeline.md#path-composition) |
 | A guard answers `400` on a URL containing `;` | A guard with a `queryEquals` trigger fails closed on legacy `;` separators | Remove the `;`, or drop the `queryEquals` trigger |

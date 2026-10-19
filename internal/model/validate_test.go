@@ -97,7 +97,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "authentik"}, Type: IdPTypeAuthRequest,
 				AuthRequest: &AuthRequestSpec{OutpostURL: "not a url"},
 			}}},
-			wantErr: "outpostURL must be an http(s) URL",
+			wantErr: "outpostURL: must be an http(s) URL",
 		},
 		{
 			name: "defaultRole admin without opt-in is rejected",
@@ -139,7 +139,7 @@ func TestConfigValidate(t *testing.T) {
 				OIDC:        &OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
 				RoleMapping: &RoleMapping{DefaultRole: "superuser"},
 			}}},
-			wantErr: `defaultRole must be "", "user", or "admin"`,
+			wantErr: `defaultRole: must be "", "user", or "admin"`,
 		},
 		{
 			name: "auth-request mode rejects requiredRoles",
@@ -147,7 +147,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "sso"}, Type: MWTypeAuth,
 				Auth: &AuthMiddleware{IdentityProvider: "authentik", Mode: AuthModeAuthRequest, RequiredRoles: []string{"admin"}},
 			}}},
-			wantErr: "requiredRoles is not supported in auth-request mode",
+			wantErr: "requiredRoles: is not supported in auth-request mode",
 		},
 		{
 			name: "valid guard middleware",
@@ -164,7 +164,7 @@ func TestConfigValidate(t *testing.T) {
 			cfg: Config{Middlewares: []Middleware{{
 				ObjectMeta: ObjectMeta{Name: "g"}, Type: MWTypeGuard, Guard: &GuardMiddleware{},
 			}}},
-			wantErr: "guard requires at least one trigger",
+			wantErr: "guard: requires at least one trigger",
 		},
 		{
 			name: "guard rejects bad allowFrom",
@@ -210,7 +210,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{},
 			}}},
-			wantErr: "requestsPerSecond must be > 0",
+			wantErr: "requestsPerSecond: must be > 0",
 		},
 		{
 			name: "rate-limit rejects unparseable window",
@@ -226,7 +226,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{Requests: 100, Window: "0s"},
 			}}},
-			wantErr: "window must be > 0",
+			wantErr: "window: must be > 0",
 		},
 		{
 			name: "rate-limit rejects requests<=0 with window set",
@@ -234,7 +234,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{Window: "1m"},
 			}}},
-			wantErr: "rateLimit.requests must be > 0",
+			wantErr: "rateLimit.requests: must be > 0",
 		},
 		{
 			name: "valid rate-limit middleware with blockFor and legacy rate form",
@@ -256,7 +256,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1fortnight"},
 			}}},
-			wantErr: "blockFor must be a valid duration",
+			wantErr: "blockFor: must be a valid duration",
 		},
 		{
 			name: "rate-limit rejects zero blockFor",
@@ -264,7 +264,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "0s"},
 			}}},
-			wantErr: "blockFor must be > 0",
+			wantErr: "blockFor: must be > 0",
 		},
 		{
 			name: "rate-limit rejects negative blockFor",
@@ -272,7 +272,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
 				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "-5s"},
 			}}},
-			wantErr: "blockFor must be > 0",
+			wantErr: "blockFor: must be > 0",
 		},
 		{
 			name: "valid rewrite middleware",
@@ -286,7 +286,7 @@ func TestConfigValidate(t *testing.T) {
 			cfg: Config{Middlewares: []Middleware{{
 				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
 			}}},
-			wantErr: "rewrite requires at least one replacePath",
+			wantErr: "rewrite: requires at least one replacePath",
 		},
 		{
 			name: "rewrite rejects empty replacePath",
@@ -294,7 +294,7 @@ func TestConfigValidate(t *testing.T) {
 				ObjectMeta: ObjectMeta{Name: "rw"}, Type: MWTypeRewrite,
 				Rewrite: &RewriteMiddleware{ReplacePath: map[string]string{}},
 			}}},
-			wantErr: "rewrite requires at least one replacePath",
+			wantErr: "rewrite: requires at least one replacePath",
 		},
 		{
 			name: "rewrite rejects non-absolute key",
@@ -326,7 +326,7 @@ func TestConfigValidate(t *testing.T) {
 				{ObjectMeta: ObjectMeta{Name: "a"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "a.pem", KeyFile: "ak.pem"}},
 				{ObjectMeta: ObjectMeta{Name: "b"}, Type: CertTypeCustom, Domains: []string{"*.example.com"}, Custom: &CustomCertSpec{CertFile: "b.pem", KeyFile: "bk.pem"}},
 			}},
-			wantErr: `both claim domain "*.example.com"`,
+			wantErr: `domains: *.example.com is already claimed by certificate`,
 		},
 		{
 			name: "disabled cert does not collide",
@@ -819,12 +819,12 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 		{
 			name:    "two proxy hosts",
 			cfg:     Config{ProxyHosts: []ProxyHost{withDomains("sso", "sso.example.com"), withDomains("ing-grab.tenant", "sso.example.com")}},
-			wantErr: `both claim domain "sso.example.com"`,
+			wantErr: `domains: sso.example.com is already claimed by `,
 		},
 		{
 			name:    "case and trailing whitespace do not evade the check",
 			cfg:     Config{ProxyHosts: []ProxyHost{withDomains("a", "SSO.Example.com"), withDomains("b", " sso.example.com ")}},
-			wantErr: `both claim domain "sso.example.com"`,
+			wantErr: `domains: sso.example.com is already claimed by `,
 		},
 		{
 			name: "proxy host and redirect host",
@@ -832,7 +832,7 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 				ProxyHosts:    []ProxyHost{withDomains("app", "app.example.com")},
 				RedirectHosts: []RedirectHost{redirect("old-app", "app.example.com")},
 			},
-			wantErr: `both claim domain "app.example.com"`,
+			wantErr: `domains: app.example.com is already claimed by `,
 		},
 		{
 			name: "proxy host and parked host",
@@ -840,7 +840,7 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 				ProxyHosts:  []ProxyHost{withDomains("app", "app.example.com")},
 				ParkedHosts: []ParkedHost{parked("absorb", "app.example.com")},
 			},
-			wantErr: `both claim domain "app.example.com"`,
+			wantErr: `domains: app.example.com is already claimed by `,
 		},
 		{
 			name: "one domain of several collides",
@@ -848,7 +848,7 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 				withDomains("a", "a.example.com", "shared.example.com"),
 				withDomains("b", "b.example.com", "shared.example.com"),
 			}},
-			wantErr: `both claim domain "shared.example.com"`,
+			wantErr: `domains: shared.example.com is already claimed by `,
 		},
 		// A disabled host is excluded from the compiled data plane entirely, so it
 		// cannot shadow anything - and staging a replacement beside the live host is

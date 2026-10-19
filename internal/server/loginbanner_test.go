@@ -48,7 +48,7 @@ func oidcProvider(name string) model.IdentityProvider {
 	}
 }
 
-const bootstrapHeading = "No administrator login is configured"
+const bootstrapHeading = "No administrator sign-in is configured"
 
 func TestLoginPageBootstrapBanner(t *testing.T) {
 	// A real-looking bcrypt hash; nothing verifies it here, only its presence.
@@ -125,6 +125,7 @@ func TestLoginPageBootstrapBanner(t *testing.T) {
 				"GPM_LOCAL_ADMIN_USER",
 				"GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE",
 				"adminAuth.providers",
+				"Admin sign-in &gt; Single sign-on providers",
 				"oidc",
 				"hashpw",
 			} {

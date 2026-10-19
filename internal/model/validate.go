@@ -30,7 +30,7 @@ func (c Config) Validate() error {
 			return
 		}
 		if seen[name] {
-			errs = append(errs, fmt.Errorf("duplicate %s name %q", kind, name))
+			errs = append(errs, fmt.Errorf("name: duplicate %s name %q", kind, name))
 		}
 		seen[name] = true
 	}
@@ -102,34 +102,37 @@ func (c Config) Validate() error {
 			errs = append(errs, err)
 		}
 		register("host", h.Name, seenHost)
-		checkRef(&errs, "proxy host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkRef(&errs, "proxy host", h.Name, "tls.certificateRef", "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "proxy host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 		// A disabled group is excluded from the compiled health state, so an enabled
 		// host referencing it would fail the whole router build; reject at validation
 		// like a disabled clientCA.
-		checkGroupRef := func(owner, ref string) {
-			checkRef(&errs, "proxy host", owner, "upstreamGroup", ref, ugs)
+		// field is the dotted path of the reference ("upstreamGroupRef", or
+		// `locations: location "/x": upstreamGroupRef` inside a location).
+		checkGroupRef := func(field, ref string) {
+			checkRef(&errs, "proxy host", h.Name, field, "upstreamGroup", ref, ugs)
 			if !h.Disabled && ref != "" && ugs[ref] && disabledUGs[ref] {
-				errs = append(errs, fmt.Errorf("proxy host %q references upstreamGroup %q, which is disabled (enable the group or use a single upstream)", owner, ref))
+				errs = append(errs, fmt.Errorf("proxy host %q: %s: upstreamGroup %q is disabled (enable the group or use a single upstream)", h.Name, field, ref))
 			}
 		}
-		checkGroupRef(h.Name, h.UpstreamGroupRef)
+		checkGroupRef("upstreamGroupRef", h.UpstreamGroupRef)
 		for _, m := range h.Middlewares {
-			checkRef(&errs, "proxy host", h.Name, "middleware", m, mws)
+			checkRef(&errs, "proxy host", h.Name, "middlewares", "middleware", m, mws)
 		}
 		for _, a := range h.AccessLists {
-			checkRef(&errs, "proxy host", h.Name, "accessList", a, als)
+			checkRef(&errs, "proxy host", h.Name, "accessLists", "accessList", a, als)
 		}
-		checkInlineAuth(&errs, "proxy host", h.Name, h.Auth, idps, idpTypes)
+		checkInlineAuth(&errs, "proxy host", h.Name, "", h.Auth, idps, idpTypes)
 		for _, l := range h.Locations {
-			checkGroupRef(h.Name+" location "+l.Path, l.UpstreamGroupRef)
+			loc := fmt.Sprintf("locations: location %q: ", l.Path)
+			checkGroupRef(loc+"upstreamGroupRef", l.UpstreamGroupRef)
 			for _, m := range l.Middlewares {
-				checkRef(&errs, "proxy host", h.Name+" location "+l.Path, "middleware", m, mws)
+				checkRef(&errs, "proxy host", h.Name, loc+"middlewares", "middleware", m, mws)
 			}
 			for _, a := range l.AccessLists {
-				checkRef(&errs, "proxy host", h.Name+" location "+l.Path, "accessList", a, als)
+				checkRef(&errs, "proxy host", h.Name, loc+"accessLists", "accessList", a, als)
 			}
-			checkInlineAuth(&errs, "proxy host", h.Name+" location "+l.Path, l.Auth, idps, idpTypes)
+			checkInlineAuth(&errs, "proxy host", h.Name, loc, l.Auth, idps, idpTypes)
 		}
 	}
 	for _, h := range c.RedirectHosts {
@@ -137,7 +140,7 @@ func (c Config) Validate() error {
 			errs = append(errs, err)
 		}
 		register("host", h.Name, seenHost)
-		checkRef(&errs, "redirect host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkRef(&errs, "redirect host", h.Name, "tls.certificateRef", "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "redirect host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
 	for _, h := range c.ParkedHosts {
@@ -145,7 +148,7 @@ func (c Config) Validate() error {
 			errs = append(errs, err)
 		}
 		register("host", h.Name, seenHost)
-		checkRef(&errs, "parked host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+		checkRef(&errs, "parked host", h.Name, "tls.certificateRef", "certificate", h.TLS.CertificateRef, certs)
 		checkClientAuthRef(&errs, "parked host", h.Name, h.TLS, clientCAs, disabledClientCAs)
 	}
 	// Stream hosts: per-object validation, then the two cross-object rules that
@@ -173,22 +176,22 @@ func (c Config) Validate() error {
 		}
 		register("host", h.Name, seenHost)
 		if h.TLS != nil {
-			checkRef(&errs, "stream host", h.Name, "certificate", h.TLS.CertificateRef, certs)
+			checkRef(&errs, "stream host", h.Name, "tls.certificateRef", "certificate", h.TLS.CertificateRef, certs)
 		}
 		for _, a := range h.AccessLists {
-			checkRef(&errs, "stream host", h.Name, "accessList", a, als)
+			checkRef(&errs, "stream host", h.Name, "accessLists", "accessList", a, als)
 			// Basic auth is an HTTP challenge/response; a raw TCP/UDP stream has no
 			// way to issue one. Reject the reference rather than silently evaluating
 			// only half the list an operator believed was gating the port.
 			if basicAuthLists[a] {
-				errs = append(errs, fmt.Errorf("stream host %q references accessList %q, which has basicAuth users: basic auth cannot be evaluated on a raw stream (use a list with only ip rules and/or geo, or attach this list to a proxy host)", h.Name, a))
+				errs = append(errs, fmt.Errorf("stream host %q: accessLists: %q has basicAuth users, which do not apply at L4 (basic auth is an HTTP challenge; use a list with only ip rules and/or geo, or attach this list to a proxy host)", h.Name, a))
 			}
 			// Same reasoning one step further: a path-scoped rule needs a request
 			// path and a source-backed rule needs the fetched ledger the HTTP data
 			// plane resolves. A raw stream has neither, so the reference is
 			// rejected rather than evaluated as half the gate the operator wrote.
 			if requestScopedLists[a] {
-				errs = append(errs, fmt.Errorf("stream host %q references accessList %q, which has path-scoped and/or source-backed rules: those need an HTTP request path and cannot be evaluated on a raw stream (use a list with only literal cidr rules and/or geo, or attach this list to a proxy host)", h.Name, a))
+				errs = append(errs, fmt.Errorf("stream host %q: accessLists: %q has path rules, which do not apply at L4 (path-scoped and source-backed rules need an HTTP request; use a list with only literal cidr rules and/or geo, or attach this list to a proxy host)", h.Name, a))
 			}
 		}
 		if h.Disabled {
@@ -199,7 +202,7 @@ func (c Config) Validate() error {
 		}
 		if h.Protocol == "udp" || h.Protocol == "both" {
 			if other, dup := udpPorts[h.ListenPort]; dup {
-				errs = append(errs, fmt.Errorf("stream hosts %q and %q both listen on udp port %d (a udp port carries no SNI and cannot be shared; give one of them a different port)", other, h.Name, h.ListenPort))
+				errs = append(errs, fmt.Errorf("stream host %q: listenPort: udp %d is also used by stream host %q (a udp port carries no SNI and cannot be shared; pick another port)", h.Name, h.ListenPort, other))
 			} else {
 				udpPorts[h.ListenPort] = h.Name
 			}
@@ -217,12 +220,16 @@ func (c Config) Validate() error {
 		names := map[string]string{}
 		for _, cl := range claims {
 			if len(cl.sni) == 0 {
-				errs = append(errs, fmt.Errorf("stream host %q shares tcp port %d with another stream host but sets no tls.sniMatch (hosts may only share a port when every one of them routes by SNI)", cl.host, port))
+				otherHost := claims[0].host
+				if otherHost == cl.host {
+					otherHost = claims[1].host
+				}
+				errs = append(errs, fmt.Errorf("stream host %q: listenPort: tcp %d is also used by stream host %q; set tls.sniMatch on both or pick another port", cl.host, port, otherHost))
 				continue
 			}
 			for _, n := range cl.sni {
 				if other, dup := names[n]; dup {
-					errs = append(errs, fmt.Errorf("stream hosts %q and %q both claim sni %q on tcp port %d", other, cl.host, n, port))
+					errs = append(errs, fmt.Errorf("stream host %q: tls.sniMatch: %q is already claimed on tcp port %d by stream host %q", cl.host, n, port, other))
 					continue
 				}
 				names[n] = cl.host
@@ -240,8 +247,9 @@ func (c Config) Validate() error {
 	// The check is scoped to ENABLED hosts on purpose: a disabled host is excluded
 	// from the compiled data plane entirely, so staging a replacement host beside
 	// the live one (disable old, enable new, or vice versa) stays legal.
-	hostDomains := map[string]string{}
-	claimDomains := func(name string, disabled bool, domains []string) {
+	type domainClaim struct{ kind, name string }
+	hostDomains := map[string]domainClaim{}
+	claimDomains := func(kind, name string, disabled bool, domains []string) {
 		if disabled {
 			return
 		}
@@ -251,26 +259,26 @@ func (c Config) Validate() error {
 				continue
 			}
 			if other, dup := hostDomains[key]; dup {
-				errs = append(errs, fmt.Errorf("hosts %q and %q both claim domain %q (an enabled domain may be served by exactly one host; disable one of them)", other, name, key))
+				errs = append(errs, fmt.Errorf("%s %q: domains: %s is already claimed by %s %q (an enabled domain may be served by exactly one host; disable one of them)", kind, name, key, other.kind, other.name))
 				continue
 			}
-			hostDomains[key] = name
+			hostDomains[key] = domainClaim{kind, name}
 		}
 	}
 	for _, h := range c.ProxyHosts {
-		claimDomains(h.Name, h.Disabled, h.Domains)
+		claimDomains("proxy host", h.Name, h.Disabled, h.Domains)
 	}
 	for _, h := range c.RedirectHosts {
-		claimDomains(h.Name, h.Disabled, h.Domains)
+		claimDomains("redirect host", h.Name, h.Disabled, h.Domains)
 	}
 	for _, h := range c.ParkedHosts {
-		claimDomains(h.Name, h.Disabled, h.Domains)
+		claimDomains("parked host", h.Name, h.Disabled, h.Domains)
 	}
 
 	// Certificate -> DNS provider references.
 	for _, ct := range c.Certificates {
 		if ct.ACME != nil {
-			checkRef(&errs, "certificate", ct.Name, "dnsProvider", ct.ACME.DNSProvider, dns)
+			checkRef(&errs, "certificate", ct.Name, "acme.dnsProvider", "dnsProvider", ct.ACME.DNSProvider, dns)
 		}
 	}
 	// Reject two enabled certificates claiming the same domain: SNI selection
@@ -286,7 +294,7 @@ func (c Config) Validate() error {
 				continue
 			}
 			if other, dup := certDomains[key]; dup {
-				errs = append(errs, fmt.Errorf("certificates %q and %q both claim domain %q", other, ct.Name, key))
+				errs = append(errs, fmt.Errorf("certificate %q: domains: %s is already claimed by certificate %q", ct.Name, key, other))
 				continue
 			}
 			certDomains[key] = ct.Name
@@ -295,7 +303,7 @@ func (c Config) Validate() error {
 	// Auth middleware -> identity provider references.
 	for _, m := range c.Middlewares {
 		if m.Auth != nil {
-			checkRef(&errs, "middleware", m.Name, "identityProvider", m.Auth.IdentityProvider, idps)
+			checkRef(&errs, "middleware", m.Name, "auth.identityProvider", "identityProvider", m.Auth.IdentityProvider, idps)
 			checkAuthAllowFromMode(&errs, fmt.Sprintf("middleware %q", m.Name), *m.Auth, idpTypes)
 		}
 	}
@@ -313,18 +321,29 @@ func checkClientAuthRef(errs *[]error, ownerKind, ownerName string, tlsSettings 
 		return
 	}
 	ref := tlsSettings.ClientAuth.CARef
-	checkRef(errs, ownerKind, ownerName, "clientCA", ref, set)
+	checkRef(errs, ownerKind, ownerName, "tls.clientAuth.caRef", "clientCA", ref, set)
 	if ref != "" && set[ref] && disabled[ref] {
-		*errs = append(*errs, fmt.Errorf("%s %q references clientCA %q, which is disabled (a disabled trust anchor would fail the TLS reload; enable it or remove the mTLS requirement)", ownerKind, ownerName, ref))
+		*errs = append(*errs, fmt.Errorf("%sclientCA %q is disabled (a disabled trust anchor would fail the TLS reload; enable it or remove the mTLS requirement)", refPrefix(ownerKind, ownerName, "tls.clientAuth.caRef"), ref))
 	}
 }
 
-func checkRef(errs *[]error, ownerKind, ownerName, refKind, ref string, set map[string]bool) {
+// refPrefix is the leading text of a reference error: the object ("proxy host
+// \"app\": ") followed by the dotted path of the field, so the admin UI can jump
+// to it. An empty ownerKind means ownerName is already a path prefix (the
+// discovery template blocks inside Settings, which have no name of their own).
+func refPrefix(ownerKind, ownerName, field string) string {
+	if ownerKind == "" {
+		return ownerName + "." + field + ": "
+	}
+	return fmt.Sprintf("%s %q: %s: ", ownerKind, ownerName, field)
+}
+
+func checkRef(errs *[]error, ownerKind, ownerName, field, refKind, ref string, set map[string]bool) {
 	if ref == "" {
 		return
 	}
 	if !set[ref] {
-		*errs = append(*errs, fmt.Errorf("%s %q references unknown %s %q", ownerKind, ownerName, refKind, ref))
+		*errs = append(*errs, fmt.Errorf("%sreferences unknown %s %q", refPrefix(ownerKind, ownerName, field), refKind, ref))
 	}
 }
 
@@ -351,14 +370,14 @@ func checkAuthAllowFromMode(errs *[]error, owner string, a AuthMiddleware, idpTy
 	if !ok {
 		// The dangling-reference error above already names the missing provider;
 		// this adds why it matters for allowFrom specifically.
-		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom needs a known auth mode, but auth.mode is unset and identityProvider %q does not resolve, so the effective mode cannot be determined - set auth.mode explicitly",
+		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom: needs a known auth mode, but auth.mode is unset and identityProvider %q does not resolve, so the effective mode cannot be determined - set auth.mode explicitly",
 			owner, a.IdentityProvider))
 		return
 	}
 	switch t {
 	case IdPTypeAuthRequest:
 	default:
-		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom is only supported in auth-request and client-cert modes; auth.mode is unset, so it defaults to identityProvider %q's type (%q), where the exemption would be silently ignored - set auth.mode explicitly or remove auth.allowFrom",
+		*errs = append(*errs, fmt.Errorf("%s: auth.allowFrom: is only supported in auth-request and client-cert modes; auth.mode is unset, so it defaults to identityProvider %q's type (%q), where the exemption would be silently ignored - set auth.mode explicitly or remove auth.allowFrom",
 			owner, a.IdentityProvider, t))
 	}
 }
@@ -369,12 +388,16 @@ func checkAuthAllowFromMode(errs *[]error, owner string, a AuthMiddleware, idpTy
 // error a middleware's would be), and an allowFrom with no explicit mode is
 // checked against the provider's type exactly as checkAuthAllowFromMode does for
 // a middleware. A nil block is absent and checks nothing.
-func checkInlineAuth(errs *[]error, ownerKind, ownerName string, a *AuthMiddleware, idps map[string]bool, idpTypes map[string]string) {
+func checkInlineAuth(errs *[]error, ownerKind, ownerName, loc string, a *AuthMiddleware, idps map[string]bool, idpTypes map[string]string) {
 	if a == nil {
 		return
 	}
-	checkRef(errs, ownerKind, ownerName, "identityProvider", a.IdentityProvider, idps)
-	checkAuthAllowFromMode(errs, fmt.Sprintf("%s %q", ownerKind, ownerName), *a, idpTypes)
+	checkRef(errs, ownerKind, ownerName, loc+"auth.identityProvider", "identityProvider", a.IdentityProvider, idps)
+	owner := fmt.Sprintf("%s %q", ownerKind, ownerName)
+	if loc != "" {
+		owner += ": " + strings.TrimSuffix(loc, ": ")
+	}
+	checkAuthAllowFromMode(errs, owner, *a, idpTypes)
 }
 
 // certCovers reports whether a certificate's domain list covers name, using the

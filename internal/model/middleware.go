@@ -123,7 +123,7 @@ func (a *AuthMiddleware) validate(owner string) error {
 	// local credential set, so they are the two auth modes with no identity
 	// provider to name.
 	if a.Mode != AuthModeClientCert && a.Mode != AuthModeBasic && a.IdentityProvider == "" {
-		return fmt.Errorf("%s: auth.identityProvider is required", owner)
+		return fmt.Errorf("%s: auth.identityProvider: is required", owner)
 	}
 	switch mode := a.Mode; mode {
 	case AuthModeOIDC, AuthModeForwardAuth:
@@ -133,54 +133,54 @@ func (a *AuthMiddleware) validate(owner string) error {
 		// left alone: it defaults from the IdP type, which is not resolvable
 		// here, and it may resolve to auth-request.
 		if len(a.AllowFrom) > 0 {
-			return fmt.Errorf("%s: auth.allowFrom is only supported in auth-request, client-cert and basic modes, not %q", owner, mode)
+			return fmt.Errorf("%s: auth.allowFrom: is only supported in auth-request, client-cert and basic modes, not %q", owner, mode)
 		}
 	case "":
 	case AuthModeBasic:
 		// The credential set IS the identity source, so naming a provider here
 		// would claim an SSO relationship the gate never uses.
 		if a.IdentityProvider != "" {
-			return fmt.Errorf("%s: auth.identityProvider is not used in basic mode (auth.basic.users is the credential source)", owner)
+			return fmt.Errorf("%s: auth.identityProvider: is not used in basic mode (auth.basic.users is the credential source)", owner)
 		}
 		// Basic auth resolves a username, never a role: there is no group claim
 		// and no roleMapping to derive one from, so requiredRoles could only ever
 		// deny every request.
 		if len(a.RequiredRoles) > 0 {
-			return fmt.Errorf("%s: auth.requiredRoles is not supported in basic mode (a username/password carries no roles; put the users who may reach this host in auth.basic.users)", owner)
+			return fmt.Errorf("%s: auth.requiredRoles: is not supported in basic mode (a username/password carries no roles; put the users who may reach this host in auth.basic.users)", owner)
 		}
 		if a.Basic == nil {
-			return fmt.Errorf("%s: auth.basic is required in basic mode", owner)
+			return fmt.Errorf("%s: auth.basic: is required in basic mode", owner)
 		}
 		if err := a.Basic.validate(owner); err != nil {
 			return err
 		}
 	case AuthModeClientCert:
 		if a.IdentityProvider != "" {
-			return fmt.Errorf("%s: auth.identityProvider is not used in client-cert mode (the TLS handshake is the identity source)", owner)
+			return fmt.Errorf("%s: auth.identityProvider: is not used in client-cert mode (the TLS handshake is the identity source)", owner)
 		}
 		// requiredRoles with no mapping could never match, silently denying
 		// every request; reject it rather than compile a dead gate.
 		if len(a.RequiredRoles) > 0 && len(a.ClientCertRoles) == 0 {
-			return fmt.Errorf("%s: auth.requiredRoles in client-cert mode needs auth.clientCertRoles to map a subject to a role", owner)
+			return fmt.Errorf("%s: auth.requiredRoles: client-cert mode needs auth.clientCertRoles to map a subject to a role", owner)
 		}
 	case AuthModeAuthRequest:
 		if len(a.RequiredRoles) > 0 {
-			return fmt.Errorf("%s: auth.requiredRoles is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", owner)
+			return fmt.Errorf("%s: auth.requiredRoles: is not supported in auth-request mode (the auth server enforces authorization via its application bindings)", owner)
 		}
 	default:
-		return fmt.Errorf("%s: auth.mode must be %s, got %q", owner, authModeList, mode)
+		return fmt.Errorf("%s: auth.mode: must be %s, got %q", owner, authModeList, mode)
 	}
 	if len(a.ClientCertRoles) > 0 && a.Mode != AuthModeClientCert {
-		return fmt.Errorf("%s: auth.clientCertRoles is only used in client-cert mode", owner)
+		return fmt.Errorf("%s: auth.clientCertRoles: is only used in client-cert mode", owner)
 	}
 	// A basic block outside basic mode is a credential set nothing reads: the
 	// gate would be an SSO/mTLS gate and the users would silently admit nobody.
 	if a.Basic != nil && a.Mode != AuthModeBasic {
-		return fmt.Errorf("%s: auth.basic is only used in basic mode (set auth.mode: basic)", owner)
+		return fmt.Errorf("%s: auth.basic: is only used in basic mode (set auth.mode: basic)", owner)
 	}
 	for _, c := range a.AllowFrom {
 		if !validCIDROrIP(c) {
-			return fmt.Errorf("%s: auth.allowFrom has invalid CIDR/IP %q", owner, c)
+			return fmt.Errorf("%s: auth.allowFrom: has invalid CIDR/IP %q", owner, c)
 		}
 	}
 	return nil
@@ -281,33 +281,33 @@ func (r *RateLimitMiddleware) validate(owner string) error {
 	windowSet := r.usesWindow()
 	switch {
 	case legacySet && windowSet:
-		return fmt.Errorf("%s: rateLimit must set either requestsPerSecond or requests+window, not both", owner)
+		return fmt.Errorf("%s: rateLimit: must set either requestsPerSecond or requests+window, not both", owner)
 	case !legacySet && !windowSet:
-		return fmt.Errorf("%s: rateLimit.requestsPerSecond must be > 0 (or set requests+window)", owner)
+		return fmt.Errorf("%s: rateLimit.requestsPerSecond: must be > 0 (or set requests+window)", owner)
 	case windowSet:
 		if r.Requests <= 0 {
-			return fmt.Errorf("%s: rateLimit.requests must be > 0", owner)
+			return fmt.Errorf("%s: rateLimit.requests: must be > 0", owner)
 		}
 		d, err := time.ParseDuration(r.Window)
 		if err != nil {
-			return fmt.Errorf("%s: rateLimit.window must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.Window, err)
+			return fmt.Errorf("%s: rateLimit.window: must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.Window, err)
 		}
 		if d <= 0 {
-			return fmt.Errorf("%s: rateLimit.window must be > 0, got %q", owner, r.Window)
+			return fmt.Errorf("%s: rateLimit.window: must be > 0, got %q", owner, r.Window)
 		}
 	}
 	for _, c := range r.AllowFrom {
 		if !validCIDROrIP(c) {
-			return fmt.Errorf("%s: rateLimit.allowFrom has invalid CIDR/IP %q", owner, c)
+			return fmt.Errorf("%s: rateLimit.allowFrom: has invalid CIDR/IP %q", owner, c)
 		}
 	}
 	if r.BlockFor != "" {
 		d, err := time.ParseDuration(r.BlockFor)
 		if err != nil {
-			return fmt.Errorf("%s: rateLimit.blockFor must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.BlockFor, err)
+			return fmt.Errorf("%s: rateLimit.blockFor: must be a valid duration (e.g. \"10s\", \"1m\", \"1h\"), got %q: %w", owner, r.BlockFor, err)
 		}
 		if d <= 0 {
-			return fmt.Errorf("%s: rateLimit.blockFor must be > 0, got %q", owner, r.BlockFor)
+			return fmt.Errorf("%s: rateLimit.blockFor: must be > 0, got %q", owner, r.BlockFor)
 		}
 	}
 	return nil
@@ -394,17 +394,17 @@ type RewriteRule struct {
 // composed path is re-cleaned at request time (see dataplane's rewritePath).
 func validateRewriteTarget(owner, field, to string) error {
 	if to == "" || !strings.HasPrefix(to, "/") {
-		return fmt.Errorf("middleware %q: %s %q must be an absolute path (start with %q)", owner, field, to, "/")
+		return fmt.Errorf("middleware %q: %s: %q must be an absolute path (start with %q)", owner, field, to, "/")
 	}
 	if strings.ContainsAny(to, "?#") {
-		return fmt.Errorf("middleware %q: %s %q must not contain a query string or fragment", owner, field, to)
+		return fmt.Errorf("middleware %q: %s: %q must not contain a query string or fragment", owner, field, to)
 	}
 	if strings.ContainsAny(to, `\;`) {
-		return fmt.Errorf("middleware %q: %s %q must not contain %q or %q", owner, field, to, `\`, ";")
+		return fmt.Errorf("middleware %q: %s: %q must not contain %q or %q", owner, field, to, `\`, ";")
 	}
 	for _, seg := range strings.Split(to, "/") {
 		if seg == "." || seg == ".." {
-			return fmt.Errorf("middleware %q: %s %q must not contain %q or %q segments", owner, field, to, ".", "..")
+			return fmt.Errorf("middleware %q: %s: %q must not contain %q or %q segments", owner, field, to, ".", "..")
 		}
 	}
 	return nil
@@ -412,45 +412,45 @@ func validateRewriteTarget(owner, field, to string) error {
 
 func (rw RewriteMiddleware) validate(owner string) error {
 	if len(rw.ReplacePath) == 0 && len(rw.PrefixRules) == 0 && len(rw.RegexRules) == 0 {
-		return fmt.Errorf("middleware %q: rewrite requires at least one replacePath, prefixRules or regexRules entry", owner)
+		return fmt.Errorf("middleware %q: rewrite: requires at least one replacePath, prefixRules or regexRules entry", owner)
 	}
 	for k, v := range rw.ReplacePath {
 		if k == "" || !strings.HasPrefix(k, "/") {
-			return fmt.Errorf("middleware %q: rewrite.replacePath key %q must be an absolute path (start with %q)", owner, k, "/")
+			return fmt.Errorf("middleware %q: rewrite.replacePath: key %q must be an absolute path (start with %q)", owner, k, "/")
 		}
-		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.replacePath[%q] target", k), v); err != nil {
+		if err := validateRewriteTarget(owner, "rewrite.replacePath", v); err != nil {
 			return err
 		}
 		if k == v {
-			return fmt.Errorf("middleware %q: rewrite.replacePath[%q] rewrites a path to itself (no-op)", owner, k)
+			return fmt.Errorf("middleware %q: rewrite.replacePath: key %q rewrites a path to itself (no-op)", owner, k)
 		}
 	}
 	if len(rw.PrefixRules) > MaxRewriteRules {
-		return fmt.Errorf("middleware %q: rewrite.prefixRules has %d rules, at most %d are allowed", owner, len(rw.PrefixRules), MaxRewriteRules)
+		return fmt.Errorf("middleware %q: rewrite.prefixRules: has %d rules, at most %d are allowed", owner, len(rw.PrefixRules), MaxRewriteRules)
 	}
 	for i, r := range rw.PrefixRules {
 		if r.From == "" || !strings.HasPrefix(r.From, "/") {
-			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d].from %q must be an absolute path (start with %q)", owner, i, r.From, "/")
+			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d].from: %q must be an absolute path (start with %q)", owner, i, r.From, "/")
 		}
 		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.prefixRules[%d].to", i), r.To); err != nil {
 			return err
 		}
 		if r.From == r.To {
-			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d] rewrites %q to itself (no-op)", owner, i, r.From)
+			return fmt.Errorf("middleware %q: rewrite.prefixRules[%d]: rewrites %q to itself (no-op)", owner, i, r.From)
 		}
 	}
 	if len(rw.RegexRules) > MaxRewriteRules {
-		return fmt.Errorf("middleware %q: rewrite.regexRules has %d rules, at most %d are allowed", owner, len(rw.RegexRules), MaxRewriteRules)
+		return fmt.Errorf("middleware %q: rewrite.regexRules: has %d rules, at most %d are allowed", owner, len(rw.RegexRules), MaxRewriteRules)
 	}
 	for i, r := range rw.RegexRules {
 		if r.From == "" {
-			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from must not be empty", owner, i)
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from: must not be empty", owner, i)
 		}
 		if len(r.From) > MaxRewritePatternLen {
-			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from is %d characters, at most %d are allowed", owner, i, len(r.From), MaxRewritePatternLen)
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from: is %d characters, at most %d are allowed", owner, i, len(r.From), MaxRewritePatternLen)
 		}
 		if _, err := regexp.Compile(AnchorRewritePattern(r.From)); err != nil {
-			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from %q is not a valid regular expression: %w", owner, i, r.From, err)
+			return fmt.Errorf("middleware %q: rewrite.regexRules[%d].from: %q is not a valid regular expression: %w", owner, i, r.From, err)
 		}
 		if err := validateRewriteTarget(owner, fmt.Sprintf("rewrite.regexRules[%d].to", i), r.To); err != nil {
 			return err
@@ -589,30 +589,30 @@ func (m Middleware) Validate() error {
 	switch m.Type {
 	case MWTypeAuth:
 		if m.Auth == nil {
-			return fmt.Errorf("middleware %q: auth spec required", m.Name)
+			return fmt.Errorf("middleware %q: auth: spec required", m.Name)
 		}
 		if err := m.Auth.validate(fmt.Sprintf("middleware %q", m.Name)); err != nil {
 			return err
 		}
 	case MWTypeHeaders:
 		if m.Headers == nil {
-			return fmt.Errorf("middleware %q: headers spec required", m.Name)
+			return fmt.Errorf("middleware %q: headers: spec required", m.Name)
 		}
 	case MWTypeGuard:
 		if m.Guard == nil || len(m.Guard.Triggers) == 0 {
-			return fmt.Errorf("middleware %q: guard requires at least one trigger", m.Name)
+			return fmt.Errorf("middleware %q: guard: requires at least one trigger", m.Name)
 		}
 		for _, c := range m.Guard.AllowFrom {
 			if !validCIDROrIP(c) {
-				return fmt.Errorf("middleware %q: guard.allowFrom has invalid CIDR/IP %q", m.Name, c)
+				return fmt.Errorf("middleware %q: guard.allowFrom: has invalid CIDR/IP %q", m.Name, c)
 			}
 		}
 		if s := m.Guard.DenyStatus; s != 0 && (s < 400 || s > 599) {
-			return fmt.Errorf("middleware %q: guard.denyStatus must be a 4xx/5xx code, got %d", m.Name, s)
+			return fmt.Errorf("middleware %q: guard.denyStatus: must be a 4xx/5xx code, got %d", m.Name, s)
 		}
 	case MWTypeRateLimit:
 		if m.RateLimit == nil {
-			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond must be > 0", m.Name)
+			return fmt.Errorf("middleware %q: rateLimit.requestsPerSecond: must be > 0", m.Name)
 		}
 		if err := m.RateLimit.validate(fmt.Sprintf("middleware %q", m.Name)); err != nil {
 			return err
@@ -629,13 +629,13 @@ func (m Middleware) Validate() error {
 		}
 	case MWTypeBouncer:
 		if m.Bouncer == nil {
-			return fmt.Errorf("middleware %q: bouncer spec required", m.Name)
+			return fmt.Errorf("middleware %q: bouncer: spec required", m.Name)
 		}
 		if err := m.Bouncer.validate(m.Name); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("middleware %q: unknown type %q", m.Name, m.Type)
+		return fmt.Errorf("middleware %q: type: unknown type %q", m.Name, m.Type)
 	}
 	return nil
 }
@@ -647,26 +647,26 @@ func (b *BouncerMiddleware) validate(name string) error {
 	switch provider {
 	case BouncerProviderCrowdSec, BouncerProviderHTTP:
 	default:
-		return fmt.Errorf("middleware %q: bouncer.provider must be crowdsec|http, got %q", name, b.Provider)
+		return fmt.Errorf("middleware %q: bouncer.provider: must be crowdsec|http, got %q", name, b.Provider)
 	}
 	if strings.TrimSpace(b.URL) == "" {
-		return fmt.Errorf("middleware %q: bouncer.url is required", name)
+		return fmt.Errorf("middleware %q: bouncer.url: is required", name)
 	}
 	u, err := url.Parse(b.URL)
 	if err != nil {
-		return fmt.Errorf("middleware %q: bouncer.url is not a valid URL: %w", name, err)
+		return fmt.Errorf("middleware %q: bouncer.url: is not a valid URL: %w", name, err)
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("middleware %q: bouncer.url must be an absolute http(s) URL, got %q", name, b.URL)
+		return fmt.Errorf("middleware %q: bouncer.url: must be an absolute http(s) URL, got %q", name, b.URL)
 	}
 	// The CrowdSec LAPI authenticates every bouncer call by API key; without one
 	// every request would 403 and the middleware would silently run on its
 	// onError policy forever.
 	if provider == BouncerProviderCrowdSec && b.APIKey.IsEmpty() {
-		return fmt.Errorf("middleware %q: bouncer.apiKey is required for the crowdsec provider (register one with \"cscli bouncers add gpm\")", name)
+		return fmt.Errorf("middleware %q: bouncer.apiKey: is required for the crowdsec provider (register one with \"cscli bouncers add gpm\")", name)
 	}
 	if b.Stream && provider != BouncerProviderCrowdSec {
-		return fmt.Errorf("middleware %q: bouncer.stream is only supported by the crowdsec provider", name)
+		return fmt.Errorf("middleware %q: bouncer.stream: is only supported by the crowdsec provider", name)
 	}
 	for _, f := range []struct{ field, value string }{{"timeout", b.Timeout}, {"cacheTTL", b.CacheTTL}} {
 		if f.value == "" {
@@ -674,31 +674,31 @@ func (b *BouncerMiddleware) validate(name string) error {
 		}
 		d, err := time.ParseDuration(f.value)
 		if err != nil {
-			return fmt.Errorf("middleware %q: bouncer.%s must be a valid duration (e.g. \"2s\", \"60s\"), got %q: %w", name, f.field, f.value, err)
+			return fmt.Errorf("middleware %q: bouncer.%s: must be a valid duration (e.g. \"2s\", \"60s\"), got %q: %w", name, f.field, f.value, err)
 		}
 		if d <= 0 {
-			return fmt.Errorf("middleware %q: bouncer.%s must be > 0, got %q", name, f.field, f.value)
+			return fmt.Errorf("middleware %q: bouncer.%s: must be > 0, got %q", name, f.field, f.value)
 		}
 	}
 	if b.CacheMaxEntries < 0 {
-		return fmt.Errorf("middleware %q: bouncer.cacheMaxEntries must be >= 0, got %d", name, b.CacheMaxEntries)
+		return fmt.Errorf("middleware %q: bouncer.cacheMaxEntries: must be >= 0, got %d", name, b.CacheMaxEntries)
 	}
 	switch b.OnError {
 	case "", BouncerOnErrorFailOpen, BouncerOnErrorFailClosed:
 	default:
-		return fmt.Errorf("middleware %q: bouncer.onError must be fail-open|fail-closed, got %q", name, b.OnError)
+		return fmt.Errorf("middleware %q: bouncer.onError: must be fail-open|fail-closed, got %q", name, b.OnError)
 	}
 	switch b.DenyWith {
 	case "", BouncerDenyWithErrorPage, BouncerDenyWithPlain:
 	default:
-		return fmt.Errorf("middleware %q: bouncer.denyWith must be error-page|plain, got %q", name, b.DenyWith)
+		return fmt.Errorf("middleware %q: bouncer.denyWith: must be error-page|plain, got %q", name, b.DenyWith)
 	}
 	if s := b.DenyStatus; s != 0 && (s < 400 || s > 599) {
-		return fmt.Errorf("middleware %q: bouncer.denyStatus must be a 4xx/5xx code, got %d", name, s)
+		return fmt.Errorf("middleware %q: bouncer.denyStatus: must be a 4xx/5xx code, got %d", name, s)
 	}
 	for _, c := range b.AllowFrom {
 		if !validCIDROrIP(c) {
-			return fmt.Errorf("middleware %q: bouncer.allowFrom has invalid CIDR/IP %q", name, c)
+			return fmt.Errorf("middleware %q: bouncer.allowFrom: has invalid CIDR/IP %q", name, c)
 		}
 	}
 	return nil

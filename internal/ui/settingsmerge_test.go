@@ -204,7 +204,7 @@ func TestSecurityHeadersEditorSerialization(t *testing.T) {
 	for _, want := range []string{
 		"if (!HEADER_NAME_RE.test(name)) {",
 		"is listed more than once",
-		"showInvalid('Invalid security header', secHdrErr); return;",
+		"showInvalid('Invalid security header', secHdrErr, ",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("the securityHeaders editor no longer validates its rows: missing %q", want)
@@ -271,7 +271,7 @@ func TestStripResponseHeadersEditorSerialization(t *testing.T) {
 		"function stripHeaderListError(names) {",
 		"if (!HEADER_NAME_RE.test(n)) return",
 		"is listed more than once (names are case-insensitive).",
-		"showInvalid('Invalid strip header', stripErr); return;",
+		"showInvalid('Invalid strip header', stripErr, ",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("the stripResponseHeaders editor no longer validates its chips: missing %q", want)

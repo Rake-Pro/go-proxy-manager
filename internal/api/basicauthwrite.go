@@ -95,7 +95,7 @@ func hashInto(shadow *basicAuthShadow, a *model.AuthMiddleware, owner string) er
 	// model refuses an oversized user set too, but that check runs after this one
 	// would already have spent the CPU.
 	if n := len(shadow.Basic.Users); n > model.MaxBasicAuthUsers {
-		return fmt.Errorf("%s.basic.users has %d users, at most %d are allowed", owner, n, model.MaxBasicAuthUsers)
+		return fmt.Errorf("%s.basic.users: has %d users, at most %d are allowed", owner, n, model.MaxBasicAuthUsers)
 	}
 	for i, u := range shadow.Basic.Users {
 		if u.Password == "" || i >= len(a.Basic.Users) {
@@ -104,7 +104,7 @@ func hashInto(shadow *basicAuthShadow, a *model.AuthMiddleware, owner string) er
 		hash, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
 		if err != nil {
 			// The only real cause is a password over bcrypt's 72-byte input limit.
-			return fmt.Errorf("%s.basic.users[%q].password could not be hashed: %w", owner, a.Basic.Users[i].Username, err)
+			return fmt.Errorf("%s.basic.users: user %q password could not be hashed: %w", owner, a.Basic.Users[i].Username, err)
 		}
 		a.Basic.Users[i].PasswordHash = string(hash)
 	}
