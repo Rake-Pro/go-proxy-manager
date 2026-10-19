@@ -402,7 +402,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 		// The refusal is the login page again with a reason, never the IdP's
 		// own error text (attacker-supplied) and never text/plain.
 		body := readBody(t, res)
-		if !strings.Contains(body, msgSSOFailed) || !strings.Contains(body, "<form") {
+		if !strings.Contains(body, msgSSOFailed) || !strings.Contains(body, "login-err") {
 			t.Fatalf("expected the login page with %q, got: %.200s", msgSSOFailed, body)
 		}
 		if strings.Contains(body, "access_denied") {
