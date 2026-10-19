@@ -478,6 +478,14 @@ in the owner's reports workspace; 88 findings, all addressed on dev except:
   read on that kind if it ever matters.
 - [ ] **Middleware check-lists show the raw type** ("auth") where the rest of
   the UI says "sign-in". Map the type label in the check-list and the rail.
+- [ ] **Tags on discovery-managed hosts are owned by the template.** The
+  reconciler carries only `maintenance` and `disabled` across a sync
+  (`internal/discovery/plan.go`, the keep list) and replaces tags with the
+  template's, so a tag added by hand is gone on the next pass. The UI now
+  skips managed hosts in bulk tag changes and says so (review L7). Follow-up:
+  let the reconciler keep hand-added tags (merge the template's tags with the
+  stored ones, or an annotation that carries per-host tags), so tags work on
+  every host.
 
 ## Upstream-group follow-ups
 
