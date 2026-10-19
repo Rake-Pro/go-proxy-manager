@@ -5,6 +5,47 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-19
+
+### Changed
+
+- Admin UI visual refresh ("drift"): the sidebar is PatternFly's dark rail
+  under the masthead in both themes; the masthead, dialog and wizard title
+  bands drift from black into navy and end in a brand-to-cyan hairline; the
+  logo sits in a brand tile; the canvas is a cool grey; every shadow is cast
+  in the palette's blue (a hairline ring plus a faint glow in dark mode), so
+  cards keep an edge on both canvases.
+- Admin UI buttons are one filled system: solid blue primary, tonal (tinted,
+  borderless) secondary, solid red only for a dialog's confirm, tonal red for
+  the page-level Delete that opens it. Chips, segmented controls, help and
+  icon buttons, step and chain numbers, bordered sub-blocks and the History
+  timeline dots are filled rather than outlined. Text inputs keep their box.
+- Every object editor carries Clone and Delete (and Renew now on an ACME
+  certificate) in the title band, as the proxy host editor already did; save
+  bars put the primary first, as dialogs do. Settings tabs sit in the title
+  band like the host editor's. The bulk-action bar is a white bar with the
+  brand edge so its buttons show.
+- Sign-in and verification-code pages open with the app's masthead strip.
+- The "managed" chip on a discovered host reads "k8s-managed" or
+  "docker-managed" instead of naming the reconciler.
+- Dark mode: inline alerts, attention rows and banners keep a translucent
+  tint of their severity colour instead of a neutral grey fill.
+- List cards (access lists, middleware, upstream groups, identity providers,
+  DNS providers, client CAs, redirects, parked hosts, streams) say they open:
+  a kind tile with the section's glyph and a round "go" mark at rest; on
+  hover or keyboard focus the card lifts, takes the brand ring, the name turns
+  brand and the hairline wire lights along its top edge.
+
+- Dev builds report their identity: the `dev-<sha>` image is built with
+  `dev-<sha>` as its version plus the commit and build date, so `/version` and
+  the admin shell name the build instead of "dev" and "unknown".
+
+### Fixed
+
+- Admin UI: on a phone the theme button shows only its glyph, so the instance
+  name no longer truncates in the masthead; the open navigation drawer in dark
+  mode has a visible edge.
+
 ## [2.1.0] - 2026-10-19
 
 ### Changed
@@ -411,7 +452,8 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v1.0.10...v2.0.0

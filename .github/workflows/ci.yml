@@ -53,12 +53,23 @@ jobs:
         with:
           persist-credentials: false
 
+      # A dev build is named by its commit: the image tag and the version the
+      # binary reports are both dev-<short sha>, so what a host runs and what
+      # the registry holds match by eye. Releases keep X.Y.Z.
+      - name: Dev version
+        id: ver
+        run: |
+          set -euo pipefail
+          echo "version=dev-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Runs on every push to dev so the "build" check lands on the SHA the
       # dev -> main PR points at. Push events also publish the dev image
-      # (:dev + :dev-<sha>); pull requests only validate the build.
+      # (:dev, floating, and :dev-<sha>); pull requests only validate the
+      # build.
       - name: Log in to GHCR
         if: github.event_name == 'push'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -84,6 +95,10 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.ver.outputs.date }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

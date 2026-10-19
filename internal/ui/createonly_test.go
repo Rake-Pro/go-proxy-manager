@@ -180,7 +180,9 @@ func TestListsAndShellBatchMarkers(t *testing.T) {
 		"@media (max-width:800px) {",
 		".hosts-table .hide-sm { display:none; }",
 		".hosts-table .hide-md { display:none; }",
-		":root[data-theme=\"dark\"] .hint-pop { border:1px solid var(--border); }",
+		// Dark mode separates a popover from the card under it with the hairline
+		// ring every --shadow-md carries, not a border.
+		"--shadow-md:0 0 0 1px rgba(255,255,255,.09)",
 	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("app.css missing lists/shell marker %q", want)

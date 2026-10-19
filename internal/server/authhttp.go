@@ -67,9 +67,8 @@ func originOK(r *http.Request) bool {
 // prefers-color-scheme. Both are served unauthenticated by the UI handler, and
 // an inline <style> block is within the existing style-src 'unsafe-inline'.
 const loginShellCSS = `
-  .login{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 16px}
-  .login-brand{font-family:var(--display);font-size:20px;font-weight:500;margin:0 0 16px;text-align:center;
-    max-width:400px;overflow-wrap:anywhere}
+  .login{min-height:calc(100vh - var(--masthead-h));display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 16px}
+  .login-masthead .wordmark{max-width:100%}
   .login-card{width:100%;max-width:400px;background:var(--panel);box-shadow:var(--shadow-sm);padding:32px 24px}
   .login-card h1{font-family:var(--display);font-size:24px;font-weight:500;margin:0 0 20px}
   .login-card h1 + .login-sub{margin-top:-16px}
@@ -90,6 +89,13 @@ const loginShellCSS = `
   input.field.otp{font-family:var(--mono);font-size:18px;letter-spacing:.35em;text-align:center}
 `
 
+// loginMasthead is the app's masthead on the sign-in pages: the same strip,
+// logo tile and instance name as the admin shell, without the tools, so the
+// first screen a user sees is drawn on the same frame as the app behind it.
+// The glyph is the shell's ICON.fanout, kept in sync by hand.
+const loginMasthead = `<header class="masthead login-masthead"><span class="wordmark"><span class="logo" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h6M10 12c3.5 0 3.5-5 7-5h2.5M10 12c3.5 0 3.5 5 7 5h2.5M17 4.6l2.4 2.4-2.4 2.4M17 14.6l2.4 2.4-2.4 2.4"/></svg></span><span class="name">{{.AppName}}</span></span></header>
+<main class="login">`
+
 // loginHead is the shared <head> of the login and verification-code pages.
 // theme-init.js must stay ahead of app.css (see the comment in that file).
 const loginHead = `<meta charset="utf-8">
@@ -108,8 +114,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <html lang="en"><head>` + loginHead + `
 <title>{{.AppName}} - Sign in</title></head>
 <body>
-<main class="login">
-  <p class="login-brand">{{.AppName}}</p>
+` + loginMasthead + `
   <div class="login-card">
   <h1>Sign in</h1>
   {{if .NoAdminLogin}}<div class="ro-banner warn login-notice">
@@ -145,8 +150,7 @@ var totpPage = template.Must(template.New("totp").Parse(`<!doctype html>
 <html lang="en"><head>` + loginHead + `
 <title>{{.AppName}} - Verification code</title></head>
 <body>
-<main class="login">
-  <p class="login-brand">{{.AppName}}</p>
+` + loginMasthead + `
   <div class="login-card">
   <h1>Verification code</h1>
   <p class="login-sub">Enter the code from your authenticator app</p>

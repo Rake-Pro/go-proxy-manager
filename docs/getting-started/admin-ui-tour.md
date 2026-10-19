@@ -24,8 +24,9 @@ Settings.
 
 ## Signing in
 
-The sign-in page shares the app's design and theme. A wrong password, a wrong
-code or a lockout re-renders the page with the reason and keeps the username.
+The sign-in page opens with the app's masthead and shares its design and
+theme. A wrong password, a wrong code or a lockout re-renders the page with the
+reason and keeps the username.
 
 ## The frame
 
@@ -115,8 +116,12 @@ object. With nothing to report it says so and shows the live counts.
   then opens the editor on the copy. Nothing is saved until you press Save.
   Domains are cleared, since a domain belongs to one host; labels and
   secrets are not copied.
-- The other object editors are one page of cards with Clone and Delete in the
-  save bar; Clone asks for the name the same way.
+- The other object editors are one page of cards with the same title band:
+  Clone and Delete (and Renew now on an ACME certificate) sit there too, and
+  Clone asks for the name the same way.
+- On the list pages, a card carries its section's glyph and a go mark; it
+  lifts and lights its top edge on hover or keyboard focus, and the whole card
+  opens the object.
 
 ## Certificates
 
@@ -130,7 +135,7 @@ own; **Renew now** forces it.
 
 ![Settings, General tab](../assets/ui/settings.png)
 
-Settings are four tabs over one object; any tab's Save commits the whole thing.
+Settings are four tabs in the title band over one object; any tab's Save commits the whole thing.
 History lists every commit with its author and lets you revert the whole config
 or one object; Backup and Restore live on the same page.
 
