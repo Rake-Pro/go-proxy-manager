@@ -26,6 +26,7 @@ type Metrics struct {
 	upstreamErrors *Counter
 	wsUpgrades     *Counter
 	denials        *Counter
+	maintenance    *Counter
 	streamActive   *Gauge
 	streamTotal    *Counter
 }
@@ -57,6 +58,8 @@ func NewMetrics(version, commit, goVersion string) *Metrics {
 		denials: r.Counter(Namespace+"denials_total",
 			"Requests refused by an access-control tier, by proxy host and reason.",
 			"host", "reason"),
+		maintenance: r.Counter(Namespace+"maintenance_responses_total",
+			"Maintenance 503 responses served, by proxy host.", "host"),
 		streamActive: r.Gauge(Namespace+"stream_connections_active",
 			"Raw TCP/UDP stream connections currently open, by stream host.", "host"),
 		streamTotal: r.Counter(Namespace+"stream_connections_total",
@@ -111,9 +114,10 @@ func (m *Metrics) HTTPRequest(host, method string, status int, dur time.Duration
 	m.responseBytes.Add(bytesOut, host)
 }
 
-func (m *Metrics) UpstreamError(host string)    { m.upstreamErrors.Inc(host) }
-func (m *Metrics) WebsocketUpgrade(host string) { m.wsUpgrades.Inc(host) }
-func (m *Metrics) Denial(host, reason string)   { m.denials.Inc(host, reason) }
+func (m *Metrics) UpstreamError(host string)       { m.upstreamErrors.Inc(host) }
+func (m *Metrics) WebsocketUpgrade(host string)    { m.wsUpgrades.Inc(host) }
+func (m *Metrics) Denial(host, reason string)      { m.denials.Inc(host, reason) }
+func (m *Metrics) MaintenanceResponse(host string) { m.maintenance.Inc(host) }
 
 func (m *Metrics) StreamOpened(host string) {
 	m.streamTotal.Inc(host)

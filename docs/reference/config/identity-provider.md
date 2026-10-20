@@ -94,6 +94,6 @@ roleMapping:
 
 | Field | Status | Reason |
 |---|---|---|
-| <span id="identity-provider-oidc-trust-id-pmfa"></span>  `oidc.trustIdPMFA` | Deprecated, ignored | It was meant to suppress a second local MFA prompt by trusting the IdP's `acr`/`amr`. gpm has no local TOTP prompt to suppress and never reads `acr`/`amr`, so the flag decides nothing. Still parsed; see `FEATURES.md` for the roadmap item that would give it meaning. |
+| <span id="identity-provider-oidc-trust-id-pmfa"></span>  `oidc.trustIdPMFA` | Deprecated, ignored | It was meant to suppress a second local MFA prompt by trusting the IdP's `acr`/`amr`. gpm has no local TOTP prompt to suppress and never reads `acr`/`amr`, so the flag decides nothing. Still parsed; see the "Not planned" list in [the roadmap](../../roadmap.md). |
 
 ---

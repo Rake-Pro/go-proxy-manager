@@ -29,16 +29,50 @@ All notable changes to go-proxy-manager are documented here. The format follows
   filter understands `method:`, `host:`, `path:`, `status:` (a code or a
   class such as `4xx`), `client:` and `slow:yes`. `GET /api/logs` reports
   the buffer `capacity`.
+- Proxy Hosts bulk bar: **Maintenance on** / **Maintenance off** beside
+  Enable / Disable, one commit per host (#52).
+- `gpm_maintenance_responses_total{host}`: counts the 503 a host in
+  maintenance answers with, so an alert can notice a window nobody closed
+  (#52).
 
 ### Changed
+
+- The always-visible explanatory paragraphs at the top of pages and cards are
+  gone (Integrations tabs, Settings cards, host editor sections, the Error
+  Pages and Runtime pages, the middleware list, the Access Logs capture
+  banner). The `?` next to each control and the documentation carry the same
+  text; the page keeps only its one-line subtitle.
+- Hovering a Tags cell (Proxy Hosts and the other object lists) shows every
+  tag; the middleware check-lists in the host editor and the wizard say
+  "sign-in" for an `auth` middleware, as the rail does (#57).
 
 - Proxy Hosts list: the Source column is gone. A discovered host's source
   (`k8s-managed`, `docker-managed`) is the first chip in the Tags column,
   which is always shown, and a display or object name that differs from the
   domain sits beside the domain.
 
+### Security
+
+- Guard `queryEquals` triggers fail closed on a repeated query key:
+  `?direct=0&direct=1` counts as matching the trigger instead of being judged
+  on the first value only (#50).
+- `GET /version` requires a signed-in session or an API token (any role), so
+  the build commit, date and Go version are no longer visible to anonymous
+  clients; `/healthz` stays open (#51).
+- Restoring a backup archive keeps the live `api-tokens/*` and ignores the
+  archive's, matching Revert; the ignored files are logged (#51).
+- Local login is also locked per username: twenty failures against one
+  account within 15 minutes, from any clients, lock it for the window (the
+  per-IP limit stays five), so a distributed guess is bounded; a locked
+  username and a locked IP get the identical response (#51).
+
 ### Fixed
 
+- Saving an object without changing anything no longer writes a file, commits
+  or restamps `updatedAt`; the API answers with an empty `X-Config-Commit` and
+  the UI says "No changes" (#58).
+- Access Logs: with nothing captured the page no longer shows "No request
+  matches this filter".
 - mTLS: the 421 that refuses a request whose connection never presented the
   client certificate now closes that connection (GOAWAY on HTTP/2), so the
   browser re-handshakes under the host's own SNI and is asked for the

@@ -14,6 +14,12 @@ maintenance gpm answers every request to it **itself**: HTTP 503 with a
 its certificate and its DNS records, so flipping the switch back restores
 service with no other change.
 
+- Every maintenance response is counted in `gpm_maintenance_responses_total`
+  (label `host`), so an alert can notice a window nobody closed; see
+  [Metrics](../../metrics.md).
+- The Proxy Hosts list's bulk bar has **Maintenance on** / **Maintenance off**
+  for a handful of hosts at once, one commit per host.
+
 There are two switches:
 
 | Field | Type | Notes |

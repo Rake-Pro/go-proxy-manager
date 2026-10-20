@@ -3,6 +3,7 @@ package dataplane
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -72,8 +73,19 @@ func (t guardTrigger) matches(r *http.Request) bool {
 			return false
 		}
 	}
+	var q url.Values
+	if len(t.queryEquals) > 0 {
+		q = r.URL.Query()
+	}
 	for k, v := range t.queryEquals {
-		if r.URL.Query().Get(k) != v {
+		vals := q[k]
+		// A repeated key is a matcher/backend divergence: Get reads the first
+		// value while a backend may read the last (or any). Fail closed and
+		// treat it as matching the trigger rather than guess which one wins.
+		if len(vals) > 1 {
+			continue
+		}
+		if q.Get(k) != v {
 			return false
 		}
 	}

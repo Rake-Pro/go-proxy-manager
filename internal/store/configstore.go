@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -381,11 +382,52 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 	if createOnly && exists {
 		return "", fmt.Errorf("%s %q: %w", obj.Kind(), obj.GetMeta().Name, ErrExists)
 	}
-	if err := writeYAML(filepath.Join(s.dir, rel), out); err != nil {
+	path := filepath.Join(s.dir, rel)
+	if exists && unchangedOnDisk(path, out) {
+		// Nothing but the timestamps would differ: write and commit nothing and
+		// return no commit, the same "nothing to commit" signal CommitAll gives a
+		// clean tree (the API sends it as an empty X-Config-Commit, which the UI
+		// shows as "No changes").
+		return "", nil
+	}
+	if err := writeYAML(path, out); err != nil {
 		return "", err
 	}
 	msg := fmt.Sprintf("%s %q: update", obj.Kind(), obj.GetMeta().Name)
 	return s.git.CommitAll(ctx, msg, author)
+}
+
+// unchangedOnDisk reports whether out serializes to the same document as the
+// file already at path, ignoring createdAt and updatedAt. Any read or parse
+// failure reports false, so the caller falls through to a normal write.
+func unchangedOnDisk(path string, out any) bool {
+	disk, err := os.ReadFile(path) //nolint:gosec // path is built from a validated kind dir and object name
+	if err != nil {
+		return false
+	}
+	want, err := yaml.Marshal(out)
+	if err != nil {
+		return false
+	}
+	a, ok := withoutTimes(disk)
+	if !ok {
+		return false
+	}
+	b, ok := withoutTimes(want)
+	return ok && bytes.Equal(a, b)
+}
+
+// withoutTimes re-marshals a YAML document with its top-level createdAt and
+// updatedAt dropped, giving a canonical form to compare.
+func withoutTimes(b []byte) ([]byte, bool) {
+	var m map[string]any
+	if err := yaml.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	delete(m, "createdAt")
+	delete(m, "updatedAt")
+	n, err := yaml.Marshal(m)
+	return n, err == nil
 }
 
 // DryRun runs exactly the checks Save runs and returns the object's path

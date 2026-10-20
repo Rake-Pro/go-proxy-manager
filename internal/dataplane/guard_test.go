@@ -127,3 +127,42 @@ func TestGuardWithoutQueryTriggersIgnoresSemicolons(t *testing.T) {
 		t.Fatalf("got %d, want 200", rec.Code)
 	}
 }
+
+// A repeated query key is read differently by different backends (first, last,
+// or all values), so "?direct=0&direct=1" must not slip past a trigger on
+// direct=1 just because url.Values.Get returns the first value.
+func TestGuardFailsClosedOnRepeatedQueryKey(t *testing.T) {
+	g := compileGuard(model.GuardMiddleware{
+		Triggers: []model.GuardTrigger{
+			{Paths: []string{"/login"}, QueryEquals: map[string]string{"direct": "1"}},
+		},
+		AllowFrom: []string{"192.0.2.0/24"},
+	})
+	h := guardHandler(g, peerIP, "", nil, okHandler())
+
+	const external = "198.18.0.9:1"
+	cases := []struct {
+		name, target, remote string
+		want                 int
+	}{
+		{"first value harmless, second guarded", "http://c/login?direct=0&direct=1", external, http.StatusForbidden},
+		{"first value guarded, second harmless", "http://c/login?direct=1&direct=0", external, http.StatusForbidden},
+		{"both harmless still treated as matching", "http://c/login?direct=0&direct=2", external, http.StatusForbidden},
+		{"repeated key allowed from the LAN", "http://c/login?direct=0&direct=1", "192.0.2.5:1", http.StatusOK},
+		{"repeated unrelated key untouched", "http://c/login?other=1&other=2", external, http.StatusOK},
+		{"repeated key on another path untouched", "http://c/x?direct=0&direct=1", external, http.StatusOK},
+		{"single guarded value still denied", "http://c/login?direct=1", external, http.StatusForbidden},
+		{"single harmless value still passes", "http://c/login?direct=0", external, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tc.target, nil)
+			req.RemoteAddr = tc.remote
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("got %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}

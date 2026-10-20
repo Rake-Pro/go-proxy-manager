@@ -668,13 +668,16 @@ func TestLocalLoginLockout(t *testing.T) {
 		t.Fatal("a throttled request must not mint a session")
 	}
 
-	// The lockout is per client IP: a different peer is unaffected.
+	// The lockout is per client IP: five failures from one peer do not lock the
+	// account for everyone (the per-username counter needs 20, see
+	// TestLocalLoginLockoutPerUsername), so another peer with the right password
+	// still signs in.
 	req := httptest.NewRequest(http.MethodPost, "/auth/local",
 		strings.NewReader(url.Values{"username": {"admin"}, "password": {"s3cret"}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = "198.51.100.9:5000"
-	if got := e.do(req).StatusCode; got != http.StatusFound {
-		t.Fatalf("other client: got %d, want 302", got)
+	if got := e.do(req).StatusCode; got != http.StatusSeeOther && got != http.StatusFound {
+		t.Fatalf("other client, same account, right password: got %d, want a redirect (not locked)", got)
 	}
 }
 

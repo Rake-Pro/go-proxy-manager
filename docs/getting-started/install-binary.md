@@ -102,5 +102,5 @@ journalctl -u gpm -f                              # structured JSON logs; add GP
 |---|---|
 | `systemctl status gpm` | `active (running)` |
 | `curl -fsS http://127.0.0.1:8081/healthz` | `ok` |
-| `curl -fsS http://127.0.0.1:8081/version` | The version you built |
+| `curl -fsS http://127.0.0.1:8081/healthz` | `ok` (`/version` reports the build too, once signed in) |
 | `journalctl -u gpm` | No `error` lines about the config directory or the admin credential |

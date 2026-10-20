@@ -74,6 +74,7 @@ type Authenticator struct {
 	pending map[string]pendingLogin // OIDC flow state -> login context
 
 	loginGate   *rateGate // local-login failure throttle, keyed by client IP
+	userGate    *rateGate // local-login failure throttle, keyed by username (distributed guessing)
 	pendingGate *rateGate // OIDC begin-login throttle, keyed by client IP
 }
 
@@ -223,10 +224,14 @@ func (g *rateGate) remaining(key string) time.Duration {
 }
 
 const (
-	maxLoginFails    = 5                // failures within the window before lockout
-	loginLockout     = 15 * time.Minute // how long failures are remembered / locked
-	maxPendingLogins = 1024             // cap on in-flight OIDC states (anti-DoS)
-	maxLoginGates    = 4096             // cap on tracked client keys (anti-DoS)
+	maxLoginFails = 5 // failures within the window before lockout
+	// Per username the limit is four times the per-IP one: the counter exists to
+	// bound a distributed guess against one account, not to let anyone lock an
+	// operator out of local login with five bad passwords from one client.
+	maxUserLoginFails = 20
+	loginLockout      = 15 * time.Minute // how long failures are remembered / locked
+	maxPendingLogins  = 1024             // cap on in-flight OIDC states (anti-DoS)
+	maxLoginGates     = 4096             // cap on tracked client keys (anti-DoS)
 
 	// maxPendingPerIP caps how many OIDC logins one client IP may start within
 	// pendingLoginWindow, so a client looping GET /auth/login cannot exhaust the
@@ -313,6 +318,7 @@ func NewAuthenticator(o Options) *Authenticator {
 		clients:          map[string]*oidc.Client{},
 		pending:          map[string]pendingLogin{},
 		loginGate:        newRateGate(loginLockout, maxLoginFails, maxLoginGates),
+		userGate:         newRateGate(loginLockout, maxUserLoginFails, maxLoginGates),
 		pendingGate:      newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
 	}
 }
@@ -658,6 +664,41 @@ func (a *Authenticator) LoginAttempt(key string) bool {
 func (a *Authenticator) NoteLoginResult(key string, ok bool) {
 	if ok {
 		a.loginGate.clear(key)
+	}
+}
+
+// loginUserKey normalizes a submitted username into its throttle key: trimmed,
+// lowercased and capped, so case or padding variants share one counter and a
+// huge value cannot bloat the map. Every submitted name is counted, existing
+// or not, so a locked response reveals nothing about which accounts exist.
+func loginUserKey(username string) string {
+	k := strings.ToLower(strings.TrimSpace(username))
+	if len(k) > 64 {
+		k = k[:64]
+	}
+	return k
+}
+
+// UserLoginAttempt is LoginAttempt for the per-username counter: it reserves
+// one attempt against username, or reports that the name is locked out.
+func (a *Authenticator) UserLoginAttempt(username string) bool {
+	return a.userGate.tryBegin(loginUserKey(username))
+}
+
+// UserLoginThrottled reports whether username is currently locked out.
+func (a *Authenticator) UserLoginThrottled(username string) bool {
+	return a.userGate.atLimit(loginUserKey(username), true)
+}
+
+// UserLoginLockoutRemaining reports how much longer username stays locked out.
+func (a *Authenticator) UserLoginLockoutRemaining(username string) time.Duration {
+	return a.userGate.remaining(loginUserKey(username))
+}
+
+// NoteUserLoginResult clears username's count after a completed login.
+func (a *Authenticator) NoteUserLoginResult(username string, ok bool) {
+	if ok {
+		a.userGate.clear(loginUserKey(username))
 	}
 }
 

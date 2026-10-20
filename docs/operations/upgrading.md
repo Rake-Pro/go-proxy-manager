@@ -62,7 +62,8 @@ data directory.
 cosign check to run against whatever you're about to pin. There is no
 in-place "upgrade" operation: stop the old process/container, start the new
 one against the same `/data` (or `/var/lib/gpm`) volume, and confirm
-`GET /version` reports what you expect.
+`GET /version` (signed in, or with an API token) reports what you expect;
+`GET /healthz` is the anonymous check.
 
 **Config compatibility.** `Config`/`Settings` carry an explicit
 `schemaVersion` (currently `1`); a version bump would come with a documented,

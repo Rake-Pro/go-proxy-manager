@@ -14,7 +14,7 @@ CONTRIBUTING.md "Docs stay in sync with code"):
 - [ ] `docs/deployment.md`: flags, env vars, ports, upgrade caveats
 - [ ] `CHANGELOG.md`: `[Unreleased]` entry (Added/Changed/Fixed/Security)
 - [ ] Issues: closed or ticked the issue this resolves, filed any newly identified follow-up
-- [ ] `FEATURES.md`: a roadmap item shipped or its scope changed
+- [ ] `docs/roadmap.md`: a planned theme shipped, or something is now deliberately not planned
 - [ ] N/A: this change has no user-visible or config-shape effect
 
 ## Tests

@@ -104,6 +104,9 @@ func maintenanceActive(hostFlag, exempt bool) bool {
 // too: a maintenance 503 without one reads to a crawler like an outage of
 // unknown length.
 func serveMaintenance(w http.ResponseWriter, r *http.Request, ep *compiledErrorPages, host string) {
+	if h := metricsHook(); h != nil {
+		h.MaintenanceResponse(host)
+	}
 	w.Header().Set("Retry-After", strconv.Itoa(currentMaintenance().EffectiveRetryAfter()))
 	serveErrorPage(w, maintenanceStatus, ep, host, func() {
 		writeDefaultMaintenance(w, r)

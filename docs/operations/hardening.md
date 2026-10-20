@@ -32,6 +32,12 @@ The settings to check before an instance faces the internet.
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't
   show up in the process environment.
+- What the admin listener does on its own, so you know not to re-implement it
+  in front: `/version` needs a signed-in session or token (only `/healthz` is
+  anonymous); local login locks a client IP after five failures and a username
+  after twenty, both for 15 minutes, with one identical 429 page; a guard
+  `queryEquals` trigger fails closed on a repeated query key; a backup restore
+  keeps the live `api-tokens/*` and ignores the archive's, as Revert does.
 
 ## What the read-only `user` role cannot see
 

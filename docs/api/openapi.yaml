@@ -6876,6 +6876,8 @@ paths:
   /version:
     get:
       summary: Build identity
+      description: Same auth as GET /api/me (any authenticated session or token; no particular role or
+        scope beyond authentication).
       tags:
       - Meta
       responses:
@@ -6885,4 +6887,5 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VersionInfo'
-      security: []
+        '401':
+          $ref: '#/components/responses/Unauthorized'

@@ -209,3 +209,53 @@ func TestRestoreLegacyRemapStillRejectsTraversal(t *testing.T) {
 		t.Fatal("restore accepted a traversal path under the retired directory prefix")
 	}
 }
+
+// Restore, like Revert, keeps the live api-tokens: an archive must not revive a
+// rotated digest or a token that has since been deleted.
+func TestRestorePreservesLiveAPITokens(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	const liveHash = "5555555555555555555555555555555555555555555555555555555555555555"
+	const archHash = "4444444444444444444444444444444444444444444444444444444444444444"
+
+	if _, err := st.Save(ctx, sampleHost("web"), Author{}); err != nil {
+		t.Fatalf("save host: %v", err)
+	}
+	tokYAML, err := yaml.Marshal(sampleToken("old", archHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostYAML, err := os.ReadFile(filepath.Join(st.dir, "proxy-hosts", "web.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := archiveWith(t, map[string][]byte{
+		"proxy-hosts/web.yaml": hostYAML,
+		"api-tokens/old.yaml":  tokYAML,
+	})
+
+	if _, err := st.Save(ctx, sampleToken("live", liveHash), Author{}); err != nil {
+		t.Fatalf("save live token: %v", err)
+	}
+	if _, err := st.Restore(ctx, archive, Author{}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.APITokens) != 1 || cfg.APITokens[0].Name != "live" || cfg.APITokens[0].TokenHash != liveHash {
+		t.Fatalf("tokens = %+v, want only the live token", cfg.APITokens)
+	}
+	if _, err := os.Stat(filepath.Join(st.dir, "api-tokens", "old.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("the archive's token file must not be written (stat err = %v)", err)
+	}
+	if len(cfg.ProxyHosts) != 1 {
+		t.Fatalf("hosts = %+v, the rest of the archive must still restore", cfg.ProxyHosts)
+	}
+	if clean, err := st.git.IsClean(ctx); err != nil || !clean {
+		t.Fatalf("restore must leave a clean tree (clean=%v err=%v)", clean, err)
+	}
+}

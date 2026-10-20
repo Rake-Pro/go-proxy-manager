@@ -63,8 +63,10 @@ object. With nothing to report it says so and shows the live counts.
   first chip) and the last change.
 - Filter by text, by field or by zone (the domain group chips). Every column
   sorts; the choice is remembered in the browser.
-- Select rows for bulk actions. Clone, YAML and Delete live on the host's own
-  page, not in the list.
+- Select rows for bulk actions: enable, disable, maintenance on or off, add or
+  remove a tag. Each host is its own commit. Clone, YAML and Delete live on
+  the host's own page, not in the list.
+- Hover a row's Tags cell to see every tag; the chips show the first three.
 - **Add proxy host** opens the creation wizard below; the full editor stays one
   link away for anything the wizard does not ask.
 
@@ -107,8 +109,9 @@ object. With nothing to report it says so and shows the live counts.
 - Sections are cards; rarely used settings sit behind expandable rows that
   summarize what they hold ("base path none, host header kept").
 - A `?` next to a field opens its help, with a link into this documentation.
-- **Save changes** makes one git commit. Validation errors stay on screen
-  until the next attempt, point at the field and switch to its tab.
+- **Save changes** makes one git commit; a save that changes nothing makes
+  none and says "No changes". Validation errors stay on screen until the
+  next attempt, point at the field and switch to its tab.
 - **Delete** asks in a dialog that names the hosts still using the object; a
   refused delete stays on screen with the reason.
 
@@ -155,6 +158,8 @@ Every list has the same filter box.
   the filter, the sort and the scroll position; **Refresh** does it once.
   Refreshing pauses while the tab is hidden.
 - **Clear** empties the buffer after a confirmation; capture is unchanged.
+- With capture off the page says so where the rows would be; there is no
+  banner to dismiss.
 - The count line says how many of the captured requests the filter shows and
   how many the buffer holds. Filter fields: `method`, `host`, `path`,
   `status` (a code or a class such as `4xx`), `client` and `slow:yes`

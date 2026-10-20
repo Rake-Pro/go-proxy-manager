@@ -24,6 +24,7 @@ type fakeHook struct {
 	upstream  map[string]int
 	websocket map[string]int
 	denials   map[string]int // "host|reason"
+	maint     map[string]int
 	streamsUp map[string]int
 	streamsDn map[string]int
 }
@@ -40,6 +41,7 @@ func newFakeHook() *fakeHook {
 		upstream:  map[string]int{},
 		websocket: map[string]int{},
 		denials:   map[string]int{},
+		maint:     map[string]int{},
 		streamsUp: map[string]int{},
 		streamsDn: map[string]int{},
 	}
@@ -61,6 +63,12 @@ func (f *fakeHook) Denial(host, reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.denials[host+"|"+reason]++
+}
+
+func (f *fakeHook) MaintenanceResponse(host string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.maint[host]++
 }
 
 func (f *fakeHook) StreamOpened(host string) { f.mu.Lock(); f.streamsUp[host]++; f.mu.Unlock() }

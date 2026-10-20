@@ -128,7 +128,7 @@ traffic.
   DNS-sync status/reconcile/plan, Ingress-discovery status/reconcile/plan,
   capabilities, upstream health, logs, SSO revocation) plus the admin-session
   routes in `internal/server` (login, callback, local login, logout, `/api/me`,
-  `/healthz`, `/version`, this spec's own route) and the opt-in `pprof`
+  `/healthz`, `/version` (any signed-in role), this spec's own route) and the opt-in `pprof`
   endpoints (only mounted with `GPM_PPROF=1`).
 - Request/response schemas are derived from `internal/model`'s Go structs (the
   same types the store persists as YAML), so a field's name, type and
