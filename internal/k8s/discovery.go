@@ -693,6 +693,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 			host.SecurityHeaders[k] = v
 		}
 	}
+	host.Locations = model.CloneLocations(tmpl.Locations)
 	if pol := dnsPolicy(ing, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}

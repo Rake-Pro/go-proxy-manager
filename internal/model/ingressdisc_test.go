@@ -99,6 +99,19 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"template stripResponseHeaders validated", func(d *IngressDiscoverySettings) {
 			d.Template.StripResponseHeaders = []string{"Content-Type"}
 		}, "own semantics"},
+		{"template locations accepted", func(d *IngressDiscoverySettings) {
+			d.Template.Locations = []Location{{Path: "/artifacts", Upstream: &Upstream{Scheme: "http", Host: "10.0.0.6", Port: 47292}}}
+		}, ""},
+		{"template locations validated like a proxy host's", func(d *IngressDiscoverySettings) {
+			d.Template.Locations = []Location{{Path: "", Upstream: &Upstream{Scheme: "http", Host: "10.0.0.6", Port: 47292}}}
+		}, "empty path"},
+		{"profile location upstream and group are exclusive", func(d *IngressDiscoverySettings) {
+			d.Profiles = map[string]IngressHostTemplate{"p": {
+				Upstream:  Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
+				TLS:       TLSSettings{CertificateRef: "wild"},
+				Locations: []Location{{Path: "/x", Upstream: &Upstream{Scheme: "http", Host: "10.0.0.6", Port: 1}, UpstreamGroupRef: "g"}},
+			}}
+		}, "mutually exclusive"},
 		{"profile stripResponseHeaders validated", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"p": {
 				Upstream:             Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},

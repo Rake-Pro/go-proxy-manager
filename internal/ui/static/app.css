@@ -96,7 +96,6 @@
   --switch-thumb-off:#ffffff;
 
   --r-card:0; --r-input:0; --r:3px;
-  --cards-cols:repeat(auto-fill,minmax(min(330px,100%),1fr));
   --sidebar-w:250px; --masthead-h:56px;
   color-scheme:light;
 }
@@ -189,9 +188,13 @@ summary:focus-visible, [tabindex]:focus-visible, .switch:focus-visible {
 input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visible, .chip-input input:focus-visible { outline:0; }
 
 /* ---------- frame: masthead across the top, sidebar beneath it ---------- */
-.app { min-height:100vh; display:flex; flex-direction:column; }
+/* The frame scrolls, not the document: masthead and sidebar stay put and
+   only the main column scrolls, so the scrollbar starts under the masthead
+   and right of the sidebar instead of running up the masthead's edge. The
+   masthead keeps a position so the account menu still anchors to it. */
+.app { height:100vh; height:100dvh; display:flex; flex-direction:column; }
 .masthead {
-  position:sticky; top:0; z-index:50; height:var(--masthead-h);
+  position:relative; flex:none; z-index:50; height:var(--masthead-h);
   display:flex; align-items:center; gap:12px; padding:0 12px 0 16px;
   background:var(--masthead); color:var(--masthead-text);
   background-image:var(--wire), var(--mast-grad); background-size:100% 2px, auto; background-repeat:no-repeat; background-position:left bottom, left top;
@@ -236,11 +239,11 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .menu a:hover, .menu button:hover { background:var(--raised); text-decoration:none; color:var(--text); }
 .menu .m-sep { height:1px; background:var(--border-soft); margin:8px 0; }
 
-.page-body { flex:1 1 auto; display:grid; grid-template-columns:var(--sidebar-w) minmax(0,1fr); }
+.page-body { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:var(--sidebar-w) minmax(0,1fr); }
 
 /* sidebar */
 .sidebar {
-  position:sticky; top:var(--masthead-h); height:calc(100vh - var(--masthead-h));
+  min-height:0;
   display:flex; flex-direction:column; background:var(--side-bg); box-shadow:var(--shadow-right); z-index:40;
 }
 .nav { flex:1 1 auto; overflow-y:auto; padding:8px 0; }
@@ -266,7 +269,8 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .nav-item.active { background:var(--side-current); border-left-color:var(--side-bar); color:#fff; }
 .nav-item:focus-visible, .nav-group-head:focus-visible { outline-color:var(--side-bar); }
 .side-foot { display:flex; justify-content:space-between; gap:10px; padding:12px 16px; border-top:1px solid var(--side-sep); font-size:12.5px; color:var(--side-muted); }
-.side-foot a { font-family:var(--mono); color:var(--side-muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.side-foot span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.side-foot a { font-family:var(--mono); color:var(--side-muted); flex:none; white-space:nowrap; }
 .side-foot a:hover { color:#fff; }
 .sidebar .dot.muted { background:#8a8d90; }
 .dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
@@ -276,7 +280,7 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .dot.muted { background:var(--border-2); }
 
 /* main column: title band then content */
-.main { min-width:0; display:flex; flex-direction:column; }
+.main { min-width:0; min-height:0; overflow-y:auto; display:flex; flex-direction:column; }
 .page-head { background:var(--panel); padding:20px 24px 0; box-shadow:var(--shadow-head); position:relative; z-index:1; }
 .page-head .head-row { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; padding-bottom:20px; }
 .page-head .head-row > div:first-child { min-width:0; }
@@ -379,7 +383,6 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 
 /* grids */
 .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.cards { display:grid; grid-template-columns:var(--cards-cols); gap:16px; }
 
 /* expiry meter */
 .meter { height:8px; background:var(--raised); overflow:hidden; margin:8px 0 4px; }
@@ -446,8 +449,7 @@ tbody tr.clickable:hover td { background:var(--surface-2); }
 /* toolbar + search */
 .toolbar { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
 .search { position:relative; flex:1 1 280px; max-width:360px; }
-.toolbar.cards-aligned { display:grid; grid-template-columns:var(--cards-cols); gap:16px; margin-bottom:16px; }
-.toolbar.cards-aligned .search { max-width:none; }
+.toolbar-actions { margin-left:auto; display:flex; gap:8px; }
 .search input { text-overflow:ellipsis; }
 .search svg { position:absolute; left:10px; top:50%; transform:translateY(-50%); width:16px; height:16px; color:var(--muted); pointer-events:none; }
 .search input.field { padding-left:34px; }
@@ -696,7 +698,11 @@ td.sel-cell input, th.sel-cell input { width:16px; height:16px; margin:0; vertic
 /* ---------- text length and column rules ---------- */
 .trunc { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
-.cell-main, .cell-sub { display:flex; align-items:center; gap:6px; min-width:0; max-width:340px; white-space:nowrap; }
+/* Cell caps are viewport-relative, not fixed: a cap chosen for a laptop
+   clipped names and upstreams on a wide screen while the table sat half
+   empty. clamp() keeps a floor for phones and a ceiling so one long value
+   cannot push every other column off the screen. */
+.cell-main, .cell-sub { display:flex; align-items:center; gap:6px; min-width:0; max-width:clamp(240px, 30vw, 760px); white-space:nowrap; }
 .cell-main > .trunc, .cell-sub > .trunc { flex:0 1 auto; }
 .cell-main > :not(.trunc), .cell-sub > :not(.trunc) { flex:none; }
 .cell-sub { margin-top:3px; min-height:22px; overflow:hidden; font-size:13.5px; color:var(--muted); }
@@ -705,20 +711,20 @@ a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
    the row sets on it (a few characters); only then do the chips shrink. */
 .cell-sub > .trunc { flex-shrink:1000; }
 .cell-sub .chip.tag { display:inline-block; flex:0 1 auto; min-width:3em; max-width:16ch; overflow:hidden; text-overflow:ellipsis; }
-.hosts-table .cell-main, .hosts-table .cell-sub { max-width:320px; }
-.hosts-table .col-upstream .trunc { max-width:200px; }
+.hosts-table .cell-main, .hosts-table .cell-sub { max-width:clamp(220px, 26vw, 640px); }
+.hosts-table .col-upstream .trunc { max-width:clamp(160px, 18vw, 480px); }
 .col-domain .more-list.tag-list { display:flex; flex-wrap:wrap; gap:4px; white-space:normal; }
 .cell-sub .mono { font-size:12.5px; }
 .more-btn { flex:none; background:none; border:0; padding:0 2px; margin:0; font:inherit; font-size:12.5px; color:var(--muted); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; white-space:nowrap; }
 .more-btn:hover { color:var(--text); }
-.col-domain .more-list { display:block; max-width:340px; margin-top:4px; font-size:12.5px; color:var(--muted); }
+.col-domain .more-list { display:block; max-width:clamp(240px, 30vw, 760px); margin-top:4px; font-size:12.5px; color:var(--muted); }
 .chip-row > .more-list { display:contents; }
 .col-method { white-space:nowrap; }
 .col-domain, .col-domains { min-width:200px; }
 .col-upstream { min-width:140px; }
-.col-upstream .trunc { max-width:240px; }
+.col-upstream .trunc { max-width:clamp(180px, 20vw, 560px); }
 .col-cert { white-space:nowrap; }
-.col-cert .lock { max-width:220px; }
+.col-cert .lock { max-width:clamp(180px, 16vw, 420px); }
 .lock.cert-cover svg { color:var(--ok); }
 .chip.cert-cover .trunc { max-width:18ch; }
 a.rail-cert .lock .trunc { color:var(--brand-text); }
@@ -726,14 +732,14 @@ a.rail-cert:hover { text-decoration:none; }
 a.rail-cert:hover .trunc { text-decoration:underline; }
 .lock .trunc { max-width:24ch; }
 .col-auth { white-space:nowrap; }
-.col-auth .chip { display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.col-auth .chip { display:inline-block; max-width:clamp(140px, 12vw, 320px); overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
 .col-status { white-space:nowrap; }
 .col-type { white-space:nowrap; }
-.col-issuer .trunc { max-width:200px; }
-.col-host .trunc { max-width:260px; }
-.col-path .trunc { max-width:340px; }
-.col-client .trunc { max-width:180px; }
-.col-name .trunc { max-width:240px; }
+.col-issuer .trunc { max-width:clamp(200px, 26vw, 720px); }
+.col-host .trunc { max-width:clamp(200px, 20vw, 560px); }
+.col-path .trunc { max-width:clamp(240px, 26vw, 720px); }
+.col-client .trunc { max-width:clamp(140px, 12vw, 320px); }
+.col-name .trunc { max-width:clamp(200px, 18vw, 480px); }
 .col-serial .trunc { max-width:18ch; }
 .col-actions .hint .mono { display:inline-block; max-width:18ch; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
 .col-reason { min-width:160px; overflow-wrap:break-word; }
@@ -741,34 +747,19 @@ a.rail-cert:hover .trunc { text-decoration:underline; }
 th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .col-actions { width:1%; white-space:nowrap; text-align:right; }
 .row-actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; }
-.card-head > .card-title, .card-head > .card-id { flex:1 1 auto; min-width:0; }
-.card-head .card-title h3, .card-head .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card-head > .card-actions { display:flex; gap:8px; flex:none; }
 .bulk-targets { margin:8px 0 12px; padding:6px 10px 6px 26px; max-height:180px; overflow:auto; border:0; background:var(--raised); border-radius:3px; font-size:13.5px; }
 .bulk-targets li { line-height:20px; }
-/* Clickable list cards say so twice: at rest a kind tile (the section's own
-   glyph) and a small round "go" mark at the top right; on hover or keyboard
-   focus the card lifts, takes the brand ring, the name turns brand and the
-   hairline wire (the one under the masthead) lights along its top edge. */
-.cards .card { position:relative; padding:18px 20px; transition:transform .12s ease, box-shadow .12s ease; }
-.cards .card::after { content:""; position:absolute; left:0; right:0; top:0; height:3px; background:var(--wire); opacity:0; transition:opacity .12s ease; pointer-events:none; }
-.cards .card:hover, .cards .card:focus-within { transform:translateY(-2px); box-shadow:var(--shadow-md), 0 0 0 1px var(--card-ring); }
-.cards .card:hover::after, .cards .card:focus-within::after { opacity:1; }
-.cards .card:hover .card-link, .cards .card:focus-within .card-link { color:var(--brand-text); }
-.cards .card .card-head { margin-bottom:12px; padding-right:36px; align-items:center; }
-.card-id { display:flex; align-items:center; gap:10px; min-width:0; }
-.card-id > .card-title { min-width:0; }
-.card-kind { width:30px; height:30px; border-radius:7px; background:var(--btn2-bg); color:var(--brand-text); display:grid; place-items:center; flex:none; }
-.card-kind svg { width:16px; height:16px; }
-.card-go { position:absolute; top:16px; right:16px; width:26px; height:26px; border-radius:50%; background:var(--num-bg); color:var(--muted); display:grid; place-items:center; transition:background .12s ease, color .12s ease; }
-.card-go svg { width:12px; height:12px; }
-.cards .card:hover .card-go, .cards .card:focus-within .card-go { background:var(--brand); color:#fff; box-shadow:var(--shadow-primary); }
-.cards .card .kv { border-top:1px solid var(--border-soft); padding-top:12px; }
-.card-title .card-name-row { display:flex; align-items:center; gap:8px; min-width:0; }
-.card-title .card-name-row h3 { min-width:0; }
-.card-title .card-name-row .chip { flex:none; }
-.cards .kv .v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cards .kv .v .domain-list, .cards .kv .v.v-list { white-space:normal; }
+/* generic object lists (identity providers, middleware, ...): one row per
+   object, one column per summary key. Values wrap rather than ellipsize, so
+   a long issuer URL or upstream list is read in place, not from a tooltip. */
+.gs-table td.col-v { white-space:normal; overflow-wrap:break-word; max-width:clamp(240px, 32vw, 900px); font-family:var(--mono); font-size:13.5px; }
+.gs-table td.col-v .chip { font-family:var(--sans); }
+.gs-table td.col-v .dl-item { white-space:normal; overflow:visible; }
+td.col-tags { white-space:normal; }
+td.col-tags .chip { margin:1px 0; }
+td.col-tags .chip.tag { display:inline-block; max-width:16ch; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.col-source .cell-main { gap:8px; }
 .view-head > div { min-width:0; max-width:100%; }
 
 /* ---------- responsive ---------- */
@@ -828,12 +819,13 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   .toast { animation:none; }
   .modal { animation:none; }
   .switch, .switch::after, .nav-chev, .sidebar { transition:none; }
-  .cards .card, .cards .card::after, .card-go { transition:none; }
-  .cards .card:hover, .cards .card:focus-within { transform:none; }
 }
 
 /* ---------- tabs (PatternFly tabs) ---------- */
-.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; border-bottom:1px solid var(--border); margin-bottom:16px; }
+/* The buttons sit 1px below the box (margin-bottom:-1px) so the underline
+   meets the border; a scroll box counts that 1px as vertical overflow and
+   draws a scrollbar thumb beside the tabs. The padding gives it a home. */
+.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:1px; border-bottom:1px solid var(--border); margin-bottom:16px; }
 .tab-btn { background:transparent; border:0; border-bottom:3px solid transparent; color:var(--muted);
   font:inherit; font-size:14px; padding:8px 16px; cursor:pointer; margin-bottom:-1px; white-space:nowrap; position:relative; }
 .tab-btn:hover { color:var(--text); border-bottom-color:var(--border-2); }
@@ -851,7 +843,7 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .head-meta { font-size:13.5px; color:var(--muted); }
 .edit-grid { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:24px; align-items:start; }
 .edit-main { min-width:0; }
-.rail { position:sticky; top:calc(var(--masthead-h) + 24px); min-width:0; }
+.rail { position:sticky; top:24px; min-width:0; }
 .rail .card + .card { margin-top:16px; }
 .dl { display:grid; gap:14px; margin:0; }
 .dl > div { min-width:0; }

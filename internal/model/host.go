@@ -516,27 +516,66 @@ func (h ProxyHost) Validate() error {
 	if err := h.RateLimit.validateInline(fmt.Sprintf("proxy host %q", h.Name)); err != nil {
 		return err
 	}
-	for _, l := range h.Locations {
+	return validateLocations(fmt.Sprintf("proxy host %q", h.Name), h.Locations)
+}
+
+// validateLocations is the one location validator, shared by ProxyHost and by
+// a discovery template/profile (which stamps its locations onto derived hosts
+// and must therefore be held to the same rules at settings-write time). owner
+// prefixes every error, e.g. `proxy host "x"`.
+func validateLocations(owner string, locs []Location) error {
+	for _, l := range locs {
 		if l.Path == "" {
-			return fmt.Errorf("proxy host %q: locations: location with empty path", h.Name)
+			return fmt.Errorf("%s: locations: location with empty path", owner)
 		}
 		if l.Upstream != nil {
 			if l.UpstreamGroupRef != "" {
-				return fmt.Errorf("proxy host %q: locations: location %q: upstream and upstreamGroupRef are mutually exclusive", h.Name, l.Path)
+				return fmt.Errorf("%s: locations: location %q: upstream and upstreamGroupRef are mutually exclusive", owner, l.Path)
 			}
 			if err := l.Upstream.validate("upstream"); err != nil {
-				return fmt.Errorf("proxy host %q: locations: location %q: %w", h.Name, l.Path, err)
+				return fmt.Errorf("%s: locations: location %q: %w", owner, l.Path, err)
 			}
 		}
-		owner := fmt.Sprintf("proxy host %q: locations: location %q", h.Name, l.Path)
-		if err := l.Auth.validateInline(owner); err != nil {
+		lo := fmt.Sprintf("%s: locations: location %q", owner, l.Path)
+		if err := l.Auth.validateInline(lo); err != nil {
 			return err
 		}
-		if err := l.RateLimit.validateInline(owner); err != nil {
+		if err := l.RateLimit.validateInline(lo); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// CloneLocations copies a location list so a host derived from a discovery
+// template owns its own slices and pointers: assigning the template's straight
+// through would give every derived host, and the settings object they came
+// from, the same *Upstream, *AuthMiddleware and *RateLimitMiddleware (the
+// reason Timeouts is copied by value at the derive sites).
+func CloneLocations(ls []Location) []Location {
+	if len(ls) == 0 {
+		return nil
+	}
+	out := make([]Location, len(ls))
+	for i, l := range ls {
+		c := l
+		if l.Upstream != nil {
+			u := *l.Upstream
+			c.Upstream = &u
+		}
+		if l.Auth != nil {
+			a := *l.Auth
+			c.Auth = &a
+		}
+		if l.RateLimit != nil {
+			r := *l.RateLimit
+			c.RateLimit = &r
+		}
+		c.Middlewares = append([]string(nil), l.Middlewares...)
+		c.AccessLists = append([]string(nil), l.AccessLists...)
+		out[i] = c
+	}
+	return out
 }
 
 // RedirectHost issues HTTP redirects for its domains.

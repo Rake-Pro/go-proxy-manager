@@ -205,6 +205,19 @@ type IngressHostTemplate struct {
 	// operator wrote.
 	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 
+	// Locations are path-scoped overrides stamped verbatim onto every derived
+	// host, exactly as on a hand-written ProxyHost (own upstream or group, own
+	// chain, stripPrefix, inline auth/rateLimit). They live HERE, on the
+	// operator-authored template or profile, and never on the Ingress: an
+	// annotation still carries a profile name and nothing else, so a tenant can
+	// pick a profile the operator wrote but can never name a path, an upstream
+	// or a chain of their own. The case that needs them is a profile written
+	// for one service whose upstream is not the cluster ingress controller (a
+	// hostPort pod, say) and which serves a sidecar under a path. Validated by
+	// the same rules as a proxy host's, at settings-write time, and
+	// cross-reference-checked when the derived host is written.
+	Locations []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
+
 	// DefaultDNS is the dns policy a derived host gets when the corresponding
 	// annotation is absent. Each flag is overridden individually by its
 	// annotation, so a template default of lanDirect can be turned off per
@@ -835,6 +848,11 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 	}
 	if err := validateSecurityHeaders(t.SecurityHeaders); err != nil {
 		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
+	}
+	// Same loop ProxyHost.Validate runs, so a profile that would derive a host
+	// with a bad location fails the settings write, not the next reconcile.
+	if err := validateLocations("ingressDiscovery."+path, t.Locations); err != nil {
+		return err
 	}
 	return nil
 }

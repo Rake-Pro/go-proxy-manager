@@ -390,7 +390,7 @@ toggle two DNS booleans, and (c) **name** one of the operator's profiles, and
 can never weaken the auth/access chain the operator configured, nor point gpm at
 an address of their choosing.
 
-### `locations` is deliberately not a template field
+### `locations` is a template/profile field, never an annotation
 
 A hand-written `ProxyHost` can carry `locations`: path-scoped overrides, each
 with its own upstream (or upstream group) and its own middleware/access-list
@@ -415,10 +415,14 @@ has a home: express it in the cluster (a second `Ingress`, a second hostname)
 and annotate it, or hand-write the host and leave it out of discovery: the two
 mechanisms sit side by side and discovery never touches an unlabelled host.
 
-So: not now, and not by annotation ever. If a real need appears, the only shape
-that keeps the containment property is an operator-side one (locations written
-per profile in settings, chosen by name like everything else), recorded in
-BACKLOG.md as deliberately deferred, not as a gap.
+So: not by annotation, ever. The need did appear (a hostPort pod outside the
+ingress controller, serving a sidecar under `/artifacts`), and it shipped in
+the only shape that keeps the containment property: `locations` written on a
+template or profile in settings, chosen by name like everything else, validated
+by the proxy host's own rules at settings-write time and cross-reference-checked
+when the derived host is written. The paragraphs above still describe what the
+field is NOT for: on the default template it stamps the same paths onto every
+derived host, so in practice it belongs on a profile written for one service.
 
 ### `robotsNoIndex`, `timeouts` and `tags` *are* template fields
 

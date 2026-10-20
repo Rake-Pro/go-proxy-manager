@@ -70,9 +70,11 @@ type ObjectMeta struct {
 	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 	// Disabled keeps an object in config but excludes it from the compiled data plane.
 	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
-	// CreatedAt/UpdatedAt are maintained by the store on write.
-	CreatedAt time.Time `json:"createdAt,omitempty" yaml:"createdAt,omitempty"`
-	UpdatedAt time.Time `json:"updatedAt,omitempty" yaml:"updatedAt,omitempty"`
+	// CreatedAt/UpdatedAt are maintained by the store on write. omitzero: an
+	// object written before the store stamped them has the zero time, which
+	// omitempty would still send as 0001-01-01 and the UI would then show.
+	CreatedAt time.Time `json:"createdAt,omitzero" yaml:"createdAt,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitzero" yaml:"updatedAt,omitempty"`
 }
 
 // GetMeta satisfies the shared accessor used by the store/API.

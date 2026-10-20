@@ -167,6 +167,12 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function shortSha(s) { return (s || '').slice(0, 7); }
+// The main column is the scroll box (app.css), not the document.
+function scrollToTop() {
+  window.scrollTo(0, 0);
+  const m = document.getElementById('main');
+  if (m) m.scrollTop = 0;
+}
 // One helper for every count shown with a noun: plural(1, 'tag', 'tags') is
 // "1 tag", plural(2, 'tag', 'tags') is "2 tags".
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
@@ -683,7 +689,7 @@ function showSaveError(e, title, field) {
   const badRow = target ? null : c.querySelector('.row-bad');
   if (target) focusErrorField(target);
   else if (badRow) focusErrorField({ el: badRow });
-  else window.scrollTo(0, 0);
+  else scrollToTop();
   return banner;
 }
 
@@ -1043,9 +1049,6 @@ function navGroupOpen(group) {
 function navItemHtml(n) {
   return `<button class="nav-item" data-view="${n.id}">${esc(n.label)}</button>`;
 }
-// Section id -> the glyph its nav item carries, for the list cards' kind tile.
-const SECTION_ICON = {};
-NAV_GROUPS.forEach((g) => g.items.forEach((i) => { SECTION_ICON[i.id] = i.icon; }));
 function navGroupHtml(group) {
   const items = group.items.map(navItemHtml).join('');
   if (!group.label) return `<div class="nav-group">${items}</div>`;
@@ -1235,8 +1238,14 @@ async function loadTopbar() {
   ]);
   const v = vR && vR.data;
   state.version = v;
-  // A build without a commit reports a placeholder ("none"); only a real hash is shown.
-  if (v) verStr = `${v.version ? 'Version ' + v.version : ''}${/^[0-9a-f]{7,}$/i.test(v.commit || '') ? ' (' + shortSha(v.commit) + ')' : ''}`.trim();
+  // A build without a commit reports a placeholder ("none"); only a real hash is
+  // shown, and not twice: a dev build is already versioned "dev-<sha>".
+  if (v) {
+    const sha = /^[0-9a-f]{7,}$/i.test(v.commit || '') ? shortSha(v.commit) : '';
+    const ver = v.version || '';
+    const dup = sha && ver.toLowerCase().includes(sha.toLowerCase());
+    verStr = `${ver ? 'Version ' + ver : ''}${sha && !dup ? ' (' + sha + ')' : ''}`.trim();
+  }
 
   const h = hR && hR.data;
   if (Array.isArray(h) && h.length) { state.headSha = h[0].hash; cfgSha = shortSha(h[0].hash); }
@@ -2637,7 +2646,7 @@ async function route() {
     },
   });
   c.innerHTML = loadingHtml();
-  window.scrollTo(0, 0);
+  scrollToTop();
   // Per-render bookkeeping: the shell and the view share one memo for the three
   // GETs they both want, and each render starts with a clean reference-list
   // failure list so a banner never outlives the view that produced it.
@@ -3827,6 +3836,7 @@ async function viewIntegrations(c) {
         // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
+        locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3868,6 +3878,7 @@ async function viewIntegrations(c) {
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
+        locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
@@ -3947,6 +3958,7 @@ async function viewIntegrations(c) {
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
+        locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3976,6 +3988,7 @@ async function viewIntegrations(c) {
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
+        locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
@@ -4246,9 +4259,9 @@ async function listHosts(c) {
   const mwType = {};
   arr(mwR).forEach((m) => { mwType[m.name] = m.type; });
 
+  const addBtn = `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`;
   const head = viewHead('Proxy Hosts',
-    'Public domains routed to an upstream, with the TLS, access and middleware that sit in between.',
-    `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`);
+    'Public domains routed to an upstream, with the TLS, access and middleware that sit in between.');
 
   if (!hosts.length) {
     c.innerHTML = head + emptyState('No proxy hosts yet',
@@ -4329,12 +4342,19 @@ async function listHosts(c) {
   } catch (e) { /* ignore */ }
   const selected = new Set();
 
+  // One line per row, like every other list. What used to be the domain's
+  // second line is two columns: Source (the kind chip and its namespace/name
+  // for a discovered host, otherwise the display or object name when it adds
+  // something) and Tags, which is only there when some host has tags.
+  const anyTags = recs.some((r) => r.tags.length);
   const COLUMNS = [
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
+    { key: null, label: 'Source', cls: 'col-source hide-sm' },
     { key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },
     { key: null, label: 'Certificate', cls: 'col-cert hide-sm' },
     { key: null, label: 'Sign-in', cls: 'col-auth hide-sm' },
     { key: null, label: 'Status', cls: 'col-status' },
+    ...(anyTags ? [{ key: null, label: 'Tags', cls: 'col-tags hide-sm' }] : []),
     { key: 'updated', label: 'Updated', cls: 'col-updated hide-sm hide-md' },
   ];
   function headHtml() {
@@ -4391,24 +4411,25 @@ async function listHosts(c) {
     const tagChips = r.tags.slice(0, 3).map(tagChip).join('') + (moreTags ? moreTags.btn : '');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
-    // Every row has the same two lines whatever it holds: the domain, then
-    // the kind chip, the source path (display name, or the object name when
-    // it differs from the domain) and the tags. The kind chip used to sit
-    // inline after the domain and dropped to its own line after a long one.
+    // Source: a display name or object name equal to the domain says nothing
+    // the Domain cell did not, so it is left out; a hand-written host with
+    // nothing to add shows "-".
     const primary = r.domains[0] || h.name;
-    const sub = r.display || (h.name !== primary ? h.name : '');
-    const subTitle = [mc ? mc.text : '', sub, r.tags.length ? 'tags: ' + r.tags.join(', ') : ''].filter(Boolean).join(' - ');
+    const ident = (r.display && r.display !== primary) ? r.display : (h.name !== primary ? h.name : '');
+    const identHtml = ident ? `<span class="trunc faint" title="${esc(ident)}">${esc(ident)}</span>` : '';
+    const source = managedChip || identHtml ? `<div class="cell-main">${managedChip}${identHtml}</div>` : '<span class="faint">-</span>';
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
       <td class="col-domain">
         <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}</div>
-        <div class="cell-sub"${subTitle ? ` title="${esc(subTitle)}"` : ''}>${managedChip}${sub ? `<span class="trunc" style="min-width:${Math.min(sub.length, 12) / 2}em">${esc(sub)}</span>` : ''}${tagChips}</div>
-        ${more ? more.list : ''}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}
+        ${more ? more.list : ''}
       </td>
+      <td class="col-source hide-sm">${source}</td>
       <td class="mono col-upstream hide-sm hide-md"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
       <td class="col-cert hide-sm">${tls}</td>
       <td class="col-auth hide-sm">${auth}</td>
       <td class="col-status">${status}</td>
+      ${anyTags ? `<td class="col-tags hide-sm">${tagChips}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}</td>` : ''}
       <td class="mono faint col-updated hide-sm hide-md">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
     </tr>`;
   }
@@ -4424,6 +4445,7 @@ async function listHosts(c) {
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, sign-in, tag and status" aria-label="Filter hosts" /></div>
       ${zoneChipsHtml}
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div id="hostBulk"></div>
     <div class="table-wrap">
@@ -4467,7 +4489,7 @@ async function listHosts(c) {
     $('#hostHead').innerHTML = headHtml();
     $('#hostRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
-      : `<tr><td colspan="8" class="list-empty">No host matches this filter.</td></tr>`;
+      : `<tr><td colspan="${COLUMNS.length + 1}" class="list-empty">No host matches this filter.</td></tr>`;
     wireRows();
     wireHead(rows);
     renderBulk();
@@ -5818,9 +5840,9 @@ function certExpiry(ct) {
 
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
+  const addBtn = `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`;
   const head = viewHead('Certificates',
-    'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.',
-    `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`);
+    'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.');
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
       'Request an ACME certificate for the domains you serve - dns-01 if you need a wildcard, http-01 otherwise - or point gpm at PEM files already on the server.',
@@ -5876,6 +5898,7 @@ async function listCerts(c) {
   c.innerHTML = head + `
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter certificates..." title="Matches name, domain, type, challenge, DNS provider, issuer and state" aria-label="Filter certificates" /></div>
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div class="table-wrap">
       <table class="certs-table">
@@ -5900,13 +5923,11 @@ async function listCerts(c) {
       : 'PEM files on the server';
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
       <td class="col-name">
-        <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a></div>
-        <div class="cell-sub">${r.ct.disabled ? DISABLED_CHIP : ''}${r.ct.displayName ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
+        <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a>${(r.ct.displayName && r.ct.displayName !== r.name) ? `<span class="trunc faint" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}${r.ct.disabled ? DISABLED_CHIP : ''}</div>
       </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td class="col-type">
-        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type === 'acme' ? 'ACME' : (r.type === 'custom' ? 'Custom' : r.type))}</span></div>
-        <div class="cell-sub mono">${issuance}</div>
+        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type === 'acme' ? 'ACME' : (r.type === 'custom' ? 'Custom' : r.type))}</span><span class="mono faint">${issuance}</span></div>
       </td>
       <td class="mono faint col-issuer"><span class="trunc" title="${esc(r.issuer || '')}">${esc(r.issuer || '-')}</span></td>
       <td class="col-time">${certExpiryCellHtml(r.ct)}</td>
@@ -6181,7 +6202,9 @@ const SECTION_META = {
     singular: 'identity provider', addLabel: 'Add identity provider',
     filterHint: 'name, display name, tags, type, issuer URL, client ID and headers',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('idpType', o.type || '')}</span>` +
-      (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span><span class="k">Client ID</span><span class="v">${esc(o.oidc.clientID || '')}</span>` : '') +
+      // The client ID stays in the editor: it is a credential half, not a
+      // list detail.
+      (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span>` : '') +
       (o.forwardAuth ? `<span class="k">User header</span><span class="v">${esc(o.forwardAuth.userHeader || '')}</span>` : ''),
   },
   access: {
@@ -6262,7 +6285,7 @@ const SECTION_META = {
   },
 };
 
-// A domain-first card shows the first domain as its title; the rest are listed
+// A domain-first row shows the first domain as its title; the rest are listed
 // under "Also".
 function alsoDomainsKv(o) {
   const rest = arr(o.domains).slice(1);
@@ -6316,8 +6339,7 @@ async function genericList(c, section) {
   ]);
   const items = arr(itemsR.data);
   const ctx = { health: healthR && healthR.data };
-  const head = viewHead(meta.title, meta.sub,
-    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`)
+  const head = viewHead(meta.title, meta.sub)
     + (meta.intro ? `<p class="muted list-intro">${esc(meta.intro)}</p>` : '');
   if (!items.length) {
     c.innerHTML = head + emptyState(`No ${meta.many || meta.singular + 's'} yet`,
@@ -6329,57 +6351,74 @@ async function genericList(c, section) {
   // Redirects and parked hosts read like the Proxy Hosts list: the domain is
   // the title, the object name the subline, then status, tags and last change.
   const LIVE_CHIP = '<span class="chip flat ok"><span class="dot ok"></span>Live</span>';
-  // Each card carries its section's glyph (the nav's own) and a "go" mark, so
-  // it reads as something that opens before the pointer says so.
-  const kindIcon = SECTION_ICON[section] || ICON.layers;
-  const GO_MARK = `<span class="card-go" aria-hidden="true">${ICON.chevron}</span>`;
-  const cardHtml = (o) => {
+  // A summary is a run of k/v pairs. The keys, in order of first appearance
+  // down the list, are the table's columns, so no section keeps a column list
+  // of its own, and a row shows "-" under a key it has nothing for.
+  const parsed = items.map((o) => {
+    const t = document.createElement('template');
+    t.innerHTML = meta.summary(o, ctx);
+    const cells = {};
+    let k = '';
+    Array.from(t.content.children).forEach((el) => {
+      if (el.classList.contains('k')) k = el.textContent.trim();
+      else if (el.classList.contains('v') && k) { cells[k] = el.outerHTML; k = ''; }
+    });
+    return cells;
+  });
+  const keys = [];
+  parsed.forEach((cells) => Object.keys(cells).forEach((k) => { if (!keys.includes(k)) keys.push(k); }));
+  const anyTags = items.some((o) => arr(o.tags).length);
+  const anyUpdated = items.some((o) => o.updatedAt);
+  const headHtml = '<tr>'
+    + `<th class="col-name">${meta.domainFirst ? 'Domain' : 'Name'}</th>`
+    + keys.map((k) => `<th>${esc(k)}</th>`).join('')
+    + (anyTags ? '<th class="col-tags">Tags</th>' : '')
+    + (anyUpdated ? '<th class="col-updated">Updated</th>' : '')
+    + '</tr>';
+  const rowHtml = (o, i) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
+    let main, sub;
+    // One line per row: the name, then (muted, inline) a display name or
+    // object name only when it differs from it, then the status chip. A
+    // second line on some rows and not others made the list look uneven.
     if (meta.domainFirst) {
       const primary = arr(o.domains)[0] || o.name;
-      const subline = [o.name !== primary ? o.name : '', o.displayName || ''].filter(Boolean).join(' - ');
-      const tags = arr(o.tags);
-      return `
-    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
-      <div class="card-head">
-        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
-        <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12.5px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
-        </div>
-      </div>
-      <div class="kv">${meta.summary(o, ctx)}${tags.length ? `<span class="k">Tags</span><span class="v v-list">${tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</span>` : ''}${o.updatedAt ? `<span class="k">Updated</span><span class="v mono">${esc(fmtTime(o.updatedAt))}</span>` : ''}</div>
-      ${GO_MARK}
-    </div>`;
+      const subline = [o.name !== primary ? o.name : '', (o.displayName && o.displayName !== primary && o.displayName !== o.name) ? o.displayName : ''].filter(Boolean).join(' - ');
+      main = `<a class="host trunc" href="${href}" title="${esc(arr(o.domains).join(', ') || o.name)}">${esc(primary)}</a>`;
+      sub = (subline ? `<span class="trunc faint mono" title="${esc(subline)}">${esc(subline)}</span>` : '') + (o.disabled ? DISABLED_CHIP : LIVE_CHIP);
+    } else {
+      main = `<a class="host trunc" href="${href}" title="${esc(o.name)}">${esc(o.name)}</a>`;
+      sub = ((o.displayName && o.displayName !== o.name) ? `<span class="trunc faint" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '')
+        + (o.disabled ? DISABLED_CHIP : '');
     }
-    return `
-    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
-      <div class="card-head">
-        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
-        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:13.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
-        </div>
-      </div>
-      <div class="kv">${meta.summary(o, ctx)}</div>
-      ${GO_MARK}
-    </div>`;
+    return `<tr class="clickable" data-name="${esc(o.name)}">
+      <td class="col-name"><div class="cell-main">${main}${sub}</div></td>
+      ${keys.map((k) => `<td class="col-v">${parsed[i][k] || '<span class="faint">-</span>'}</td>`).join('')}
+      ${anyTags ? `<td class="col-tags">${arr(o.tags).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</td>` : ''}
+      ${anyUpdated ? `<td class="col-updated mono">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}
+    </tr>`;
   };
-  const cards = items.map(cardHtml).join('');
+  const addBtn = `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`;
   c.innerHTML = head + `
-    <div class="toolbar cards-aligned">
+    <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(lowerTitle(meta.title))}..." title="${esc(`Matches ${meta.filterHint || 'name, display name and tags'}, and the word "disabled"`)}" aria-label="Filter ${esc(meta.title)}" /></div>
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
-    <div class="cards" id="gsCards">${cards}</div>
+    <div class="table-wrap">
+      <table class="gs-table">
+        <thead>${headHtml}</thead>
+        <tbody id="gsRows">${items.map(rowHtml).join('')}</tbody>
+      </table>
+    </div>
     <div class="list-empty" id="gsNone" hidden>No ${esc(meta.singular)} matches this filter.</div>`;
 
-  // Summary values are one line each (CSS ellipsizes them), so each carries
-  // its full text as a tooltip unless its markup already set one.
-  $$('#gsCards .kv .v').forEach((v) => { if (!v.title) v.title = v.textContent.trim(); });
-
   // The filter matches the object's stored values, not the summary markup the
-  // card happens to render.
+  // row happens to render.
   const gsFilter = $('#gsFilter');
   gsFilter.addEventListener('input', () => {
     const q = gsFilter.value.trim().toLowerCase();
     let shown = 0;
-    $$('#gsCards .card[data-name]').forEach((el) => {
+    $$('#gsRows tr[data-name]').forEach((el) => {
       const hit = !q || (blobs[el.dataset.name] || '').indexOf(q) !== -1;
       el.style.display = hit ? '' : 'none';
       if (hit) shown++;
@@ -6387,12 +6426,13 @@ async function genericList(c, section) {
     $('#gsNone').hidden = shown > 0;
   });
 
-  $$('.cards .card[data-name]').forEach((el) => {
+  $$('#gsRows tr[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
-    // The name is the card's link for the keyboard and screen readers; the rest
-    // of the card stays clickable for the mouse. Delete is not offered here: it
-    // lives in the object's own save bar, as on proxy hosts and certificates.
-    el.addEventListener('click', (e) => { if (!e.target.closest('a')) open(); });
+    // The name is the row's link for the keyboard and screen readers; the rest
+    // of the row stays clickable for the mouse, except a "+N" toggle. Delete
+    // is not offered here: it lives in the object's own save bar, as on proxy
+    // hosts and certificates.
+    el.addEventListener('click', (e) => { if (!e.target.closest('a') && !e.target.closest('button')) open(); });
   });
 }
 
@@ -8695,7 +8735,7 @@ function revealToken(secret) {
     </div>`;
   const content = $('#content');
   content.insertBefore(wrap, content.firstChild);
-  window.scrollTo(0, 0);
+  scrollToTop();
   $('#tok-copy').addEventListener('click', async () => {
     const inp = $('#tok-reveal');
     inp.select();
@@ -8747,8 +8787,7 @@ async function viewTokens(c) {
   const rows = tokens.map((t) => `
     <tr data-name="${esc(t.name)}" data-blob="${esc([t.name, t.displayName, arr(t.scopes).join(' '), t.disabled ? 'disabled' : ''].join(' ').toLowerCase())}">
       <td class="col-name">
-        <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span></div>
-        <div class="cell-sub">${t.disabled ? DISABLED_CHIP : ''}${t.createdAt ? `<span class="trunc mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}</div>
+        <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span>${t.createdAt ? `<span class="trunc faint mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}${t.disabled ? DISABLED_CHIP : ''}</div>
       </td>
       <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
       <td class="mono col-time">${tokenExpiryLabel(t)}</td>

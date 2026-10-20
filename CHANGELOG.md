@@ -5,6 +5,52 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-20
+
+### Added
+
+- Ingress and Docker discovery templates and profiles take `locations`, the
+  same path-scoped overrides a hand-written proxy host has, stamped onto every
+  derived host and validated by the same rules at settings-write time. They
+  live on the operator's template or profile only; an Ingress annotation still
+  carries a profile name and nothing else. Meant for a profile written for one
+  service whose upstream is not the cluster ingress controller (a hostPort pod
+  serving a sidecar under a path).
+
+### Changed
+
+- Admin UI list pages for identity providers, middleware, access lists,
+  client CAs, DNS providers, upstream groups, streams, redirects and parked
+  hosts are tables, as Proxy Hosts and Certificates already were: one row per
+  object, one column per summary field, long values wrapped instead of cut
+  short. The Add button sits on the filter row on every list.
+- Admin UI Identity Providers list no longer shows the OIDC client ID; it is
+  in the provider's editor only.
+- Admin UI tables size their cells to the window: every fixed pixel cap on a
+  name, upstream, issuer, path or list value is now a viewport-relative clamp,
+  so a wide screen shows the full text instead of clipping it beside empty
+  space, and a phone still gets the old floor.
+- Admin UI lists are one line per row, everywhere. Proxy Hosts' second line
+  (kind chip, source path, object name, tags) became two columns: Source,
+  with the k8s/docker chip and its namespace/name, or the display or object
+  name when it differs from the domain; and Tags, present only when some host
+  has tags. Certificates and the generic object lists show a display or
+  object name inline, muted, only when it differs from the name. The
+  certificate Type cell is one line and the issuer column is no longer
+  clipped at 200px.
+- Admin UI frame: the masthead and sidebar stay put and only the main column
+  scrolls, so the scrollbar starts under the masthead instead of running up
+  its edge; the tab strip no longer shows a stray scrollbar thumb.
+
+### Fixed
+
+- API responses omit `createdAt`/`updatedAt` when the store never stamped
+  them, instead of sending the zero time (shown as year 0 in the lists).
+
+- Admin UI sidebar footer no longer repeats the commit hash on a dev build
+  ("dev-abc1234 (abc1234)"), and the config-commit link next to it is never
+  truncated.
+
 ## [2.2.0] - 2026-10-19
 
 ### Changed
