@@ -194,8 +194,9 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
   server-enforced TTL, active TCP/HTTP health probes + passive connect-failure
   detection, `GET /api/upstream-health`, typed UI editor),
   access-log viewer (shipped: in-memory ring + `GET /api/logs` + "Access Logs"
-  view, gated on the access-log toggle, flippable live via `PUT /api/logs`
-  since the handler-switch change) or metrics (shipped: opt-in
+  view with structured filters, sorting, auto-refresh and a Clear action,
+  gated on the access-log toggle, flippable live via `PUT /api/logs`,
+  emptied via `DELETE /api/logs`) or metrics (shipped: opt-in
   Prometheus `/metrics`, see P2).
 - Per-host OIDC relying-party gating on the data plane (shipped: redirect ->
   callback -> signed SSO session cookie) and HSTS emission (shipped).
@@ -384,7 +385,7 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
   validated (no CR/LF, no hop-by-hop, case-insensitive dedup, unknown scope
   rejected); `Strict-Transport-Security` refused: HSTS is unchanged and
   separate. Resolves the auth-refusal/error-page "no `nosniff` on rendered pages"
-  observation from BACKLOG. Authorable from the UI as well as from git: the
+  observation from the auth-refusal review. Authorable from the UI as well as from git: the
   Settings page ("Response security headers") edits the fleet default and the
   host editor edits that host's per-key override, both as name/value/scope rows.
 - **Response-header stripping** (shipped): `settings.stripResponseHeaders`
@@ -442,6 +443,18 @@ reworking earlier tiers or duplicating work (see "Architecture for extension").
 - ML-KEM (was P3)
 - MPTCP (was P3)
 - Anubis (was P3)
+- Scheduled maintenance windows: a window opens and closes when an operator
+  flips the switch; a deploy pipeline does the rest with two API calls.
+- `healthCheck.path` prefixed with a group member's `upstream.path`: the probe
+  path is configured in full on purpose.
+- Ingress discovery, until a need appears: per-host ACME for discovered names
+  outside the wildcard (rate-limit budget, CT disclosure), watch-based
+  discovery (a full-state poll self-heals), Gateway API as a second source.
+  Per-Ingress `locations` stay out: see `design/ingress-discovery.md`.
+- DNS sync: adopting a pre-ledger Cloudflare record that lacks the
+  `managed-by:gpm` comment (add the comment by hand to let gpm own it), and a
+  ledger-repair endpoint (hand-edit `config/dns-ledger.yaml` and reload; an
+  API route onto the ledger is an "authorise a DNS deletion" primitive).
 
 ### Architecture for extension
 - Model **hosts, certs, identity providers, access rules, middleware** as

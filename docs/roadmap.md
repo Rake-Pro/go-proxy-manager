@@ -3,8 +3,8 @@
 What is planned next and what is deliberately not planned. For full detail and
 history see
 [FEATURES.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/FEATURES.md)
-(the P0-P3 tier roadmap) and
-[BACKLOG.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/BACKLOG.md)
+(the P0-P3 tier roadmap) and the
+[open issues](https://github.com/Rake-Pro/go-proxy-manager/issues)
 (concrete follow-ups on shipped features) on GitHub.
 
 ## Planned

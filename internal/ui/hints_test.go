@@ -26,14 +26,10 @@ type hintEntry struct {
 // to that tag in app.js; the value is why it is exempt. A control that is not
 // listed here and has no hint fails TestHintCoverage.
 var hintExempt = map[string]string{
-	`id="cm-typed"`:    "confirmation modal: the operator retypes a name, and the modal body is the explanation",
-	`id="cm-prompt"`:   "confirmation modal: free-text prompt, labelled by the modal itself",
-	`id="hostFilter"`:  "list filter box",
-	`id="certFilter"`:  "list filter box",
-	`id="gsFilter"`:    "list filter box",
-	`id="tokFilter"`:   "list filter box",
-	`id="logFilter"`:   "list filter box",
-	`id="histFilter"`:  "list filter box",
+	`id="cm-typed"`:  "confirmation modal: the operator retypes a name, and the modal body is the explanation",
+	`id="cm-prompt"`: "confirmation modal: free-text prompt, labelled by the modal itself",
+	`<input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}"`: "the shared list filter box (filterBoxHtml); its title says what it matches",
+	`id="logsAuto"`:    "access-log auto-refresh interval, a view control rather than a config field",
 	`id="hostSelAll"`:  "bulk-selection checkbox, not a config field",
 	`class="tl-cmp"`:   "history compare pick, not a config field; its label says what it does",
 	`class="host-sel"`: "bulk-selection checkbox, not a config field",

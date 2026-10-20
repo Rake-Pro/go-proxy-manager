@@ -13,7 +13,7 @@ CONTRIBUTING.md "Docs stay in sync with code"):
 - [ ] `docs/api/openapi.yaml`: every new/changed route (enforced by `internal/server/openapi_test.go`)
 - [ ] `docs/deployment.md`: flags, env vars, ports, upgrade caveats
 - [ ] `CHANGELOG.md`: `[Unreleased]` entry (Added/Changed/Fixed/Security)
-- [ ] `BACKLOG.md`: checked off a done item, or added a newly identified follow-up
+- [ ] Issues: closed or ticked the issue this resolves, filed any newly identified follow-up
 - [ ] `FEATURES.md`: a roadmap item shipped or its scope changed
 - [ ] N/A: this change has no user-visible or config-shape effect
 

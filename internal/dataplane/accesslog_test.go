@@ -63,6 +63,39 @@ func TestAccessLogLiveToggle(t *testing.T) {
 	if got := len(s.RecentLogs()); got != 1 {
 		t.Fatalf("captured %d entries after disabling, want still 1", got)
 	}
+
+	// ClearLogs empties the ring without touching the capture state, and a
+	// later capture lands in the empty ring.
+	s.ClearLogs()
+	if got := len(s.RecentLogs()); got != 0 {
+		t.Fatalf("captured %d entries after ClearLogs, want 0", got)
+	}
+	s.SetAccessLog(true)
+	serve()
+	serve()
+	if got := len(s.RecentLogs()); got != 2 {
+		t.Fatalf("captured %d entries after clear + 2 requests, want 2", got)
+	}
+}
+
+func TestLogRingClearAfterWrap(t *testing.T) {
+	r := newLogRing(3)
+	for i := 0; i < 5; i++ {
+		r.add(AccessEntry{Status: i})
+	}
+	if got := len(r.recent()); got != 3 {
+		t.Fatalf("len = %d, want 3", got)
+	}
+	r.clear()
+	if got := len(r.recent()); got != 0 {
+		t.Fatalf("len after clear = %d, want 0", got)
+	}
+	r.add(AccessEntry{Status: 7})
+	r.add(AccessEntry{Status: 8})
+	got := r.recent()
+	if len(got) != 2 || got[0].Status != 8 || got[1].Status != 7 {
+		t.Fatalf("after clear: %+v, want newest first [8 7]", got)
+	}
 }
 
 // A startup toggle that needs the observer (here: a metrics hook) keeps the

@@ -55,14 +55,14 @@ object. With nothing to report it says so and shows the live counts.
 
 ![Proxy hosts list](../assets/ui/proxy-hosts.png)
 
-- One row per host: the domain, its source (the k8s-managed or docker-managed
-  chip with the namespace/name it came from, or the object name when it
-  differs from the domain), the upstream, the certificate that covers the
-  first domain with its state (amber inside the renewal window, red when
-  expired, "no certificate" when nothing covers it), the sign-in gate, the
-  status, tags when any host has them, and the last change.
-- Filter by text or by zone (the domain group chips). Sort by domain, upstream
-  or last change.
+- One row per host: the domain (with the object or display name beside it
+  when it differs), the upstream, the certificate that covers the first
+  domain with its state (amber inside the renewal window, red when expired,
+  "no certificate" when nothing covers it), the sign-in gate, the status, the
+  tags (a discovered host's source, `k8s-managed` or `docker-managed`, is its
+  first chip) and the last change.
+- Filter by text, by field or by zone (the domain group chips). Every column
+  sorts; the choice is remembered in the browser.
 - Select rows for bulk actions. Clone, YAML and Delete live on the host's own
   page, not in the list.
 - **Add proxy host** opens the creation wizard below; the full editor stays one
@@ -122,8 +122,43 @@ object. With nothing to report it says so and shows the live counts.
   Clone and Delete (and Renew now on an ACME certificate) sit there too, and
   Clone asks for the name the same way.
 - The other list pages are tables like Proxy Hosts: one row per object, one
-  column per summary field, values wrapped rather than cut short, and the
-  whole row opens the object.
+  column per summary field, values wrapped rather than cut short, every
+  column sortable, and the whole row opens the object.
+
+## Filtering a list
+
+Every list has the same filter box.
+
+| Typed | Matches |
+|---|---|
+| `lan` | The word anywhere in the row's values (never in its markup) |
+| `tag:lan` | Only the `tag` field; the box's tooltip lists the fields of that list |
+| `-status:disabled` | Excludes; works on a word too (`-lan`) |
+| `name:"two words"` | A value with spaces |
+| `status:5xx` | Access Logs: a status class; `status:404` a code |
+
+- Typing suggests the field names, then the values present in the list; Enter
+  or a click takes a suggestion, Escape closes it.
+- A complete `field:value` term becomes a chip when you type a space; the
+  chips and the words in the box combine. Backspace on an empty box pulls the
+  last chip back for editing.
+- The matched text is highlighted in the rows.
+- A field whose left side is not a field name is just a word, so an upstream
+  written `group:k8s` is found by typing it.
+
+## Access Logs
+
+- The most recent proxied requests held in memory, newest first, while
+  capture is on. **Enable capture** turns it on live (until the next
+  restart); `-access-log` or `GPM_ACCESS_LOG=1` makes it the startup default.
+- **Auto-refresh** reloads the rows in place at the chosen interval, keeping
+  the filter, the sort and the scroll position; **Refresh** does it once.
+  Refreshing pauses while the tab is hidden.
+- **Clear** empties the buffer after a confirmation; capture is unchanged.
+- The count line says how many of the captured requests the filter shows and
+  how many the buffer holds. Filter fields: `method`, `host`, `path`,
+  `status` (a code or a class such as `4xx`), `client` and `slow:yes`
+  (requests over one second).
 
 ## Certificates
 

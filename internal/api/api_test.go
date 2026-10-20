@@ -523,6 +523,30 @@ func TestAccessLogToggle(t *testing.T) {
 	}
 }
 
+func TestLogsClear(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	cleared := 0
+	h := api.New(api.Deps{Store: st, ClearLogs: func() { cleared++ }})
+	w := do(t, h, "DELETE", "/logs", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("clear want 204 got %d: %s", w.Code, w.Body.String())
+	}
+	if cleared != 1 {
+		t.Fatalf("ClearLogs called %d times, want 1", cleared)
+	}
+	if w.Header().Get("X-Config-Commit") != "" {
+		t.Fatal("runtime clear must not report a config commit")
+	}
+	unwired, _ := newHandler(t)
+	if w := do(t, unwired, "DELETE", "/logs", ""); w.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired want 501 got %d", w.Code)
+	}
+}
+
 func TestHistoryDiffViaAPI(t *testing.T) {
 	h, _ := newHandler(t)
 	if w := do(t, h, "PUT", "/proxy-hosts/app", validProxyHost); w.Code != http.StatusOK {

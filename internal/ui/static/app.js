@@ -268,6 +268,389 @@ function metaCarryForward(o) {
 function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 
+// ---------- list filter ----------
+// Every list filter box takes plain words and field-scoped terms. parseFilter
+// turns `tag:lan -status:disabled "two words" foo` into terms. A colon only
+// scopes a term when its left side is one of the list's fields, so an
+// upstream written "group:k8s" is still found by typing it. A leading "-"
+// excludes. A field with nothing after the colon (still being typed) matches
+// everything.
+function parseFilter(q, fields) {
+  const terms = [];
+  const re = /(-)?(?:([A-Za-z][\w-]*):)?(?:"([^"]*)"|(\S*))/g;
+  let m;
+  while ((m = re.exec(q || ''))) {
+    if (!m[0]) { re.lastIndex++; continue; }
+    let field = (m[2] || '').toLowerCase();
+    let value = m[3] != null ? m[3] : m[4];
+    if (field && !(fields && fields[field])) {
+      value = m[2] + ':' + (m[3] != null ? '"' + m[3] + '"' : m[4]);
+      field = '';
+    }
+    value = value.trim().toLowerCase();
+    if (!value) continue;
+    terms.push({ neg: !!m[1], field, value });
+  }
+  return terms;
+}
+// A filterable record is {blob, f}: blob is every value the row was built from
+// (lowercase, never the markup), f maps a field name to its lowercase values.
+// Every term must hold; a scoped term matches a substring of any of the
+// field's values, a word matches the blob.
+function filterHit(rec, terms) {
+  for (const t of terms) {
+    let hit;
+    if (t.field) {
+      const vals = (rec.f && rec.f[t.field]) || [];
+      hit = vals.some((v) => v.indexOf(t.value) !== -1);
+    } else {
+      hit = (rec.blob || '').indexOf(t.value) !== -1;
+    }
+    if (hit === t.neg) return false;
+  }
+  return true;
+}
+// fvals flattens its arguments (strings, numbers, arrays of them) to the
+// lowercase value list a record field holds; blanks are dropped.
+function fvals() {
+  const out = [];
+  Array.prototype.forEach.call(arguments, (v) => {
+    (Array.isArray(v) ? v : [v]).forEach((x) => {
+      if (x == null || x === '' || typeof x === 'boolean') return;
+      out.push(String(x).toLowerCase());
+    });
+  });
+  return out;
+}
+// The suggestion values for a field: every distinct value across the records,
+// first spelling wins, sorted.
+function fieldValues(recs) {
+  const out = {};
+  recs.forEach((r) => {
+    Object.keys(r.f || {}).forEach((k) => {
+      const seen = out[k] || (out[k] = []);
+      r.f[k].forEach((v) => { if (seen.indexOf(v) === -1) seen.push(v); });
+    });
+  });
+  Object.keys(out).forEach((k) => out[k].sort());
+  return out;
+}
+
+// filterBoxHtml renders a list's search control: the committed field terms as
+// chips, the input, and the suggestion list under it. fields is
+// {name: 'what it matches'}, which the title and the suggestions show.
+function filterBoxHtml(id, placeholder, label, fields) {
+  const names = Object.keys(fields || {});
+  const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; a leading - excludes. Type to see suggestions.`;
+  return `<div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`;
+}
+// wireFilter drives a filterBoxHtml control. fields is {name: hint}; values()
+// returns {field: [values]} for the suggestions (read when the list opens, so a
+// list that refreshes keeps them current); onChange(terms) runs on every
+// change. Typing suggests field names, then the values present in the list; a
+// complete field term becomes a chip on space, Enter or when its suggestion
+// is taken, and Backspace on an empty input pulls the last chip back to edit
+// it. Plain words stay in the input and filter as they are typed.
+// Returns {terms} for a caller that re-renders and needs the current terms.
+function wireFilter(id, fields, values, onChange) {
+  const input = $('#' + id), wrap = $('#' + id + '-wrap'), sug = $('#' + id + '-sug');
+  if (!input) return { terms: () => [] };
+  const chips = [];
+  let items = [], active = -1, tokStart = 0;
+  const query = () => (chips.join(' ') + ' ' + input.value).trim();
+  const terms = () => parseFilter(query(), fields);
+  const fire = () => onChange(terms());
+  const fieldRe = /^(-?)([A-Za-z][\w-]*):(.*)$/;
+
+  function renderChips() {
+    $$('.chip-tok', wrap).forEach((el) => el.remove());
+    chips.forEach((tok, i) => {
+      const el = document.createElement('span');
+      el.className = 'chip-tok';
+      el.innerHTML = `<span class="chip-tok-t">${esc(tok)}</span><button type="button" aria-label="Remove ${esc(tok)}" tabindex="-1">${ICON.x}</button>`;
+      el.querySelector('button').addEventListener('click', () => { chips.splice(i, 1); renderChips(); fire(); input.focus(); });
+      wrap.insertBefore(el, input);
+    });
+  }
+  function close() {
+    items = []; active = -1;
+    sug.hidden = true; sug.innerHTML = '';
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+  }
+  function setActive(i) {
+    active = i;
+    $$('.fsug-item', sug).forEach((el, j) => el.classList.toggle('on', j === i));
+    if (i >= 0) input.setAttribute('aria-activedescendant', `${id}-opt-${i}`);
+    else input.removeAttribute('aria-activedescendant');
+  }
+  // Moves every complete field term in the input to a chip. With `all`
+  // false only a term followed by a space goes (the one just finished).
+  function commit(all) {
+    const v = input.value;
+    const re = /(?:^|\s)(-?[A-Za-z][\w-]*:(?:"[^"]*"|\S+))(?=\s|$)/g;
+    let out = v, m, moved = false;
+    const found = [];
+    while ((m = re.exec(v))) found.push({ tok: m[1], end: m.index + m[0].length });
+    found.forEach((f) => {
+      const fm = fieldRe.exec(f.tok);
+      if (!fm || !fields[fm[2].toLowerCase()]) return;
+      if (!all && !/\s/.test(v.slice(f.end, f.end + 1))) return;
+      chips.push(fm[1] + fm[2].toLowerCase() + ':' + fm[3]);
+      out = out.replace(f.tok, '');
+      moved = true;
+    });
+    if (!moved) return false;
+    input.value = out.replace(/\s{2,}/g, ' ').replace(/^\s+/, '');
+    renderChips();
+    return true;
+  }
+  function suggest() {
+    const v = input.value;
+    const start = v.search(/\S+$/);
+    const tok = start === -1 ? '' : v.slice(start);
+    tokStart = start === -1 ? v.length : start;
+    const neg = tok.charAt(0) === '-';
+    const body = neg ? tok.slice(1) : tok;
+    const colon = body.indexOf(':');
+    items = [];
+    if (colon === -1) {
+      const typed = body.toLowerCase();
+      Object.keys(fields).forEach((f) => {
+        if (!typed || f.indexOf(typed) === 0) items.push({ text: (neg ? '-' : '') + f + ':', hint: fields[f], kind: 'field' });
+      });
+    } else {
+      const f = body.slice(0, colon).toLowerCase();
+      if (fields[f]) {
+        const typed = body.slice(colon + 1).toLowerCase().replace(/^"|"$/g, '');
+        const all = (values && values()[f]) || [];
+        all.forEach((s) => {
+          if (typed && s.indexOf(typed) === -1) return;
+          items.push({ text: (neg ? '-' : '') + f + ':' + (/\s/.test(s) ? '"' + s + '"' : s), hint: '', kind: 'value' });
+        });
+        items = items.slice(0, 12);
+      }
+    }
+    if (!items.length || document.activeElement !== input) { close(); return; }
+    sug.innerHTML = items.map((it, i) => `<div class="fsug-item" role="option" id="${id}-opt-${i}" data-i="${i}" aria-selected="false"><span class="mono">${esc(it.text)}</span>${it.hint ? `<span class="faint">${esc(it.hint)}</span>` : ''}</div>`).join('');
+    sug.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    setActive(-1);
+  }
+  function accept(i) {
+    const it = items[i];
+    if (!it) return;
+    const before = input.value.slice(0, tokStart);
+    if (it.kind === 'field') {
+      input.value = before + it.text;
+      suggest();
+    } else {
+      chips.push(it.text);
+      input.value = before.replace(/\s+$/, '');
+      renderChips();
+      close();
+    }
+    fire();
+  }
+
+  input.addEventListener('input', () => {
+    if (commit(false)) close(); else suggest();
+    fire();
+  });
+  input.addEventListener('focus', suggest);
+  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (sug.hidden) suggest(); if (items.length) setActive((active + 1) % items.length); return; }
+    if (e.key === 'ArrowUp' && items.length) { e.preventDefault(); setActive((active - 1 + items.length) % items.length); return; }
+    if (e.key === 'Escape' && !sug.hidden) { e.preventDefault(); close(); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (active >= 0) { accept(active); return; }
+      if (commit(true)) { close(); fire(); }
+      return;
+    }
+    if (e.key === 'Backspace' && !input.value && chips.length) {
+      e.preventDefault();
+      input.value = chips.pop();
+      renderChips();
+      suggest();
+      fire();
+    }
+  });
+  // mousedown, so the input keeps focus and blur does not close the list
+  // before the click lands.
+  sug.addEventListener('mousedown', (e) => {
+    const el = e.target.closest('.fsug-item');
+    if (!el) return;
+    e.preventDefault();
+    accept(Number(el.dataset.i));
+  });
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) input.focus(); });
+  return { terms };
+}
+// highlightTerms wraps every match of the filter's words and values inside
+// root's visible rows in <mark>. Previous marks are unwrapped first, so it is
+// safe to call on every filter pass. Controls and folded "+N" blocks are
+// skipped; a hidden row is not touched.
+function highlightTerms(root, terms) {
+  if (!root) return;
+  $$('mark.hl', root).forEach((m) => { m.replaceWith(document.createTextNode(m.textContent)); });
+  root.normalize();
+  const needles = terms.filter((t) => !t.neg && t.value).map((t) => t.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!needles.length) return;
+  const re = new RegExp(needles.join('|'), 'gi');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      const p = n.parentElement;
+      if (!p || !/\S/.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
+      if (p.closest('button, input, select, textarea, mark, .more-list, .sort-btn')) return NodeFilter.FILTER_REJECT;
+      const row = p.closest('tr, .tl-item');
+      if (row && row.style.display === 'none') return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) nodes.push(n);
+  nodes.forEach((node) => {
+    const text = node.nodeValue;
+    re.lastIndex = 0;
+    let m, last = 0, frag = null;
+    while ((m = re.exec(text))) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      if (!frag) frag = document.createDocumentFragment();
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mk = document.createElement('mark');
+      mk.className = 'hl';
+      mk.textContent = m[0];
+      frag.appendChild(mk);
+      last = m.index + m[0].length;
+    }
+    if (!frag) return;
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.replaceWith(frag);
+  });
+}
+// A DOM-driven filter pass for lists that render once: rows carry data-i (an
+// index into recs) or data-name (a key into recs); a miss hides the row. The
+// empty-state element, if given, shows when nothing is left. Returns the
+// number of rows shown.
+function applyRowFilter(rows, recs, terms, emptyEl) {
+  let shown = 0;
+  rows.forEach((el) => {
+    const rec = el.dataset.i != null ? recs[Number(el.dataset.i)] : recs[el.dataset.name];
+    const hit = !rec || filterHit(rec, terms);
+    el.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  if (emptyEl) emptyEl.hidden = shown > 0;
+  return shown;
+}
+
+// ---------- table sort ----------
+// sortThHtml renders one column header. The th keeps the columnheader role
+// (that is what aria-sort is valid on); the control inside it is a real
+// button. A column without a key is a plain header.
+function sortThHtml(col, sort) {
+  const cls = [col.key ? 'sortable' : '', col.cls || ''].filter(Boolean).join(' ');
+  const clsAttr = cls ? ` class="${cls}"` : '';
+  if (!col.key) return `<th${clsAttr}>${esc(col.label)}</th>`;
+  const active = sort.key === col.key;
+  const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
+  return `<th${clsAttr} aria-sort="${aria}" data-sort="${esc(col.key)}"${col.type ? ` data-type="${esc(col.type)}"` : ''}><button type="button" class="sort-btn" data-sort="${esc(col.key)}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
+}
+// loadSort reads a remembered column choice; one that no longer names a column
+// is ignored. stored says whether anything valid was remembered.
+function loadSort(storageKey, def, valid) {
+  const sort = { key: def.key, dir: def.dir === -1 ? -1 : 1, stored: false };
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && p.key && valid(p.key)) { sort.key = p.key; sort.dir = p.dir === -1 ? -1 : 1; sort.stored = true; }
+    }
+  } catch (e) { /* ignore */ }
+  return sort;
+}
+function saveSort(storageKey, sort) {
+  try { localStorage.setItem(storageKey, JSON.stringify({ key: sort.key, dir: sort.dir })); } catch (e) { /* ignore */ }
+}
+// wireSortHead wires the sort buttons of a rendered head: a click on a column
+// sorts by it, a second click flips the direction, and rerender() repaints.
+// Keyboard focus stays on the same column after the repaint. The cell's
+// padding sorts on a mouse click too.
+function wireSortHead(head, sort, storageKey, rerender) {
+  $$('.sort-btn', head).forEach((b) => {
+    const th = b.closest('th');
+    th.addEventListener('click', (e) => { if (e.target === th) b.click(); });
+    b.addEventListener('click', () => {
+      const key = b.dataset.sort;
+      if (sort.key === key) sort.dir = -sort.dir; else { sort.key = key; sort.dir = 1; }
+      saveSort(storageKey, sort);
+      rerender();
+      const nb = head.querySelector(`.sort-btn[data-sort="${CSS.escape(key)}"]`);
+      if (nb) nb.focus();
+    });
+  });
+}
+// wireTableSort makes a rendered table sortable by its th[data-sort] headers
+// without a re-render: the body rows are reordered in place. A cell's data-v
+// (a number, or an ISO timestamp) is its sort value, else its text; a blank
+// sorts last whichever way. th[data-type="num"] compares numerically. A
+// tr.sub-row travels with the row above it. The choice persists under
+// storageKey; only a remembered choice reorders at first paint, the server's
+// order stands otherwise. Returns apply(), for a caller that replaces the rows
+// and wants the same order back.
+function wireTableSort(table, storageKey, def) {
+  if (!table || !table.tHead || !table.tBodies.length) return { apply() {} };
+  const head = table.tHead;
+  const cols = $$('th', head).map((th) => ({
+    key: th.dataset.sort || null, label: th.textContent.trim(), cls: th.className.replace(/\bsortable\b/, '').trim(), type: th.dataset.type || '',
+  }));
+  const valid = (k) => cols.some((c) => c.key === k);
+  const sort = loadSort(storageKey, def || { key: '', dir: 1 }, valid);
+  function apply() {
+    const body = table.tBodies[0];
+    const idx = cols.findIndex((c) => c.key === sort.key);
+    if (idx === -1) return;
+    const num = cols[idx].type === 'num';
+    const groups = [];
+    Array.from(body.rows).forEach((tr) => {
+      if (tr.classList.contains('sub-row') && groups.length) groups[groups.length - 1].rows.push(tr);
+      else groups.push({ tr, rows: [tr] });
+    });
+    groups.forEach((g, i) => {
+      const td = g.tr.cells[idx];
+      g.i = i;
+      g.v = td ? (td.dataset.v != null ? td.dataset.v : td.textContent.trim()) : '';
+      g.n = num ? parseFloat(g.v) : NaN;
+      g.blank = g.v === '' || (num && isNaN(g.n));
+    });
+    groups.sort((a, b) => {
+      if (a.blank !== b.blank) return a.blank ? 1 : -1;
+      const c = num ? a.n - b.n : a.v.localeCompare(b.v, undefined, { numeric: true, sensitivity: 'base' });
+      return c === 0 ? a.i - b.i : c * sort.dir;
+    });
+    groups.forEach((g) => g.rows.forEach((tr) => body.appendChild(tr)));
+  }
+  function renderHead() {
+    head.innerHTML = '<tr>' + cols.map((c) => sortThHtml(c, sort)).join('') + '</tr>';
+    wireSortHead(head, sort, storageKey, () => { renderHead(); apply(); });
+  }
+  renderHead();
+  if (sort.stored) apply();
+  return { apply };
+}
+// wireMiniTables wires every table[data-sort-key] under root that has not
+// been wired yet; a view that renders a status table calls it after painting.
+function wireMiniTables(root) {
+  $$('table[data-sort-key]', root || document).forEach((t) => {
+    if (t.dataset.sortWired) return;
+    t.dataset.sortWired = '1';
+    wireTableSort(t, t.dataset.sortKey, { key: '', dir: 1 });
+  });
+}
+
 // Maps a domain to its registrable zone for the hosts list filter chips: the
 // last two labels, so www.notes.example.com and portal.internal.example.com
 // both belong to example.com. Where the last two labels are a public second
@@ -1412,7 +1795,7 @@ const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '.btn.danger-soft', '[data-revert]', '[data-revert-obj]',
   '.tok-rotate', '.tok-toggle', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
-  '#ed-src-reconcile', '#logsToggle', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
+  '#ed-src-reconcile', '#logsToggle', '#logsClear', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
   // Clone leads to an editor whose Save a read-only caller cannot use, so it is
   // gated like the proxy host band's Clone.
@@ -2698,6 +3081,7 @@ async function route() {
     applyInsecureCookieBanner(c);
     armDirtyTracking(c);
     decorateHints(c);
+    wireMiniTables(c);
     if (hintObserver) { hintObserver.disconnect(); hintObserver.observe(c, { childList: true, subtree: true }); }
     window.dispatchEvent(new CustomEvent('gpm:routed', { detail: { hash: location.hash, ok: true } }));
   } catch (e) {
@@ -2864,8 +3248,8 @@ function discoveryCounters(st) {
 }
 function discoveryHostsTable(hosts, secondCol, secondKey) {
   if (!arr(hosts).length) return '<div class="hint">No hosts in the last run.</div>';
-  return `<div class="table-wrap"><table class="mini-table">
-    <thead><tr><th>Host</th><th>${esc(secondCol)}</th><th>Domains</th><th>Action</th><th>Profile</th><th>Reason</th></tr></thead>
+  return `<div class="table-wrap"><table class="mini-table" data-sort-key="gpm.discovery.sort">
+    <thead><tr><th data-sort="host">Host</th><th data-sort="second">${esc(secondCol)}</th><th data-sort="domains">Domains</th><th data-sort="action">Action</th><th data-sort="profile">Profile</th><th data-sort="reason">Reason</th></tr></thead>
     <tbody>${arr(hosts).map((h) => `<tr>
       <td class="col-name"><a href="#/hosts/${encodeURIComponent(h.name || '')}" class="mono trunc" title="${esc(h.name || '')}">${esc(h.name || '')}</a></td>
       <td class="mono faint col-name"><span class="trunc" title="${esc(h[secondKey] || '')}">${esc(h[secondKey] || '')}</span></td>
@@ -3377,7 +3761,7 @@ async function viewIntegrations(c, tab) {
       if (st.error) parts.push('FAILED - ' + st.error + (st.lastSuccess ? ' (last success ' + fmtTime(st.lastSuccess) + ', managed hosts frozen as they were)' : ' (no successful run yet)'));
       else parts.push(`${st.discovered || 0} annotated Ingresses, ${st.managed || 0} managed hosts (+${st.created || 0} / ~${st.updated || 0} / -${st.deleted || 0}${st.skipped ? ', ' + st.skipped + ' skipped' : ''})`);
       el.textContent = parts.join('. ') + '.';
-      if (list) list.innerHTML = discoveryRunLine(st) + discoveryCounters(st) + discoveryHostsTable(st.hosts, 'Ingress', 'ingress');
+      if (list) { list.innerHTML = discoveryRunLine(st) + discoveryCounters(st) + discoveryHostsTable(st.hosts, 'Ingress', 'ingress'); wireMiniTables(list); }
     } catch (e) {
       el.textContent = e && e.status === 501 ? 'Ingress discovery is not available in this build.' : 'Status unavailable: ' + (e.message || e);
       if (list) list.innerHTML = '';
@@ -3406,7 +3790,7 @@ async function viewIntegrations(c, tab) {
       el.textContent = 'Dry run, nothing was changed. ' + (parts.length ? parts.join('; ') : 'no changes') +
         ` (${p.discovered || 0} annotated Ingresses, ${p.managed || 0} managed hosts after).`;
       const list = $('#set-id-hosts');
-      if (list) list.innerHTML = discoveryCounters(p) + discoveryHostsTable(p.hosts, 'Ingress', 'ingress');
+      if (list) { list.innerHTML = discoveryCounters(p) + discoveryHostsTable(p.hosts, 'Ingress', 'ingress'); wireMiniTables(list); }
     } catch (e) {
       el.textContent = e && e.status === 501 ? 'Ingress discovery is not available in this build.' :
         (e && e.status === 409 ? 'A reconcile is already in progress; try again shortly.' : 'Preview unavailable: ' + (e.message || e));
@@ -3519,6 +3903,7 @@ async function viewIntegrations(c, tab) {
       + (st.error ? `<div class="inline-error">${esc(st.error)}</div>` : '')
       + discoveryCounters(st)
       + discoveryHostsTable(st.hosts, 'Container', 'container');
+    wireMiniTables(el);
   }
   async function renderDockerStatus() {
     const el = $('#set-dkr-status');
@@ -3566,15 +3951,16 @@ async function viewIntegrations(c, tab) {
     try {
       const st = (await api('/api/access-list-sources/status')).data || {};
       const rows = arr(st.sources);
-      el.innerHTML = rows.length ? `<div class="table-wrap"><table class="mini-table">
-        <thead><tr><th>Access list</th><th>Source</th><th class="col-time">Fetched</th><th class="col-num">Entries</th><th>Error</th></tr></thead>
+      el.innerHTML = rows.length ? `<div class="table-wrap"><table class="mini-table" data-sort-key="gpm.als.sort">
+        <thead><tr><th data-sort="list">Access list</th><th data-sort="source">Source</th><th class="col-time" data-sort="fetched">Fetched</th><th class="col-num" data-sort="entries" data-type="num">Entries</th><th data-sort="error">Error</th></tr></thead>
         <tbody>${rows.map((r) => `<tr>
           <td class="col-name"><a class="mono trunc" href="#/access/${encodeURIComponent(r.list || '')}" title="${esc(r.list || '')}">${esc(r.list || '')}</a></td>
           <td class="mono col-name"><span class="trunc" title="${esc(r.name || '')}">${esc(r.name || '')}</span></td>
-          <td class="faint col-time"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'Never')}</td>
+          <td class="faint col-time" data-v="${esc(r.fetchedAt || '')}"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'Never')}</td>
           <td class="mono col-num">${esc(r.entryCount || 0)}</td>
           <td class="warn-text col-reason">${esc(r.lastError || '')}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="hint">No access list declares a remote source yet.</div>';
+      wireMiniTables(el);
     } catch (e) {
       el.innerHTML = `<div class="hint">${e && e.status === 501 ? 'Access-list source sync is not available in this build.' : esc('Status unavailable: ' + (e.message || e))}</div>`;
     }
@@ -4329,15 +4715,23 @@ async function listHosts(c) {
     const status = h.disabled ? 'disabled' : (h.maintenance ? 'maintenance' : 'live');
     const tags = arr(h.tags);
     const managed = managedBy(h);
+    const mc = MANAGED_CHIPS[managed];
+    const sourceTag = mc ? mc.text : '';
+    const auth = authMw || (authInline ? 'inline' : 'none');
     return {
-      h, domains, zone, upStr, cert, authMw, authInline, managed, status, tags,
+      h, domains, zone, upStr, cert, certName, authMw, authInline, managed, status, tags, sourceTag, auth,
       name: h.name || '',
       display: h.displayName || '',
       updated: h.updatedAt || '',
       // The filter haystack: every value the row is BUILT from, never the
-      // markup it renders to.
-      blob: [h.name, h.displayName, domains.join(' '), upStr, certName, authMw, authInline ? 'sign-in' : '', managed, status, tags.join(' ')]
+      // markup it renders to; f scopes the same values by field.
+      blob: [h.name, h.displayName, domains.join(' '), upStr, certName, authMw, authInline ? 'sign-in' : '', managed, sourceTag, status, tags.join(' ')]
         .join(' ').toLowerCase(),
+      f: {
+        domain: fvals(domains), name: fvals(h.name, h.displayName), upstream: fvals(upStr), cert: fvals(certName),
+        auth: fvals(auth), status: fvals(status), tag: fvals(tags, sourceTag), source: fvals(managed || 'manual'),
+        zone: fvals(zone), middleware: fvals(h.middlewares), access: fvals(h.accessLists),
+      },
     };
   });
   const zoneEntries = Object.keys(zoneCounts)
@@ -4355,53 +4749,45 @@ async function listHosts(c) {
   const SORTS = {
     domains: (r) => (r.domains[0] || r.name).toLowerCase(),
     upstream: (r) => r.upStr.toLowerCase(),
+    cert: (r) => r.certName.toLowerCase(),
+    auth: (r) => r.auth.toLowerCase(),
+    status: (r) => r.status,
+    tags: (r) => [r.sourceTag].concat(r.tags).filter(Boolean).join(' ').toLowerCase(),
     updated: (r) => r.updated || '',
   };
-  let sort = { key: 'domains', dir: 1 };
-  try {
-    const raw = localStorage.getItem(HOSTS_SORT_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && SORTS[parsed.key]) sort = { key: parsed.key, dir: parsed.dir === -1 ? -1 : 1 };
-    }
-  } catch (e) { /* ignore */ }
+  const sort = loadSort(HOSTS_SORT_KEY, { key: 'domains', dir: 1 }, (k) => !!SORTS[k]);
   const selected = new Set();
+  const FILTER_FIELDS = {
+    domain: 'a domain', name: 'object or display name', upstream: 'upstream host:port or group', cert: 'covering certificate',
+    auth: 'sign-in middleware, inline or none', status: 'live, disabled or maintenance', tag: 'a tag, or k8s-managed / docker-managed',
+    source: 'ingress-discovery, docker-discovery or manual', zone: 'domain group', middleware: 'an attached middleware', access: 'an attached access list',
+  };
+  let terms = [];
 
-  // One line per row, like every other list. What used to be the domain's
-  // second line is two columns: Source (the kind chip and its namespace/name
-  // for a discovered host, otherwise the display or object name when it adds
-  // something) and Tags, which is only there when some host has tags.
-  const anyTags = recs.some((r) => r.tags.length);
+  // One line per row, like every other list. The Tags column always shows: a
+  // discovered host's source (k8s-managed, docker-managed) is its first tag,
+  // and a display or object name that adds something sits beside the domain.
   const COLUMNS = [
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
-    { key: null, label: 'Source', cls: 'col-source hide-sm' },
     { key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },
-    { key: null, label: 'Certificate', cls: 'col-cert hide-sm' },
-    { key: null, label: 'Sign-in', cls: 'col-auth hide-sm' },
-    { key: null, label: 'Status', cls: 'col-status' },
-    ...(anyTags ? [{ key: null, label: 'Tags', cls: 'col-tags hide-sm' }] : []),
+    { key: 'cert', label: 'Certificate', cls: 'col-cert hide-sm' },
+    { key: 'auth', label: 'Sign-in', cls: 'col-auth hide-sm' },
+    { key: 'status', label: 'Status', cls: 'col-status' },
+    { key: 'tags', label: 'Tags', cls: 'col-tags hide-sm' },
     { key: 'updated', label: 'Updated', cls: 'col-updated hide-sm hide-md' },
   ];
   function headHtml() {
     return `<tr><th class="sel-cell"><input type="checkbox" id="hostSelAll" aria-label="Select all listed hosts" /></th>`
-      + COLUMNS.map((col) => {
-        if (!col.key) return `<th class="${col.cls}">${esc(col.label)}</th>`;
-        const active = sort.key === col.key;
-        const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
-        // The th keeps its columnheader role (that is what aria-sort is valid
-        // on); the control inside it is a real button.
-        return `<th class="sortable ${col.cls}" aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
-      }).join('')
+      + COLUMNS.map((col) => sortThHtml(col, sort)).join('')
       + `</tr>`;
   }
 
   function visible() {
-    const q = (($('#hostFilter') && $('#hostFilter').value) || '').trim().toLowerCase();
     const out = recs.filter((r) => {
       // With no chip row there is no control to undo a zone filter, so it
       // does not apply.
       const zoneOk = !showZones || !r.zone || !zonesOff.has(r.zone);
-      return zoneOk && (!q || r.blob.indexOf(q) !== -1);
+      return zoneOk && filterHit(r, terms);
     });
     const get = SORTS[sort.key] || SORTS.domains;
     return out.sort((a, b) => {
@@ -4432,29 +4818,28 @@ async function listHosts(c) {
     // Three tag chips, then "+N" that opens the rest under the cell, as the
     // domains do.
     const tagChip = (t) => `<span class="chip tag" title="${esc(t)}">${esc(t)}</span>`;
-    const moreTags = r.tags.length > 3 ? moreToggle(r.tags.slice(3), r.tags.slice(3).map(tagChip).join(''), true) : null;
-    const tagChips = r.tags.slice(0, 3).map(tagChip).join('') + (moreTags ? moreTags.btn : '');
     const mc = MANAGED_CHIPS[r.managed];
+    // The source is the first tag: where the host came from, for a discovered
+    // one (its namespace/name is in the chip's title).
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
-    // Source: a display name or object name equal to the domain says nothing
-    // the Domain cell did not, so it is left out; a hand-written host with
-    // nothing to add shows "-".
+    const moreTags = r.tags.length > 3 ? moreToggle(r.tags.slice(3), r.tags.slice(3).map(tagChip).join(''), true) : null;
+    const tagChips = managedChip + r.tags.slice(0, 3).map(tagChip).join('') + (moreTags ? moreTags.btn : '');
+    // A display name or object name equal to the domain says nothing the
+    // Domain cell did not, so it is left out.
     const primary = r.domains[0] || h.name;
     const ident = (r.display && r.display !== primary) ? r.display : (h.name !== primary ? h.name : '');
     const identHtml = ident ? `<span class="trunc faint" title="${esc(ident)}">${esc(ident)}</span>` : '';
-    const source = managedChip || identHtml ? `<div class="cell-main">${managedChip}${identHtml}</div>` : '<span class="faint">-</span>';
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
       <td class="col-domain">
-        <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}</div>
+        <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}${identHtml}</div>
         ${more ? more.list : ''}
       </td>
-      <td class="col-source hide-sm">${source}</td>
       <td class="mono col-upstream hide-sm hide-md"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
       <td class="col-cert hide-sm">${tls}</td>
       <td class="col-auth hide-sm">${auth}</td>
       <td class="col-status">${status}</td>
-      ${anyTags ? `<td class="col-tags hide-sm">${tagChips}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}</td>` : ''}
+      <td class="col-tags hide-sm">${tagChips || '<span class="faint">-</span>'}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}</td>
       <td class="mono faint col-updated hide-sm hide-md">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
     </tr>`;
   }
@@ -4468,7 +4853,7 @@ async function listHosts(c) {
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, sign-in, tag and status" aria-label="Filter hosts" /></div>
+      ${filterBoxHtml('hostFilter', 'filter hosts...', 'Filter hosts', FILTER_FIELDS)}
       ${zoneChipsHtml}
       <div class="toolbar-actions">${addBtn}</div>
     </div>
@@ -4515,6 +4900,7 @@ async function listHosts(c) {
     $('#hostRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
       : `<tr><td colspan="${COLUMNS.length + 1}" class="list-empty">No host matches this filter.</td></tr>`;
+    highlightTerms($('#hostRows'), terms);
     wireRows();
     wireHead(rows);
     renderBulk();
@@ -4529,21 +4915,7 @@ async function listHosts(c) {
         render();
       });
     }
-    $$('#hostHead .sort-btn').forEach((b) => {
-      // The cell's padding still sorts on a mouse click, as it did before the
-      // button moved inside it.
-      const th = b.closest('th');
-      th.addEventListener('click', (e) => { if (e.target === th) b.click(); });
-      b.addEventListener('click', () => {
-        const key = b.dataset.sort;
-        sort = { key, dir: sort.key === key ? -sort.dir : 1 };
-        try { localStorage.setItem(HOSTS_SORT_KEY, JSON.stringify(sort)); } catch (e) { /* ignore */ }
-        render();
-        // The head is re-rendered: keep keyboard focus on the same column.
-        const nb = $(`#hostHead .sort-btn[data-sort="${key}"]`);
-        if (nb) nb.focus();
-      });
-    });
+    wireSortHead($('#hostHead'), sort, HOSTS_SORT_KEY, render);
   }
 
   function wireRows() {
@@ -4656,8 +5028,7 @@ async function listHosts(c) {
     if (c.isConnected) await route();
   }
 
-  const filter = $('#hostFilter');
-  filter.addEventListener('input', render);
+  wireFilter('hostFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
   const zoneChips = $('#zoneChips');
   if (zoneChips) {
     zoneChips.addEventListener('click', (e) => {
@@ -5889,40 +6260,44 @@ async function listCerts(c) {
       expiry: certExpiry(ct),
       state: ct.state || '',
       issuer: ct.issuer || '',
-      blob: [ct.name, ct.displayName, domains.join(' '), type, challenge, provider, detail, ct.issuer, ct.state].join(' ').toLowerCase(),
+      blob: [ct.name, ct.displayName, domains.join(' '), type, challenge, provider, detail, ct.issuer, ct.state, ct.disabled ? 'disabled' : ''].join(' ').toLowerCase(),
+      f: {
+        name: fvals(ct.name, ct.displayName), domain: fvals(domains), type: fvals(type), challenge: fvals(challenge),
+        provider: fvals(provider), issuer: fvals(ct.issuer), state: fvals(ct.state), status: fvals(ct.disabled ? 'disabled' : 'live'),
+      },
     };
   });
 
-  let sort = { key: 'name', dir: 1 };
-  try {
-    const raw = localStorage.getItem(CERTS_SORT_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.key) sort = { key: parsed.key, dir: parsed.dir === -1 ? -1 : 1 };
-    }
-  } catch (e) { /* ignore */ }
   const SORTS = {
     name: (r) => r.name.toLowerCase(),
     domains: (r) => (r.domains[0] || '').toLowerCase(),
+    type: (r) => (r.type + ' ' + r.challenge + ' ' + r.provider).toLowerCase(),
+    issuer: (r) => r.issuer.toLowerCase(),
     // Blank expiry sorts last in either direction rather than pretending to be
     // the earliest date, which is what an empty string would do. The '9999'
     // only orders ascending; render() puts blanks last before applying dir.
     expiry: (r) => r.expiry || '9999',
   };
+  const sort = loadSort(CERTS_SORT_KEY, { key: 'name', dir: 1 }, (k) => !!SORTS[k]);
+  const FILTER_FIELDS = {
+    name: 'object or display name', domain: 'a domain or SAN', type: 'acme or custom', challenge: 'dns-01 or http-01',
+    provider: 'DNS provider', issuer: 'issuing CA', state: 'certificate state', status: 'live or disabled',
+  };
+  let terms = [];
   const COLUMNS = [
     { key: 'name', label: 'Name', cls: 'col-name' },
     { key: 'domains', label: 'Domains', cls: 'col-domains' },
     // Type and issuance are one fact ("acme, by dns-01 via cloudflare"), so
     // they share a two-line cell instead of two columns.
-    { key: null, label: 'Type', cls: 'col-type' },
-    { key: null, label: 'Issuer', cls: 'col-issuer' },
+    { key: 'type', label: 'Type', cls: 'col-type' },
+    { key: 'issuer', label: 'Issuer', cls: 'col-issuer' },
     { key: 'expiry', label: 'Expiry', cls: 'col-time' },
     { key: null, label: '', cls: 'col-actions' },
   ];
 
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter certificates..." title="Matches name, domain, type, challenge, DNS provider, issuer and state" aria-label="Filter certificates" /></div>
+      ${filterBoxHtml('certFilter', 'filter certificates...', 'Filter certificates', FILTER_FIELDS)}
       <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div class="table-wrap">
@@ -5933,13 +6308,7 @@ async function listCerts(c) {
     </div>`;
 
   function headHtml() {
-    return '<tr>' + COLUMNS.map((col) => {
-      const cls = col.cls ? ` class="${col.key ? 'sortable ' : ''}${col.cls}"` : (col.key ? ' class="sortable"' : '');
-      if (!col.key) return `<th${cls}>${esc(col.label)}</th>`;
-      const active = sort.key === col.key;
-      const aria = active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none';
-      return `<th${cls} aria-sort="${aria}"><button type="button" class="sort-btn" data-sort="${col.key}">${esc(col.label)}<span class="sort-mark" aria-hidden="true">${active ? (sort.dir === 1 ? '&#9650;' : '&#9660;') : '&#9650;'}</span></button></th>`;
-    }).join('') + '</tr>';
+    return '<tr>' + COLUMNS.map((col) => sortThHtml(col, sort)).join('') + '</tr>';
   }
 
   function rowHtml(r) {
@@ -5963,9 +6332,8 @@ async function listCerts(c) {
   }
 
   function render() {
-    const q = (($('#certFilter') && $('#certFilter').value) || '').trim().toLowerCase();
     const get = SORTS[sort.key] || SORTS.name;
-    const rows = recs.filter((r) => !q || r.blob.indexOf(q) !== -1)
+    const rows = recs.filter((r) => filterHit(r, terms))
       .sort((a, b) => {
         if (sort.key === 'expiry' && !a.expiry !== !b.expiry) return a.expiry ? -1 : 1;
         const av = get(a), bv = get(b);
@@ -5976,21 +6344,8 @@ async function listCerts(c) {
     $('#certRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
       : `<tr><td colspan="6" class="list-empty">No certificate matches this filter.</td></tr>`;
-    $$('#certHead .sort-btn').forEach((b) => {
-      // The cell's padding still sorts on a mouse click, as it did before the
-      // button moved inside it.
-      const th = b.closest('th');
-      th.addEventListener('click', (e) => { if (e.target === th) b.click(); });
-      b.addEventListener('click', () => {
-        const key = b.dataset.sort;
-        sort = { key, dir: sort.key === key ? -sort.dir : 1 };
-        try { localStorage.setItem(CERTS_SORT_KEY, JSON.stringify(sort)); } catch (e) { /* ignore */ }
-        render();
-        // The head is re-rendered: keep keyboard focus on the same column.
-        const nb = $(`#certHead .sort-btn[data-sort="${key}"]`);
-        if (nb) nb.focus();
-      });
-    });
+    highlightTerms($('#certRows'), terms);
+    wireSortHead($('#certHead'), sort, CERTS_SORT_KEY, render);
     $$('#certRows tr.clickable').forEach((tr) => {
       tr.addEventListener('click', (e) => {
         if (e.target.closest('.ct-renew') || e.target.closest('a')) return;
@@ -6010,7 +6365,7 @@ async function listCerts(c) {
       $$('#certRows .ct-renew').forEach((b) => gateControl(b, false, readOnlyReason()));
     }
   }
-  $('#certFilter').addEventListener('input', render);
+  wireFilter('certFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
   render();
 }
 
@@ -6217,7 +6572,6 @@ const SECTION_META = {
     title: 'Client CAs', sub: 'The authority a client certificate is checked against, for hosts that ask devices for one at the handshake.',
     empty: 'Generate a CA here and gpm can issue the client certificates too; paste an existing certificate if your organisation already runs a CA.',
     singular: 'client CA', addLabel: 'Add client CA',
-    filterHint: 'name, display name, tags, CRL file and policy',
     summary: (o) => `<span class="k">Revocation</span><span class="v">${o.crlFile ? 'file: ' + esc(o.crlFile) : (o.crlPEM ? 'inline CRL' : 'none')}</span>` +
       ((o.crlFile || o.crlPEM) ? `<span class="k">Policy</span><span class="v">${enumChip('crlPolicy', o.crlPolicy === 'fail-open' ? 'fail-open' : '')}</span>` : ''),
   },
@@ -6225,7 +6579,6 @@ const SECTION_META = {
     title: 'Identity Providers', sub: 'Where people prove who they are: an OIDC provider, a forward-auth proxy or an auth-request outpost.',
     empty: 'Add the provider first. A sign-in middleware then references it, and every host that picks up that middleware is protected by it.',
     singular: 'identity provider', addLabel: 'Add identity provider',
-    filterHint: 'name, display name, tags, type, issuer URL, client ID and headers',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('idpType', o.type || '')}</span>` +
       // The client ID stays in the editor: it is a credential half, not a
       // list detail.
@@ -6236,7 +6589,6 @@ const SECTION_META = {
     title: 'Access Lists', sub: 'Who may reach a host, by IP range or country. Attach one to a host or to a single location.',
     empty: 'Start with a default action of deny plus one allow rule for your own network, then attach the list to a host.',
     singular: 'access list', addLabel: 'Add access list',
-    filterHint: 'name, display name, tags, default action, CIDRs, countries and sources',
     summary: (o) => `<span class="k">Rules</span><span class="v">${arr(o.rules).length}</span>` +
       `<span class="k">Sources</span><span class="v">${arr(o.sources).length}</span>` +
       (o.defaultAction ? `<span class="k">Default</span><span class="v">${esc(o.defaultAction)}</span>` : '') +
@@ -6248,7 +6600,6 @@ const SECTION_META = {
     title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, guards, path rewrites and deny hooks.',
     empty: 'Most installs start with one sign-in middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
     singular: 'middleware', many: 'middleware', addLabel: 'Add middleware',
-    filterHint: 'name, display name, tags, type, identity provider and settings',
     intro: 'Evaluation order is fixed, whatever order a host lists them in: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('middlewareType', o.type || '')}${(o.type === 'auth' && o.auth && o.auth.mode) ? ' - ' + esc(enumLabel('authMode', o.auth.mode).split(' - ')[0]) : ''}</span>` +
       (o.auth && o.auth.identityProvider ? `<span class="k">Identity provider</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
@@ -6262,7 +6613,6 @@ const SECTION_META = {
     title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into: ACME dns-01 challenges and DNS sync records.',
     empty: 'Add the provider that hosts your zone and give it a scoped API token, as a ${ENV:...} placeholder so no secret is committed.',
     singular: 'DNS provider', addLabel: 'Add DNS provider',
-    filterHint: 'name, display name, tags, provider and config values',
     summary: (o) => `<span class="k">Provider</span><span class="v">${esc(o.provider || '')}</span>` +
       (o.config ? `<span class="k">Config keys</span><span class="v v-list">${Object.keys(o.config).map((k) => `<span class="dl-item">${esc(k)}</span>`).join(', ')}</span>` : ''),
   },
@@ -6270,7 +6620,6 @@ const SECTION_META = {
     title: 'Redirects', sub: 'A domain that answers with a redirect: retired names, vanity hostnames, apex to www.',
     empty: 'Add the old domain, the target it should send visitors to, and whether the redirect is permanent.',
     singular: 'redirect', addLabel: 'Add redirect',
-    filterHint: 'domains, name, display name, tags, target and status code',
     domainFirst: true,
     summary: (o) => alsoDomainsKv(o) +
       (o.targetDomain ? `<span class="k">To</span><span class="v">${esc(((o.targetScheme && o.targetScheme !== 'auto') ? o.targetScheme + '://' : '') + o.targetDomain)}</span>` : '') +
@@ -6280,7 +6629,6 @@ const SECTION_META = {
     title: 'Streams', sub: 'Raw TCP or UDP forwarding for services that do not speak HTTP, with optional SNI routing and TLS termination.',
     empty: 'Add the port gpm should listen on and the host and port behind it. Leave TLS on none unless you need SNI routing.',
     singular: 'stream', addLabel: 'Add stream',
-    filterHint: 'name, display name, tags, listen port, target and protocol',
     summary: (o) => (o.listenPort != null ? `<span class="k">Listen</span><span class="v">:${esc(o.listenPort)}</span>` : '') +
       (o.target && o.target.host ? `<span class="k">Target</span><span class="v">${esc(o.target.host + ':' + (o.target.port != null ? o.target.port : ''))}</span>` : '') +
       (o.protocol ? `<span class="k">Protocol</span><span class="v">${enumChip('streamProtocol', o.protocol)}</span>` : ''),
@@ -6289,7 +6637,6 @@ const SECTION_META = {
     title: 'Parked Hosts', sub: 'A domain that answers but serves nothing: a reserved name, or a clean 404 instead of another host.',
     empty: 'Add the domains to reserve. They answer 404 by default; change the status code if you want something else.',
     singular: 'parked host', addLabel: 'Add parked host',
-    filterHint: 'domains, name, display name, tags and status code',
     domainFirst: true,
     summary: (o) => alsoDomainsKv(o) +
       `<span class="k">Answers</span><span class="v">${esc(o.statusCode || 404)}</span>`,
@@ -6298,7 +6645,6 @@ const SECTION_META = {
     title: 'Upstream Groups', sub: 'Several upstreams behind one name, with health checks and a load-distribution policy.',
     empty: 'Add two or more upstreams, then pick how requests are spread across them. A health check keeps a dead one out of the rotation.',
     singular: 'upstream group', addLabel: 'Add upstream group',
-    filterHint: 'name, display name, tags, upstream addresses and policy',
     // The members are a pool, not a chain: comma-joined. Health is the live
     // probe state from /api/health, as on the Overview.
     health: true,
@@ -6371,8 +6717,7 @@ async function genericList(c, section) {
       meta.empty || `Add your first ${meta.singular}.`, meta.addLabel, `#/${section}/_new`);
     return;
   }
-  const blobs = {};
-  items.forEach((o) => { blobs[o.name] = objSearchBlob(o); });
+  const recs = {};
   // Redirects and parked hosts read like the Proxy Hosts list: the domain is
   // the title, the object name the subline, then status, tags and last change.
   const LIVE_CHIP = '<span class="chip flat ok"><span class="dot ok"></span>Live</span>';
@@ -6394,11 +6739,28 @@ async function genericList(c, section) {
   parsed.forEach((cells) => Object.keys(cells).forEach((k) => { if (!keys.includes(k)) keys.push(k); }));
   const anyTags = items.some((o) => arr(o.tags).length);
   const anyUpdated = items.some((o) => o.updatedAt);
+  // The filter fields are the columns: name (and domain for a domain-first
+  // list), every summary key, tag and status. A summary cell's text is the
+  // value the field matches on.
+  const fieldKey = (k) => k.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const cellText = (html) => { const t = document.createElement('template'); t.innerHTML = html || ''; return t.content.textContent.trim(); };
+  const FILTER_FIELDS = Object.assign(
+    { name: 'object or display name' },
+    meta.domainFirst ? { domain: 'a domain' } : {},
+    keys.reduce((m, k) => { m[fieldKey(k)] = `the ${k} column`; return m; }, {}),
+    { tag: 'a tag', status: 'live or disabled' },
+  );
+  items.forEach((o, i) => {
+    const f = { name: fvals(o.name, o.displayName), tag: fvals(o.tags), status: fvals(o.disabled ? 'disabled' : 'live') };
+    if (meta.domainFirst) f.domain = fvals(o.domains);
+    keys.forEach((k) => { f[fieldKey(k)] = fvals(cellText(parsed[i][k])); });
+    recs[o.name] = { blob: objSearchBlob(o), f };
+  });
   const headHtml = '<tr>'
-    + `<th class="col-name">${meta.domainFirst ? 'Domain' : 'Name'}</th>`
-    + keys.map((k) => `<th>${esc(k)}</th>`).join('')
-    + (anyTags ? '<th class="col-tags">Tags</th>' : '')
-    + (anyUpdated ? '<th class="col-updated">Updated</th>' : '')
+    + `<th class="col-name" data-sort="name">${meta.domainFirst ? 'Domain' : 'Name'}</th>`
+    + keys.map((k) => `<th data-sort="${esc(fieldKey(k))}">${esc(k)}</th>`).join('')
+    + (anyTags ? '<th class="col-tags" data-sort="tags">Tags</th>' : '')
+    + (anyUpdated ? '<th class="col-updated" data-sort="updated">Updated</th>' : '')
     + '</tr>';
   const rowHtml = (o, i) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
@@ -6420,13 +6782,13 @@ async function genericList(c, section) {
       <td class="col-name"><div class="cell-main">${main}${sub}</div></td>
       ${keys.map((k) => `<td class="col-v">${parsed[i][k] || '<span class="faint">-</span>'}</td>`).join('')}
       ${anyTags ? `<td class="col-tags">${arr(o.tags).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</td>` : ''}
-      ${anyUpdated ? `<td class="col-updated mono">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}
+      ${anyUpdated ? `<td class="col-updated mono" data-v="${esc(o.updatedAt || '')}">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}
     </tr>`;
   };
   const addBtn = `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`;
   c.innerHTML = head + `
     <div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(lowerTitle(meta.title))}..." title="${esc(`Matches ${meta.filterHint || 'name, display name and tags'}, and the word "disabled"`)}" aria-label="Filter ${esc(meta.title)}" /></div>
+      ${filterBoxHtml('gsFilter', `filter ${lowerTitle(meta.title)}...`, `Filter ${meta.title}`, FILTER_FIELDS)}
       <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div class="table-wrap">
@@ -6437,18 +6799,12 @@ async function genericList(c, section) {
     </div>
     <div class="list-empty" id="gsNone" hidden>No ${esc(meta.singular)} matches this filter.</div>`;
 
+  wireTableSort($('.gs-table', c), `gpm.${section}.sort`, { key: 'name', dir: 1 });
   // The filter matches the object's stored values, not the summary markup the
   // row happens to render.
-  const gsFilter = $('#gsFilter');
-  gsFilter.addEventListener('input', () => {
-    const q = gsFilter.value.trim().toLowerCase();
-    let shown = 0;
-    $$('#gsRows tr[data-name]').forEach((el) => {
-      const hit = !q || (blobs[el.dataset.name] || '').indexOf(q) !== -1;
-      el.style.display = hit ? '' : 'none';
-      if (hit) shown++;
-    });
-    $('#gsNone').hidden = shown > 0;
+  wireFilter('gsFilter', FILTER_FIELDS, () => fieldValues(Object.values(recs)), (terms) => {
+    applyRowFilter($$('#gsRows tr[data-name]'), recs, terms, $('#gsNone'));
+    highlightTerms($('#gsRows'), terms);
   });
 
   $$('#gsRows tr[data-name]').forEach((el) => {
@@ -8355,13 +8711,13 @@ function issuedCertsCard(issued) {
   const rows = issued.map((r) => `<tr${r.supersededBy ? ' class="superseded"' : ''}>
       <td class="col-name"><span class="trunc" title="${esc(r.commonName)}">${esc(r.commonName)}</span></td>
       <td class="mono col-serial"><span class="trunc" title="${esc(r.serial)}">${esc(r.serial)}</span></td>
-      <td class="col-time">${esc(fmtTime(r.notAfter))}</td>
+      <td class="col-time" data-v="${esc(r.notAfter || '')}">${esc(fmtTime(r.notAfter))}</td>
       <td class="col-status">${issuedStatusChip(r)}</td>
       <td class="col-actions">${r.supersededBy
         ? `<span class="hint">renewed as <span class="mono" title="${esc(r.supersededBy)}">${esc(r.supersededBy)}</span></span>`
         : `<button class="btn sm ren-btn" type="button" data-serial="${esc(r.serial)}" data-cn="${esc(r.commonName)}">Renew</button>`}</td>
     </tr>
-    ${r.supersededBy ? '' : `<tr class="ren-row" id="ren-${esc(r.serial)}" hidden><td colspan="5">
+    ${r.supersededBy ? '' : `<tr class="ren-row sub-row" id="ren-${esc(r.serial)}" hidden><td colspan="5">
       <div class="inline-fields">
         <div class="field-group"><label>New bundle password</label>
           <input class="field mono ren-pw" data-hint="clientCA.renew.password" type="password" minlength="12" placeholder="at least 12 characters" /></div>
@@ -8375,8 +8731,8 @@ function issuedCertsCard(issued) {
       <div class="hint" style="margin-top:8px">New key and serial, same subject. Does not revoke the current certificate - every device must import the new .p12.</div>
     </td></tr>`}`).join('');
   return `<div class="card form-section" id="issued-card"><p class="section-label">Issued certificates</p>
-    <div class="table-wrap"><table class="mini-table">
-      <thead><tr><th>Common name</th><th>Serial</th><th class="col-time">Expires</th><th>Status</th><th class="col-actions"></th></tr></thead>
+    <div class="table-wrap"><table class="mini-table" data-sort-key="gpm.issued.sort">
+      <thead><tr><th data-sort="cn">Common name</th><th data-sort="serial">Serial</th><th class="col-time" data-sort="expires">Expires</th><th data-sort="status">Status</th><th class="col-actions"></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
   </div>`;
@@ -8392,6 +8748,7 @@ async function refreshIssuedCerts(name, hasKey) {
   if (banner) banner.innerHTML = expiryBanner(issued);
   const card = $('#issued-card');
   if (card) card.outerHTML = issuedCertsCard(issued);
+  wireMiniTables($('#issued-card'));
   wireClientCertRenew(name, hasKey);
 }
 
@@ -8809,14 +9166,23 @@ async function viewTokens(c) {
     const m = moreToggle(list.slice(3), list.slice(3).map((s) => `<span class="chip">${esc(s)}</span>`).join(''));
     return shown + m.list + m.btn;
   };
+  const TOK_FIELDS = { name: 'token name', scope: 'a scope such as proxy-hosts:write', status: 'live, disabled or expired' };
+  const tokRecs = {};
+  tokens.forEach((t) => {
+    const status = t.disabled ? 'disabled' : (t.expiresAt && new Date(t.expiresAt) < new Date() ? 'expired' : 'live');
+    tokRecs[t.name] = {
+      blob: [t.name, t.displayName, arr(t.scopes).join(' '), status].join(' ').toLowerCase(),
+      f: { name: fvals(t.name, t.displayName), scope: fvals(t.scopes), status: fvals(status) },
+    };
+  });
   const rows = tokens.map((t) => `
-    <tr data-name="${esc(t.name)}" data-blob="${esc([t.name, t.displayName, arr(t.scopes).join(' '), t.disabled ? 'disabled' : ''].join(' ').toLowerCase())}">
+    <tr data-name="${esc(t.name)}">
       <td class="col-name">
         <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span>${t.createdAt ? `<span class="trunc faint mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}${t.disabled ? DISABLED_CHIP : ''}</div>
       </td>
       <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
-      <td class="mono col-time">${tokenExpiryLabel(t)}</td>
-      <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'Never'}</td>
+      <td class="mono col-time" data-v="${esc(t.expiresAt || '')}">${tokenExpiryLabel(t)}</td>
+      <td class="mono faint col-time" data-v="${esc(t.lastUsed || '')}">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'Never'}</td>
       <td class="col-actions">
         <div class="row-actions">
           <button class="btn ghost sm tok-edit" data-name="${esc(t.name)}" type="button">Edit</button>
@@ -8873,12 +9239,13 @@ async function viewTokens(c) {
       </div>
     </div>` +
     (tokens.length ? `<div class="toolbar">
-        <div class="search">${ICON.search}<input class="field mono" id="tokFilter" placeholder="filter tokens..." title="Matches name, display name, scope and disabled" aria-label="Filter tokens" /></div>
+        ${filterBoxHtml('tokFilter', 'filter tokens...', 'Filter tokens', TOK_FIELDS)}
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th class="col-name">Name</th><th>Scopes</th><th class="col-time">Expires</th><th class="col-time">Last used</th><th class="col-actions"></th></tr></thead>
+      <div class="table-wrap"><table id="tokTable">
+        <thead><tr><th class="col-name" data-sort="name">Name</th><th data-sort="scopes">Scopes</th><th class="col-time" data-sort="expires">Expires</th><th class="col-time" data-sort="used">Last used</th><th class="col-actions"></th></tr></thead>
         <tbody id="tokRows">${rows}</tbody>
-      </table></div>`
+      </table></div>
+      <div class="list-empty" id="tokNone" hidden>No token matches this filter.</div>`
       : emptyState('No API tokens yet',
         'Add one with only the scopes the script needs - write implies read, so a deploy job usually wants proxy-hosts:write and nothing else.'));
 
@@ -8909,15 +9276,11 @@ async function viewTokens(c) {
   });
   $('#tok-cancel').addEventListener('click', () => showForm(false));
 
-  const tokFilter = $('#tokFilter');
-  if (tokFilter) {
-    tokFilter.addEventListener('input', () => {
-      const q = tokFilter.value.trim().toLowerCase();
-      $$('#tokRows tr[data-blob]').forEach((tr) => {
-        tr.style.display = (!q || tr.dataset.blob.indexOf(q) !== -1) ? '' : 'none';
-      });
-    });
-  }
+  wireTableSort($('#tokTable'), 'gpm.tokens.sort', { key: 'name', dir: 1 });
+  wireFilter('tokFilter', TOK_FIELDS, () => fieldValues(Object.values(tokRecs)), (terms) => {
+    applyRowFilter($$('#tokRows tr[data-name]'), tokRecs, terms, $('#tokNone'));
+    highlightTerms($('#tokRows'), terms);
+  });
 
   const adminSw = $('#tok-admin');
   const scopeGrid = $('#tok-scopes');
@@ -9123,55 +9486,137 @@ async function viewTokens(c) {
 }
 
 // ---------- ACCESS LOGS ----------
-async function viewLogs(c) {
-  const data = (await api('/api/logs')).data || {};
-  const enabled = !!data.enabled;
-  const entries = arr(data.entries);
-  const statusClass = (s) => (s >= 500 ? 'err' : s >= 400 ? 'warn' : 'ok');
-  const rows = entries.map((e) => `
-    <tr data-blob="${esc([e.method, e.host, e.path, e.status, e.client].join(' ').toLowerCase())}">
-      <td class="mono faint col-time" title="${esc(fmtTime(e.time, true))}">${esc(fmtClock(e.time))}</td>
+const LOGS_AUTO_KEY = 'gpm.logs.auto';
+const LOGS_SORT_KEY = 'gpm.logs.sort';
+const LOG_FIELDS = {
+  method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
+  client: 'client address', slow: 'yes: requests slower than 1s',
+};
+function logRec(e) {
+  const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
+  return {
+    blob: [e.method, e.host, e.path, e.status, cls, e.client].join(' ').toLowerCase(),
+    f: {
+      method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
+      client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'),
+    },
+  };
+}
+function logRowHtml(e, i) {
+  const statusClass = e.status >= 500 ? 'err' : (e.status >= 400 ? 'warn' : 'ok');
+  return `<tr data-i="${i}">
+      <td class="mono faint col-time" data-v="${esc(e.time || '')}" title="${esc(fmtTime(e.time, true))}">${esc(fmtClock(e.time))}</td>
       <td class="mono col-method">${esc(e.method || '')}</td>
       <td class="mono col-host"><span class="trunc" title="${esc(e.host || '')}">${esc(e.host || '')}</span></td>
       <td class="mono col-path"><span class="trunc" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
-      <td class="col-status"><span class="chip ${statusClass(e.status)}">${esc(e.status)}</span></td>
-      <td class="mono col-num">${esc(e.durMs)}ms</td>
+      <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span></td>
+      <td class="mono col-num" data-v="${esc(e.durMs)}">${esc(e.durMs)}ms</td>
+      <td class="mono col-num" data-v="${esc(e.bytes || 0)}">${esc(fmtBytes(e.bytes || 0))}</td>
       <td class="mono faint col-client"><span class="trunc" title="${esc(e.client || '')}">${esc(e.client || '')}</span></td>
-    </tr>`).join('');
+    </tr>`;
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+async function viewLogs(c) {
+  const data = (await api('/api/logs')).data || {};
+  const enabled = !!data.enabled;
+  let entries = arr(data.entries);
+  let recs = entries.map(logRec);
+  const capacity = data.capacity || 0;
+  let auto = 0;
+  try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
+  const AUTO = [[0, 'Off'], [2, 'Every 2s'], [5, 'Every 5s'], [15, 'Every 15s'], [60, 'Every minute']];
 
   c.innerHTML = `
     ${pageHead('Access Logs', 'Most recent proxied requests, newest first (in-memory buffer).')}
     <div class="view-head">
-      <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
+      <label class="auto-refresh" for="logsAuto"><span>Auto-refresh</span><select class="field" id="logsAuto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
+      <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
+      <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
     </div>
-    ${entries.length ? `<div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="logFilter" placeholder="filter requests..." title="Matches host, path, method, status code and client address" aria-label="Filter log entries" /></div>
-    </div>` : ''}
     ${enabled ? '' : `<div class="card" style="margin-bottom:14px"><div class="hint">Request capture is <b>off</b> - the off path adds zero per-request overhead. "Enable capture" switches it on live, until the next restart; start gpm with <span class="mono">-access-log</span> (or <span class="mono">GPM_ACCESS_LOG=1</span>) to make it the startup default.</div></div>`}
-    ${entries.length ? `<div class="table-wrap">
-      <table>
-        <thead><tr><th class="col-time">Time</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th><th class="col-num">Duration</th><th>Client</th></tr></thead>
-        <tbody id="logRows">${rows}</tbody>
+    <div class="toolbar" id="logsToolbar"${entries.length ? '' : ' hidden'}>
+      ${filterBoxHtml('logFilter', 'filter requests...', 'Filter log entries', LOG_FIELDS)}
+      <div class="toolbar-actions"><span class="muted" id="logsCount"></span></div>
+    </div>
+    <div class="table-wrap" id="logsWrap"${entries.length ? '' : ' hidden'}>
+      <table id="logsTable">
+        <thead><tr><th class="col-time" data-sort="time">Time</th><th data-sort="method">Method</th><th data-sort="host">Host</th><th data-sort="path">Path</th><th data-sort="status" data-type="num">Status</th><th class="col-num" data-sort="dur" data-type="num">Duration</th><th class="col-num" data-sort="bytes" data-type="num">Bytes</th><th data-sort="client">Client</th></tr></thead>
+        <tbody id="logRows"></tbody>
       </table>
-    </div>` : (enabled
+    </div>
+    <div class="list-empty" id="logsNone" hidden>No request matches this filter.</div>
+    <div id="logsEmpty">${entries.length ? '' : (enabled
       ? emptyState('No requests captured yet', 'Requests that reach a proxy host appear here as they arrive. Refresh to load the latest.')
-      : emptyState('Nothing to show', 'Requests are recorded only while capture is on.'))}`;
+      : emptyState('Nothing to show', 'Requests are recorded only while capture is on.'))}</div>`;
 
-  const logFilter = $('#logFilter');
-  if (logFilter) {
-    // Matches the values behind the row (method, host, path, status, client),
-    // not the rendered cells - a chip label is not a search index.
-    logFilter.addEventListener('input', () => {
-      const q = logFilter.value.trim().toLowerCase();
-      $$('#logRows tr[data-blob]').forEach((tr) => {
-        tr.style.display = (!q || tr.dataset.blob.indexOf(q) !== -1) ? '' : 'none';
-      });
-    });
+  let terms = [];
+  const sorter = wireTableSort($('#logsTable'), LOGS_SORT_KEY, { key: 'time', dir: -1 });
+  function paint() {
+    $('#logRows').innerHTML = entries.map(logRowHtml).join('');
+    sorter.apply();
+    const shown = applyRowFilter($$('#logRows tr[data-i]'), recs, terms, $('#logsNone'));
+    highlightTerms($('#logRows'), terms);
+    $('#logsCount').textContent = (shown === entries.length ? `${entries.length}` : `${shown} of ${entries.length}`)
+      + ` ${entries.length === 1 ? 'request' : 'requests'}` + (capacity ? ` (buffer holds ${capacity})` : '');
+    $('#logsToolbar').hidden = !entries.length;
+    $('#logsWrap').hidden = !entries.length;
+    $('#logsClear').disabled = !entries.length || $('#logsClear').classList.contains('cap-disabled');
+    $('#logsEmpty').innerHTML = entries.length ? '' : emptyState('No requests captured yet', 'Requests that reach a proxy host appear here as they arrive.');
   }
+  paint();
+  wireFilter('logFilter', LOG_FIELDS, () => fieldValues(recs), (t) => { terms = t; paint(); });
+
+  // A refresh replaces the rows in place and keeps the filter, the sort and
+  // the scroll position; the capture state and the shell banners are only
+  // re-read through route().
+  async function refresh() {
+    let d;
+    try { d = (await api('/api/logs')).data || {}; } catch (e) { toastErr(e, 'Could not refresh the access log'); return; }
+    if (!!d.enabled !== enabled) { if (c.isConnected) await route(); return; }
+    entries = arr(d.entries);
+    recs = entries.map(logRec);
+    paint();
+  }
+  // The timer belongs to this render: it stops when the route moves on
+  // (routeSeq changes) or the tab is hidden, and never stacks.
+  const mySeq = routeSeq;
+  let timer = null;
+  function schedule() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (!auto) return;
+    timer = setInterval(() => {
+      if (mySeq !== routeSeq || !c.isConnected) { clearInterval(timer); timer = null; return; }
+      if (document.hidden) return;
+      refresh();
+    }, auto * 1000);
+  }
+  schedule();
+  $('#logsAuto').addEventListener('change', () => {
+    auto = Number($('#logsAuto').value) || 0;
+    try { localStorage.setItem(LOGS_AUTO_KEY, String(auto)); } catch (e) { /* ignore */ }
+    schedule();
+  });
+  $('#logsRefresh').addEventListener('click', refresh);
+  $('#logsClear').addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Clear the access log?',
+      body: `<p>Drops the ${plural(entries.length, 'captured request', 'captured requests')} held in memory. Capture ${enabled ? 'stays on, so new requests keep arriving' : 'stays off'}. Nothing on disk changes.</p>`,
+      confirmLabel: 'Clear log', danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api('/api/logs', { method: 'DELETE' });
+      toast('Access log cleared', '', 'ok');
+      await refresh();
+    } catch (e) { toastErr(e, 'Could not clear the access log'); }
+  });
   // route(), not viewLogs(c): a bare re-render drops the shell banners and the
   // read-only gating of "Disable capture".
-  $('#logsRefresh').addEventListener('click', () => route());
   $('#logsToggle').addEventListener('click', async () => {
     const btn = $('#logsToggle');
     btn.disabled = true;
@@ -9221,6 +9666,15 @@ async function viewHistory(c) {
   // files, api-token digests included), so the read-only role gets no diff
   // controls rather than buttons that 403.
   const canDiff = !isRoleReadOnly();
+  const HIST_FIELDS = { author: 'commit author', kind: 'object kind of a single-object change', name: 'object name', action: 'update, delete, import, restore, revert or settings', hash: 'commit hash' };
+  const histRecs = items.map((h) => {
+    const obj = parseObjectCommit(h.message);
+    const action = obj ? 'update' : ((/^(delete|import|restore|revert|settings)/i.exec(historyText(h.message) || '') || [''])[0].toLowerCase());
+    return {
+      blob: [h.message, historyText(h.message), h.author, h.email, h.hash].join(' ').toLowerCase(),
+      f: { author: fvals(h.author, h.email), kind: fvals(obj && kindSingular(obj.kind)), name: fvals(obj && obj.name), action: fvals(action), hash: fvals(h.hash) },
+    };
+  });
   c.innerHTML = `
     ${pageHead('History', 'Every change is a git commit. Reviewable, attributable, and reversible.')}
     <div class="card" style="margin-bottom:16px">
@@ -9233,7 +9687,7 @@ async function viewHistory(c) {
       </div>
     </div>
     ${items.length ? `<div class="toolbar">
-      <div class="search">${ICON.search}<input class="field mono" id="histFilter" placeholder="filter commits..." title="Matches message, author, email and commit hash" aria-label="Filter history" /></div>
+      ${filterBoxHtml('histFilter', 'filter commits...', 'Filter history', HIST_FIELDS)}
     </div>` : ''}
     <div class="card">
       ${items.length ? `<div class="timeline">${items.map((h, i) => {
@@ -9249,12 +9703,12 @@ async function viewHistory(c) {
         // role (no admin scope) does not get them.
         const changes = canDiff ? `<button type="button" class="revert" data-changes="${esc(h.hash)}" title="Every file this commit changed, as a diff">Changes</button>` : '';
         const pick = canDiff ? `<label class="check-item tl-pick" title="Pick two commits to compare"><input type="checkbox" class="tl-cmp" data-hash="${esc(h.hash)}" data-idx="${i}" aria-label="Compare ${esc(shortSha(h.hash))}" />Compare</label>` : '';
-        return `<div class="tl-item" data-blob="${esc([h.message, historyText(h.message), h.author, h.email, h.hash].join(' ').toLowerCase())}">
+        return `<div class="tl-item" data-i="${i}">
           <div class="tl-meta">${esc(fmtTime(h.when))} &middot; <span${h.email ? ` title="${esc(h.email)}"` : ''}>${esc(h.author || 'unknown')}</span></div>
           <div class="tl-msg" title="${esc(h.message || '')}">${esc(historyText(h.message))}</div>
           <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${changes}${scoped}${whole}${pick}</div>
         </div>`;
-      }).join('')}</div>` : '<div class="muted" style="font-size:13.5px">No commits yet.</div>'}
+      }).join('')}<div class="list-empty" id="histNone" hidden>No commit matches this filter.</div></div>` : '<div class="muted" style="font-size:13.5px">No commits yet.</div>'}
     </div>`;
 
   // Compare bar: appears once two commits are ticked. The diff always runs
@@ -9288,15 +9742,10 @@ async function viewHistory(c) {
     el.addEventListener('click', () => showDiff({ to: el.getAttribute('data-changes') }));
   });
 
-  const histFilter = $('#histFilter');
-  if (histFilter) {
-    histFilter.addEventListener('input', () => {
-      const q = histFilter.value.trim().toLowerCase();
-      $$('.timeline .tl-item[data-blob]').forEach((el) => {
-        el.style.display = (!q || el.dataset.blob.indexOf(q) !== -1) ? '' : 'none';
-      });
-    });
-  }
+  wireFilter('histFilter', HIST_FIELDS, () => fieldValues(histRecs), (terms) => {
+    applyRowFilter($$('.timeline .tl-item[data-i]'), histRecs, terms, $('#histNone'));
+    highlightTerms($('.timeline', c), terms);
+  });
   $('#backupBtn').addEventListener('click', () => { window.location.href = '/api/backup'; });
   const fileInput = $('#restoreFile');
   $('#restoreBtn').addEventListener('click', () => fileInput.click());

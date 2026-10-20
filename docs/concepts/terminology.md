@@ -99,4 +99,4 @@ Other views with no config object behind them:
 | **Integrations** | `settings.dnsSync`, `settings.ingressDiscovery`, `settings.dockerDiscovery`, `settings.accessListSync`, `settings.webhooks`, `settings.notifications`. |
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |
-| **Access Logs** | The in-memory log of proxy-listener requests and its runtime toggle (`PUT /api/logs`). Not stored config. |
+| **Access Logs** | The in-memory log of proxy-listener requests, its runtime toggle (`PUT /api/logs`) and its clear action (`DELETE /api/logs`). Not stored config. |

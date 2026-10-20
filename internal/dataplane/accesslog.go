@@ -52,6 +52,15 @@ func (r *logRing) add(e AccessEntry) {
 	r.n++
 }
 
+// clear drops every retained entry. Capture continues: the next request
+// lands in an empty ring.
+func (r *logRing) clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.buf = r.buf[:0]
+	r.n = 0
+}
+
 // recent returns up to cap entries, newest first.
 func (r *logRing) recent() []AccessEntry {
 	r.mu.Lock()

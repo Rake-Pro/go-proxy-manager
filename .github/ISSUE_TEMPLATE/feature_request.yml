@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [FEATURES.md](../../FEATURES.md) (roadmap) and
-        [BACKLOG.md](../../BACKLOG.md) (tracked follow-ups) first: your idea
-        may already be scoped or deliberately deferred with a reason stated.
+        Check [FEATURES.md](../../FEATURES.md) (roadmap) and the open
+        issues (tracked follow-ups) first: your idea may already be scoped or
+        deliberately deferred with a reason stated.
   - type: textarea
     id: problem
     attributes:

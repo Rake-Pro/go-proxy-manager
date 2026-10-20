@@ -2946,6 +2946,9 @@ components:
             properties: {}
             additionalProperties: true
           description: Newest first. Shape depends on internal/dataplane's access-log entry.
+        capacity:
+          type: integer
+          description: How many entries the buffer retains before the oldest is overwritten.
       description: Recent proxied-request access-log entries for the in-UI log viewer.
     ReconcileAck:
       type: object
@@ -5248,6 +5251,21 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+      x-scope: admin
+    delete:
+      summary: Empty the access-log buffer
+      description: Drops every retained entry; capture state is unchanged. Admin scope, as the toggle.
+      tags:
+      - Meta
+      responses:
+        '204':
+          description: Cleared
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          description: No access-log buffer is wired
       x-scope: admin
   /api/me:
     get:

@@ -453,6 +453,22 @@ tbody tr.clickable:hover td { background:var(--surface-2); }
 .search input { text-overflow:ellipsis; }
 .search svg { position:absolute; left:10px; top:50%; transform:translateY(-50%); width:16px; height:16px; color:var(--muted); pointer-events:none; }
 .search input.field { padding-left:34px; }
+/* structured filter box: chips for committed field terms, the input, and the
+   suggestion list under it */
+.fbox { max-width:520px; }
+.fbox .fbox-in { padding-left:34px; min-height:34px; }
+.fbox .fbox-in input { min-width:140px; font-family:var(--mono); font-size:13.5px; }
+.fbox .chip-tok { font-family:var(--mono); font-size:12.5px; }
+.fbox .chip-tok button svg { width:12px; height:12px; display:block; }
+.fsug { position:absolute; left:0; right:0; top:100%; z-index:30; margin-top:2px; background:var(--panel); border:1px solid var(--border); box-shadow:var(--shadow-md); max-height:280px; overflow-y:auto; }
+.fsug-item { display:flex; gap:10px; align-items:baseline; padding:6px 10px; font-size:13.5px; cursor:pointer; }
+.fsug-item .mono { font-family:var(--mono); }
+.fsug-item .faint { font-size:12.5px; }
+.fsug-item:hover, .fsug-item.on { background:var(--raised); }
+mark.hl { background:var(--warn-bg2); color:inherit; padding:0; border-radius:2px; }
+.toolbar-actions .muted { font-size:13px; white-space:nowrap; }
+.auto-refresh { display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--muted); }
+.auto-refresh select.field { width:auto; padding-right:28px; }
 
 /* form controls (PatternFly form-control: flat box, darker bottom edge, blue on focus) */
 input.field, select.field, textarea.field {

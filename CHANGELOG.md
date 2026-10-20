@@ -5,6 +5,36 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Structured filters on every list (Proxy Hosts, Certificates, the other
+  object lists, API Tokens, Access Logs, History): the filter box takes
+  field-scoped terms such as `tag:lan`, `status:disabled`, `cert:wildcard`,
+  `source:ingress-discovery` or `status:5xx`, with a leading `-` to exclude
+  and quotes for a value with spaces. Typing suggests the field names, then
+  the values present in the list; a complete term becomes a chip, and the
+  matched text is highlighted in the rows. Plain words still match
+  everything, and the term chips compose with the domain-group chips.
+- Every table sorts by its columns: the object lists, API Tokens, Access
+  Logs, the discovery and access-list source status tables and the issued
+  client certificates, besides Proxy Hosts (now also by certificate,
+  sign-in, status and tags) and Certificates (now also by type and issuer).
+  The choice is remembered per table in the browser.
+- Access Logs: **Clear** empties the buffer (`DELETE /api/logs`, admin
+  scope), an auto-refresh interval (off, 2 s, 5 s, 15 s, 1 min) reloads the
+  rows in place while keeping the filter, the sort and the scroll position,
+  a Bytes column, a count line (shown of total, buffer capacity), and the
+  filter understands `method:`, `host:`, `path:`, `status:` (a code or a
+  class such as `4xx`), `client:` and `slow:yes`. `GET /api/logs` reports
+  the buffer `capacity`.
+
+### Changed
+
+- Proxy Hosts list: the Source column is gone. A discovered host's source
+  (`k8s-managed`, `docker-managed`) is the first chip in the Tags column,
+  which is always shown, and a display or object name that differs from the
+  domain sits beside the domain.
+
 ### Fixed
 
 - mTLS: the 421 that refuses a request whose connection never presented the
