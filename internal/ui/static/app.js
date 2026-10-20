@@ -5918,8 +5918,7 @@ async function listCerts(c) {
       : 'PEM files on the server';
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
       <td class="col-name">
-        <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a></div>
-        <div class="cell-sub">${r.ct.disabled ? DISABLED_CHIP : ''}${(r.ct.displayName && r.ct.displayName !== r.name) ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
+        <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a>${(r.ct.displayName && r.ct.displayName !== r.name) ? `<span class="trunc faint" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}${r.ct.disabled ? DISABLED_CHIP : ''}</div>
       </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td class="col-type">
@@ -6374,21 +6373,21 @@ async function genericList(c, section) {
   const rowHtml = (o, i) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
     let main, sub;
-    // The subline carries an identifier only when it adds one (a display name
-    // or object name that differs from the first line), and the box is always
-    // rendered so every row is the same height whether or not it has one.
+    // One line per row: the name, then (muted, inline) a display name or
+    // object name only when it differs from it, then the status chip. A
+    // second line on some rows and not others made the list look uneven.
     if (meta.domainFirst) {
       const primary = arr(o.domains)[0] || o.name;
       const subline = [o.name !== primary ? o.name : '', (o.displayName && o.displayName !== primary && o.displayName !== o.name) ? o.displayName : ''].filter(Boolean).join(' - ');
-      main = `<a class="host trunc" href="${href}" title="${esc(arr(o.domains).join(', ') || o.name)}">${esc(primary)}</a>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}`;
-      sub = subline ? `<span class="trunc mono" title="${esc(subline)}">${esc(subline)}</span>` : '';
+      main = `<a class="host trunc" href="${href}" title="${esc(arr(o.domains).join(', ') || o.name)}">${esc(primary)}</a>`;
+      sub = (subline ? `<span class="trunc faint mono" title="${esc(subline)}">${esc(subline)}</span>` : '') + (o.disabled ? DISABLED_CHIP : LIVE_CHIP);
     } else {
       main = `<a class="host trunc" href="${href}" title="${esc(o.name)}">${esc(o.name)}</a>`;
-      sub = (o.disabled ? DISABLED_CHIP : '')
-        + ((o.displayName && o.displayName !== o.name) ? `<span class="trunc" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '');
+      sub = ((o.displayName && o.displayName !== o.name) ? `<span class="trunc faint" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '')
+        + (o.disabled ? DISABLED_CHIP : '');
     }
     return `<tr class="clickable" data-name="${esc(o.name)}">
-      <td class="col-name"><div class="cell-main">${main}</div><div class="cell-sub">${sub}</div></td>
+      <td class="col-name"><div class="cell-main">${main}${sub}</div></td>
       ${keys.map((k) => `<td class="col-v">${parsed[i][k] || '<span class="faint">-</span>'}</td>`).join('')}
       ${anyTags ? `<td class="col-tags">${arr(o.tags).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</td>` : ''}
       ${anyUpdated ? `<td class="col-updated mono">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}

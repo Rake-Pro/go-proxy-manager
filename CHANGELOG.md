@@ -24,10 +24,11 @@ All notable changes to go-proxy-manager are documented here. The format follows
   short. The Add button sits on the filter row on every list.
 - Admin UI Identity Providers list no longer shows the OIDC client ID; it is
   in the provider's editor only.
-- Admin UI lists: a row's subline shows a display name or object name only
-  when it differs from the first line, and is always rendered, so rows no
-  longer repeat themselves or vary in height; the certificate Type cell is one
-  line and the issuer column is no longer clipped at 200px.
+- Admin UI lists: certificates and the generic object lists are one line per
+  row, with a display or object name shown inline, muted, only when it differs
+  from the name, so rows no longer repeat themselves or vary in height. Proxy
+  Hosts keeps its two-line rows, which every row has. The certificate Type
+  cell is one line and the issuer column is no longer clipped at 200px.
 - Admin UI frame: the masthead and sidebar stay put and only the main column
   scrolls, so the scrollbar starts under the masthead instead of running up
   its edge; the tab strip no longer shows a stray scrollbar thumb.
