@@ -756,8 +756,10 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .gs-table td.col-v { white-space:normal; overflow-wrap:break-word; max-width:clamp(240px, 32vw, 900px); font-family:var(--mono); font-size:13.5px; }
 .gs-table td.col-v .chip { font-family:var(--sans); }
 .gs-table td.col-v .dl-item { white-space:normal; overflow:visible; }
-.gs-table td.col-tags { white-space:normal; }
-.gs-table td.col-tags .chip { margin:1px 0; }
+td.col-tags { white-space:normal; }
+td.col-tags .chip { margin:1px 0; }
+td.col-tags .chip.tag { display:inline-block; max-width:16ch; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.col-source .cell-main { gap:8px; }
 .view-head > div { min-width:0; max-width:100%; }
 
 /* ---------- responsive ---------- */

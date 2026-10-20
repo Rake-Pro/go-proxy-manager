@@ -28,11 +28,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
   name, upstream, issuer, path or list value is now a viewport-relative clamp,
   so a wide screen shows the full text instead of clipping it beside empty
   space, and a phone still gets the old floor.
-- Admin UI lists: certificates and the generic object lists are one line per
-  row, with a display or object name shown inline, muted, only when it differs
-  from the name, so rows no longer repeat themselves or vary in height. Proxy
-  Hosts keeps its two-line rows, which every row has. The certificate Type
-  cell is one line and the issuer column is no longer clipped at 200px.
+- Admin UI lists are one line per row, everywhere. Proxy Hosts' second line
+  (kind chip, source path, object name, tags) became two columns: Source,
+  with the k8s/docker chip and its namespace/name, or the display or object
+  name when it differs from the domain; and Tags, present only when some host
+  has tags. Certificates and the generic object lists show a display or
+  object name inline, muted, only when it differs from the name. The
+  certificate Type cell is one line and the issuer column is no longer
+  clipped at 200px.
 - Admin UI frame: the masthead and sidebar stay put and only the main column
   scrolls, so the scrollbar starts under the masthead instead of running up
   its edge; the tab strip no longer shows a stray scrollbar thumb.

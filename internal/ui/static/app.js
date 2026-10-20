@@ -4342,12 +4342,19 @@ async function listHosts(c) {
   } catch (e) { /* ignore */ }
   const selected = new Set();
 
+  // One line per row, like every other list. What used to be the domain's
+  // second line is two columns: Source (the kind chip and its namespace/name
+  // for a discovered host, otherwise the display or object name when it adds
+  // something) and Tags, which is only there when some host has tags.
+  const anyTags = recs.some((r) => r.tags.length);
   const COLUMNS = [
     { key: 'domains', label: 'Domain', cls: 'col-domain' },
+    { key: null, label: 'Source', cls: 'col-source hide-sm' },
     { key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },
     { key: null, label: 'Certificate', cls: 'col-cert hide-sm' },
     { key: null, label: 'Sign-in', cls: 'col-auth hide-sm' },
     { key: null, label: 'Status', cls: 'col-status' },
+    ...(anyTags ? [{ key: null, label: 'Tags', cls: 'col-tags hide-sm' }] : []),
     { key: 'updated', label: 'Updated', cls: 'col-updated hide-sm hide-md' },
   ];
   function headHtml() {
@@ -4404,27 +4411,25 @@ async function listHosts(c) {
     const tagChips = r.tags.slice(0, 3).map(tagChip).join('') + (moreTags ? moreTags.btn : '');
     const mc = MANAGED_CHIPS[r.managed];
     const managedChip = mc ? `<span class="chip managed" title="${esc(mc.title)}">${esc(mc.text)}</span>` : '';
-    // Every row has the same two lines whatever it holds: the domain, then
-    // the kind chip, the source path (display name, or the object name when
-    // it differs from the domain) and the tags. The kind chip used to sit
-    // inline after the domain and dropped to its own line after a long one.
-    // A display name equal to the domain, or a name equal to the domain, says
-    // nothing the first line did not: the subline then holds only the kind
-    // chip and tags, so a row never repeats itself.
+    // Source: a display name or object name equal to the domain says nothing
+    // the Domain cell did not, so it is left out; a hand-written host with
+    // nothing to add shows "-".
     const primary = r.domains[0] || h.name;
-    const sub = (r.display && r.display !== primary) ? r.display : (h.name !== primary ? h.name : '');
-    const subTitle = [mc ? mc.text : '', sub, r.tags.length ? 'tags: ' + r.tags.join(', ') : ''].filter(Boolean).join(' - ');
+    const ident = (r.display && r.display !== primary) ? r.display : (h.name !== primary ? h.name : '');
+    const identHtml = ident ? `<span class="trunc faint" title="${esc(ident)}">${esc(ident)}</span>` : '';
+    const source = managedChip || identHtml ? `<div class="cell-main">${managedChip}${identHtml}</div>` : '<span class="faint">-</span>';
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
       <td class="col-domain">
         <div class="cell-main"><a class="host trunc" href="#/hosts/${encodeURIComponent(h.name)}" title="${esc(r.domains.join(', ') || h.name)}">${esc(primary)}</a>${more ? more.btn : ''}</div>
-        <div class="cell-sub"${subTitle ? ` title="${esc(subTitle)}"` : ''}>${managedChip}${sub ? `<span class="trunc" style="min-width:${Math.min(sub.length, 12) / 2}em">${esc(sub)}</span>` : ''}${tagChips}</div>
-        ${more ? more.list : ''}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}
+        ${more ? more.list : ''}
       </td>
+      <td class="col-source hide-sm">${source}</td>
       <td class="mono col-upstream hide-sm hide-md"><span class="trunc" title="${esc(r.upStr)}">${esc(r.upStr)}</span></td>
       <td class="col-cert hide-sm">${tls}</td>
       <td class="col-auth hide-sm">${auth}</td>
       <td class="col-status">${status}</td>
+      ${anyTags ? `<td class="col-tags hide-sm">${tagChips}${moreTags ? moreTags.list.replace('class="more-list"', 'class="more-list tag-list"') : ''}</td>` : ''}
       <td class="mono faint col-updated hide-sm hide-md">${esc(r.updated ? fmtTime(r.updated) : '')}</td>
     </tr>`;
   }
@@ -4484,7 +4489,7 @@ async function listHosts(c) {
     $('#hostHead').innerHTML = headHtml();
     $('#hostRows').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
-      : `<tr><td colspan="8" class="list-empty">No host matches this filter.</td></tr>`;
+      : `<tr><td colspan="${COLUMNS.length + 1}" class="list-empty">No host matches this filter.</td></tr>`;
     wireRows();
     wireHead(rows);
     renderBulk();
@@ -8782,8 +8787,7 @@ async function viewTokens(c) {
   const rows = tokens.map((t) => `
     <tr data-name="${esc(t.name)}" data-blob="${esc([t.name, t.displayName, arr(t.scopes).join(' '), t.disabled ? 'disabled' : ''].join(' ').toLowerCase())}">
       <td class="col-name">
-        <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span></div>
-        <div class="cell-sub">${t.disabled ? DISABLED_CHIP : ''}${t.createdAt ? `<span class="trunc mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}</div>
+        <div class="cell-main"><span class="mono host trunc" title="${esc(t.name)}">${esc(t.name)}</span>${t.createdAt ? `<span class="trunc faint mono" title="Created ${esc(fmtTime(t.createdAt))}">created ${esc(fmtDate(t.createdAt))}</span>` : ''}${t.disabled ? DISABLED_CHIP : ''}</div>
       </td>
       <td><div class="chip-row" title="${esc(arr(t.scopes).join(', '))}">${scopeChips(t.scopes)}</div></td>
       <td class="mono col-time">${tokenExpiryLabel(t)}</td>
