@@ -6198,7 +6198,9 @@ const SECTION_META = {
     singular: 'identity provider', addLabel: 'Add identity provider',
     filterHint: 'name, display name, tags, type, issuer URL, client ID and headers',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('idpType', o.type || '')}</span>` +
-      (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span><span class="k">Client ID</span><span class="v">${esc(o.oidc.clientID || '')}</span>` : '') +
+      // The client ID stays in the editor: it is a credential half, not a
+      // list detail.
+      (o.oidc ? `<span class="k">Issuer</span><span class="v">${esc(o.oidc.issuerURL || '')}</span>` : '') +
       (o.forwardAuth ? `<span class="k">User header</span><span class="v">${esc(o.forwardAuth.userHeader || '')}</span>` : ''),
   },
   access: {

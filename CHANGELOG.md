@@ -22,6 +22,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
   hosts are tables, as Proxy Hosts and Certificates already were: one row per
   object, one column per summary field, long values wrapped instead of cut
   short. The Add button sits on the filter row on every list.
+- Admin UI Identity Providers list no longer shows the OIDC client ID; it is
+  in the provider's editor only.
 - Admin UI lists: a row's subline shows a display name or object name only
   when it differs from the first line, and is always rendered, so rows no
   longer repeat themselves or vary in height; the certificate Type cell is one
