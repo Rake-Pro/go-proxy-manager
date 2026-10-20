@@ -30,6 +30,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host, in order. |
 | <span id="settings-ingress-discovery-template-access-lists"></span> `template.accessLists` | []string | Applied to every derived host. |
 | <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. |
+| <span id="settings-ingress-discovery-template-locations"></span> `template.locations` | []Location | Path-scoped overrides stamped verbatim onto every derived host, the same shape as [ProxyHost: `locations`](../proxy-host.md) (own upstream or group, own middleware/access-list chain, `stripPrefix`, inline `auth`/`rateLimit`), validated by the same rules at settings-write time. **Operator-side only**: they live on the template or a named profile, never on the `Ingress`, so the annotation model is unchanged (a tenant can pick a profile that carries them, never name a path or chain). Meant for a profile written for one service whose upstream is not the cluster ingress controller (a hostPort pod with a sidecar under a path, say); on the default template they would apply to every derived host. |
 | <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
 | <span id="settings-ingress-discovery-template-security-headers"></span> `template.securityHeaders` | map | Applied to every derived host: that host's `securityHeaders` override (name -> value/scope), merged over `settings.securityHeaders` per key at request time. Validated by the same rules as a hand-written host. Without it a hand-set override on a managed host is reverted on the next reconcile. See [Security headers](security-headers.md#settings-security-headers). |
 | <span id="settings-ingress-discovery-template-default-dns"></span> `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
@@ -345,15 +346,14 @@ resolved the same way: first by derived name wins, the rest are skipped.
 **What a derived host cannot express.** Cutting a hand-written host over to
 discovery (annotate the `Ingress`, let the derived host appear, delete the
 hand-written one) silently drops everything the template has no field for. A
-derived host carries only `upstream`/`upstreamGroupRef`, `tls`,
-`middlewares`, `accessLists` and the `dns` policy. It cannot carry:
+derived host carries what its template or profile carries: `upstream`/
+`upstreamGroupRef`, `tls`, `middlewares`, `accessLists`, `timeouts`,
+`robotsNoIndex`, `tags`, `locations` and the `dns` policy. Per host it cannot
+carry:
 
-- `timeouts`: per-host dial/response overrides; the host falls back to the
-  shared transport defaults, which a slow backend will notice,
-- `locations`: path-scoped routing, and with it any path-scoped middleware,
-  access list or upstream override,
-- `robotsNoIndex`: the `X-Robots-Tag: noindex, nofollow` response header,
-- `tags`, and `displayName`, which is fixed to `<namespace>/<name>` (cosmetic).
+- anything the profile does not: a host-specific `timeouts` or `locations` list
+  needs a profile of its own (the Ingress selects it by name),
+- `displayName`, which is fixed to `<namespace>/<name>` (cosmetic).
 
 So **diff each hand-written host against what the template derives before you
 delete it**, field by field, and keep it hand-written if it uses any of the

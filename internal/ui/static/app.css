@@ -731,7 +731,7 @@ a.rail-cert:hover .trunc { text-decoration:underline; }
 .col-auth .chip { display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
 .col-status { white-space:nowrap; }
 .col-type { white-space:nowrap; }
-.col-issuer .trunc { max-width:200px; }
+.col-issuer .trunc { max-width:420px; }
 .col-host .trunc { max-width:260px; }
 .col-path .trunc { max-width:340px; }
 .col-client .trunc { max-width:180px; }

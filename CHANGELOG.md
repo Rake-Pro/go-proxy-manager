@@ -5,6 +5,16 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Ingress and Docker discovery templates and profiles take `locations`, the
+  same path-scoped overrides a hand-written proxy host has, stamped onto every
+  derived host and validated by the same rules at settings-write time. They
+  live on the operator's template or profile only; an Ingress annotation still
+  carries a profile name and nothing else. Meant for a profile written for one
+  service whose upstream is not the cluster ingress controller (a hostPort pod
+  serving a sidecar under a path).
+
 ### Changed
 
 - Admin UI list pages for identity providers, middleware, access lists,
@@ -12,6 +22,10 @@ All notable changes to go-proxy-manager are documented here. The format follows
   hosts are tables, as Proxy Hosts and Certificates already were: one row per
   object, one column per summary field, long values wrapped instead of cut
   short. The Add button sits on the filter row on every list.
+- Admin UI lists: a row's subline shows a display name or object name only
+  when it differs from the first line, and is always rendered, so rows no
+  longer repeat themselves or vary in height; the certificate Type cell is one
+  line and the issuer column is no longer clipped at 200px.
 - Admin UI frame: the masthead and sidebar stay put and only the main column
   scrolls, so the scrollbar starts under the masthead instead of running up
   its edge; the tab strip no longer shows a stray scrollbar thumb.

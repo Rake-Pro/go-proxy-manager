@@ -1856,6 +1856,15 @@ components:
             Applied verbatim to every derived host (see ProxyHost's own field of
             the same name). Validated by the same rules; without it a hand-set
             list on a managed host is reverted on the next reconcile.
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Location'
+          description: >-
+            Path-scoped overrides stamped verbatim onto every derived host, as
+            on ProxyHost. Operator-side only: an Ingress annotation can select
+            a profile that carries them but can never name a path, upstream or
+            chain itself. Validated by the same rules as a proxy host's.
         securityHeaders:
           type: object
           additionalProperties:

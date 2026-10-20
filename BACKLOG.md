@@ -658,8 +658,10 @@ Deliberately deferred:
 
 Deliberately deferred (Ingress discovery; not planned until a need appears):
 
-- **`locations` on a discovery template/profile.** Decided against, not
-  overlooked. Locations are **per-service path routing** with their own upstream
+- ~~**`locations` on a discovery template/profile.**~~ Shipped 2026-10-20 in
+  the operator-side shape below (per template/profile in settings, selected by
+  name; never by annotation). The original reasoning, kept for the record:
+  decided against, not overlooked. Locations are **per-service path routing** with their own upstream
   and chain; discovery's model is the opposite: every derived host forwards
   *everything* to the cluster ingress controller, which does the path routing
   itself, from the same `Ingress` gpm read. A template-level location list would

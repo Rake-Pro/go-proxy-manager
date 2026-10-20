@@ -3836,6 +3836,7 @@ async function viewIntegrations(c) {
         // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
+        locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3877,6 +3878,7 @@ async function viewIntegrations(c) {
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
+        locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
@@ -3956,6 +3958,7 @@ async function viewIntegrations(c) {
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
+        locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
       },
     };
@@ -3985,6 +3988,7 @@ async function viewIntegrations(c) {
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
+        locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
@@ -4404,8 +4408,11 @@ async function listHosts(c) {
     // the kind chip, the source path (display name, or the object name when
     // it differs from the domain) and the tags. The kind chip used to sit
     // inline after the domain and dropped to its own line after a long one.
+    // A display name equal to the domain, or a name equal to the domain, says
+    // nothing the first line did not: the subline then holds only the kind
+    // chip and tags, so a row never repeats itself.
     const primary = r.domains[0] || h.name;
-    const sub = r.display || (h.name !== primary ? h.name : '');
+    const sub = (r.display && r.display !== primary) ? r.display : (h.name !== primary ? h.name : '');
     const subTitle = [mc ? mc.text : '', sub, r.tags.length ? 'tags: ' + r.tags.join(', ') : ''].filter(Boolean).join(' - ');
     return `<tr class="clickable" data-name="${esc(h.name)}">
       <td class="sel-cell"><input type="checkbox" class="host-sel" data-name="${esc(h.name)}" aria-label="Select ${esc(h.name)}"${selected.has(h.name) ? ' checked' : ''} /></td>
@@ -5912,12 +5919,11 @@ async function listCerts(c) {
     return `<tr class="clickable" data-name="${esc(r.ct.name)}">
       <td class="col-name">
         <div class="cell-main"><a class="host trunc" href="#/certs/${encodeURIComponent(r.ct.name)}" title="${esc(r.name)}">${esc(r.name)}</a></div>
-        <div class="cell-sub">${r.ct.disabled ? DISABLED_CHIP : ''}${r.ct.displayName ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
+        <div class="cell-sub">${r.ct.disabled ? DISABLED_CHIP : ''}${(r.ct.displayName && r.ct.displayName !== r.name) ? `<span class="trunc" title="${esc(r.ct.displayName)}">${esc(r.ct.displayName)}</span>` : ''}</div>
       </td>
       <td class="mono col-domains">${domainListHtml(r.domains)}</td>
       <td class="col-type">
-        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type === 'acme' ? 'ACME' : (r.type === 'custom' ? 'Custom' : r.type))}</span></div>
-        <div class="cell-sub mono">${issuance}</div>
+        <div class="cell-main"><span class="chip ${r.type === 'acme' ? 'cyan' : ''}">${esc(r.type === 'acme' ? 'ACME' : (r.type === 'custom' ? 'Custom' : r.type))}</span><span class="mono faint">${issuance}</span></div>
       </td>
       <td class="mono faint col-issuer"><span class="trunc" title="${esc(r.issuer || '')}">${esc(r.issuer || '-')}</span></td>
       <td class="col-time">${certExpiryCellHtml(r.ct)}</td>
@@ -6366,18 +6372,21 @@ async function genericList(c, section) {
   const rowHtml = (o, i) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
     let main, sub;
+    // The subline carries an identifier only when it adds one (a display name
+    // or object name that differs from the first line), and the box is always
+    // rendered so every row is the same height whether or not it has one.
     if (meta.domainFirst) {
       const primary = arr(o.domains)[0] || o.name;
-      const subline = [o.name !== primary ? o.name : '', o.displayName || ''].filter(Boolean).join(' - ');
+      const subline = [o.name !== primary ? o.name : '', (o.displayName && o.displayName !== primary && o.displayName !== o.name) ? o.displayName : ''].filter(Boolean).join(' - ');
       main = `<a class="host trunc" href="${href}" title="${esc(arr(o.domains).join(', ') || o.name)}">${esc(primary)}</a>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}`;
       sub = subline ? `<span class="trunc mono" title="${esc(subline)}">${esc(subline)}</span>` : '';
     } else {
       main = `<a class="host trunc" href="${href}" title="${esc(o.name)}">${esc(o.name)}</a>`;
       sub = (o.disabled ? DISABLED_CHIP : '')
-        + (o.displayName ? `<span class="trunc" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '');
+        + ((o.displayName && o.displayName !== o.name) ? `<span class="trunc" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '');
     }
     return `<tr class="clickable" data-name="${esc(o.name)}">
-      <td class="col-name"><div class="cell-main">${main}</div>${sub ? `<div class="cell-sub">${sub}</div>` : ''}</td>
+      <td class="col-name"><div class="cell-main">${main}</div><div class="cell-sub">${sub}</div></td>
       ${keys.map((k) => `<td class="col-v">${parsed[i][k] || '<span class="faint">-</span>'}</td>`).join('')}
       ${anyTags ? `<td class="col-tags">${arr(o.tags).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</td>` : ''}
       ${anyUpdated ? `<td class="col-updated mono">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}

@@ -2573,6 +2573,42 @@ func TestAnnotationPrefixMigrateRelabelsOnFailClosedDisable(t *testing.T) {
 // operator's list is reverted - with a git commit - on every poll. It must be
 // inherited verbatim, from the default template and from a named profile
 // (profiles ARE IngressHostTemplate, proven rather than assumed).
+func TestDerivedHostInheritsLocations(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := baseSettings(f)
+	s.Template.Locations = []model.Location{{
+		Path:        "/artifacts",
+		Upstream:    &model.Upstream{Scheme: "http", Host: "10.0.0.6", Port: 47292},
+		Middlewares: []string{"m"},
+	}}
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if len(h.Locations) != 1 || h.Locations[0].Path != "/artifacts" || h.Locations[0].Upstream == nil || h.Locations[0].Upstream.Port != 47292 {
+		t.Fatalf("locations = %+v, want the template's", h.Locations)
+	}
+	// The derived host owns its copy: the template's pointers are not shared.
+	if h.Locations[0].Upstream == s.Template.Locations[0].Upstream {
+		t.Fatal("derived location shares the template's *Upstream")
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
 func TestDerivedHostInheritsStripResponseHeaders(t *testing.T) {
 	f := newFakeAPI(t, "tok")
 	f.handler = func(w http.ResponseWriter, r *http.Request) {

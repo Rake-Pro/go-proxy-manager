@@ -711,6 +711,7 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 			host.SecurityHeaders[k] = v
 		}
 	}
+	host.Locations = model.CloneLocations(tmpl.Locations)
 	if pol := dnsPolicy(ct, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}
