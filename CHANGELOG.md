@@ -5,6 +5,15 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- mTLS: the 421 that refuses a request whose connection never presented the
+  client certificate now closes that connection (GOAWAY on HTTP/2), so the
+  browser re-handshakes under the host's own SNI and is asked for the
+  certificate. Before, a connection kept busy from before the host required a
+  certificate, or one coalesced from a non-mTLS host under the same wildcard
+  certificate, answered "Misdirected Request" until it went idle.
+
 ## [2.4.0] - 2026-10-20
 
 ### Added
