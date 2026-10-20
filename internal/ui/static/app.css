@@ -698,7 +698,11 @@ td.sel-cell input, th.sel-cell input { width:16px; height:16px; margin:0; vertic
 /* ---------- text length and column rules ---------- */
 .trunc { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
-.cell-main, .cell-sub { display:flex; align-items:center; gap:6px; min-width:0; max-width:340px; white-space:nowrap; }
+/* Cell caps are viewport-relative, not fixed: a cap chosen for a laptop
+   clipped names and upstreams on a wide screen while the table sat half
+   empty. clamp() keeps a floor for phones and a ceiling so one long value
+   cannot push every other column off the screen. */
+.cell-main, .cell-sub { display:flex; align-items:center; gap:6px; min-width:0; max-width:clamp(240px, 30vw, 760px); white-space:nowrap; }
 .cell-main > .trunc, .cell-sub > .trunc { flex:0 1 auto; }
 .cell-main > :not(.trunc), .cell-sub > :not(.trunc) { flex:none; }
 .cell-sub { margin-top:3px; min-height:22px; overflow:hidden; font-size:13.5px; color:var(--muted); }
@@ -707,20 +711,20 @@ a.trunc { display:inline-block; max-width:100%; vertical-align:bottom; }
    the row sets on it (a few characters); only then do the chips shrink. */
 .cell-sub > .trunc { flex-shrink:1000; }
 .cell-sub .chip.tag { display:inline-block; flex:0 1 auto; min-width:3em; max-width:16ch; overflow:hidden; text-overflow:ellipsis; }
-.hosts-table .cell-main, .hosts-table .cell-sub { max-width:320px; }
-.hosts-table .col-upstream .trunc { max-width:200px; }
+.hosts-table .cell-main, .hosts-table .cell-sub { max-width:clamp(220px, 26vw, 640px); }
+.hosts-table .col-upstream .trunc { max-width:clamp(160px, 18vw, 480px); }
 .col-domain .more-list.tag-list { display:flex; flex-wrap:wrap; gap:4px; white-space:normal; }
 .cell-sub .mono { font-size:12.5px; }
 .more-btn { flex:none; background:none; border:0; padding:0 2px; margin:0; font:inherit; font-size:12.5px; color:var(--muted); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; white-space:nowrap; }
 .more-btn:hover { color:var(--text); }
-.col-domain .more-list { display:block; max-width:340px; margin-top:4px; font-size:12.5px; color:var(--muted); }
+.col-domain .more-list { display:block; max-width:clamp(240px, 30vw, 760px); margin-top:4px; font-size:12.5px; color:var(--muted); }
 .chip-row > .more-list { display:contents; }
 .col-method { white-space:nowrap; }
 .col-domain, .col-domains { min-width:200px; }
 .col-upstream { min-width:140px; }
-.col-upstream .trunc { max-width:240px; }
+.col-upstream .trunc { max-width:clamp(180px, 20vw, 560px); }
 .col-cert { white-space:nowrap; }
-.col-cert .lock { max-width:220px; }
+.col-cert .lock { max-width:clamp(180px, 16vw, 420px); }
 .lock.cert-cover svg { color:var(--ok); }
 .chip.cert-cover .trunc { max-width:18ch; }
 a.rail-cert .lock .trunc { color:var(--brand-text); }
@@ -728,14 +732,14 @@ a.rail-cert:hover { text-decoration:none; }
 a.rail-cert:hover .trunc { text-decoration:underline; }
 .lock .trunc { max-width:24ch; }
 .col-auth { white-space:nowrap; }
-.col-auth .chip { display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.col-auth .chip { display:inline-block; max-width:clamp(140px, 12vw, 320px); overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
 .col-status { white-space:nowrap; }
 .col-type { white-space:nowrap; }
-.col-issuer .trunc { max-width:420px; }
-.col-host .trunc { max-width:260px; }
-.col-path .trunc { max-width:340px; }
-.col-client .trunc { max-width:180px; }
-.col-name .trunc { max-width:240px; }
+.col-issuer .trunc { max-width:clamp(200px, 26vw, 720px); }
+.col-host .trunc { max-width:clamp(200px, 20vw, 560px); }
+.col-path .trunc { max-width:clamp(240px, 26vw, 720px); }
+.col-client .trunc { max-width:clamp(140px, 12vw, 320px); }
+.col-name .trunc { max-width:clamp(200px, 18vw, 480px); }
 .col-serial .trunc { max-width:18ch; }
 .col-actions .hint .mono { display:inline-block; max-width:18ch; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
 .col-reason { min-width:160px; overflow-wrap:break-word; }
@@ -749,7 +753,7 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 /* generic object lists (identity providers, middleware, ...): one row per
    object, one column per summary key. Values wrap rather than ellipsize, so
    a long issuer URL or upstream list is read in place, not from a tooltip. */
-.gs-table td.col-v { white-space:normal; overflow-wrap:break-word; max-width:360px; font-family:var(--mono); font-size:13.5px; }
+.gs-table td.col-v { white-space:normal; overflow-wrap:break-word; max-width:clamp(240px, 32vw, 900px); font-family:var(--mono); font-size:13.5px; }
 .gs-table td.col-v .chip { font-family:var(--sans); }
 .gs-table td.col-v .dl-item { white-space:normal; overflow:visible; }
 .gs-table td.col-tags { white-space:normal; }
