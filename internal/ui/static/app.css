@@ -188,9 +188,13 @@ summary:focus-visible, [tabindex]:focus-visible, .switch:focus-visible {
 input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visible, .chip-input input:focus-visible { outline:0; }
 
 /* ---------- frame: masthead across the top, sidebar beneath it ---------- */
-.app { min-height:100vh; display:flex; flex-direction:column; }
+/* The frame scrolls, not the document: masthead and sidebar stay put and
+   only the main column scrolls, so the scrollbar starts under the masthead
+   and right of the sidebar instead of running up the masthead's edge. The
+   masthead keeps a position so the account menu still anchors to it. */
+.app { height:100vh; height:100dvh; display:flex; flex-direction:column; }
 .masthead {
-  position:sticky; top:0; z-index:50; height:var(--masthead-h);
+  position:relative; flex:none; z-index:50; height:var(--masthead-h);
   display:flex; align-items:center; gap:12px; padding:0 12px 0 16px;
   background:var(--masthead); color:var(--masthead-text);
   background-image:var(--wire), var(--mast-grad); background-size:100% 2px, auto; background-repeat:no-repeat; background-position:left bottom, left top;
@@ -235,11 +239,11 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .menu a:hover, .menu button:hover { background:var(--raised); text-decoration:none; color:var(--text); }
 .menu .m-sep { height:1px; background:var(--border-soft); margin:8px 0; }
 
-.page-body { flex:1 1 auto; display:grid; grid-template-columns:var(--sidebar-w) minmax(0,1fr); }
+.page-body { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:var(--sidebar-w) minmax(0,1fr); }
 
 /* sidebar */
 .sidebar {
-  position:sticky; top:var(--masthead-h); height:calc(100vh - var(--masthead-h));
+  min-height:0;
   display:flex; flex-direction:column; background:var(--side-bg); box-shadow:var(--shadow-right); z-index:40;
 }
 .nav { flex:1 1 auto; overflow-y:auto; padding:8px 0; }
@@ -276,7 +280,7 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .dot.muted { background:var(--border-2); }
 
 /* main column: title band then content */
-.main { min-width:0; display:flex; flex-direction:column; }
+.main { min-width:0; min-height:0; overflow-y:auto; display:flex; flex-direction:column; }
 .page-head { background:var(--panel); padding:20px 24px 0; box-shadow:var(--shadow-head); position:relative; z-index:1; }
 .page-head .head-row { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; padding-bottom:20px; }
 .page-head .head-row > div:first-child { min-width:0; }
@@ -745,7 +749,7 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 /* generic object lists (identity providers, middleware, ...): one row per
    object, one column per summary key. Values wrap rather than ellipsize, so
    a long issuer URL or upstream list is read in place, not from a tooltip. */
-.gs-table td.col-v { white-space:normal; overflow-wrap:anywhere; max-width:360px; font-family:var(--mono); font-size:13.5px; }
+.gs-table td.col-v { white-space:normal; overflow-wrap:break-word; max-width:360px; font-family:var(--mono); font-size:13.5px; }
 .gs-table td.col-v .chip { font-family:var(--sans); }
 .gs-table td.col-v .dl-item { white-space:normal; overflow:visible; }
 .gs-table td.col-tags { white-space:normal; }
@@ -792,12 +796,6 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   body.nav-open .scrim { display:block; position:fixed; inset:var(--masthead-h) 0 0 0; background:var(--scrim); z-index:44; }
   .masthead .menu-btn { display:inline-flex; }
   .masthead { padding:0 8px 0 10px; }
-  /* The frame, not the document, scrolls: the masthead stays put and the
-     scrollbar starts beneath it instead of running up its right edge. The
-     masthead keeps a position so the account menu still anchors to it. */
-  .app { height:100vh; height:100dvh; min-height:0; }
-  .masthead { position:relative; flex:none; }
-  .page-body { min-height:0; overflow-y:auto; }
   #themeBtn { width:36px; padding:0; }
   #themeBtn .tool-label { display:none; }
   body.nav-open .sidebar { box-shadow:var(--shadow-md); }
@@ -839,7 +837,7 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .head-meta { font-size:13.5px; color:var(--muted); }
 .edit-grid { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:24px; align-items:start; }
 .edit-main { min-width:0; }
-.rail { position:sticky; top:calc(var(--masthead-h) + 24px); min-width:0; }
+.rail { position:sticky; top:24px; min-width:0; }
 .rail .card + .card { margin-top:16px; }
 .dl { display:grid; gap:14px; margin:0; }
 .dl > div { min-width:0; }

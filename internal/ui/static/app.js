@@ -167,11 +167,11 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function shortSha(s) { return (s || '').slice(0, 7); }
-// Below 800px .page-body is the scroll box (app.css), not the document.
+// The main column is the scroll box (app.css), not the document.
 function scrollToTop() {
   window.scrollTo(0, 0);
-  const pb = document.querySelector('.page-body');
-  if (pb) pb.scrollTop = 0;
+  const m = document.getElementById('main');
+  if (m) m.scrollTop = 0;
 }
 // One helper for every count shown with a noun: plural(1, 'tag', 'tags') is
 // "1 tag", plural(2, 'tag', 'tags') is "2 tags".
