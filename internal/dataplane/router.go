@@ -157,6 +157,10 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		}
 		handler := buildChain(proxy, h, reg, hostEP)
 		hh := &hostHandler{host: h.Name, handler: handler, forceSSL: h.TLS.ForceSSL, upstream: upLabel, errorPages: hostEP, maintenance: h.Maintenance}
+		// The front door is exempt whatever hostname reaches it; every other
+		// host is exempt per REQUEST hostname (see serveHTTPS), so a host that
+		// also happens to carry an exempt name is not exempt on its other names.
+		hh.maintenanceExempt = h.AdminEdge
 		if hh.locations, err = buildLocations(h, reg, hostEP); err != nil {
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
@@ -577,7 +581,7 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// so gpm answers for it. It sits INSIDE the mTLS gate above, so a host
 		// that requires a client certificate still refuses an uncertified request
 		// with a 421 rather than disclosing a maintenance window to it.
-		if maintenanceActive(hh.maintenance) {
+		if maintenanceActive(hh.maintenance, hh.maintenanceExempt || isMaintenanceExempt(name)) {
 			serveMaintenance(w, r, hh.errorPages, hh.host)
 			return
 		}
@@ -648,7 +652,7 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// an HTTPS-only host still bounces the client to TLS and serves the
 		// maintenance page there. ACME HTTP-01 is answered before host routing
 		// (see dispatchHTTP), so certificates still renew during a window.
-		if maintenanceActive(hh.maintenance) {
+		if maintenanceActive(hh.maintenance, hh.maintenanceExempt || isMaintenanceExempt(name)) {
 			serveMaintenance(w, r, hh.errorPages, hh.host)
 			return
 		}

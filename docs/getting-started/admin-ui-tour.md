@@ -55,10 +55,12 @@ object. With nothing to report it says so and shows the live counts.
 
 ![Proxy hosts list](../assets/ui/proxy-hosts.png)
 
-- One row per host: domains with their tags and a managed-by label, the
-  upstream, the certificate that covers the first domain with its state (amber
-  inside the renewal window, red when expired, "no certificate" when nothing
-  covers it), the sign-in gate, the status and the last change.
+- One row per host: the domain, its source (the k8s-managed or docker-managed
+  chip with the namespace/name it came from, or the object name when it
+  differs from the domain), the upstream, the certificate that covers the
+  first domain with its state (amber inside the renewal window, red when
+  expired, "no certificate" when nothing covers it), the sign-in gate, the
+  status, tags when any host has them, and the last change.
 - Filter by text or by zone (the domain group chips). Sort by domain, upstream
   or last change.
 - Select rows for bulk actions. Clone, YAML and Delete live on the host's own
@@ -136,8 +138,14 @@ own; **Renew now** forces it.
 ![Settings, General tab](../assets/ui/settings.png)
 
 Settings are four tabs in the title band over one object; any tab's Save commits the whole thing.
-History lists every commit with its author and lets you revert the whole config
-or one object; Backup and Restore live on the same page.
+Integrations is tabbed the same way, one tab per outbound system.
+API Tokens: **Edit** on a token changes its scopes and expiry in place; the
+secret keeps working, and only **Rotate** mints a new one.
+History lists every commit with its author. **Changes** on a commit opens
+every file it touched as a diff; tick **Compare** on two commits to see
+everything that changed between them, oldest to newest. Revert the whole
+config or one object from the same row; Backup and Restore live on the same
+page.
 
 ![History with backup, restore and revert](../assets/ui/history.png)
 

@@ -195,10 +195,98 @@ func TestMaintenanceUninstalledIsOff(t *testing.T) {
 	prev := globalMaintenance.Load()
 	globalMaintenance.Store(nil)
 	t.Cleanup(func() { globalMaintenance.Store(prev) })
-	if maintenanceActive(false) {
+	if maintenanceActive(false, false) {
 		t.Fatal("maintenance must be off when SetMaintenance has never run")
 	}
-	if !maintenanceActive(true) {
+	if !maintenanceActive(true, false) {
 		t.Fatal("a host's own flag must still apply with no settings installed")
+	}
+}
+
+// withMaintenanceExempt installs the fleet-wide exemption list for the test
+// and restores the previous value on cleanup.
+func withMaintenanceExempt(t *testing.T, domains []string) {
+	t.Helper()
+	prev := maintenanceExempt.Load()
+	SetMaintenanceExempt(domains)
+	t.Cleanup(func() { maintenanceExempt.Store(prev) })
+}
+
+func TestMaintenanceExemptHostStaysUpUnderGlobalSwitch(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	withMaintenance(t, model.MaintenanceSettings{Enabled: true})
+	// Installed BEFORE the build: the exemption is recorded per host handler.
+	withMaintenanceExempt(t, []string{"UP.example.com"})
+	rt := maintenanceRouter(t, false)
+
+	if rec := serveOn(rt, true, "GET", "https://up.example.com/", "up.example.com"); rec.Code != http.StatusOK || rec.Body.String() != "upstream" {
+		t.Fatalf("exempt host under global maintenance: got %d %q, want 200 upstream", rec.Code, rec.Body.String())
+	}
+	if rec := serveOn(rt, true, "GET", "https://down.example.com/", "down.example.com"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("non-exempt host under global maintenance: status = %d, want 503", rec.Code)
+	}
+	if rec := serveOn(rt, false, "GET", "http://up.example.com/", "up.example.com"); rec.Code != http.StatusOK {
+		t.Fatalf("exempt host on the plaintext listener: status = %d, want 200", rec.Code)
+	}
+}
+
+func TestMaintenanceExemptHostStillHonoursOwnFlag(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	withMaintenance(t, model.MaintenanceSettings{})
+	withMaintenanceExempt(t, []string{"down.example.com"})
+	rt := maintenanceRouter(t, true)
+	if rec := serveOn(rt, true, "GET", "https://down.example.com/", "down.example.com"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("own flag on an exempt host: status = %d, want 503", rec.Code)
+	}
+}
+
+func TestMaintenanceAdminEdgeHostIsExemptByMarkerNotName(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	withMaintenance(t, model.MaintenanceSettings{Enabled: true})
+	withMaintenanceExempt(t, nil)
+	upstream := upstreamFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("panel"))
+	}))
+	// The compiled front door carries the non-serialized marker; a stored host
+	// that merely uses the name does not, and is not exempt.
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{
+		{ObjectMeta: model.ObjectMeta{Name: "door"}, AdminEdge: true, Domains: []string{"gpm.example.com"}, Upstream: upstream},
+		{ObjectMeta: model.ObjectMeta{Name: model.AdminEdgeHostName}, Domains: []string{"fake.example.com"}, Upstream: upstream},
+	}}
+	rt, err := buildRouter(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+	if rec := serveOn(rt, true, "GET", "https://gpm.example.com/", "gpm.example.com"); rec.Code != http.StatusOK || rec.Body.String() != "panel" {
+		t.Fatalf("admin edge under global maintenance: got %d %q, want 200 panel", rec.Code, rec.Body.String())
+	}
+	if rec := serveOn(rt, true, "GET", "https://fake.example.com/", "fake.example.com"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a host merely named %s must not be exempt: status = %d", model.AdminEdgeHostName, rec.Code)
+	}
+}
+
+func TestMaintenanceExemptionIsPerRequestHostname(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	withMaintenance(t, model.MaintenanceSettings{Enabled: true})
+	withMaintenanceExempt(t, []string{"auth.example.com"})
+	upstream := upstreamFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("upstream"))
+	}))
+	// A tenant host that added the IdP's hostname beside its own: exempt only
+	// when reached by that name, never on its own.
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "app"},
+		Domains:    []string{"app.example.com", "auth.example.com"},
+		Upstream:   upstream,
+	}}}
+	rt, err := buildRouter(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+	if rec := serveOn(rt, true, "GET", "https://app.example.com/", "app.example.com"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("own name under global maintenance: status = %d, want 503", rec.Code)
+	}
+	if rec := serveOn(rt, true, "GET", "https://auth.example.com/", "auth.example.com"); rec.Code != http.StatusOK {
+		t.Fatalf("exempt name under global maintenance: status = %d, want 200", rec.Code)
 	}
 }

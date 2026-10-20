@@ -2024,6 +2024,8 @@ components:
             CR/LF in a name or value, and an unknown scope are rejected.
         maintenance:
           $ref: '#/components/schemas/MaintenanceSettings'
+        adminEdge:
+          $ref: '#/components/schemas/AdminEdgeSettings'
         stripResponseHeaders:
           type: array
           items:
@@ -2044,6 +2046,35 @@ components:
             (Content-Type/-Length/-Encoding, Vary, Location, Sec-WebSocket-*)
             and case-insensitive duplicates are rejected.
       description: Singleton application configuration (config/settings.yaml).
+    AdminEdgeSettings:
+      type: object
+      description: >-
+        Serves the admin panel at the edge, on externalBaseURL's hostname,
+        through gpm's own proxy listeners: TLS by SNI like every other domain,
+        the access lists and middlewares named here, then a loopback hop to the
+        admin listener. Not a proxy host: it is never listed, disabled,
+        deleted or discovery-managed, and the fleet-wide maintenance switch
+        never applies to it. While enabled, no stored host may claim the
+        panel's hostname and the name "gpm-admin" is reserved; a settings or
+        object write that would collide is refused. The direct admin listener
+        keeps working as the break-glass path.
+      properties:
+        enabled:
+          type: boolean
+        tls:
+          $ref: '#/components/schemas/TLSSettings'
+        middlewares:
+          type: array
+          items:
+            type: string
+        accessLists:
+          type: array
+          items:
+            type: string
+        dns:
+          $ref: '#/components/schemas/DNSSyncPolicy'
+        robotsNoIndex:
+          type: boolean
     MaintenanceSettings:
       type: object
       description: >-
@@ -2216,6 +2247,37 @@ components:
           type: string
           format: date-time
       description: One git commit in the config repo's history.
+    Diff:
+      type: object
+      properties:
+        from:
+          type: string
+          description: Empty when the diff is one commit against its parent.
+        to:
+          type: string
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              oldPath:
+                type: string
+                description: Set when the file was renamed.
+              additions:
+                type: integer
+              deletions:
+                type: integer
+              status:
+                type: string
+                enum: [added, deleted, renamed, modified]
+        patch:
+          type: string
+          description: Unified diff, as `git diff` prints it.
+        truncated:
+          type: boolean
+      description: What changed in the config repo between two points of its history.
     CommitRef:
       type: object
       properties:
@@ -2385,6 +2447,14 @@ components:
                 currently serving the maintenance page whatever its own maintenance flag says. The
                 SPA says so on the host editor rather than showing a per-host toggle that reads off
                 while the host is in fact down.
+            exempt:
+              type: array
+              items:
+                type: string
+              description: >-
+                Hostnames the fleet-wide switch leaves up, the admin edge and the hosts the
+                admin sign-in providers live behind, so the panel stays reachable to turn
+                maintenance off. A per-host maintenance flag on one of them is still honoured.
         adminLogin:
           type: object
           properties:
@@ -4744,6 +4814,47 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
+  /api/history/diff:
+    get:
+      summary: What a commit changed, or what changed between two commits
+      description: >-
+        With only `to`, the unified diff that commit introduced (against its
+        parent, or against the empty tree for the first commit). With `from`
+        as well, the diff from the older commit to the newer one. Both are
+        commit hashes (7-64 hex characters); symbolic names are refused. The
+        patch carries whole object files, API-token digests included, so this
+        is admin scope like the token endpoints and whole-config revert. A
+        patch over 2 MiB is cut and `truncated` set; the file list is always
+        complete.
+      tags:
+      - Meta
+      parameters:
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Diff'
+        '400':
+          description: A hash is not commit-shaped.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: A hash names no commit in the config repo.
+      x-scope: admin
   /api/identity-providers:
     get:
       summary: List identity providers

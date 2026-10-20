@@ -383,6 +383,12 @@ type ProxyHost struct {
 	AccessLists []string   `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
 	Locations   []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
 
+	// AdminEdge marks the host the admin front door compiles to (see
+	// AdminEdgeSettings.Host). Never serialized, so no stored or API-written
+	// host can carry it: the data plane's maintenance exemption keys on this,
+	// not on the host's name or labels.
+	AdminEdge bool `json:"-" yaml:"-"`
+
 	// Auth gates every request to this host through an identity provider WITHOUT
 	// needing a separate Middleware object: it carries exactly the AuthMiddleware
 	// shape, is validated by the same rules and compiles to the same data-plane

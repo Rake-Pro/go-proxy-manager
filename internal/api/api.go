@@ -63,6 +63,10 @@ type Deps struct {
 	// switch (settings.maintenance.enabled) is currently on, for the capability
 	// probe. May be nil (reported off).
 	MaintenanceGlobal func() bool
+	// MaintenanceExempt, if set, lists the hostnames the fleet-wide switch
+	// leaves up (the admin edge and the admin sign-in providers' hosts), for
+	// the capability probe. May be nil.
+	MaintenanceExempt func() []string
 	// UpstreamHealth, if set, returns the live per-group upstream health payload
 	// (marshalled as-is) for GET /upstream-health. May be nil.
 	UpstreamHealth func() any
@@ -270,6 +274,9 @@ type maintenanceCapability struct {
 	// than showing a per-host toggle that appears to be off while the host is in
 	// fact down.
 	GlobalEnabled bool `json:"globalEnabled"`
+	// Exempt lists the hostnames the fleet-wide switch leaves up, so the SPA
+	// can say so next to the switch.
+	Exempt []string `json:"exempt"`
 }
 
 type adminLoginCapability struct {
@@ -597,7 +604,7 @@ func New(d Deps) http.Handler {
 			},
 			HA:          haCapability{Role: d.Role.String(), ReadOnly: d.Role.IsFollower()},
 			Metrics:     metricsCapability{Enabled: d.MetricsEnabled},
-			Maintenance: maintenanceCapability{GlobalEnabled: d.MaintenanceGlobal != nil && d.MaintenanceGlobal()},
+			Maintenance: maintenanceCapability{GlobalEnabled: d.MaintenanceGlobal != nil && d.MaintenanceGlobal(), Exempt: exemptList(d.MaintenanceExempt)},
 			AdminLogin: adminLoginCapability{
 				Configured:   d.NoAdminLogin == nil || !d.NoAdminLogin(),
 				TOTP:         d.Runtime.LocalAdminTOTP,
@@ -854,6 +861,24 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, nonNilCommits(commits))
+	}))
+
+	// What a commit changed (?to=<hash>), or what changed between two commits
+	// (?from=<older>&to=<newer>), as a unified diff plus a per-file summary. The
+	// patch carries whole object files, api-token digests included, so it is
+	// admin-scope like the token endpoints and whole-config revert.
+	mux.HandleFunc("GET /history/diff", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		diff, err := d.Store.Diff(r.Context(), q.Get("from"), q.Get("to"))
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "bad object") || strings.Contains(err.Error(), "unknown revision") || strings.Contains(err.Error(), "bad revision") {
+				status = http.StatusNotFound
+			}
+			writeErr(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, diff)
 	}))
 
 	// Revert the whole config to a past commit (recorded as a new commit, so the
@@ -1444,6 +1469,18 @@ func (d Deps) decorateToken(t model.APIToken, _ *http.Request) any {
 		}
 	}
 	return out
+}
+
+// exemptList calls the optional hook and never returns nil, so the JSON is an
+// array either way.
+func exemptList(f func() []string) []string {
+	if f == nil {
+		return []string{}
+	}
+	if l := f(); l != nil {
+		return l
+	}
+	return []string{}
 }
 
 // mergeExtra renders obj as a JSON object and merges extra's fields into it, so

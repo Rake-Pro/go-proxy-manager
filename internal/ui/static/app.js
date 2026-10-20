@@ -2682,7 +2682,7 @@ async function route() {
       case 'streams': await genericSection(c, 'streams', sub); break;
       case 'parked': await genericSection(c, 'parked', sub); break;
       case 'errorpages': await viewErrorPages(c); break;
-      case 'integrations': await viewIntegrations(c); break;
+      case 'integrations': await viewIntegrations(c, sub); break;
       case 'tokens': await viewTokens(c); break;
       case 'logs': await viewLogs(c); break;
       case 'history': await viewHistory(c); break;
@@ -2735,6 +2735,10 @@ function settingsTabOf(hash) {
   const m = /^#\/settings(?:\/([^/]+))?$/.exec(hash || '');
   return m ? (m[1] || SETTINGS_TABS[0].id) : null;
 }
+function integrationsTabOf(hash) {
+  const m = /^#\/integrations(?:\/([^/]+))?$/.exec(hash || '');
+  return m ? (m[1] || INTEGRATIONS_TABS[0].id) : null;
+}
 let leavePrompt = false;
 async function onHashChange() {
   if (revertingHash) { revertingHash = false; currentHash = location.hash; return; }
@@ -2742,6 +2746,12 @@ async function onHashChange() {
   if (nextTab && settingsTabOf(currentHash) && document.getElementById('set-panel-general')) {
     currentHash = location.hash;
     showSettingsTab(nextTab);
+    return;
+  }
+  const nextInt = integrationsTabOf(location.hash);
+  if (nextInt && integrationsTabOf(currentHash) && document.getElementById('int-panel-dns')) {
+    currentHash = location.hash;
+    showIntegrationsTab(nextInt);
     return;
   }
   if (dirtyFlag && location.hash !== currentHash) {
@@ -2875,7 +2885,7 @@ function discoveryRunLine(st) {
   </div>`;
 }
 
-async function viewIntegrations(c) {
+async function viewIntegrations(c, tab) {
   const [setR, , ] = await Promise.all([
     api('/api/settings'),
     loadCapabilities(),
@@ -2905,9 +2915,11 @@ async function viewIntegrations(c) {
   const ddProfiles = (dd.profiles && typeof dd.profiles === 'object') ? dd.profiles : {};
   const resolvedPrefix = idc.annotationPrefix || 'gpm.rake.pro';
 
-  c.innerHTML = viewHead('Integrations',
-    'Systems gpm talks to: DNS zones it writes, hosts it discovers, IP feeds it pulls, endpoints it notifies.')
-    + `
+  const panel = (id) => `<div class="tab-panel" data-tab="${id}" id="int-panel-${id}" role="tabpanel" aria-labelledby="int-tab-${id}" hidden>`;
+  c.innerHTML = `
+    ${pageHead('Integrations', 'Systems gpm talks to: DNS zones it writes, hosts it discovers, IP feeds it pulls, endpoints it notifies.', '', '', '', '',
+      INTEGRATIONS_TABS.map((t) => `<button class="tab-btn" type="button" role="tab" id="int-tab-${esc(t.id)}" aria-controls="int-panel-${esc(t.id)}" data-tab="${esc(t.id)}" aria-selected="false" tabindex="-1">${esc(t.label)}</button>`).join(''))}
+    ${panel('dns')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">DNS sync</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">Publishes CNAMEs for proxy hosts that opted in (per-host, under DNS sync in the host editor). Reconcile is full-state, and gpm only ever deletes records it created itself, recorded in the ownership ledger at <span class="mono">config/dns-ledger.yaml</span>. A record that is not in that ledger is never deleted, whatever it points at. Turning a DNS server on for the first time is therefore safe: matching records are adopted, everything else is left exactly as it is. Use <b>Preview changes</b> first to see it.</p>
@@ -2934,7 +2946,8 @@ async function viewIntegrations(c) {
       </div>
       ${intSaveBar()}
     </div>
-
+    </div>
+    ${panel('ingress')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Kubernetes Ingress discovery</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">Polls the cluster read-only for Ingresses annotated <span class="mono">${esc(resolvedPrefix)}/managed: "true"</span> and reconciles them into proxy hosts labelled <span class="mono">${esc(resolvedPrefix)}/managed-by: ingress-discovery</span>. Only those labelled hosts are ever written or removed; a host you wrote by hand is never touched. Everything except the hostnames and the two DNS annotations comes from the template or a named profile below, so a cluster manifest can never supply an upstream, a certificate or a middleware - only the <em>name</em> of a chain you wrote here. The prefix is set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>.</p>
@@ -3033,7 +3046,8 @@ async function viewIntegrations(c) {
       </div>
       ${intSaveBar()}
     </div>
-
+    </div>
+    ${panel('docker')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Docker discovery</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">Derives proxy hosts from labelled Docker containers. Uses the same templates, profiles and label prefix as Kubernetes Ingress discovery - only the source differs. Label prefix: <span class="mono">${esc(resolvedPrefix)}</span> (set under <a href="#/settings/advanced">Settings -&gt; Advanced</a>).</p>
@@ -3108,7 +3122,8 @@ async function viewIntegrations(c) {
       </div>
       ${intSaveBar()}
     </div>
-
+    </div>
+    ${panel('access-sync')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Access-list sync</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">Keeps access lists that declare a remote <b>source</b> (an IP feed fetched over http(s)) up to date. The interval below is only how often the loop asks whether any source is <i>due</i>; each source carries its own fetch interval, so polling often is cheap. A list with no source costs nothing either way.</p>
@@ -3122,7 +3137,8 @@ async function viewIntegrations(c) {
       <div style="margin-top:6px"><button class="btn ghost sm" id="int-als-run" type="button">Reconcile now</button></div>
       ${intSaveBar()}
     </div>
-
+    </div>
+    ${panel('webhooks')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Lifecycle webhooks</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">POST a JSON event to each URL after every config change (create/update/delete, restore, revert, settings). Delivery is async and best-effort, so a slow endpoint never blocks a save.</p>
@@ -3131,7 +3147,8 @@ async function viewIntegrations(c) {
       <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, with the same <span class="mono">X-GPM-Webhook-Secret</span> header a real event carries.</div>
       ${intSaveBar()}
     </div>
-
+    </div>
+    ${panel('notifications')}
     <div class="card form-section" style="margin-bottom:16px">
       <p class="section-label">Notifications</p>
       <p class="muted" style="font-size:13.5px;margin:0 0 10px">Alerts to ntfy, Discord, or a generic webhook on ACME renewal failure, certificate expiry, upstream health flaps, and a frozen discovery reconciler. Delivery is async and best-effort, so a slow receiver never blocks a save.</p>
@@ -3143,7 +3160,14 @@ async function viewIntegrations(c) {
       <button class="btn ghost sm" id="addNotification" type="button" style="margin-top:6px">${ICON.plus}Add notification target</button>
       <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends a synthetic event to the target immediately, using the same payload shape a real alert would (plain text for ntfy, an embed for Discord, a JSON envelope for generic), bypassing this target's Events filter.</div>
       ${intSaveBar()}
+    </div>
     </div>`;
+
+  showIntegrationsTab(tab || INTEGRATIONS_TABS[0].id);
+  $$('#pageTabs .tab-btn').forEach((b) => {
+    b.addEventListener('click', () => { location.hash = '#/integrations/' + b.dataset.tab; });
+  });
+  wirePageTabKeys();
 
   // ----- DNS sync -----
   async function renderDNSStatus() {
@@ -4115,21 +4139,22 @@ async function viewOverview(c) {
   // ---- discovery: GET /api/ingress-discovery/status, /api/docker-discovery/status
   // (source order: discovery, ingress before docker) ----
   function attnDiscovery(res, label) {
+    const discoveryTab = label === 'Docker' ? '#/integrations/docker' : '#/integrations/ingress';
     if (!res.ok) {
       const status = res.err && res.err.status;
       if (status === 501 || status === 404) return; // not enabled: no row
       warnRows.push(attnRow('warn', `Could not read ${label.toLowerCase()} discovery status`,
-        esc((res.err && res.err.message) || 'request failed'), '#/integrations', 'Open'));
+        esc((res.err && res.err.message) || 'request failed'), discoveryTab, 'Open'));
       return;
     }
     const st = res.data;
     if (st.error) {
-      errRows.push(attnRow('err', `${label} discovery failed`, esc(st.error), '#/integrations', 'Open discovery'));
+      errRows.push(attnRow('err', `${label} discovery failed`, esc(st.error), discoveryTab, 'Open discovery'));
     }
     arr(st.hosts).forEach((h) => {
       if (h.action === 'skipped' && h.reason) {
         warnRows.push(attnRow('warn', `${label} discovery skipped <b>${esc(h.name)}</b>`,
-          esc(h.reason), '#/integrations', 'Open discovery'));
+          esc(h.reason), discoveryTab, 'Open discovery'));
       }
     });
   }
@@ -8794,6 +8819,7 @@ async function viewTokens(c) {
       <td class="mono faint col-time">${t.lastUsed ? esc(fmtTime(t.lastUsed)) : 'Never'}</td>
       <td class="col-actions">
         <div class="row-actions">
+          <button class="btn ghost sm tok-edit" data-name="${esc(t.name)}" type="button">Edit</button>
           <button class="btn ghost sm tok-toggle" data-name="${esc(t.name)}" type="button">${t.disabled ? 'Enable' : 'Disable'}</button>
           <button class="btn ghost sm tok-rotate" data-name="${esc(t.name)}" type="button">Rotate</button>
           <button class="btn danger-soft sm tok-del" data-name="${esc(t.name)}" type="button">Delete</button>
@@ -8806,9 +8832,9 @@ async function viewTokens(c) {
     'Credentials for scripts and CI, sent as a Bearer token. Scopes limit what each token can reach.',
     `<button class="btn primary" id="tok-add" type="button" aria-expanded="false" aria-controls="tok-form">${ICON.plus}Add token</button>`) +
     `<div class="card form-section" id="tok-form" style="margin-bottom:16px" hidden>
-      <p class="section-label">Add token</p>
+      <p class="section-label" id="tok-form-title">Add token</p>
       <div class="inline-fields">
-        <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" data-hint="apiToken.name" placeholder="ci-deploy" /></div>
+        <div class="field-group"><label>Name</label><input class="field mono" id="tok-name" data-hint="apiToken.name" placeholder="ci-deploy" /><div class="hint" id="tok-name-hint" hidden>Immutable after creation.</div></div>
         <div class="field-group field-narrow"><label>Expires</label><input class="field mono" id="tok-expires" data-hint="apiToken.expiresAt" type="date" /></div>
       </div>
       <div class="field-group">
@@ -8840,6 +8866,7 @@ async function viewTokens(c) {
         </div>
         <div class="hint" style="margin-top:8px">Write implies read - checking write ticks and locks read. <span class="mono">api-tokens</span>, <em>writing</em> <span class="mono">settings</span>, restore, whole-config revert and the pprof endpoints need Full admin.</div>
       </div>
+      <div class="hint" id="tok-edit-note" hidden>Saving keeps the token's secret: only its scopes and expiry change. Rotate it from the list to mint a new secret.</div>
       <div style="display:flex;gap:10px;margin-top:12px">
         <button class="btn primary" id="tok-create" type="button">${ICON.plus}Add token</button>
         <button class="btn ghost" id="tok-cancel" type="button">Cancel</button>
@@ -8856,12 +8883,30 @@ async function viewTokens(c) {
         'Add one with only the scopes the script needs - write implies read, so a deploy job usually wants proxy-hosts:write and nothing else.'));
 
   const tokForm = $('#tok-form'), tokAdd = $('#tok-add');
+  // One form, two modes. editing holds the stored token while its scopes or
+  // expiry are being changed; null means the form adds a new one. editingExtra
+  // keeps the scopes the grid has no row for (a wildcard like "*:read") so an
+  // edit never silently narrows the token; editingExpiry is the stored expiry
+  // as loaded, re-sent verbatim unless the date input was changed.
+  let editing = null, editingExtra = [], editingExpiry = '';
+  const setMode = (t) => {
+    editing = t || null;
+    $('#tok-form-title').textContent = editing ? `Edit token ${editing.name}` : 'Add token';
+    $('#tok-create').innerHTML = editing ? 'Save changes' : `${ICON.plus}Add token`;
+    $('#tok-name').readOnly = !!editing;
+    $('#tok-name-hint').hidden = !editing;
+    $('#tok-edit-note').hidden = !editing;
+  };
   const showForm = (open) => {
     tokForm.hidden = !open;
     tokAdd.setAttribute('aria-expanded', String(open));
-    if (open) { $('#tok-name').focus(); } else { clearEditorError(); tokAdd.focus(); }
+    if (open) { (editing ? $('#tok-expires') : $('#tok-name')).focus(); } else { clearEditorError(); tokAdd.focus(); }
   };
-  tokAdd.addEventListener('click', () => showForm(tokForm.hidden));
+  tokAdd.addEventListener('click', () => {
+    if (!tokForm.hidden && !editing) { showForm(false); return; }
+    fillForm(null);
+    showForm(true);
+  });
   $('#tok-cancel').addEventListener('click', () => showForm(false));
 
   const tokFilter = $('#tokFilter');
@@ -8931,16 +8976,64 @@ async function viewTokens(c) {
     return out;
   }
 
+  // fillForm loads a stored token into the form (scopes, expiry) or clears it.
+  function fillForm(t) {
+    setMode(t);
+    $('#tok-name').value = t ? t.name : '';
+    editingExpiry = t && t.expiresAt ? String(t.expiresAt) : '';
+    $('#tok-expires').value = editingExpiry ? editingExpiry.slice(0, 10) : '';
+    const scopes = t ? arr(t.scopes) : [];
+    // Any "admin" entry is full admin, whatever else rides beside it.
+    $('#tok-admin').setAttribute('aria-checked', scopes.includes('admin') ? 'true' : 'false');
+    syncAdmin();
+    const known = new Set($$('#tok-scopes .tok-read').map((i) => i.dataset.p));
+    editingExtra = scopes.filter((sc) => {
+      const m = /^([^:]+):(read|write)$/.exec(sc);
+      return sc !== 'admin' && !(m && known.has(m[1]));
+    });
+    scopeGrid.querySelectorAll('.tok-read, .tok-write').forEach((box) => {
+      const verb = box.classList.contains('tok-write') ? 'write' : 'read';
+      box.checked = scopes.includes(box.dataset.p + ':' + verb) || (verb === 'read' && scopes.includes(box.dataset.p + ':write'));
+    });
+  }
+
+  $$('.tok-edit').forEach((b) => {
+    b.addEventListener('click', () => {
+      const cur = tokens.find((t) => t.name === b.dataset.name);
+      if (!cur) return;
+      fillForm(cur);
+      showForm(true);
+      scrollToTop();
+    });
+  });
+
   $('#tok-create').addEventListener('click', async () => {
     clearEditorError();
     const nm = $('#tok-name').value.trim();
     if (!nm) { showInvalid('Name required', 'Enter a token name.', $('#tok-name')); return; }
     const scopes = collectScopes();
     if (!scopes.length) { showInvalid('Scope required', 'Pick at least one scope, or Full admin.', $('#tok-scopes')); return; }
-    const body = { scopes };
     const exp = $('#tok-expires').value;
-    if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
     const btn = $('#tok-create'); btn.disabled = true;
+    if (editing) {
+      // Whole-object PUT without ?rotate=1: the server carries the stored
+      // digest forward, so the secret in use keeps working. Scopes the grid
+      // cannot show ride along unchanged unless Full admin now covers them.
+      const merged = scopes.includes('admin') ? scopes : scopes.concat(editingExtra.filter((sc) => !scopes.includes(sc)));
+      const body = Object.assign(metaCarryForward(editing), { scopes: merged });
+      if (editing.displayName) body.displayName = editing.displayName;
+      if (editing.disabled) body.disabled = true;
+      if (exp && exp === editingExpiry.slice(0, 10)) body.expiresAt = editingExpiry;
+      else if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
+      try {
+        const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body });
+        toastSaved(r.commit, 'Saved'); refreshHeadSha();
+        if (c.isConnected) await route();
+      } catch (e) { toastErr(e, `Could not save ${nm}`); btn.disabled = false; }
+      return;
+    }
+    const body = { scopes };
+    if (exp) body.expiresAt = new Date(exp + 'T23:59:59Z').toISOString();
     try {
       const r = await api('/api/api-tokens/' + encodeURIComponent(nm), { method: 'PUT', body, headers: { 'If-None-Match': '*' } });
       toastSaved(r.commit, 'Added'); refreshHeadSha();
@@ -9091,8 +9184,43 @@ async function viewLogs(c) {
 }
 
 // ---------- HISTORY ----------
+// showDiff fetches what one commit changed ({to}) or what changed between two
+// ({from, to}) and renders it in the wide modal: a file summary with +/-
+// counts, then the unified diff with added, removed and hunk lines coloured.
+async function showDiff(q) {
+  let d;
+  try {
+    const qs = new URLSearchParams();
+    qs.set('to', q.to);
+    if (q.from) qs.set('from', q.from);
+    d = (await api('/api/history/diff?' + qs.toString())).data || {};
+  } catch (e) { toastErr(e, 'Could not load the changes'); return; }
+  const files = arr(d.files);
+  const title = q.from ? `Changes from ${shortSha(q.from)} to ${shortSha(q.to)}` : `Changes in ${shortSha(q.to)}`;
+  const summary = files.length
+    ? `<ul class="diff-files">${files.map((f) => `<li><span class="chip ${f.status === 'added' ? 'ok' : f.status === 'deleted' ? 'err' : ''}">${esc(f.status)}</span><span class="mono trunc" title="${esc(f.path)}">${esc(f.oldPath ? f.oldPath + ' -> ' + f.path : f.path)}</span><span class="mono diff-count"><span class="diff-add">+${f.additions}</span> <span class="diff-del">-${f.deletions}</span></span></li>`).join('')}</ul>`
+    : '<p class="muted">No file changed between these two points.</p>';
+  const lines = String(d.patch || '').split('\n').map((l) => {
+    let cls = '';
+    if (l.startsWith('diff --git ')) cls = 'diff-file';
+    else if (l.startsWith('@@')) cls = 'diff-hunk';
+    else if (l.startsWith('+++') || l.startsWith('---') || l.startsWith('index ') || l.startsWith('new file') || l.startsWith('deleted file') || l.startsWith('rename ') || l.startsWith('similarity ')) cls = 'diff-meta';
+    else if (l.startsWith('+')) cls = 'diff-add';
+    else if (l.startsWith('-')) cls = 'diff-del';
+    return `<span class="${cls}">${esc(l)}</span>`;
+  }).join('\n');
+  const body = summary
+    + (files.length ? `<pre class="diff">${lines}</pre>` : '')
+    + (d.truncated ? '<p class="hint warn">The patch was cut at 2 MiB; the file list above is complete.</p>' : '');
+  await confirmModal({ title, body, wide: true, closeOnly: true, confirmLabel: 'Close', danger: false, keepOnNavigate: false });
+}
+
 async function viewHistory(c) {
   const items = arr((await api('/api/history')).data);
+  // GET /api/history/diff is admin scope (the patch carries whole object
+  // files, api-token digests included), so the read-only role gets no diff
+  // controls rather than buttons that 403.
+  const canDiff = !isRoleReadOnly();
   c.innerHTML = `
     ${pageHead('History', 'Every change is a git commit. Reviewable, attributable, and reversible.')}
     <div class="card" style="margin-bottom:16px">
@@ -9116,13 +9244,49 @@ async function viewHistory(c) {
         const whole = i === 0
           ? '<span class="revert disabled" title="Already the current config">Current</span>'
           : `<button type="button" class="revert" data-revert="${esc(h.hash)}" title="Revert the entire config (every object) to this commit">Revert entire config</button>`;
+        // Changes opens what this one commit did; the compare box picks two
+        // commits for a diff between them. Both read the repo, so the "user"
+        // role (no admin scope) does not get them.
+        const changes = canDiff ? `<button type="button" class="revert" data-changes="${esc(h.hash)}" title="Every file this commit changed, as a diff">Changes</button>` : '';
+        const pick = canDiff ? `<label class="check-item tl-pick" title="Pick two commits to compare"><input type="checkbox" class="tl-cmp" data-hash="${esc(h.hash)}" data-idx="${i}" aria-label="Compare ${esc(shortSha(h.hash))}" />Compare</label>` : '';
         return `<div class="tl-item" data-blob="${esc([h.message, historyText(h.message), h.author, h.email, h.hash].join(' ').toLowerCase())}">
           <div class="tl-meta">${esc(fmtTime(h.when))} &middot; <span${h.email ? ` title="${esc(h.email)}"` : ''}>${esc(h.author || 'unknown')}</span></div>
           <div class="tl-msg" title="${esc(h.message || '')}">${esc(historyText(h.message))}</div>
-          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${scoped}${whole}</div>
+          <div class="tl-actions"><span class="sha">${esc(shortSha(h.hash))}</span>${changes}${scoped}${whole}${pick}</div>
         </div>`;
       }).join('')}</div>` : '<div class="muted" style="font-size:13.5px">No commits yet.</div>'}
     </div>`;
+
+  // Compare bar: appears once two commits are ticked. The diff always runs
+  // from the older commit to the newer one, whatever order they were ticked.
+  const cmpBar = document.createElement('div');
+  cmpBar.className = 'panel save-bar cmp-bar';
+  cmpBar.hidden = true;
+  cmpBar.innerHTML = `<div class="save-note" id="cmpNote"></div><div style="display:flex;gap:10px"><button class="btn primary" id="cmpGo" type="button">Compare</button><button class="btn ghost" id="cmpClear" type="button">Clear</button></div>`;
+  c.appendChild(cmpBar);
+  const picked = () => $$('.tl-cmp:checked').map((b) => ({ hash: b.dataset.hash, idx: Number(b.dataset.idx) }));
+  const syncCmp = () => {
+    const p = picked();
+    // A third tick is refused rather than silently dropping one.
+    $$('.tl-cmp').forEach((b) => { b.disabled = p.length >= 2 && !b.checked; });
+    cmpBar.hidden = p.length === 0;
+    $('#cmpNote').textContent = p.length === 2
+      ? `Compare ${shortSha(p.find((x) => x.idx === Math.max(p[0].idx, p[1].idx)).hash)} to ${shortSha(p.find((x) => x.idx === Math.min(p[0].idx, p[1].idx)).hash)}`
+      : 'Pick one more commit to compare.';
+    $('#cmpGo').disabled = p.length !== 2;
+  };
+  $$('.tl-cmp').forEach((b) => b.addEventListener('change', syncCmp));
+  $('#cmpClear').addEventListener('click', () => { $$('.tl-cmp').forEach((b) => { b.checked = false; }); syncCmp(); });
+  $('#cmpGo').addEventListener('click', () => {
+    const p = picked();
+    if (p.length !== 2) return;
+    const older = p[0].idx > p[1].idx ? p[0] : p[1];
+    const newer = older === p[0] ? p[1] : p[0];
+    showDiff({ from: older.hash, to: newer.hash });
+  });
+  c.querySelectorAll('[data-changes]').forEach((el) => {
+    el.addEventListener('click', () => showDiff({ to: el.getAttribute('data-changes') }));
+  });
 
   const histFilter = $('#histFilter');
   if (histFilter) {
@@ -9285,8 +9449,22 @@ const SETTINGS_TABS = [
   { id: 'advanced', label: 'Advanced' },
   { id: 'operations', label: 'Operations' },
 ];
-function showSettingsTab(id) {
-  const known = SETTINGS_TABS.some((t) => t.id === id) ? id : SETTINGS_TABS[0].id;
+// Integrations is tabbed the same way: one rendered view, every tab's controls
+// in the DOM at once, so any tab's Save sends the whole settings object.
+const INTEGRATIONS_TABS = [
+  { id: 'dns', label: 'DNS sync' },
+  { id: 'ingress', label: 'Ingress discovery' },
+  { id: 'docker', label: 'Docker discovery' },
+  { id: 'access-sync', label: 'Access-list sync' },
+  { id: 'webhooks', label: 'Webhooks' },
+  { id: 'notifications', label: 'Notifications' },
+];
+function showIntegrationsTab(id) { showTabIn(INTEGRATIONS_TABS, id); }
+function showSettingsTab(id) { showTabIn(SETTINGS_TABS, id); }
+// showTabIn selects tab id among tabs: the band's buttons and the content's
+// panels (both carry data-tab) flip together.
+function showTabIn(tabs, id) {
+  const known = tabs.some((t) => t.id === id) ? id : tabs[0].id;
   $$('#pageTabs .tab-btn').forEach((b) => {
     const on = b.dataset.tab === known;
     b.classList.toggle('on', on);
@@ -9378,6 +9556,12 @@ async function viewSettings(c, tab) {
   const unknownProvs = storedProvs.filter((n) => !oidcIdps.some((p) => p.name === n));
   const pp = s.proxyProtocol || {};
   const maint = s.maintenance || {};
+  const ae = s.adminEdge || {};
+  const aeTLS = ae.tls || {};
+  const aeHost = (() => { try { return new URL(s.externalBaseURL || '').hostname; } catch (e) { return ''; } })();
+  // What the fleet-wide switch leaves up, from the capability probe: the
+  // admin edge and the hosts the admin sign-in providers live behind.
+  const maintExempt = arr(state.capabilities && state.capabilities.maintenance && state.capabilities.maintenance.exempt);
   const idc = s.ingressDiscovery || {};
   const trusted = arr(s.trustedProxies);
   const stls = s.tls || {};
@@ -9417,6 +9601,21 @@ async function viewSettings(c, tab) {
         </div>
         <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Require SSO for admins</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'Require SSO for admins', 'settings.adminAuth.ssoOnly')}</div>
         <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local sign-in re-enabled.</div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">Admin front door</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Serve this panel at the edge, on the public URL above, through gpm's own listeners: the certificate by domain, the chain below, then a loopback hop to the admin listener. Not a proxy host: it is never listed, disabled, deleted or discovery-managed, and <b>fleet-wide maintenance never applies to it</b>, so you can always reach this page to turn maintenance off. The direct admin listener keeps working as the break-glass path.</p>
+        <div class="toggle-line"><div class="tl-text"><div class="nm">Serve the panel at the edge</div><div class="ds">${aeHost ? `on <span class="mono">${esc(aeHost)}</span>` : 'set the public URL above first'}</div></div>${switchHtml('set-ae-on', !!ae.enabled, 'Serve the panel at the edge', 'settings.adminEdge.enabled')}</div>
+        <div id="set-ae-body" style="margin-top:12px">
+          <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-ae-al" data-hint="settings.adminEdge.accessLists" data-path="adminEdge.accessLists"></div><div class="hint">Who may reach the panel at all. A LAN/VPN list is the usual choice; the panel's own sign-in sits behind it.</div></div>
+          <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-ae-mw" data-hint="settings.adminEdge.middlewares" data-path="adminEdge.middlewares"></div><div class="hint">Optional, in order. An mTLS or rate-limit middleware is sensible; a sign-in middleware gates the panel a second time.</div></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect plain HTTP to HTTPS</div></div>${switchHtml('set-ae-forcessl', !!aeTLS.forceSSL, 'Force SSL', 'settings.adminEdge.tls.forceSSL')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">HSTS</div><div class="ds">Strict-Transport-Security, one year, subdomains included</div></div>${switchHtml('set-ae-hsts', !!(aeTLS.hsts && aeTLS.hsts.enabled), 'HSTS', 'settings.adminEdge.tls.hsts.enabled')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Hide from search engines</div><div class="ds">X-Robots-Tag: noindex, nofollow</div></div>${switchHtml('set-ae-robots', !!ae.robotsNoIndex, 'Hide from search engines', 'settings.adminEdge.robotsNoIndex')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">LAN record</div><div class="ds">DNS sync publishes a local record pointing straight at gpm</div></div>${switchHtml('set-ae-dns-lan', !!(ae.dns && ae.dns.lanDirect), 'LAN record', 'settings.adminEdge.dns.lanDirect')}</div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">Public CNAME</div><div class="ds">DNS sync publishes the public record</div></div>${switchHtml('set-ae-dns-pub', !!(ae.dns && ae.dns.publicCname), 'Public CNAME', 'settings.adminEdge.dns.publicCname')}</div>
+          <div class="hint" style="margin-top:8px">Replaces a hand-written proxy host for this hostname: while this is on, no host may claim it (the save is refused), so delete that host first or right after. Other TLS settings (minimum version, client certificates) are kept as stored and editable in <span class="mono">settings.yaml</span>.</div>
+        </div>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Client addresses</p>
@@ -9516,7 +9715,7 @@ async function viewSettings(c, tab) {
       <div class="card form-section danger-zone" style="margin-top:16px">
         <p class="section-label">Fleet-wide maintenance</p>
         <p class="muted" style="font-size:13.5px;margin:0 0 10px">Takes <b>every proxy host</b> out of service for a downtime window: gpm answers each request itself with a <span class="mono">503</span> and a <span class="mono">Retry-After</span> instead of dialling the upstream. It wins over each host's own Maintenance switch, so turning it off returns hosts to whatever they were individually set to. Redirect, parked and stream hosts proxy nothing and keep serving; ACME HTTP-01 is answered before host routing, so certificates still renew. The page served is the <a href="#/errorpages">error page</a> configured for <span class="mono">503</span> (a host's own override first), or gpm's built-in maintenance page when none is.</p>
-        <div class="toggle-line"><div class="tl-text"><div class="nm">Fleet-wide maintenance</div><div class="ds">All proxy hosts serve the maintenance page</div></div>${switchHtml('set-maint-on', !!maint.enabled, 'Fleet-wide maintenance', 'settings.maintenance.enabled')}</div>
+        <div class="toggle-line"><div class="tl-text"><div class="nm">Fleet-wide maintenance</div><div class="ds">${maintExempt.length ? `Every proxy host except ${maintExempt.map((d) => `<span class="mono">${esc(d)}</span>`).join(', ')} (this panel and its sign-in) serves the maintenance page` : 'All proxy hosts serve the maintenance page'}</div></div>${switchHtml('set-maint-on', !!maint.enabled, 'Fleet-wide maintenance', 'settings.maintenance.enabled')}</div>
         <div class="field-group" style="margin-top:10px;max-width:220px">
           <label>Retry-After (seconds)</label>
           <input class="field mono" id="set-maint-retry" data-hint="settings.maintenance.retryAfterSeconds" data-path="maintenance.retryAfterSeconds" type="number" min="0" max="86400" value="${esc(maint.retryAfterSeconds != null ? String(maint.retryAfterSeconds) : '')}" placeholder="300" />
@@ -9556,6 +9755,25 @@ async function viewSettings(c, tab) {
       : 'Username/password fallback <span class="warn-text">(no credential configured - this switch grants nothing until <span class="mono">GPM_LOCAL_ADMIN_USER</span> and a bcrypt hash are set)</span>';
   }
 
+  const aeAlCtl = makeChipInput($('#set-ae-al'), arr(ae.accessLists), 'add access list...');
+  const aeMwCtl = makeChipInput($('#set-ae-mw'), arr(ae.middlewares), 'add middleware...');
+  // The edge needs a hostname to serve on; without a public URL the switch is
+  // greyed with the reason, and the chain fields follow the switch.
+  const refreshAdminEdge = () => {
+    gateControl($('#set-ae-on'), !!aeHost || isOn('set-ae-on'), 'Set the public URL of this panel first.');
+    gateControl($('#set-ae-body'), isOn('set-ae-on'), 'Turn the front door on to edit its chain.');
+  };
+  refreshAdminEdge();
+  // A block that was never configured gets the sensible defaults the moment
+  // the door is first switched on; a stored false (an omitted key) is kept.
+  let aeDefaulted = !!s.adminEdge;
+  $('#set-ae-on').addEventListener('switchchange', () => {
+    if (isOn('set-ae-on') && !aeDefaulted) {
+      aeDefaulted = true;
+      ['set-ae-forcessl', 'set-ae-robots'].forEach((id) => $('#' + id).setAttribute('aria-checked', 'true'));
+    }
+    refreshAdminEdge();
+  });
   const ppCtl = makeChipInput($('#set-pp-cidrs'), arr(pp.trustedCIDRs), 'add CIDR...');
   const trustedCtl = makeChipInput($('#set-trustedproxies'), trusted, '10.0.0.0/8 or 192.0.2.10', (list) => {
     $('#set-trustedproxies-warn').hidden = !hasWildcardProxy(list);
@@ -9703,6 +9921,24 @@ async function viewSettings(c, tab) {
     if (isOn('set-maint-on')) maintenance.enabled = true;
     if (!isNaN(maintRetry) && maintRetry > 0) maintenance.retryAfterSeconds = maintRetry;
     if (Object.keys(maintenance).length) body.maintenance = maintenance;
+
+    // Admin edge (adminEdge). Rebuilt from the controls, with the TLS block
+    // merged over the stored one so a minTLSVersion or clientAuth written in
+    // settings.yaml survives a save here. Off with nothing else set leaves the
+    // key off the body entirely.
+    const adminEdge = {};
+    if (isOn('set-ae-on')) adminEdge.enabled = true;
+    const aeAls = aeAlCtl.get(), aeMws = aeMwCtl.get();
+    if (aeAls.length) adminEdge.accessLists = aeAls;
+    if (aeMws.length) adminEdge.middlewares = aeMws;
+    const aeTls = Object.assign({}, ae.tls, { forceSSL: isOn('set-ae-forcessl') });
+    if (isOn('set-ae-hsts')) aeTls.hsts = Object.assign({ maxAge: 31536000, includeSubdomains: true }, ae.tls && ae.tls.hsts, { enabled: true });
+    else delete aeTls.hsts;
+    if (!aeTls.forceSSL) delete aeTls.forceSSL;
+    if (Object.keys(aeTls).length) adminEdge.tls = aeTls;
+    if (isOn('set-ae-robots')) adminEdge.robotsNoIndex = true;
+    if (isOn('set-ae-dns-lan') || isOn('set-ae-dns-pub')) adminEdge.dns = { lanDirect: isOn('set-ae-dns-lan'), publicCname: isOn('set-ae-dns-pub') };
+    if (Object.keys(adminEdge).length) body.adminEdge = adminEdge;
 
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();

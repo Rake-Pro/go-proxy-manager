@@ -11,15 +11,15 @@ data directory.
 
 | Version | Action required | Detail |
 |---|---|---|
-| Unreleased | **Rename `config/dead-hosts` to `config/parked-hosts`** before starting the new binary. The API path becomes `/api/parked-hosts`, the token-scope subject becomes `parked-hosts`, and the whole-config key becomes `parkedHosts`. | Below, and [ParkedHost](../reference/config/parked-host.md) |
-| Unreleased | **Replace each stream host's `forwardHost`/`forwardPort` with a single `target: {host, port}`.** A file still using the old keys is rejected at load. | Below, and [StreamHost](../reference/config/stream-host.md) |
-| Unreleased | **Only if you relied on `forwardAuth.trustedProxies` for client-IP resolution:** copy the same CIDRs into `settings.trustedProxies`. It no longer doubles as `X-Forwarded-For` trust. gpm logs a `WARN` naming the exact block to paste. | [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers) |
-| Unreleased | **No action now, but plan for v2:** `AccessList.basicAuth` and `AccessList.satisfyAny` are deprecated and still enforced. v2 refuses a config that carries them. | [Migrate access-list basic auth](../how-to/migrate-basic-auth.md) |
+| 1.0.0 | **Rename `config/dead-hosts` to `config/parked-hosts`** before starting the new binary. The API path becomes `/api/parked-hosts`, the token-scope subject becomes `parked-hosts`, and the whole-config key becomes `parkedHosts`. | Below, and [ParkedHost](../reference/config/parked-host.md) |
+| 1.0.0 | **Replace each stream host's `forwardHost`/`forwardPort` with a single `target: {host, port}`.** A file still using the old keys is rejected at load. | Below, and [StreamHost](../reference/config/stream-host.md) |
+| 1.0.0 | **Only if you relied on `forwardAuth.trustedProxies` for client-IP resolution:** copy the same CIDRs into `settings.trustedProxies`. It no longer doubles as `X-Forwarded-For` trust. gpm logs a `WARN` naming the exact block to paste. | [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers) |
+| 1.0.0 | **No action now, but migrate when convenient:** `AccessList.basicAuth` and `AccessList.satisfyAny` are deprecated and still enforced (2.x included). A later major release will refuse a config that carries them. | [Migrate access-list basic auth](../how-to/migrate-basic-auth.md) |
 | 1.0.x, all | **Roll a newer binary out before adopting config it introduces.** An older binary's kind map silently ignores a directory it does not know, so a downgrade leaves live objects invisible rather than cleanly rejected. Applies to `upstream-groups` and `api-tokens`. | Below |
 
-## The next release, in full
+## 1.0.0, in full
 
-> **BREAKING: the next release renames two things, and neither is migrated for
+> **BREAKING: 1.0.0 renamed two things, and neither is migrated for
 > you.** The config store is a git working tree, so gpm refuses an unmigrated
 > tree at startup with the exact fix in the error rather than authoring a commit
 > you never made. Do both steps in the config repo *before* starting the new

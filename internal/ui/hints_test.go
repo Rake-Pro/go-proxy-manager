@@ -35,6 +35,7 @@ var hintExempt = map[string]string{
 	`id="logFilter"`:   "list filter box",
 	`id="histFilter"`:  "list filter box",
 	`id="hostSelAll"`:  "bulk-selection checkbox, not a config field",
+	`class="tl-cmp"`:   "history compare pick, not a config field; its label says what it does",
 	`class="host-sel"`: "bulk-selection checkbox, not a config field",
 	`id="restoreFile"`: "hidden file input behind the Restore button",
 	`id="tok-reveal"`:  "read-only display of the token secret that was just minted",

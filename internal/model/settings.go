@@ -830,6 +830,10 @@ type Settings struct {
 	// off: each proxy host is governed by its own maintenance flag alone.
 	Maintenance MaintenanceSettings `json:"maintenance,omitempty" yaml:"maintenance,omitempty"`
 
+	// AdminEdge serves the admin panel at the edge on externalBaseURL's host
+	// (see AdminEdgeSettings): not a proxy host, never in fleet maintenance.
+	AdminEdge AdminEdgeSettings `json:"adminEdge,omitempty" yaml:"adminEdge,omitempty"`
+
 	// ErrorPages configures the default custom error pages for every host; a
 	// ProxyHost's own errorPages overrides this. Zero value keeps today's plain
 	// gpm error output.
@@ -984,6 +988,9 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := s.Maintenance.validate(); err != nil {
+		return err
+	}
+	if err := s.AdminEdge.validate(s.ExternalBaseURL); err != nil {
 		return err
 	}
 	if err := validateSecurityHeaders(s.SecurityHeaders); err != nil {

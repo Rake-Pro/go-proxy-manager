@@ -5,6 +5,41 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- History: **Changes** on a commit shows every file it touched as a unified
+  diff with a per-file summary, and **Compare** on two commits shows what
+  changed between them, oldest to newest. Backed by `GET /api/history/diff`
+  (admin scope: the patch carries whole object files).
+- API tokens: **Edit** on a token changes its scopes and expiry in place. The
+  secret in use keeps working; Rotate is still the only way to mint a new one.
+
+- Admin front door (`settings.adminEdge`, Settings > General): gpm serves its
+  own panel at the edge on `externalBaseURL`'s hostname, with the access
+  lists, middlewares, TLS and DNS policy of a proxy host but without a proxy
+  host object. It is never listed, disabled, deleted or discovery-managed; the
+  name `gpm-admin` is reserved and a stored host may not claim the hostname
+  while it is on (the write is refused, either side). Replaces the hand-written
+  proxy host route, which remains supported.
+- Fleet-wide maintenance leaves the admin front door and the hosts the admin
+  sign-in providers live behind up, so the panel stays reachable to turn it
+  off; the Settings page lists what stays up and `GET /api/capabilities`
+  reports it under `maintenance.exempt`. A per-host maintenance flag on one of
+  them is still honoured. Fixes #9.
+- Integrations is tabbed like Settings: DNS sync, Ingress discovery, Docker
+  discovery, Access-list sync, Webhooks and Notifications, each deep-linkable
+  as `#/integrations/<tab>`, any tab's Save writing the whole settings object.
+
+### Fixed
+
+- Admin UI on a phone: the tab strip no longer shows its own scrollbar under
+  the tabs, and the hover underline no longer sticks to the last tapped tab.
+- README: the Go badge now reads `.go-version`, the toolchain the binary and
+  image are built with, instead of the language minimum in `go.mod`.
+- Docs: the upgrade table dated its 1.0.0 rows "Unreleased"; the UI tour
+  describes the Proxy Hosts columns and API token Edit; the flags reference no
+  longer claims `-version` has an environment variable.
+
 ## [2.3.0] - 2026-10-20
 
 ### Added

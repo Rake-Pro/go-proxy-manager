@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -123,7 +124,11 @@ func main() {
 		log.Fatal().Err(err).Str("dir", *configDir).Msg("failed to initialise config store")
 	}
 
-	cfg, settings, err := st.Load(ctx)
+	// The admin edge (settings.adminEdge) compiles to a proxy host that hops to
+	// the admin listener over loopback; the store builds it on LoadCompiled,
+	// which is what every routing, publishing and discovery consumer reads.
+	st.SetAdminEdgeUpstream(adminLoopbackUpstream(*adminAddr))
+	cfg, settings, err := st.LoadCompiled(ctx)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load config")
 	}
@@ -283,6 +288,11 @@ func main() {
 	// deployment that boots with maintenance on must never serve a single request
 	// to an upstream first.
 	dataplane.SetMaintenance(settings.Maintenance)
+	// What the fleet-wide switch leaves up: the admin edge and the hosts the
+	// admin sign-in providers live behind, so the panel stays reachable to turn
+	// maintenance back off. Installed before the compile, which records it per
+	// host.
+	dataplane.SetMaintenanceExempt(model.MaintenanceExemptDomains(cfg, settings))
 
 	// Fetched access-list source sets, installed before the first Reload for the
 	// same reason as the error pages above: compileAccessList resolves a
@@ -365,7 +375,7 @@ func main() {
 	// data plane. It is the single path used after any config or certificate
 	// change (API writes, ACME issuance) so the running state never drifts.
 	reload := func() error {
-		c, st2, err := st.Load(ctx)
+		c, st2, err := st.LoadCompiled(ctx)
 		if err != nil {
 			log.Error().Err(err).Msg("reload: failed to load config")
 			return err
@@ -399,6 +409,7 @@ func main() {
 		// compile then fails, the hosts still running the previous router honour
 		// the new switch - which is the reading an operator flipping it wants.
 		dataplane.SetMaintenance(st2.Maintenance)
+		dataplane.SetMaintenanceExempt(model.MaintenanceExemptDomains(c, st2))
 		// Fetched access-list source sets, refreshed before the compile so a
 		// reload triggered by a completed fetch serves the new set on the very
 		// next request (see accesssync).
@@ -520,7 +531,7 @@ func main() {
 	// records this file says it created. It is committed to the config repo like
 	// everything else, authored as the reconciler rather than as an operator.
 	dnsSyncer := dnssync.New(func(c context.Context) (model.Config, model.Settings, error) {
-		return st.Load(c)
+		return st.LoadCompiled(c)
 	}, dnsLedgerStore{st})
 
 	if mx != nil {
@@ -542,7 +553,7 @@ func main() {
 	// commit per reconcile. It publishes no DNS itself - after a write it asks the
 	// phase-1 syncer for a run, so there is a single DNS code path.
 	ingressDisc := k8s.New(
-		func(c context.Context) (model.Config, model.Settings, error) { return st.Load(c) },
+		func(c context.Context) (model.Config, model.Settings, error) { return st.LoadCompiled(c) },
 		func(c context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error) {
 			objs := make([]model.Object, 0, len(upserts))
 			for _, h := range upserts {
@@ -604,7 +615,7 @@ func main() {
 	// reconcile. Its hosts carry managed-by: docker-discovery, so the two
 	// reconcilers can run side by side and neither can touch the other's objects.
 	dockerDisc := docker.New(
-		func(c context.Context) (model.Config, model.Settings, error) { return st.Load(c) },
+		func(c context.Context) (model.Config, model.Settings, error) { return st.LoadCompiled(c) },
 		func(c context.Context, upserts []model.ProxyHost, deletes []string, message string) (string, error) {
 			objs := make([]model.Object, 0, len(upserts))
 			for _, h := range upserts {
@@ -748,6 +759,7 @@ func main() {
 		SetAccessLog:      dp.SetAccessLog,
 		GeoDBLoaded:       geoResolver.Loaded,
 		MaintenanceGlobal: dataplane.MaintenanceGlobalEnabled,
+		MaintenanceExempt: dataplane.MaintenanceExemptDomains,
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},
@@ -1095,4 +1107,24 @@ func (a accessLedgerStore) Save(ctx context.Context, l model.AccessListSourceLed
 	_, err := a.st.SaveAccessListSourceLedger(context.WithoutCancel(ctx), l,
 		store.Author{Name: "access-list-sync", Email: "gpm@localhost"}, rev)
 	return err
+}
+
+// adminLoopbackUpstream is where the data plane reaches the admin listener for
+// the admin edge: the listener's own host when it binds one, 127.0.0.1 for a
+// wildcard bind (":8081", "0.0.0.0:8081", "[::]:8081"). A port that does not
+// parse leaves the port 0, which LoadCompiled treats as "no admin edge".
+func adminLoopbackUpstream(addr string) model.Upstream {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return model.Upstream{}
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return model.Upstream{}
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return model.Upstream{Scheme: "http", Host: host, Port: port}
 }

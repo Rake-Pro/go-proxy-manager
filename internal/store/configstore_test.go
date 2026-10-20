@@ -1123,3 +1123,197 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+func TestDiffOneCommitAndBetweenCommits(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	first, err := s.Save(ctx, sampleHost("alpha"), Author{})
+	if err != nil {
+		t.Fatalf("save alpha: %v", err)
+	}
+	h := sampleHost("alpha")
+	h.Upstream.Port = 9090
+	second, err := s.Save(ctx, h, Author{})
+	if err != nil {
+		t.Fatalf("save alpha again: %v", err)
+	}
+	third, err := s.Delete(ctx, "ProxyHost", "alpha", Author{})
+	if err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+
+	// One commit against its parent: the port change, one modified file.
+	d, err := s.Diff(ctx, "", second)
+	if err != nil {
+		t.Fatalf("diff second: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Status != "modified" || d.Files[0].Path != "proxy-hosts/alpha.yaml" {
+		t.Fatalf("files = %+v, want one modified proxy-hosts/alpha.yaml", d.Files)
+	}
+	// The port line plus the updatedAt stamp every save rewrites.
+	if d.Files[0].Additions != 2 || d.Files[0].Deletions != 2 {
+		t.Fatalf("counts = +%d -%d, want +2 -2", d.Files[0].Additions, d.Files[0].Deletions)
+	}
+	if !strings.Contains(d.Patch, "port: 8080") || !strings.Contains(d.Patch, "port: 9090") {
+		t.Fatalf("patch does not show the port change:\n%s", d.Patch)
+	}
+
+	// The commit that created the file is an addition, even though it is not
+	// the root commit (Init made that one).
+	d, err = s.Diff(ctx, "", first)
+	if err != nil {
+		t.Fatalf("diff first: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Status != "added" {
+		t.Fatalf("files = %+v, want one added file", d.Files)
+	}
+
+	// Between two commits: from the creation to the deletion the file is gone.
+	d, err = s.Diff(ctx, first, third)
+	if err != nil {
+		t.Fatalf("diff first..third: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Status != "deleted" {
+		t.Fatalf("files = %+v, want one deleted file", d.Files)
+	}
+	if d.From != first || d.To != third {
+		t.Fatalf("from/to = %s/%s", d.From, d.To)
+	}
+
+	// Untrusted input is shape-checked before git sees it.
+	if _, err := s.Diff(ctx, "", "--output=/tmp/x"); err == nil {
+		t.Fatal("option-shaped hash accepted")
+	}
+	if _, err := s.Diff(ctx, "HEAD", second); err == nil {
+		t.Fatal("symbolic from accepted")
+	}
+}
+
+func TestAdminEdgeWritePaths(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	st.SetAdminEdgeUpstream(model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 8081})
+	if _, err := st.Save(ctx, model.AccessList{ObjectMeta: model.ObjectMeta{Name: "lan"}}, Author{}); err != nil {
+		t.Fatalf("seed access list: %v", err)
+	}
+	_, s, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ExternalBaseURL = "https://gpm.example.com"
+	s.AdminAuth.LocalLoginEnabled = true
+	s.AdminEdge = model.AdminEdgeSettings{Enabled: true, AccessLists: []string{"lan"}, TLS: model.TLSSettings{ForceSSL: true}}
+
+	// A settings write naming an access list that does not exist is refused.
+	bad := s
+	bad.AdminEdge.AccessLists = []string{"nope"}
+	if _, err := st.SaveSettings(ctx, bad, Author{}); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("dangling access list accepted: %v", err)
+	}
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+
+	// The compiled view carries the synthetic host; the plain one does not.
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ProxyHosts) != 0 {
+		t.Fatalf("Load must not list the admin edge: %+v", cfg.ProxyHosts)
+	}
+	ccfg, _, err := st.LoadCompiled(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ccfg.ProxyHosts) != 1 || ccfg.ProxyHosts[0].Name != model.AdminEdgeHostName || ccfg.ProxyHosts[0].Domains[0] != "gpm.example.com" || ccfg.ProxyHosts[0].Upstream.Port != 8081 {
+		t.Fatalf("LoadCompiled hosts = %+v", ccfg.ProxyHosts)
+	}
+
+	// A stored host may claim neither the panel's hostname nor the reserved name.
+	h := sampleHost("old")
+	h.Domains = []string{"gpm.example.com"}
+	if _, err := st.Save(ctx, h, Author{}); err == nil || !strings.Contains(err.Error(), "admin panel") {
+		t.Fatalf("hostname collision accepted: %v", err)
+	}
+	h = sampleHost(model.AdminEdgeHostName)
+	if _, err := st.Save(ctx, h, Author{}); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("reserved name accepted: %v", err)
+	}
+	// The same collision through a batch write.
+	h = sampleHost("batch")
+	h.Domains = []string{"gpm.example.com"}
+	if _, err := st.SaveBatch(ctx, []model.Object{h}, "batch", Author{}); err == nil || !strings.Contains(err.Error(), "admin panel") {
+		t.Fatalf("batch collision accepted: %v", err)
+	}
+
+	// The access list the edge names cannot be deleted from under it.
+	if _, err := st.Delete(ctx, "AccessList", "lan", Author{}); err == nil || !strings.Contains(err.Error(), "adminEdge") {
+		t.Fatalf("referenced access list deleted: %v", err)
+	}
+
+	// Turning the edge off releases the hostname and the name.
+	s.AdminEdge.Enabled = false
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatalf("save settings off: %v", err)
+	}
+	h = sampleHost("old")
+	h.Domains = []string{"gpm.example.com"}
+	if _, err := st.Save(ctx, h, Author{}); err != nil {
+		t.Fatalf("hostname free after disabling: %v", err)
+	}
+	// And the other way round: enabling with a host on the hostname is refused.
+	s.AdminEdge.Enabled = true
+	if _, err := st.SaveSettings(ctx, s, Author{}); err == nil || !strings.Contains(err.Error(), `"old"`) {
+		t.Fatalf("enable over a stored host accepted: %v", err)
+	}
+}
+
+func TestAdminEdgeRevertCannotReintroduceCollision(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	st.SetAdminEdgeUpstream(model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 8081})
+	h := sampleHost("old")
+	h.Domains = []string{"gpm.example.com"}
+	withHost, err := st.Save(ctx, h, Author{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Delete(ctx, "ProxyHost", "old", Author{}); err != nil {
+		t.Fatal(err)
+	}
+	_, s, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ExternalBaseURL = "https://gpm.example.com"
+	s.AdminAuth.LocalLoginEnabled = true
+	s.AdminEdge = model.AdminEdgeSettings{Enabled: true}
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatal(err)
+	}
+	// Per-object revert brings "old" back under the live settings, where the
+	// edge owns the hostname: refused, nothing committed.
+	if _, err := st.RevertObject(ctx, "ProxyHost", "old", withHost, Author{}); err == nil || !strings.Contains(err.Error(), "admin panel") {
+		t.Fatalf("object revert reintroduced the collision: %v", err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ProxyHosts) != 0 {
+		t.Fatalf("refused revert left hosts behind: %+v", cfg.ProxyHosts)
+	}
+	// A whole-config revert restores settings.yaml too, so the target state
+	// (edge off, host present) is consistent and goes through.
+	if _, err := st.Revert(ctx, withHost, Author{}); err != nil {
+		t.Fatalf("whole-config revert to a consistent state: %v", err)
+	}
+	cfg, s, err = st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AdminEdge.Enabled || len(cfg.ProxyHosts) != 1 {
+		t.Fatalf("after revert: edge=%v hosts=%d", s.AdminEdge.Enabled, len(cfg.ProxyHosts))
+	}
+}
