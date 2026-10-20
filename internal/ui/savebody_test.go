@@ -299,14 +299,25 @@ func TestNoExternalOriginsInTheBundle(t *testing.T) {
 			}
 		}
 	}
-	// The three faces app.css declares have to actually be in the bundle.
+	// The three faces app.css declares have to actually be in the bundle, and
+	// nothing else is embedded under fonts/ (the licence file aside): a face no
+	// stylesheet names is dead weight in every binary.
 	for _, f := range []string{
-		"static/fonts/inter-latin.woff2",
-		"static/fonts/space-grotesk-latin.woff2",
-		"static/fonts/jetbrains-mono-latin.woff2",
+		"static/fonts/red-hat-display-vf.woff2",
+		"static/fonts/red-hat-text-vf.woff2",
+		"static/fonts/red-hat-mono-vf.woff2",
 	} {
 		if _, err := staticFS.ReadFile(f); err != nil {
 			t.Errorf("vendored font %s is missing from the embedded bundle: %v", f, err)
+		}
+	}
+	entries, err := staticFS.ReadDir("static/fonts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".woff2") && !strings.HasPrefix(e.Name(), "red-hat-") {
+			t.Errorf("fonts/%s is embedded but no stylesheet declares it", e.Name())
 		}
 	}
 	css, err := staticFS.ReadFile("static/app.css")

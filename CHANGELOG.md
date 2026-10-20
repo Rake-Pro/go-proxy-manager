@@ -45,6 +45,9 @@ All notable changes to go-proxy-manager are documented here. The format follows
 - Hovering a Tags cell (Proxy Hosts and the other object lists) shows every
   tag; the middleware check-lists in the host editor and the wizard say
   "sign-in" for an `auth` middleware, as the rail does (#57).
+- The three font files no stylesheet declared (Inter, Space Grotesk,
+  JetBrains Mono) are gone from the embedded bundle, about 100 KB off the
+  binary; a test now refuses an embedded face nothing names (#57).
 
 - Proxy Hosts list: the Source column is gone. A discovered host's source
   (`k8s-managed`, `docker-managed`) is the first chip in the Tags column,
