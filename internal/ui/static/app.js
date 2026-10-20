@@ -167,6 +167,12 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function shortSha(s) { return (s || '').slice(0, 7); }
+// Below 800px .page-body is the scroll box (app.css), not the document.
+function scrollToTop() {
+  window.scrollTo(0, 0);
+  const pb = document.querySelector('.page-body');
+  if (pb) pb.scrollTop = 0;
+}
 // One helper for every count shown with a noun: plural(1, 'tag', 'tags') is
 // "1 tag", plural(2, 'tag', 'tags') is "2 tags".
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
@@ -683,7 +689,7 @@ function showSaveError(e, title, field) {
   const badRow = target ? null : c.querySelector('.row-bad');
   if (target) focusErrorField(target);
   else if (badRow) focusErrorField({ el: badRow });
-  else window.scrollTo(0, 0);
+  else scrollToTop();
   return banner;
 }
 
@@ -1043,9 +1049,6 @@ function navGroupOpen(group) {
 function navItemHtml(n) {
   return `<button class="nav-item" data-view="${n.id}">${esc(n.label)}</button>`;
 }
-// Section id -> the glyph its nav item carries, for the list cards' kind tile.
-const SECTION_ICON = {};
-NAV_GROUPS.forEach((g) => g.items.forEach((i) => { SECTION_ICON[i.id] = i.icon; }));
 function navGroupHtml(group) {
   const items = group.items.map(navItemHtml).join('');
   if (!group.label) return `<div class="nav-group">${items}</div>`;
@@ -1235,8 +1238,14 @@ async function loadTopbar() {
   ]);
   const v = vR && vR.data;
   state.version = v;
-  // A build without a commit reports a placeholder ("none"); only a real hash is shown.
-  if (v) verStr = `${v.version ? 'Version ' + v.version : ''}${/^[0-9a-f]{7,}$/i.test(v.commit || '') ? ' (' + shortSha(v.commit) + ')' : ''}`.trim();
+  // A build without a commit reports a placeholder ("none"); only a real hash is
+  // shown, and not twice: a dev build is already versioned "dev-<sha>".
+  if (v) {
+    const sha = /^[0-9a-f]{7,}$/i.test(v.commit || '') ? shortSha(v.commit) : '';
+    const ver = v.version || '';
+    const dup = sha && ver.toLowerCase().includes(sha.toLowerCase());
+    verStr = `${ver ? 'Version ' + ver : ''}${sha && !dup ? ' (' + sha + ')' : ''}`.trim();
+  }
 
   const h = hR && hR.data;
   if (Array.isArray(h) && h.length) { state.headSha = h[0].hash; cfgSha = shortSha(h[0].hash); }
@@ -2637,7 +2646,7 @@ async function route() {
     },
   });
   c.innerHTML = loadingHtml();
-  window.scrollTo(0, 0);
+  scrollToTop();
   // Per-render bookkeeping: the shell and the view share one memo for the three
   // GETs they both want, and each render starts with a clean reference-list
   // failure list so a banner never outlives the view that produced it.
@@ -4246,9 +4255,9 @@ async function listHosts(c) {
   const mwType = {};
   arr(mwR).forEach((m) => { mwType[m.name] = m.type; });
 
+  const addBtn = `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`;
   const head = viewHead('Proxy Hosts',
-    'Public domains routed to an upstream, with the TLS, access and middleware that sit in between.',
-    `<a class="btn primary" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`);
+    'Public domains routed to an upstream, with the TLS, access and middleware that sit in between.');
 
   if (!hosts.length) {
     c.innerHTML = head + emptyState('No proxy hosts yet',
@@ -4424,6 +4433,7 @@ async function listHosts(c) {
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="hostFilter" placeholder="filter hosts..." title="Matches domain, name, upstream, certificate, sign-in, tag and status" aria-label="Filter hosts" /></div>
       ${zoneChipsHtml}
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div id="hostBulk"></div>
     <div class="table-wrap">
@@ -5818,9 +5828,9 @@ function certExpiry(ct) {
 
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
+  const addBtn = `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`;
   const head = viewHead('Certificates',
-    'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.',
-    `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`);
+    'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.');
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
       'Request an ACME certificate for the domains you serve - dns-01 if you need a wildcard, http-01 otherwise - or point gpm at PEM files already on the server.',
@@ -5876,6 +5886,7 @@ async function listCerts(c) {
   c.innerHTML = head + `
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="certFilter" placeholder="filter certificates..." title="Matches name, domain, type, challenge, DNS provider, issuer and state" aria-label="Filter certificates" /></div>
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
     <div class="table-wrap">
       <table class="certs-table">
@@ -6262,7 +6273,7 @@ const SECTION_META = {
   },
 };
 
-// A domain-first card shows the first domain as its title; the rest are listed
+// A domain-first row shows the first domain as its title; the rest are listed
 // under "Also".
 function alsoDomainsKv(o) {
   const rest = arr(o.domains).slice(1);
@@ -6316,8 +6327,7 @@ async function genericList(c, section) {
   ]);
   const items = arr(itemsR.data);
   const ctx = { health: healthR && healthR.data };
-  const head = viewHead(meta.title, meta.sub,
-    `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`)
+  const head = viewHead(meta.title, meta.sub)
     + (meta.intro ? `<p class="muted list-intro">${esc(meta.intro)}</p>` : '');
   if (!items.length) {
     c.innerHTML = head + emptyState(`No ${meta.many || meta.singular + 's'} yet`,
@@ -6329,57 +6339,71 @@ async function genericList(c, section) {
   // Redirects and parked hosts read like the Proxy Hosts list: the domain is
   // the title, the object name the subline, then status, tags and last change.
   const LIVE_CHIP = '<span class="chip flat ok"><span class="dot ok"></span>Live</span>';
-  // Each card carries its section's glyph (the nav's own) and a "go" mark, so
-  // it reads as something that opens before the pointer says so.
-  const kindIcon = SECTION_ICON[section] || ICON.layers;
-  const GO_MARK = `<span class="card-go" aria-hidden="true">${ICON.chevron}</span>`;
-  const cardHtml = (o) => {
+  // A summary is a run of k/v pairs. The keys, in order of first appearance
+  // down the list, are the table's columns, so no section keeps a column list
+  // of its own, and a row shows "-" under a key it has nothing for.
+  const parsed = items.map((o) => {
+    const t = document.createElement('template');
+    t.innerHTML = meta.summary(o, ctx);
+    const cells = {};
+    let k = '';
+    Array.from(t.content.children).forEach((el) => {
+      if (el.classList.contains('k')) k = el.textContent.trim();
+      else if (el.classList.contains('v') && k) { cells[k] = el.outerHTML; k = ''; }
+    });
+    return cells;
+  });
+  const keys = [];
+  parsed.forEach((cells) => Object.keys(cells).forEach((k) => { if (!keys.includes(k)) keys.push(k); }));
+  const anyTags = items.some((o) => arr(o.tags).length);
+  const anyUpdated = items.some((o) => o.updatedAt);
+  const headHtml = '<tr>'
+    + `<th class="col-name">${meta.domainFirst ? 'Domain' : 'Name'}</th>`
+    + keys.map((k) => `<th>${esc(k)}</th>`).join('')
+    + (anyTags ? '<th class="col-tags">Tags</th>' : '')
+    + (anyUpdated ? '<th class="col-updated">Updated</th>' : '')
+    + '</tr>';
+  const rowHtml = (o, i) => {
     const href = `#/${section}/${encodeURIComponent(o.name)}`;
+    let main, sub;
     if (meta.domainFirst) {
       const primary = arr(o.domains)[0] || o.name;
       const subline = [o.name !== primary ? o.name : '', o.displayName || ''].filter(Boolean).join(' - ');
-      const tags = arr(o.tags);
-      return `
-    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
-      <div class="card-head">
-        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
-        <div class="card-title"><div class="card-name-row"><h3 class="host" title="${esc(arr(o.domains).join(', ') || o.name)}"><a class="card-link" href="${href}">${esc(primary)}</a></h3>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}</div>${subline ? `<div class="faint mono" style="font-size:12.5px" title="${esc(subline)}">${esc(subline)}</div>` : ''}</div>
-        </div>
-      </div>
-      <div class="kv">${meta.summary(o, ctx)}${tags.length ? `<span class="k">Tags</span><span class="v v-list">${tags.map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</span>` : ''}${o.updatedAt ? `<span class="k">Updated</span><span class="v mono">${esc(fmtTime(o.updatedAt))}</span>` : ''}</div>
-      ${GO_MARK}
-    </div>`;
+      main = `<a class="host trunc" href="${href}" title="${esc(arr(o.domains).join(', ') || o.name)}">${esc(primary)}</a>${o.disabled ? DISABLED_CHIP : LIVE_CHIP}`;
+      sub = subline ? `<span class="trunc mono" title="${esc(subline)}">${esc(subline)}</span>` : '';
+    } else {
+      main = `<a class="host trunc" href="${href}" title="${esc(o.name)}">${esc(o.name)}</a>`;
+      sub = (o.disabled ? DISABLED_CHIP : '')
+        + (o.displayName ? `<span class="trunc" title="${esc(o.displayName)}">${esc(o.displayName)}</span>` : '');
     }
-    return `
-    <div class="card" data-name="${esc(o.name)}" style="cursor:pointer">
-      <div class="card-head">
-        <div class="card-id"><span class="card-kind" aria-hidden="true">${kindIcon}</span>
-        <div class="card-title"><div class="card-name-row"><h3 title="${esc(o.name)}"><a class="card-link" href="${href}">${esc(o.name)}</a></h3>${o.disabled ? DISABLED_CHIP : ''}</div>${o.displayName ? `<div class="faint" style="font-size:13.5px" title="${esc(o.displayName)}">${esc(o.displayName)}</div>` : ''}</div>
-        </div>
-      </div>
-      <div class="kv">${meta.summary(o, ctx)}</div>
-      ${GO_MARK}
-    </div>`;
+    return `<tr class="clickable" data-name="${esc(o.name)}">
+      <td class="col-name"><div class="cell-main">${main}</div>${sub ? `<div class="cell-sub">${sub}</div>` : ''}</td>
+      ${keys.map((k) => `<td class="col-v">${parsed[i][k] || '<span class="faint">-</span>'}</td>`).join('')}
+      ${anyTags ? `<td class="col-tags">${arr(o.tags).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(' ')}</td>` : ''}
+      ${anyUpdated ? `<td class="col-updated mono">${o.updatedAt ? esc(fmtTime(o.updatedAt)) : ''}</td>` : ''}
+    </tr>`;
   };
-  const cards = items.map(cardHtml).join('');
+  const addBtn = `<a class="btn primary" href="#/${section}/_new">${ICON.plus}${meta.addLabel}</a>`;
   c.innerHTML = head + `
-    <div class="toolbar cards-aligned">
+    <div class="toolbar">
       <div class="search">${ICON.search}<input class="field mono" id="gsFilter" placeholder="filter ${esc(lowerTitle(meta.title))}..." title="${esc(`Matches ${meta.filterHint || 'name, display name and tags'}, and the word "disabled"`)}" aria-label="Filter ${esc(meta.title)}" /></div>
+      <div class="toolbar-actions">${addBtn}</div>
     </div>
-    <div class="cards" id="gsCards">${cards}</div>
+    <div class="table-wrap">
+      <table class="gs-table">
+        <thead>${headHtml}</thead>
+        <tbody id="gsRows">${items.map(rowHtml).join('')}</tbody>
+      </table>
+    </div>
     <div class="list-empty" id="gsNone" hidden>No ${esc(meta.singular)} matches this filter.</div>`;
 
-  // Summary values are one line each (CSS ellipsizes them), so each carries
-  // its full text as a tooltip unless its markup already set one.
-  $$('#gsCards .kv .v').forEach((v) => { if (!v.title) v.title = v.textContent.trim(); });
-
   // The filter matches the object's stored values, not the summary markup the
-  // card happens to render.
+  // row happens to render.
   const gsFilter = $('#gsFilter');
   gsFilter.addEventListener('input', () => {
     const q = gsFilter.value.trim().toLowerCase();
     let shown = 0;
-    $$('#gsCards .card[data-name]').forEach((el) => {
+    $$('#gsRows tr[data-name]').forEach((el) => {
       const hit = !q || (blobs[el.dataset.name] || '').indexOf(q) !== -1;
       el.style.display = hit ? '' : 'none';
       if (hit) shown++;
@@ -6387,12 +6411,13 @@ async function genericList(c, section) {
     $('#gsNone').hidden = shown > 0;
   });
 
-  $$('.cards .card[data-name]').forEach((el) => {
+  $$('#gsRows tr[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
-    // The name is the card's link for the keyboard and screen readers; the rest
-    // of the card stays clickable for the mouse. Delete is not offered here: it
-    // lives in the object's own save bar, as on proxy hosts and certificates.
-    el.addEventListener('click', (e) => { if (!e.target.closest('a')) open(); });
+    // The name is the row's link for the keyboard and screen readers; the rest
+    // of the row stays clickable for the mouse, except a "+N" toggle. Delete
+    // is not offered here: it lives in the object's own save bar, as on proxy
+    // hosts and certificates.
+    el.addEventListener('click', (e) => { if (!e.target.closest('a') && !e.target.closest('button')) open(); });
   });
 }
 
@@ -8695,7 +8720,7 @@ function revealToken(secret) {
     </div>`;
   const content = $('#content');
   content.insertBefore(wrap, content.firstChild);
-  window.scrollTo(0, 0);
+  scrollToTop();
   $('#tok-copy').addEventListener('click', async () => {
     const inp = $('#tok-reveal');
     inp.select();

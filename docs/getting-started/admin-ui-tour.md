@@ -119,9 +119,9 @@ object. With nothing to report it says so and shows the live counts.
 - The other object editors are one page of cards with the same title band:
   Clone and Delete (and Renew now on an ACME certificate) sit there too, and
   Clone asks for the name the same way.
-- On the list pages, a card carries its section's glyph and a go mark; it
-  lifts and lights its top edge on hover or keyboard focus, and the whole card
-  opens the object.
+- The other list pages are tables like Proxy Hosts: one row per object, one
+  column per summary field, values wrapped rather than cut short, and the
+  whole row opens the object.
 
 ## Certificates
 

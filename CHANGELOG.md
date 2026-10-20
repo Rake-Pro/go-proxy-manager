@@ -5,6 +5,23 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Admin UI list pages for identity providers, middleware, access lists,
+  client CAs, DNS providers, upstream groups, streams, redirects and parked
+  hosts are tables, as Proxy Hosts and Certificates already were: one row per
+  object, one column per summary field, long values wrapped instead of cut
+  short. The Add button sits on the filter row on every list.
+- Admin UI on a phone: the body below the masthead scrolls, so the scrollbar
+  no longer runs over the masthead; the tab strip no longer shows a stray
+  scrollbar thumb.
+
+### Fixed
+
+- Admin UI sidebar footer no longer repeats the commit hash on a dev build
+  ("dev-abc1234 (abc1234)"), and the config-commit link next to it is never
+  truncated.
+
 ## [2.2.0] - 2026-10-19
 
 ### Changed

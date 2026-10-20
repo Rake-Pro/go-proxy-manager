@@ -96,7 +96,6 @@
   --switch-thumb-off:#ffffff;
 
   --r-card:0; --r-input:0; --r:3px;
-  --cards-cols:repeat(auto-fill,minmax(min(330px,100%),1fr));
   --sidebar-w:250px; --masthead-h:56px;
   color-scheme:light;
 }
@@ -266,7 +265,8 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .nav-item.active { background:var(--side-current); border-left-color:var(--side-bar); color:#fff; }
 .nav-item:focus-visible, .nav-group-head:focus-visible { outline-color:var(--side-bar); }
 .side-foot { display:flex; justify-content:space-between; gap:10px; padding:12px 16px; border-top:1px solid var(--side-sep); font-size:12.5px; color:var(--side-muted); }
-.side-foot a { font-family:var(--mono); color:var(--side-muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.side-foot span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.side-foot a { font-family:var(--mono); color:var(--side-muted); flex:none; white-space:nowrap; }
 .side-foot a:hover { color:#fff; }
 .sidebar .dot.muted { background:#8a8d90; }
 .dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
@@ -379,7 +379,6 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 
 /* grids */
 .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.cards { display:grid; grid-template-columns:var(--cards-cols); gap:16px; }
 
 /* expiry meter */
 .meter { height:8px; background:var(--raised); overflow:hidden; margin:8px 0 4px; }
@@ -446,8 +445,7 @@ tbody tr.clickable:hover td { background:var(--surface-2); }
 /* toolbar + search */
 .toolbar { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
 .search { position:relative; flex:1 1 280px; max-width:360px; }
-.toolbar.cards-aligned { display:grid; grid-template-columns:var(--cards-cols); gap:16px; margin-bottom:16px; }
-.toolbar.cards-aligned .search { max-width:none; }
+.toolbar-actions { margin-left:auto; display:flex; gap:8px; }
 .search input { text-overflow:ellipsis; }
 .search svg { position:absolute; left:10px; top:50%; transform:translateY(-50%); width:16px; height:16px; color:var(--muted); pointer-events:none; }
 .search input.field { padding-left:34px; }
@@ -741,34 +739,17 @@ a.rail-cert:hover .trunc { text-decoration:underline; }
 th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
 .col-actions { width:1%; white-space:nowrap; text-align:right; }
 .row-actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; }
-.card-head > .card-title, .card-head > .card-id { flex:1 1 auto; min-width:0; }
-.card-head .card-title h3, .card-head .card-title .faint { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card-head > .card-actions { display:flex; gap:8px; flex:none; }
 .bulk-targets { margin:8px 0 12px; padding:6px 10px 6px 26px; max-height:180px; overflow:auto; border:0; background:var(--raised); border-radius:3px; font-size:13.5px; }
 .bulk-targets li { line-height:20px; }
-/* Clickable list cards say so twice: at rest a kind tile (the section's own
-   glyph) and a small round "go" mark at the top right; on hover or keyboard
-   focus the card lifts, takes the brand ring, the name turns brand and the
-   hairline wire (the one under the masthead) lights along its top edge. */
-.cards .card { position:relative; padding:18px 20px; transition:transform .12s ease, box-shadow .12s ease; }
-.cards .card::after { content:""; position:absolute; left:0; right:0; top:0; height:3px; background:var(--wire); opacity:0; transition:opacity .12s ease; pointer-events:none; }
-.cards .card:hover, .cards .card:focus-within { transform:translateY(-2px); box-shadow:var(--shadow-md), 0 0 0 1px var(--card-ring); }
-.cards .card:hover::after, .cards .card:focus-within::after { opacity:1; }
-.cards .card:hover .card-link, .cards .card:focus-within .card-link { color:var(--brand-text); }
-.cards .card .card-head { margin-bottom:12px; padding-right:36px; align-items:center; }
-.card-id { display:flex; align-items:center; gap:10px; min-width:0; }
-.card-id > .card-title { min-width:0; }
-.card-kind { width:30px; height:30px; border-radius:7px; background:var(--btn2-bg); color:var(--brand-text); display:grid; place-items:center; flex:none; }
-.card-kind svg { width:16px; height:16px; }
-.card-go { position:absolute; top:16px; right:16px; width:26px; height:26px; border-radius:50%; background:var(--num-bg); color:var(--muted); display:grid; place-items:center; transition:background .12s ease, color .12s ease; }
-.card-go svg { width:12px; height:12px; }
-.cards .card:hover .card-go, .cards .card:focus-within .card-go { background:var(--brand); color:#fff; box-shadow:var(--shadow-primary); }
-.cards .card .kv { border-top:1px solid var(--border-soft); padding-top:12px; }
-.card-title .card-name-row { display:flex; align-items:center; gap:8px; min-width:0; }
-.card-title .card-name-row h3 { min-width:0; }
-.card-title .card-name-row .chip { flex:none; }
-.cards .kv .v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cards .kv .v .domain-list, .cards .kv .v.v-list { white-space:normal; }
+/* generic object lists (identity providers, middleware, ...): one row per
+   object, one column per summary key. Values wrap rather than ellipsize, so
+   a long issuer URL or upstream list is read in place, not from a tooltip. */
+.gs-table td.col-v { white-space:normal; overflow-wrap:anywhere; max-width:360px; font-family:var(--mono); font-size:13.5px; }
+.gs-table td.col-v .chip { font-family:var(--sans); }
+.gs-table td.col-v .dl-item { white-space:normal; overflow:visible; }
+.gs-table td.col-tags { white-space:normal; }
+.gs-table td.col-tags .chip { margin:1px 0; }
 .view-head > div { min-width:0; max-width:100%; }
 
 /* ---------- responsive ---------- */
@@ -811,6 +792,12 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   body.nav-open .scrim { display:block; position:fixed; inset:var(--masthead-h) 0 0 0; background:var(--scrim); z-index:44; }
   .masthead .menu-btn { display:inline-flex; }
   .masthead { padding:0 8px 0 10px; }
+  /* The frame, not the document, scrolls: the masthead stays put and the
+     scrollbar starts beneath it instead of running up its right edge. The
+     masthead keeps a position so the account menu still anchors to it. */
+  .app { height:100vh; height:100dvh; min-height:0; }
+  .masthead { position:relative; flex:none; }
+  .page-body { min-height:0; overflow-y:auto; }
   #themeBtn { width:36px; padding:0; }
   #themeBtn .tool-label { display:none; }
   body.nav-open .sidebar { box-shadow:var(--shadow-md); }
@@ -828,12 +815,13 @@ th.col-time, th.col-updated, th.col-num, th.col-actions { text-align:right; }
   .toast { animation:none; }
   .modal { animation:none; }
   .switch, .switch::after, .nav-chev, .sidebar { transition:none; }
-  .cards .card, .cards .card::after, .card-go { transition:none; }
-  .cards .card:hover, .cards .card:focus-within { transform:none; }
 }
 
 /* ---------- tabs (PatternFly tabs) ---------- */
-.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; border-bottom:1px solid var(--border); margin-bottom:16px; }
+/* The buttons sit 1px below the box (margin-bottom:-1px) so the underline
+   meets the border; a scroll box counts that 1px as vertical overflow and
+   draws a scrollbar thumb beside the tabs. The padding gives it a home. */
+.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:1px; border-bottom:1px solid var(--border); margin-bottom:16px; }
 .tab-btn { background:transparent; border:0; border-bottom:3px solid transparent; color:var(--muted);
   font:inherit; font-size:14px; padding:8px 16px; cursor:pointer; margin-bottom:-1px; white-space:nowrap; position:relative; }
 .tab-btn:hover { color:var(--text); border-bottom-color:var(--border-2); }
