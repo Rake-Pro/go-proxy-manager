@@ -169,6 +169,13 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 		}
 		return "", fmt.Errorf("restore refused: %w", err)
 	}
+	// Same for an archive whose hosts collide with its own adminEdge block.
+	if err := checkAdminEdge(restored, restoredSettings); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("restore refused: %w", err)
+	}
 	// Mirror the Save/SaveSettings no-literal-secrets guard at the restore
 	// boundary: an uploaded archive must not smuggle a plaintext secret onto disk
 	// and into permanent git history, bypassing the ${ENV:}/${FILE:} contract.

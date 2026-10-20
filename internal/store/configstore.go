@@ -130,6 +130,10 @@ type Store struct {
 	// (e.g. a CLI subcommand, or a test) the geo-availability gate is skipped, so
 	// the store stays usable without a geo wiring.
 	geoLoaded func() bool
+
+	// adminEdgeUpstream is the admin listener's loopback address for the
+	// synthetic admin edge host (see LoadCompiled). Zero = not set.
+	adminEdgeUpstream model.Upstream
 }
 
 // New returns a Store rooted at dir using the given GitRepo.
@@ -163,6 +167,46 @@ func (s *Store) checkGeoAvailable(cfg model.Config) error {
 
 // Dir returns the config repo root.
 func (s *Store) Dir() string { return s.dir }
+
+// SetAdminEdgeUpstream tells the store where the admin listener is reachable
+// from the data plane (a loopback address), so LoadCompiled can build the
+// admin edge host. Set once at startup by the process that owns the listener.
+func (s *Store) SetAdminEdgeUpstream(up model.Upstream) { s.adminEdgeUpstream = up }
+
+// LoadCompiled is Load plus the synthetic objects settings compile to: today
+// the admin edge host, appended to ProxyHosts when settings.adminEdge is on.
+// It is what the data plane, DNS sync and discovery read, so every consumer
+// that routes, publishes or claims domains sees the panel's hostname; the
+// object API keeps Load, so the synthetic host is never listed or editable.
+func (s *Store) LoadCompiled(ctx context.Context) (model.Config, model.Settings, error) {
+	cfg, settings, err := s.Load(ctx)
+	if err != nil {
+		return cfg, settings, err
+	}
+	if settings.AdminEdge.Enabled {
+		// Every write path refuses a collision, so one here arrived out of band
+		// (a git pull, a hand edit). The stored host keeps serving and the
+		// front door stays off until the operator resolves it, rather than two
+		// hosts fighting over the TLS and routing maps.
+		if err := checkAdminEdge(cfg, settings); err != nil {
+			log.Error().Err(err).Msg("config store: admin front door skipped at compile; fix the collision and the next reload enables it")
+			return cfg, settings, nil
+		}
+		if name := model.AdminEdgeHostname(settings.ExternalBaseURL); name != "" && s.adminEdgeUpstream.Port > 0 {
+			cfg.ProxyHosts = append(cfg.ProxyHosts, settings.AdminEdge.Host(name, s.adminEdgeUpstream))
+		}
+	}
+	return cfg, settings, nil
+}
+
+// checkAdminEdge refuses a config write that would collide with the admin
+// edge: a stored host claiming the panel's hostname or its reserved name, or
+// (on a settings write) a middleware or access list the block names that does
+// not exist. Both sides of every write path call it, so the collision can be
+// created from neither.
+func checkAdminEdge(cfg model.Config, settings model.Settings) error {
+	return settings.AdminEdge.ValidateRefs(cfg, settings.ExternalBaseURL)
+}
 
 // Init creates the directory tree, initialises the git repo, seeds default
 // settings, and makes an initial commit if the repo is empty.
@@ -379,11 +423,14 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	// Referential-integrity gate: apply this object to the current config and
 	// validate the whole graph BEFORE writing, so no dangling reference is ever
 	// committed.
-	cfg, _, err := s.loadLocked()
+	cfg, settings, err := s.loadLocked()
 	if err != nil {
 		return "", nil, false, err
 	}
 	meta := obj.GetMeta()
+	if settings.AdminEdge.Enabled && obj.Kind() == "ProxyHost" && meta.Name == model.AdminEdgeHostName {
+		return "", nil, false, fmt.Errorf("proxy host %q: the name is reserved for the admin edge while settings.adminEdge is on", meta.Name)
+	}
 	// Captured BEFORE withObject: upsert() below replaces a same-named element
 	// of cfg's slice in place, and withObject's shallow copy of cfg shares that
 	// slice's backing array, so cfg itself would otherwise be mutated to look
@@ -391,6 +438,9 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
+		return "", nil, false, err
+	}
+	if err := checkAdminEdge(merged, settings); err != nil {
 		return "", nil, false, err
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
@@ -422,11 +472,14 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 		return "", fmt.Errorf("%s %q: %w", kind, name, ErrNotFound)
 	}
 
-	cfg, _, err := s.loadLocked()
+	cfg, settings, err := s.loadLocked()
 	if err != nil {
 		return "", err
 	}
 	if err := withoutObject(&cfg, kind, name).Validate(); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
+	}
+	if err := checkAdminEdge(withoutObject(&cfg, kind, name), settings); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
 	}
 
@@ -445,7 +498,7 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cfg, _, err := s.loadLocked()
+	cfg, settings, err := s.loadLocked()
 	if err != nil {
 		return "", err
 	}
@@ -463,6 +516,9 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 		merged = withObject(&merged, o)
 	}
 	if err := merged.Validate(); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := checkAdminEdge(merged, settings); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
@@ -637,7 +693,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cfg, _, err := s.loadLocked()
+	cfg, settings, err := s.loadLocked()
 	if err != nil {
 		return "", err
 	}
@@ -720,6 +776,9 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	if err := merged.Validate(); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
+	if err := checkAdminEdge(merged, settings); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
 	if err := s.checkGeoAvailable(merged); err != nil {
 		return "", err
 	}
@@ -793,6 +852,92 @@ func (s *Store) RepoHistory(ctx context.Context, limit int) ([]Commit, error) {
 	return s.git.Log(ctx, "", limit)
 }
 
+// DiffFile is one file's part of a Diff: its path under the config repo and
+// the number of added and removed lines.
+type DiffFile struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"oldPath,omitempty"` // set when the file was renamed
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	// Status is "added", "deleted", "renamed" or "modified".
+	Status string `json:"status"`
+}
+
+// Diff is what changed between two points of the config history.
+type Diff struct {
+	From      string     `json:"from"` // empty when To is shown against its parent
+	To        string     `json:"to"`
+	Files     []DiffFile `json:"files"`
+	Patch     string     `json:"patch"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
+
+// Diff returns the config changes one commit introduced (from == "") or the
+// changes between two commits, oldest first. Hashes are shape-checked here,
+// exactly as Revert does, so a user-supplied value never reaches git as an
+// option or a path.
+func (s *Store) Diff(ctx context.Context, from, to string) (Diff, error) {
+	if !commitHashRe.MatchString(to) {
+		return Diff{}, fmt.Errorf("invalid commit hash %q", to)
+	}
+	if from != "" && !commitHashRe.MatchString(from) {
+		return Diff{}, fmt.Errorf("invalid commit hash %q", from)
+	}
+	patch, err := s.git.Diff(ctx, from, to)
+	if err != nil {
+		return Diff{}, err
+	}
+	d := Diff{From: from, To: to, Files: parseDiffFiles(patch)}
+	if d.Files == nil {
+		d.Files = []DiffFile{}
+	}
+	// The git side stops reading at MaxDiffBytes; a patch that long was cut.
+	// The file list was parsed from what arrived, so it is complete only when
+	// the patch is.
+	if len(patch) >= MaxDiffBytes {
+		d.Truncated = true
+	}
+	d.Patch = patch
+	return d, nil
+}
+
+// parseDiffFiles reads the per-file summary out of a unified diff: one entry
+// per "diff --git" header, counting the +/- body lines that follow it.
+func parseDiffFiles(patch string) []DiffFile {
+	var files []DiffFile
+	var cur *DiffFile
+	for _, line := range strings.Split(patch, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			files = append(files, DiffFile{Status: "modified"})
+			cur = &files[len(files)-1]
+			// "diff --git a/<old> b/<new>"; paths with spaces are not produced
+			// by the store (object names are validated), so a split suffices.
+			parts := strings.SplitN(strings.TrimPrefix(line, "diff --git "), " b/", 2)
+			if len(parts) == 2 {
+				cur.OldPath = strings.TrimPrefix(parts[0], "a/")
+				cur.Path = parts[1]
+				if cur.OldPath == cur.Path {
+					cur.OldPath = ""
+				}
+			}
+		case cur == nil:
+		case strings.HasPrefix(line, "new file mode"):
+			cur.Status = "added"
+		case strings.HasPrefix(line, "deleted file mode"):
+			cur.Status = "deleted"
+		case strings.HasPrefix(line, "rename from "):
+			cur.Status = "renamed"
+		case strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
+		case strings.HasPrefix(line, "+"):
+			cur.Additions++
+		case strings.HasPrefix(line, "-"):
+			cur.Deletions++
+		}
+	}
+	return files
+}
+
 // commitHashRe matches a git commit hash (short or full); used to keep an
 // untrusted revert target from being interpreted as a git option/path.
 var commitHashRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
@@ -831,7 +976,7 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 		}
 		return "", fmt.Errorf("revert: preserve %v: %w", preservedOnRevert, err)
 	}
-	restored, _, err := s.loadLocked()
+	restored, restoredSettings, err := s.loadLocked()
 	if err != nil {
 		// The restored state is invalid (e.g. schema drift): undo and report.
 		if head != "" {
@@ -842,6 +987,15 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 	if err := s.checkGeoAvailable(restored); err != nil {
 		// The target config would re-introduce a geo rule with no database to
 		// evaluate it: undo the tree change and refuse, committing nothing.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
+	}
+	// The target config may hold a host that claims the admin front door's
+	// hostname (or its reserved name), which the write paths refuse: refuse the
+	// revert the same way rather than committing a collision.
+	if err := checkAdminEdge(restored, restoredSettings); err != nil {
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
 		}
@@ -907,7 +1061,7 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 		return "", fmt.Errorf("revert %s %q: restore %q from %q: %w", kind, name, rel, hash, err)
 	}
 
-	restored, _, err := s.loadLocked()
+	restored, restoredSettings, err := s.loadLocked()
 	if err != nil {
 		// The single-file restore left the whole config invalid (e.g. it references
 		// an object deleted since): undo the file change and refuse.
@@ -917,6 +1071,12 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 		return "", fmt.Errorf("revert refused, config with %s %q at %q does not validate: %w", kind, name, hash, err)
 	}
 	if err := s.checkGeoAvailable(restored); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
+	}
+	if err := checkAdminEdge(restored, restoredSettings); err != nil {
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
 		}
@@ -970,6 +1130,11 @@ func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, autho
 	// and with ssoOnly a name that does not is a total lockout (no local form, no
 	// buttons) recoverable only by editing git and redeploying.
 	if err := settings.AdminAuth.ValidateRefs(cfg); err != nil {
+		return "", err
+	}
+	// Same again for the admin edge: its middlewares and access lists must
+	// resolve, and no stored host may already own the panel's hostname.
+	if err := checkAdminEdge(cfg, settings); err != nil {
 		return "", err
 	}
 	if lits := model.LiteralSecrets(settings); len(lits) > 0 {

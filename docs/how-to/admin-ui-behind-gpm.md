@@ -1,10 +1,17 @@
 # Reach the admin UI through gpm itself
 
 [Deployment](../reference/env-vars-and-flags.md#listeners-and-ports) says to front the admin listener
-(`:8081`) with "your own authenticating ingress." gpm can be that ingress: a
-normal `ProxyHost` pointed at the admin listener, gated by a normal
-`AccessList`, using gpm's own certificate flow. No second reverse proxy, no
-manual TLS.
+(`:8081`) with "your own authenticating ingress." gpm can be that ingress, and
+has a setting for it: **Settings > General > Admin front door**
+([`adminEdge`](../reference/config/settings/admin-edge.md)) serves the panel on
+`externalBaseURL`'s hostname through gpm's own listeners, gated by the access
+lists and middlewares you pick, with the certificate chosen by domain. No proxy
+host object, no second reverse proxy, no manual TLS, and the fleet-wide
+maintenance switch never takes the panel down.
+
+The steps below set that up. The older way, a hand-written `ProxyHost` pointed
+at the admin listener, still works and is described at the end for an instance
+that needs something the setting cannot express (a path-scoped location, say).
 
 ## Prerequisites
 
@@ -63,8 +70,8 @@ manual TLS.
    trusted proxy sending `X-Forwarded-Proto: https`), the same cookie is issued
    `Secure` and `__Host-` named, again with no restart.
 
-3. **Create the certificate and the proxy host**, from inside the bootstrap
-   session:
+3. **Create the certificate and turn the front door on**, from inside the
+   bootstrap session:
 
    ```yaml
    # config/certificates/gpm-admin.yaml - reuse an existing certificate
@@ -76,23 +83,22 @@ manual TLS.
    ```
 
    ```yaml
-   # config/proxy-hosts/gpm-admin.yaml
-   name: gpm-admin
-   domains: [gpm.example.com]
-   upstream: {scheme: http, host: 127.0.0.1, port: 8081}
-   tls: {certificateRef: gpm-admin, forceSSL: true}
-   accessLists: [admin-lan-only]
+   # config/settings.yaml
+   externalBaseURL: https://gpm.example.com
+   adminEdge:
+     enabled: true
+     accessLists: [admin-lan-only]
+     tls: {forceSSL: true}
    ```
 
-   `upstream.host`/`upstream.port` must match whatever `GPM_ADMIN_ADDR` is
-   actually bound to (step 1). `scheme: http` is correct: the admin server
-   never speaks TLS; this `ProxyHost` is what terminates it.
+   The loopback hop uses whatever `GPM_ADMIN_ADDR` is bound to (step 1); there
+   is no upstream to type. The admin server never speaks TLS; the front door
+   is what terminates it, with the certificate from the first block.
 
-   **UI clicks:** Proxy Hosts -> Add proxy host -> Service step: Domains
-   `gpm.example.com`, backend scheme `http`, host `127.0.0.1`, port `8081` ->
-   Certificate step: the coverage line names `gpm-admin` once it exists; turn
-   on "Force SSL" -> Access step: tick `admin-lan-only` (next step) -> Review
-   shows the YAML above -> Create host.
+   **UI clicks:** Settings -> General -> Public URL of this panel
+   `https://gpm.example.com` -> Admin front door: turn on "Serve the panel at
+   the edge", add `admin-lan-only` (next step) under Access lists, keep Force
+   SSL on -> Save changes.
 
 4. **Restrict it with an access list.** TLS alone does not limit who can
    reach the admin panel: this does:
@@ -125,9 +131,10 @@ manual TLS.
    ```
 
    This must match the exact scheme + host you are now using, not the
-   bootstrap `http://127.0.0.1:8081`. It drives both the OIDC
-   `redirect_uri` (see [Settings](../reference/config/settings/index.md))
-   and the cookie decision from step 2: an `https://` `externalBaseURL` makes
+   bootstrap `http://127.0.0.1:8081`. It names the host the front door serves
+   on, drives the OIDC `redirect_uri` (see
+   [Settings](../reference/config/settings/index.md)) and the cookie decision
+   from step 2: an `https://` `externalBaseURL` makes
    admin cookies `Secure` even on the loopback listener, so a later
    break-glass session on `http://127.0.0.1:8081` needs a tunnel that keeps
    the browser on `https://gpm.example.com`, or `GPM_COOKIE_SECURE=0` for that
@@ -136,7 +143,7 @@ manual TLS.
 6. **Stop publishing `8081`.** Once `https://gpm.example.com` works end to
    end, remove any port publish/forward for `8081` beyond the host/container
    itself, drop `"127.0.0.1:8081:8081"` from Compose entirely, or leave it
-   loopback-only for break-glass shell access. The `ProxyHost` from step 3 is
+   loopback-only for break-glass shell access. The front door from step 3 is
    now the only supported path in.
 
 7. **(Optional) Layer SSO in front, keep local login as the anti-lockout
@@ -171,8 +178,33 @@ manual TLS.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `502` on `https://gpm.example.com` | Wrong upstream address/port | Confirm `GPM_ADMIN_ADDR` (step 1) and the proxy host's `upstream.host`/`upstream.port` (step 3) agree, and that `GET /healthz` on that loopback address works from inside the container |
+| `502` on `https://gpm.example.com` | The admin listener is not where the loopback hop expects | Confirm `GPM_ADMIN_ADDR` (step 1) is bound and that `GET /healthz` on that loopback address works from inside the container |
+| Save refused: "is the admin panel's hostname" | A stored proxy host still claims the hostname | Delete that host (the older route below), or turn the front door off; the two cannot both own the name |
 | Login redirects back to the login page in a loop | `externalBaseURL` mismatch (step 5) | Set `externalBaseURL` to exactly the scheme + host in the browser's address bar |
 | `403` on every request | Client IP not covered by the access list (step 4) | Check `defaultAction` and the CIDRs; if a proxy sits ahead of gpm for this host, check whether `X-Forwarded-For` is trusted (see the note at the end of step 4) |
 | Login "does nothing" over `http://127.0.0.1:8081` after step 5 | `externalBaseURL` is `https://`, so `auto` issues a `Secure` cookie the plain-HTTP browser drops | Reach the panel over `https://gpm.example.com`, or set `GPM_COOKIE_SECURE=0` for that break-glass session only |
 | One bad password locks out every admin | `settings.trustedProxies` does not include the proxy listener's source address, so all attempts share one lockout bucket | Add that address (`127.0.0.1/32`, `::1/128` for a loopback bind) to `settings.trustedProxies` |
+
+## The older route: a hand-written proxy host
+
+Before `adminEdge` existed the same result was a normal `ProxyHost` pointed at
+the admin listener. It still works, and it is the right choice when the front
+door cannot express what you need (a path-scoped `locations` entry, say):
+
+```yaml
+# config/proxy-hosts/gpm-admin-host.yaml
+name: gpm-admin-host
+domains: [gpm.example.com]
+upstream: {scheme: http, host: 127.0.0.1, port: 8081}
+tls: {certificateRef: gpm-admin, forceSSL: true}
+accessLists: [admin-lan-only]
+```
+
+`upstream.host`/`upstream.port` must match whatever `GPM_ADMIN_ADDR` is bound
+to. Two things the setting gives you that this does not: the fleet-wide
+maintenance switch takes this host down with every other (turn maintenance off
+over the admin listener), and the name `gpm-admin` is reserved while the
+setting is on, so pick another if you may switch later.
+Moving from this host to the setting: turn `adminEdge` on with the same access
+lists and TLS, then delete the host (or the other way round); the save that
+would leave both claiming the hostname is refused.

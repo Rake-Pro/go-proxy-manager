@@ -825,7 +825,13 @@ td.col-tags .chip.tag { display:inline-block; max-width:16ch; overflow:hidden; t
 /* The buttons sit 1px below the box (margin-bottom:-1px) so the underline
    meets the border; a scroll box counts that 1px as vertical overflow and
    draws a scrollbar thumb beside the tabs. The padding gives it a home. */
-.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:1px; border-bottom:1px solid var(--border); margin-bottom:16px; }
+.tabs { display:flex; gap:0; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:1px; border-bottom:1px solid var(--border); margin-bottom:16px; scrollbar-width:none; }
+/* The strip scrolls by swipe or wheel; a scrollbar under a row of underlined
+   tabs read as a second underline on a phone. */
+.tabs::-webkit-scrollbar { display:none; }
+/* A touch has no hover: without this the hover underline sticks to the last
+   tapped tab and reads as a second active tab. */
+@media (hover:none) { .tab-btn:hover { border-bottom-color:transparent; } .tab-btn.on:hover { border-bottom-color:var(--brand); } }
 .tab-btn { background:transparent; border:0; border-bottom:3px solid transparent; color:var(--muted);
   font:inherit; font-size:14px; padding:8px 16px; cursor:pointer; margin-bottom:-1px; white-space:nowrap; position:relative; }
 .tab-btn:hover { color:var(--text); border-bottom-color:var(--border-2); }
@@ -980,3 +986,20 @@ details.sub-fold[open] > summary::before { content:"- "; }
   .wz-main { padding:16px; }
   .wz-foot { padding:12px 16px; }
 }
+
+/* history: diff viewer */
+.diff-files { list-style:none; margin:0 0 12px; padding:0; display:flex; flex-direction:column; gap:4px; font-size:13.5px; }
+.diff-files li { display:flex; align-items:center; gap:10px; min-width:0; }
+.diff-files li .trunc { flex:1 1 auto; }
+.diff-count { flex:none; font-size:12.5px; }
+.diff { margin:0 0 16px; padding:12px 14px; background:var(--raised); font-family:var(--mono); font-size:12.5px; line-height:1.45; overflow:auto; max-height:min(60vh, 640px); white-space:pre; }
+.diff .diff-add { color:var(--ok-text); background:var(--ok-bg); display:inline-block; min-width:100%; }
+.diff .diff-del { color:var(--err-text); background:var(--err-bg); display:inline-block; min-width:100%; }
+.diff .diff-hunk { color:var(--info-text); display:inline-block; min-width:100%; }
+.diff .diff-meta { color:var(--faint); }
+.diff .diff-file { color:var(--text); font-weight:700; display:inline-block; min-width:100%; margin-top:8px; }
+.diff .diff-file:first-child { margin-top:0; }
+.diff-files .diff-add { color:var(--ok-text); }
+.diff-files .diff-del { color:var(--err-text); }
+.tl-pick { margin-left:auto; font-size:12.5px; color:var(--muted); }
+.cmp-bar { position:sticky; bottom:0; margin-top:16px; }

@@ -36,8 +36,8 @@ the admin server exposes only `/healthz` and `/version`.
 
 ## Flags and environment variables
 
-Every flag has an environment-variable equivalent (the env var wins for
-container deployments).
+Every flag except `-version` has an environment-variable equivalent (the env
+var wins for container deployments).
 
 | Name | Default | Meaning | Restart needed |
 |------|---------|---------|----------------|

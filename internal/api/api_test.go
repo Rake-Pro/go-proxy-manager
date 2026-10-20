@@ -522,3 +522,85 @@ func TestAccessLogToggle(t *testing.T) {
 		t.Fatalf("unwired want 501 got %d", w.Code)
 	}
 }
+
+func TestHistoryDiffViaAPI(t *testing.T) {
+	h, _ := newHandler(t)
+	if w := do(t, h, "PUT", "/proxy-hosts/app", validProxyHost); w.Code != http.StatusOK {
+		t.Fatalf("create want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	changed := strings.Replace(validProxyHost, `"port":8080`, `"port":9090`, 1)
+	if w := do(t, h, "PUT", "/proxy-hosts/app", changed); w.Code != http.StatusOK {
+		t.Fatalf("update want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, "GET", "/history", "")
+	var commits []store.Commit
+	if err := json.Unmarshal(w.Body.Bytes(), &commits); err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) < 3 {
+		t.Fatalf("want init + 2 commits, got %d", len(commits))
+	}
+	newest, older := commits[0].Hash, commits[1].Hash
+
+	w = do(t, h, "GET", "/history/diff?to="+newest, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("diff want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	var d store.Diff
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "proxy-hosts/app.yaml" || d.Files[0].Status != "modified" {
+		t.Fatalf("files = %+v", d.Files)
+	}
+	if !strings.Contains(d.Patch, "port: 9090") {
+		t.Fatalf("patch missing the change:\n%s", d.Patch)
+	}
+
+	w = do(t, h, "GET", "/history/diff?from="+older+"&to="+newest, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("range diff want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, "GET", "/history/diff?to=../etc", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad hash want 400 got %d", w.Code)
+	}
+	if w := do(t, h, "GET", "/history/diff?to=0123456789abcdef0123456789abcdef01234567", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown hash want 404 got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCapabilitiesReportMaintenanceExempt(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(api.Deps{Store: st, MaintenanceExempt: func() []string { return []string{"gpm.example.com", "auth.example.com"} }})
+	w := do(t, h, "GET", "/capabilities", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("capabilities want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	var caps struct {
+		Maintenance struct {
+			Exempt []string `json:"exempt"`
+		} `json:"maintenance"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &caps); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(caps.Maintenance.Exempt, ",") != "gpm.example.com,auth.example.com" {
+		t.Fatalf("exempt = %v", caps.Maintenance.Exempt)
+	}
+	// Without the hook the field is an empty array, never null.
+	h2, _ := newHandler(t)
+	w = do(t, h2, "GET", "/capabilities", "")
+	var raw struct {
+		Maintenance map[string]json.RawMessage `json:"maintenance"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw.Maintenance["exempt"])); got != "[]" {
+		t.Fatalf("exempt must be an empty array without the hook, got %s", got)
+	}
+}

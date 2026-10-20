@@ -44,12 +44,54 @@ func currentMaintenance() model.MaintenanceSettings {
 // down).
 func MaintenanceGlobalEnabled() bool { return currentMaintenance().Enabled }
 
+// maintenanceExempt is the set of hostnames the FLEET-WIDE switch leaves up:
+// the admin edge and the hosts its sign-in providers live behind (see
+// model.MaintenanceExemptDomains). Installed once per reload like the switch
+// itself and consulted per request by hostname. A per-host maintenance flag on
+// an exempt host is still honoured.
+var maintenanceExempt atomic.Pointer[[]string]
+
+// SetMaintenanceExempt installs the hostnames the fleet-wide switch skips.
+func SetMaintenanceExempt(domains []string) {
+	d := append([]string(nil), domains...)
+	maintenanceExempt.Store(&d)
+}
+
+// MaintenanceExemptDomains returns the installed exemption list, for the
+// capability probe (the SPA says what stays up next to the switch).
+func MaintenanceExemptDomains() []string {
+	if p := maintenanceExempt.Load(); p != nil {
+		return append([]string(nil), (*p)...)
+	}
+	return nil
+}
+
+// isMaintenanceExempt reports whether the REQUEST hostname (already through
+// hostKey) is on the installed list. Keyed per request, not per host object:
+// a host that carries an exempt name beside its own is exempt only when it is
+// reached by that name, so a tenant cannot shield an app by adding the admin
+// IdP's hostname to their Ingress.
+func isMaintenanceExempt(name string) bool {
+	p := maintenanceExempt.Load()
+	if p == nil {
+		return false
+	}
+	for _, e := range *p {
+		if name == hostKey(e) {
+			return true
+		}
+	}
+	return false
+}
+
 // maintenanceActive reports whether a host whose own flag is hostFlag must be
 // answered with the maintenance page. The fleet-wide toggle wins outright: an
 // operator taking the whole edge down must not have to walk every host, and a
 // host that is individually out stays out when the global switch is off.
-func maintenanceActive(hostFlag bool) bool {
-	return currentMaintenance().Enabled || hostFlag
+// exempt (the admin edge, its sign-in providers' hosts) bypasses the fleet-wide
+// switch only: the operator must be able to reach the panel to turn it off.
+func maintenanceActive(hostFlag, exempt bool) bool {
+	return hostFlag || (currentMaintenance().Enabled && !exempt)
 }
 
 // serveMaintenance writes the maintenance response for host: the configured

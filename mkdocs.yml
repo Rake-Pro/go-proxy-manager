@@ -102,6 +102,7 @@ nav:
               - Security headers: reference/config/settings/security-headers.md
               - Error pages: reference/config/settings/error-pages.md
               - Maintenance mode: reference/config/settings/maintenance.md
+              - Admin front door: reference/config/settings/admin-edge.md
               - DNS sync: reference/config/settings/dns-sync.md
               - Ingress discovery: reference/config/settings/ingress-discovery.md
               - Docker discovery: reference/config/settings/docker-discovery.md

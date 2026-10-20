@@ -73,6 +73,13 @@ type GitRepo interface {
 	Log(ctx context.Context, path string, limit int) ([]Commit, error)
 	// Head returns the current HEAD commit hash (empty for an unborn branch).
 	Head(ctx context.Context) (string, error)
+	// Diff returns the unified diff of the config between two commits. With an
+	// empty from it is the diff one commit introduced (against its parent, or
+	// against the empty tree for the root commit). Both arguments are passed
+	// after the revision-only options and before "--", and the caller has
+	// already shape-checked them as commit hashes, so an untrusted value can
+	// never be read as a git option or a path.
+	Diff(ctx context.Context, from, to string) (string, error)
 	// RestoreTree makes the index and working tree match treeish exactly (files
 	// absent from treeish are removed). It does NOT create a commit. Used to
 	// roll the config back to a past commit (the caller then commits the result)
@@ -189,6 +196,59 @@ func (g *execGit) Log(ctx context.Context, path string, limit int) ([]Commit, er
 		commits = append(commits, Commit{Hash: f[0], Author: f[1], Email: f[2], When: when, Message: f[4]})
 	}
 	return commits, nil
+}
+
+// MaxDiffBytes caps what Diff reads from git: enough for any config change,
+// small enough that a restore of a huge archive cannot buffer unbounded output.
+// The caller sees a patch cut at this length and reports it as truncated.
+const MaxDiffBytes = 2 << 20
+
+func (g *execGit) Diff(ctx context.Context, from, to string) (string, error) {
+	// --no-ext-diff, --no-textconv and --no-color: raw, parseable output
+	// whatever the host's git config or .gitattributes say; the explicit
+	// prefixes defeat diff.noprefix, since the file summary is parsed off
+	// "a/" and "b/". -M: a renamed object file shows as a rename, not as a
+	// delete plus an add.
+	common := []string{"-M", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"}
+	var args []string
+	if from == "" {
+		// diff-tree -p --root shows exactly what one commit introduced, root
+		// commit included; --cc keeps a merge commit from printing nothing.
+		args = append([]string{"diff-tree", "-p", "--cc", "--root", "--no-commit-id"}, common...)
+		args = append(args, to, "--")
+	} else {
+		args = append([]string{"diff"}, common...)
+		args = append(args, from, to, "--")
+	}
+	// Not run(): a patch keeps its final newline (a trimmed one is not a valid
+	// patch), and stdout is capped rather than buffered whole.
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
+	var stderr bytes.Buffer
+	out := &cappedBuffer{max: MaxDiffBytes}
+	cmd.Stdout = out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return out.buf.String(), nil
+}
+
+// cappedBuffer keeps the first max bytes written and discards the rest, so a
+// child process can finish without the caller holding its whole output.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.max - c.buf.Len(); room > 0 {
+		if len(p) > room {
+			c.buf.Write(p[:room])
+		} else {
+			c.buf.Write(p)
+		}
+	}
+	return len(p), nil
 }
 
 func (g *execGit) Head(ctx context.Context) (string, error) {

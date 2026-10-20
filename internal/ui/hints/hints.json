@@ -963,6 +963,38 @@
     "text": "The Retry-After sent on every maintenance response, per-host ones included. Blank is 300s, maximum 24h.",
     "doc": "reference/config/settings/maintenance.md#settings-maintenance-retry-after-seconds"
   },
+  "settings.adminEdge.enabled": {
+    "text": "Serve this panel at the edge on the public URL's hostname: certificate by domain, the chain below, then a loopback hop to the admin listener. Not a proxy host, and fleet-wide maintenance never applies to it.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-enabled"
+  },
+  "settings.adminEdge.accessLists": {
+    "text": "Access lists in front of the panel, as on a proxy host: who may reach it at all. The panel's own sign-in sits behind them.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-access-lists"
+  },
+  "settings.adminEdge.middlewares": {
+    "text": "Middlewares in front of the panel, in order, as on a proxy host. A sign-in middleware gates the panel a second time.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-middlewares"
+  },
+  "settings.adminEdge.tls.forceSSL": {
+    "text": "Redirect plain HTTP for the panel's hostname to HTTPS.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-tls"
+  },
+  "settings.adminEdge.tls.hsts.enabled": {
+    "text": "Send Strict-Transport-Security on the panel: one year, subdomains included.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-tls"
+  },
+  "settings.adminEdge.robotsNoIndex": {
+    "text": "Send X-Robots-Tag: noindex, nofollow on the panel so search engines leave it out.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-robots-no-index"
+  },
+  "settings.adminEdge.dns.lanDirect": {
+    "text": "DNS sync publishes a local record for the panel's hostname pointing straight at gpm.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-dns"
+  },
+  "settings.adminEdge.dns.publicCname": {
+    "text": "DNS sync publishes the public record for the panel's hostname.",
+    "doc": "reference/config/settings/admin-edge.md#settings-admin-edge-dns"
+  },
   "settings.errorPages.dir": {
     "text": "A directory of html/template files named <status>.html, plus an optional default.html, relative to the certificate store.",
     "doc": "reference/config/settings/error-pages.md#settings-error-pages-dir"

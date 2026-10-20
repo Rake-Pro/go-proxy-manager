@@ -482,6 +482,10 @@ type hostHandler struct {
 	// without a router rebuild while this per-host bit is compiled in like every
 	// other host field.
 	maintenance bool
+	// maintenanceExempt marks the admin edge and the hosts the admin sign-in
+	// providers live behind: the fleet-wide switch skips them (see
+	// maintenanceActive), the per-host flag does not.
+	maintenanceExempt bool
 
 	// errorPages is this host's own compiled errorPages override, or nil when it
 	// has none (the settings-level pages, if any, still apply - see

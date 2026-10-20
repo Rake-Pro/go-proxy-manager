@@ -8,7 +8,7 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 [![Release](https://img.shields.io/github/actions/workflow/status/Rake-Pro/go-proxy-manager/release.yml?label=release)](https://github.com/Rake-Pro/go-proxy-manager/actions/workflows/release.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-go--proxy--manager-blue?logo=docker)](https://github.com/Rake-Pro/go-proxy-manager/pkgs/container/go-proxy-manager)
 [![License](https://img.shields.io/github/license/Rake-Pro/go-proxy-manager)](LICENSE)
-[![Go version](https://img.shields.io/github/go-mod/go-version/Rake-Pro/go-proxy-manager)](go.mod)
+[![Go toolchain](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2FRake-Pro%2Fgo-proxy-manager%2Fmain%2F.go-version&search=%5B0-9.%5D%2B&label=Go&color=00ADD8)](.go-version)
 
 ## What it is
 

@@ -51,8 +51,12 @@ else (including `*/*`). **Every** maintenance response carries a `Content-Type`
 and a body: a bodyless error response from this proxy has broken real API
 clients.
 
-**What is not affected.** Redirect, parked and stream hosts proxy nothing to
-take out of service and keep serving. ACME HTTP-01 challenges are answered
+**What is not affected.** The [admin front door](admin-edge.md) and the host
+each admin sign-in provider's issuer lives behind are left up by the
+fleet-wide switch, so the panel stays reachable to turn it off again (a
+per-host flag on one of them is still honoured; `GET /api/capabilities`
+lists them under `maintenance.exempt`). Redirect, parked and stream hosts
+proxy nothing to take out of service and keep serving. ACME HTTP-01 challenges are answered
 before host routing, so certificates still renew during a window. A host that
 requires mTLS still refuses an uncertified request with a 421 rather than
 disclosing a maintenance window to it. There is no scheduling: a window opens
