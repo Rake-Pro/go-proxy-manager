@@ -5,6 +5,8 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-20
+
 ### Added
 
 - Ingress and Docker discovery templates and profiles take `locations`, the
