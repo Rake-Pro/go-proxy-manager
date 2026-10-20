@@ -229,6 +229,10 @@ const (
 	// bound a distributed guess against one account, not to let anyone lock an
 	// operator out of local login with five bad passwords from one client.
 	maxUserLoginFails = 20
+	// The username map is capped at what it takes to fill the IP map at the
+	// per-IP limit, so filling it is never the cheaper way to lock local login
+	// for everyone (keys are at most 64 bytes).
+	maxUserLoginGates = maxLoginFails * maxLoginGates
 	loginLockout      = 15 * time.Minute // how long failures are remembered / locked
 	maxPendingLogins  = 1024             // cap on in-flight OIDC states (anti-DoS)
 	maxLoginGates     = 4096             // cap on tracked client keys (anti-DoS)
@@ -318,7 +322,7 @@ func NewAuthenticator(o Options) *Authenticator {
 		clients:          map[string]*oidc.Client{},
 		pending:          map[string]pendingLogin{},
 		loginGate:        newRateGate(loginLockout, maxLoginFails, maxLoginGates),
-		userGate:         newRateGate(loginLockout, maxUserLoginFails, maxLoginGates),
+		userGate:         newRateGate(loginLockout, maxUserLoginFails, maxUserLoginGates),
 		pendingGate:      newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
 	}
 }

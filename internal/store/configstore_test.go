@@ -1329,9 +1329,13 @@ func TestSaveNoOpMakesNoCommit(t *testing.T) {
 		name       string
 		mutate     func(h *model.ProxyHost)
 		wantCommit bool
+		dirty      bool
 	}{
-		{"identical object", func(h *model.ProxyHost) {}, false},
-		{"real change", func(h *model.ProxyHost) { h.Upstream.Port = 9090 }, true},
+		{"identical object", func(h *model.ProxyHost) {}, false, false},
+		{"real change", func(h *model.ProxyHost) { h.Upstream.Port = 9090 }, true, false},
+		// An uncommitted change elsewhere in the tree (a commit that failed
+		// after its write) is swept in by the retry rather than left behind.
+		{"identical object, dirty tree", func(h *model.ProxyHost) {}, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1340,6 +1344,20 @@ func TestSaveNoOpMakesNoCommit(t *testing.T) {
 			au := Author{Name: "admin", Email: "admin@example.com"}
 			if _, err := st.Save(ctx, sampleHost("app"), au); err != nil {
 				t.Fatal(err)
+			}
+			if tc.dirty {
+				if _, err := st.Save(ctx, sampleHost("other"), au); err != nil {
+					t.Fatal(err)
+				}
+				// A comment keeps the file valid: a dirty tree, not a broken one.
+				stray := filepath.Join(st.dir, "proxy-hosts", "other.yaml")
+				cur, err := os.ReadFile(stray)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(stray, append(cur, []byte("# hand edit\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			file := filepath.Join(st.dir, "proxy-hosts", "app.yaml")
 			before, err := os.ReadFile(file)
@@ -1367,6 +1385,11 @@ func TestSaveNoOpMakesNoCommit(t *testing.T) {
 			if tc.wantCommit {
 				if sha == "" || commits() != n0+1 {
 					t.Fatalf("sha=%q commits=%d, want a new commit over %d", sha, commits(), n0)
+				}
+				if tc.dirty {
+					if clean, err := st.git.IsClean(ctx); err != nil || !clean {
+						t.Fatalf("tree still dirty after the retry (clean=%v err=%v)", clean, err)
+					}
 				}
 				return
 			}

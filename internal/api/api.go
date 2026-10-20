@@ -372,6 +372,12 @@ func (d Deps) scoped(required string, h http.HandlerFunc) http.HandlerFunc {
 // that and returns false to stop the handler - never a misleading 200. On success
 // it fires the lifecycle event and returns true.
 func (d Deps) applyChange(w http.ResponseWriter, action, kind, name, sha string) bool {
+	// No commit means nothing changed (a save identical to what is stored, a
+	// revert to HEAD): nothing to reload, and no lifecycle event, webhook or
+	// DNS / access-list trigger to fire.
+	if sha == "" {
+		return true
+	}
 	if err := d.onChange(); err != nil {
 		writeErr(w, http.StatusInternalServerError,
 			fmt.Errorf("change committed as %s but could not be applied to the running configuration: %w", sha, err))

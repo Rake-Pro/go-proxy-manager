@@ -302,7 +302,9 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	key := clientIPKey(r)
 	// The per-IP and per-username gates answer identically, so a locked name
 	// cannot be told apart from a locked address (no account-existence oracle).
-	if !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
+	// A locked name is checked first, without reserving an IP slot: the owner
+	// retrying a locked account must not lock their own address as well.
+	if s.authn.UserLoginThrottled(username) || !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
 		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key, username))
 		return
 	}
@@ -356,7 +358,9 @@ func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
 	key := clientIPKey(r)
 	// The per-IP and per-username gates answer identically, so a locked name
 	// cannot be told apart from a locked address (no account-existence oracle).
-	if !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
+	// A locked name is checked first, without reserving an IP slot: the owner
+	// retrying a locked account must not lock their own address as well.
+	if s.authn.UserLoginThrottled(username) || !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
 		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key, username))
 		return
 	}

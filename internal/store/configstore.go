@@ -387,8 +387,12 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 		// Nothing but the timestamps would differ: write and commit nothing and
 		// return no commit, the same "nothing to commit" signal CommitAll gives a
 		// clean tree (the API sends it as an empty X-Config-Commit, which the UI
-		// shows as "No changes").
-		return "", nil
+		// shows as "No changes"). Only on a clean tree: the file on disk is what
+		// HEAD holds then. A dirty tree (a commit that failed after the write, a
+		// hand edit) falls through, so the retry commits what is there.
+		if clean, err := s.git.IsClean(ctx); err == nil && clean {
+			return "", nil
+		}
 	}
 	if err := writeYAML(path, out); err != nil {
 		return "", err

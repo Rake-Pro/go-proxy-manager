@@ -67,11 +67,12 @@ revertible with `POST /api/revert` like any other change.
   next load if the on-disk artifact is missing.
 - **`session.db`**: restoring config never touches it; every admin session
   active at restore time stays valid (or invalid) exactly as it was before.
-- **`api-tokens`** digests restore fine (they're plain config), but remember a
-  scoped revert of just `api-tokens` is refused for the reason in
-  [APIToken](../reference/config/api-token.md): a whole-config
-  restore is the one path that *does* touch them, by design, since it's meant
-  to bring back an entire prior state including which tokens existed then.
+- **`api-tokens`** are never brought back from an archive: a restore keeps the
+  instance's live tokens and ignores the archive's token files (logged as
+  `restore: archive api-token files ignored`), the same rule as Revert, for
+  the reason in [APIToken](../reference/config/api-token.md). Restoring onto
+  a fresh instance therefore leaves it with no tokens: re-mint the ones your
+  automation needs (backup cron, metrics scrapers) afterwards.
 
 Verify a backup is actually restorable periodically, not just that the cron
 job exits `0`: a `GET`/`POST /api/restore` round trip against a disposable
