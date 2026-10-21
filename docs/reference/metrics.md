@@ -50,6 +50,7 @@ every third-party dependency has to earn its place.
 | `gpm_http_response_bytes_total` | counter | `host` |
 | `gpm_http_upstream_errors_total` | counter | `host` |
 | `gpm_http_websocket_upgrades_total` | counter | `host` |
+| `gpm_maintenance_responses_total` | counter | `host` (the 503 a host in maintenance answers with; also counted in `gpm_http_requests_total` as `5xx`) |
 | `gpm_denials_total` | counter | `host`, `reason` (`rate-limit`, `access-list`, `access-list-auth`, `guard`, `geo`, `bouncer`, `auth-forward`, `auth-request`, `auth-oidc`, `auth-client-cert`, `auth-basic`) |
 | `gpm_stream_connections_active` | gauge | `host` |
 | `gpm_stream_connections_total` | counter | `host` |

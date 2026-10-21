@@ -754,8 +754,9 @@ func main() {
 			}
 		},
 		RecentLogs: func() any {
-			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs()}
+			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity()}
 		},
+		ClearLogs:         dp.ClearLogs,
 		SetAccessLog:      dp.SetAccessLog,
 		GeoDBLoaded:       geoResolver.Loaded,
 		MaintenanceGlobal: dataplane.MaintenanceGlobalEnabled,

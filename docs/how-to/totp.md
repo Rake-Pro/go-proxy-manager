@@ -58,5 +58,5 @@ MFA the identity provider enforces.
 | Every code is rejected | Server and phone clocks differ by more than 30 seconds; only one step either side is accepted | Fix time sync (NTP) on the host |
 | Every code is rejected, and the log says the secret is not usable base32 | gpm refuses to start with an unparseable secret, so this is a stale container | Regenerate with `gpm totp-secret` and restart |
 | "Wrong code." on a code that just worked | Codes are single-use: the accepted step cannot be replayed | Wait for the next 30-second step |
-| "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts (wrong password **or** wrong code) from one client IP within 15 minutes | Wait the minutes shown, or restart gpm: the lockout and the used-code ledger are in memory only |
+| "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts (wrong password **or** wrong code) from one client IP, or twenty against one username from any clients, within 15 minutes | Wait the minutes shown, or restart gpm: the lockout and the used-code ledger are in memory only |
 | Locked out with no authenticator (phone lost) | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*` and restart to sign in with the password alone, then enrol a new secret |

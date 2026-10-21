@@ -25,7 +25,7 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
 | `*:read` | Every read, including whole-config reads (`/api/config`, `/api/history`, `/api/logs`, `/api/upstream-health`) |
 | `*:write` | Every read and write, except the `admin`-only routes below |
 | `metrics:read` | `GET /metrics` only, and nothing else |
-| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke` and `/debug/pprof/*` |
+| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
 
 Valid subjects are the REST resource plurals plus the pseudo-resources
 `settings`, `dns-sync`, `ingress-discovery`, `docker-discovery` and `metrics`.
@@ -128,7 +128,7 @@ traffic.
   DNS-sync status/reconcile/plan, Ingress-discovery status/reconcile/plan,
   capabilities, upstream health, logs, SSO revocation) plus the admin-session
   routes in `internal/server` (login, callback, local login, logout, `/api/me`,
-  `/healthz`, `/version`, this spec's own route) and the opt-in `pprof`
+  `/healthz`, `/version` (any signed-in role), this spec's own route) and the opt-in `pprof`
   endpoints (only mounted with `GPM_PPROF=1`).
 - Request/response schemas are derived from `internal/model`'s Go structs (the
   same types the store persists as YAML), so a field's name, type and

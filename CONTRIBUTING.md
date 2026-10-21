@@ -65,9 +65,10 @@ before merge.
     coverage).
   - `CHANGELOG.md` for every notable Added / Changed / Fixed / Security
     change.
-  - `FEATURES.md` when a roadmap item ships or its scope changes, and
-    `BACKLOG.md`: check items off when done, add newly identified
-    follow-ups.
+  - `docs/roadmap.md` when a planned theme ships or something becomes
+    deliberately not planned.
+  - GitHub issues: close (or tick the checklist line of) the issue a change
+    resolves, and file a newly identified follow-up as an issue.
 - **Backwards compatibility.** Existing YAML under `/data/config` must keep
   loading. Deprecate a field rather than removing it (keep the struct field,
   mark it `// Deprecated:`, drop it from the UI/OpenAPI/docs) unless the

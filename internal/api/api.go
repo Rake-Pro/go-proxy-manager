@@ -55,6 +55,9 @@ type Deps struct {
 	// RecentLogs, if set, returns the data-plane access-log viewer payload
 	// (marshalled as-is) for GET /logs. May be nil.
 	RecentLogs func() any
+	// ClearLogs, if set, empties the data-plane access-log buffer
+	// (DELETE /logs). May be nil.
+	ClearLogs func()
 	// GeoDBLoaded reports whether a GeoIP database is currently loaded, for the
 	// read-only GET /capabilities probe the UI uses to enable/grey-out geo
 	// controls. May be nil (reported as not loaded).
@@ -369,6 +372,12 @@ func (d Deps) scoped(required string, h http.HandlerFunc) http.HandlerFunc {
 // that and returns false to stop the handler - never a misleading 200. On success
 // it fires the lifecycle event and returns true.
 func (d Deps) applyChange(w http.ResponseWriter, action, kind, name, sha string) bool {
+	// No commit means nothing changed (a save identical to what is stored, a
+	// revert to HEAD): nothing to reload, and no lifecycle event, webhook or
+	// DNS / access-list trigger to fire.
+	if sha == "" {
+		return true
+	}
 	if err := d.onChange(); err != nil {
 		writeErr(w, http.StatusInternalServerError,
 			fmt.Errorf("change committed as %s but could not be applied to the running configuration: %w", sha, err))
@@ -917,6 +926,17 @@ func New(d Deps) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, d.RecentLogs())
+	}))
+
+	// Empty the viewer's buffer. Admin scope, as the toggle: the buffer is a
+	// global runtime artefact, not one resource.
+	mux.HandleFunc("DELETE /logs", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		if d.ClearLogs == nil {
+			writeErr(w, http.StatusNotImplemented, errors.New("access-log buffer is not wired"))
+			return
+		}
+		d.ClearLogs()
+		w.WriteHeader(http.StatusNoContent)
 	}))
 
 	// Flip data-plane request capture live. Runtime-only - never persisted, so

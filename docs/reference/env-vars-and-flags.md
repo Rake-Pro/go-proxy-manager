@@ -32,7 +32,8 @@ addresses enabled**: one socket serving both families. See
 A Prometheus exposition is available at `/metrics` on the **admin** listener,
 off by default (`-metrics` / `GPM_METRICS=1`) and gated like the rest of the
 admin panel, see [Metrics (Prometheus)](metrics.md) below. Unauthenticated,
-the admin server exposes only `/healthz` and `/version`.
+the admin server exposes only `/healthz`; `/version` needs a signed-in session
+or an API token of any role.
 
 ## Flags and environment variables
 

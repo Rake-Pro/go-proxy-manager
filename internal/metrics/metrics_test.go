@@ -150,6 +150,7 @@ func TestGPMMetricsHookRecords(t *testing.T) {
 	m.UpstreamError("app")
 	m.WebsocketUpgrade("app")
 	m.Denial("app", "rate-limit")
+	m.MaintenanceResponse("app")
 	m.StreamOpened("db")
 	m.StreamClosed("db")
 	m.RegisterHA("leader")
@@ -168,6 +169,7 @@ func TestGPMMetricsHookRecords(t *testing.T) {
 		`gpm_http_upstream_errors_total{host="app"} 1`,
 		`gpm_http_websocket_upgrades_total{host="app"} 1`,
 		`gpm_denials_total{host="app",reason="rate-limit"} 1`,
+		`gpm_maintenance_responses_total{host="app"} 1`,
 		`gpm_stream_connections_total{host="db"} 1`,
 		`gpm_stream_connections_active{host="db"} 0`,
 		`gpm_ha_role{role="follower"} 0`,

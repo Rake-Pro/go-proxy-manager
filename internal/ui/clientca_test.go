@@ -69,7 +69,7 @@ func TestStaticBundleSupersededRowsAreHistorical(t *testing.T) {
 		"renewed as ",
 		// the renew button and its form only exist for a current record
 		"${r.supersededBy\n        ? ",
-		"${r.supersededBy ? '' : `<tr class=\"ren-row\"",
+		"${r.supersededBy ? '' : `<tr class=\"ren-row sub-row\"",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("issued-certificate table missing superseded-row marker %q", want)

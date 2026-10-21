@@ -221,6 +221,13 @@ func mtlsDispatchRouter(t *testing.T) (*router, *x509.Certificate, *ecdsa.Privat
 // handshake still completes and the dispatch gate is what does the rejecting.
 func dispatchTLS(t *testing.T, rt *router, sni, host string, clientCert *tls.Certificate) (int, error) {
 	t.Helper()
+	code, _, err := dispatchTLSResp(t, rt, sni, host, clientCert)
+	return code, err
+}
+
+// dispatchTLSResp is dispatchTLS returning the response headers too.
+func dispatchTLSResp(t *testing.T, rt *router, sni, host string, clientCert *tls.Certificate) (int, http.Header, error) {
+	t.Helper()
 	def := testTLSCert(t)
 	serverCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -254,10 +261,10 @@ func dispatchTLS(t *testing.T, rt *router, sni, host string, clientCert *tls.Cer
 	go func() { errc <- srv.Handshake() }()
 	if err := cli.Handshake(); err != nil {
 		<-errc
-		return 0, err
+		return 0, nil, err
 	}
 	if err := <-errc; err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	state := srv.ConnectionState()
@@ -266,7 +273,7 @@ func dispatchTLS(t *testing.T, rt *router, sni, host string, clientCert *tls.Cer
 	req.TLS = &state
 	w := httptest.NewRecorder()
 	rt.serveHTTPS(w, req)
-	return w.Code, nil
+	return w.Code, w.Header(), nil
 }
 
 // TestMTLSDispatchRejectsForeignSNI closes the core bypass: a client handshakes
@@ -274,12 +281,18 @@ func dispatchTLS(t *testing.T, rt *router, sni, host string, clientCert *tls.Cer
 // mTLS host by Host header. The per-request gate must reject it.
 func TestMTLSDispatchRejectsForeignSNI(t *testing.T) {
 	rt, _, _ := mtlsDispatchRouter(t)
-	code, err := dispatchTLS(t, rt, "plain.example", "req.example", nil)
+	code, hdr, err := dispatchTLSResp(t, rt, "plain.example", "req.example", nil)
 	if err != nil {
 		t.Fatalf("handshake with a non-mTLS SNI should complete: %v", err)
 	}
 	if code != http.StatusMisdirectedRequest {
 		t.Fatalf("Host=req.example over a plain.example handshake must be rejected (421), got %d", code)
+	}
+	// The 421 must take the connection down with it: a browser that coalesced
+	// this host onto a non-mTLS connection, or kept one open from before the
+	// host required a certificate, only re-handshakes once the connection goes.
+	if got := hdr.Get("Connection"); got != "close" {
+		t.Fatalf("421 must carry Connection: close so the client re-handshakes, got %q", got)
 	}
 }
 

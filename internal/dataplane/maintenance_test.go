@@ -290,3 +290,36 @@ func TestMaintenanceExemptionIsPerRequestHostname(t *testing.T) {
 		t.Fatalf("exempt name under global maintenance: status = %d, want 200", rec.Code)
 	}
 }
+
+// A maintenance 503 is counted per host NAME, on both the HTTPS and the plain
+// HTTP path, and a host that is up is not counted.
+func TestMaintenanceResponseCounted(t *testing.T) {
+	tests := []struct {
+		name     string
+		tls      bool
+		url      string
+		host     string
+		wantDown int
+		wantUp   int
+	}{
+		{"https down host", true, "https://down.example.com/", "down.example.com", 1, 0},
+		{"http down host", false, "http://down.example.com/", "down.example.com", 1, 0},
+		{"host that is up", true, "https://up.example.com/", "up.example.com", 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withMaintenance(t, model.MaintenanceSettings{})
+			withGlobalErrorPages(t, nil)
+			hook := installHook(t)
+			rt := maintenanceRouter(t, true)
+			// "up" carries no flag of its own, so only "down" is out of service.
+			serveOn(rt, tc.tls, "GET", tc.url, tc.host)
+			if got := hook.maint["down"]; got != tc.wantDown {
+				t.Errorf("maintenance count for down = %d, want %d", got, tc.wantDown)
+			}
+			if got := hook.maint["up"]; got != tc.wantUp {
+				t.Errorf("maintenance count for up = %d, want %d", got, tc.wantUp)
+			}
+		})
+	}
+}

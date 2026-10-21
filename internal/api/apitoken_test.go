@@ -332,6 +332,8 @@ func TestScopeEnforcement(t *testing.T) {
 		// output, not one resource. 501 past the gate = the dep is unwired here.
 		{"logs toggle needs admin", []string{"*:write"}, "PUT", "/logs", `{"enabled":true}`, http.StatusForbidden},
 		{"admin reaches logs toggle", []string{model.ScopeAdmin}, "PUT", "/logs", `{"enabled":true}`, http.StatusNotImplemented},
+		{"logs clear needs admin", []string{"*:write"}, "DELETE", "/logs", "", http.StatusForbidden},
+		{"admin reaches logs clear", []string{model.ScopeAdmin}, "DELETE", "/logs", "", http.StatusNotImplemented},
 		{"upstream health needs wildcard read", []string{"proxy-hosts:read"}, "GET", "/upstream-health", "", http.StatusForbidden},
 		{"wildcard read reaches upstream health", []string{"*:read"}, "GET", "/upstream-health", "", http.StatusOK},
 

@@ -243,8 +243,12 @@ func (s *Server) renderLoginPage(w http.ResponseWriter, status int, returnTo, us
 
 // lockoutMessage names how long the client stays locked out, in whole minutes
 // rounded up so the page never says "0 minutes".
-func (s *Server) lockoutMessage(key string) string {
-	n := int((s.authn.LoginLockoutRemaining(key) + time.Minute - 1) / time.Minute)
+func (s *Server) lockoutMessage(key, username string) string {
+	rem := s.authn.LoginLockoutRemaining(key)
+	if u := s.authn.UserLoginLockoutRemaining(username); u > rem {
+		rem = u
+	}
+	n := int((rem + time.Minute - 1) / time.Minute)
 	if n <= 1 {
 		return "Too many attempts. Try again in 1 minute."
 	}
@@ -296,8 +300,12 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
 	username := r.PostForm.Get("username")
 	key := clientIPKey(r)
-	if !s.authn.LoginAttempt(key) {
-		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
+	// The per-IP and per-username gates answer identically, so a locked name
+	// cannot be told apart from a locked address (no account-existence oracle).
+	// A locked name is checked first, without reserving an IP slot: the owner
+	// retrying a locked account must not lock their own address as well.
+	if s.authn.UserLoginThrottled(username) || !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
+		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key, username))
 		return
 	}
 	sess, pending, err := s.authn.LocalLogin(r.Context(), username, r.PostForm.Get("password"))
@@ -307,10 +315,11 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 	// throttle on the TOTP step meaningless. Only a completed login clears it.
 	if err != nil || pending == "" {
 		s.authn.NoteLoginResult(key, err == nil)
+		s.authn.NoteUserLoginResult(username, err == nil)
 	}
 	if err != nil {
 		log.Warn().Err(err).Msg("local login failed")
-		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, msgWrongCredentials))
+		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, username, msgWrongCredentials))
 		return
 	}
 	if pending != "" {
@@ -327,9 +336,9 @@ func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
 // failureMessage is msg, or the lockout message when the failure just recorded
 // was the one that locked the client out, so the user learns it now rather
 // than on the next attempt.
-func (s *Server) failureMessage(key, msg string) string {
-	if s.authn.LoginThrottled(key) {
-		return s.lockoutMessage(key)
+func (s *Server) failureMessage(key, username, msg string) string {
+	if s.authn.LoginThrottled(key) || s.authn.UserLoginThrottled(username) {
+		return s.lockoutMessage(key, username)
 	}
 	return msg
 }
@@ -347,15 +356,20 @@ func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
 	returnTo := sanitizeReturnTo(r.PostForm.Get("return"))
 	username := r.PostForm.Get("username")
 	key := clientIPKey(r)
-	if !s.authn.LoginAttempt(key) {
-		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key))
+	// The per-IP and per-username gates answer identically, so a locked name
+	// cannot be told apart from a locked address (no account-existence oracle).
+	// A locked name is checked first, without reserving an IP slot: the owner
+	// retrying a locked account must not lock their own address as well.
+	if s.authn.UserLoginThrottled(username) || !s.authn.LoginAttempt(key) || !s.authn.UserLoginAttempt(username) {
+		s.renderLoginPage(w, http.StatusTooManyRequests, returnTo, username, s.lockoutMessage(key, username))
 		return
 	}
 	sess, err := s.authn.CompleteTOTPLogin(r.Context(), r.PostForm.Get("pending"), r.PostForm.Get("code"))
 	s.authn.NoteLoginResult(key, err == nil)
+	s.authn.NoteUserLoginResult(username, err == nil)
 	if err != nil {
 		log.Warn().Err(err).Msg("local login second factor failed")
-		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, msgWrongCode))
+		s.renderLoginPage(w, http.StatusUnauthorized, returnTo, username, s.failureMessage(key, username, msgWrongCode))
 		return
 	}
 	s.authn.IssueCookie(w, r, sess)

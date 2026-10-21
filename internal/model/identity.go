@@ -27,8 +27,8 @@ type OIDCSpec struct {
 	// acr/amr instead of prompting a second local TOTP, but gpm has no local TOTP
 	// prompt to suppress and never reads acr/amr, so the flag decides nothing. It
 	// is still parsed so existing YAML keeps loading, and is dropped from the UI,
-	// the API docs and the config reference. See FEATURES.md for the roadmap item
-	// that would give it meaning.
+	// the API docs and the config reference. docs/roadmap.md lists MFA
+	// delegation as not planned, which is why nothing gives it meaning.
 	TrustIdPMFA bool `json:"trustIdPMFA,omitempty" yaml:"trustIdPMFA,omitempty"`
 }
 

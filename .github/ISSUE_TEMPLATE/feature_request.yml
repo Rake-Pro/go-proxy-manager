@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [FEATURES.md](../../FEATURES.md) (roadmap) and
-        [BACKLOG.md](../../BACKLOG.md) (tracked follow-ups) first: your idea
-        may already be scoped or deliberately deferred with a reason stated.
+        Check the [roadmap](../../docs/roadmap.md) and the open issues
+        first: your idea may already be scoped or deliberately deferred with
+        a reason stated.
   - type: textarea
     id: problem
     attributes:
@@ -34,4 +34,4 @@ body:
       label: Scope check
       options:
         - label: This does not require a new third-party dependency (or I've noted why one is unavoidable).
-        - label: This is not on the "Not planned at this time" list in FEATURES.md.
+        - label: This is not on the "Not planned" list in docs/roadmap.md.

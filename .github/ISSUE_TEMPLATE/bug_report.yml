@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Before filing: check [CHANGELOG.md](../../CHANGELOG.md) for a recent
-        fix, and [BACKLOG.md](../../BACKLOG.md) for a known, tracked gap.
+        fix, and the open issues for a known, tracked gap.
   - type: input
     id: version
     attributes:

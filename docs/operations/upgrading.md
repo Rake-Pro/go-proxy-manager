@@ -15,6 +15,7 @@ data directory.
 | 1.0.0 | **Replace each stream host's `forwardHost`/`forwardPort` with a single `target: {host, port}`.** A file still using the old keys is rejected at load. | Below, and [StreamHost](../reference/config/stream-host.md) |
 | 1.0.0 | **Only if you relied on `forwardAuth.trustedProxies` for client-IP resolution:** copy the same CIDRs into `settings.trustedProxies`. It no longer doubles as `X-Forwarded-For` trust. gpm logs a `WARN` naming the exact block to paste. | [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers) |
 | 1.0.0 | **No action now, but migrate when convenient:** `AccessList.basicAuth` and `AccessList.satisfyAny` are deprecated and still enforced (2.x included). A later major release will refuse a config that carries them. | [Migrate access-list basic auth](../how-to/migrate-basic-auth.md) |
+| 2.5.0 | **A backup restore no longer brings back `api-tokens/*`:** the live tokens are kept and the archive's are ignored, as Revert already did. Restoring onto a fresh instance means re-minting tokens. Also: `GET /version` now needs a signed-in session or token; use `/healthz` for anonymous checks. | [Backup and restore](backup-and-restore.md) |
 | 1.0.x, all | **Roll a newer binary out before adopting config it introduces.** An older binary's kind map silently ignores a directory it does not know, so a downgrade leaves live objects invisible rather than cleanly rejected. Applies to `upstream-groups` and `api-tokens`. | Below |
 
 ## 1.0.0, in full
@@ -62,7 +63,8 @@ data directory.
 cosign check to run against whatever you're about to pin. There is no
 in-place "upgrade" operation: stop the old process/container, start the new
 one against the same `/data` (or `/var/lib/gpm`) volume, and confirm
-`GET /version` reports what you expect.
+`GET /version` (signed in, or with an API token) reports what you expect;
+`GET /healthz` is the anonymous check.
 
 **Config compatibility.** `Config`/`Settings` carry an explicit
 `schemaVersion` (currently `1`); a version bump would come with a documented,

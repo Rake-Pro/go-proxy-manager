@@ -5,6 +5,84 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-20
+
+### Added
+
+- Structured filters on every list (Proxy Hosts, Certificates, the other
+  object lists, API Tokens, Access Logs, History): the filter box takes
+  field-scoped terms such as `tag:lan`, `status:disabled`, `cert:wildcard`,
+  `source:ingress-discovery` or `status:5xx`, with a leading `-` to exclude
+  and quotes for a value with spaces. Typing suggests the field names, then
+  the values present in the list; a complete term becomes a chip, and the
+  matched text is highlighted in the rows. Plain words still match
+  everything, and the term chips compose with the domain-group chips.
+- Every table sorts by its columns: the object lists, API Tokens, Access
+  Logs, the discovery and access-list source status tables and the issued
+  client certificates, besides Proxy Hosts (now also by certificate,
+  sign-in, status and tags) and Certificates (now also by type and issuer).
+  The choice is remembered per table in the browser.
+- Access Logs: **Clear** empties the buffer (`DELETE /api/logs`, admin
+  scope), an auto-refresh interval (off, 2 s, 5 s, 15 s, 1 min) reloads the
+  rows in place while keeping the filter, the sort and the scroll position,
+  a Bytes column, a count line (shown of total, buffer capacity), and the
+  filter understands `method:`, `host:`, `path:`, `status:` (a code or a
+  class such as `4xx`), `client:` and `slow:yes`. `GET /api/logs` reports
+  the buffer `capacity`.
+- Proxy Hosts bulk bar: **Maintenance on** / **Maintenance off** beside
+  Enable / Disable, one commit per host (#52).
+- `gpm_maintenance_responses_total{host}`: counts the 503 a host in
+  maintenance answers with, so an alert can notice a window nobody closed
+  (#52).
+
+### Changed
+
+- The always-visible explanatory paragraphs at the top of pages and cards are
+  gone (Integrations tabs, Settings cards, host editor sections, the Error
+  Pages and Runtime pages, the middleware list, the Access Logs capture
+  banner). The `?` next to each control and the documentation carry the same
+  text; the page keeps only its one-line subtitle.
+- Hovering a Tags cell (Proxy Hosts and the other object lists) shows every
+  tag; the middleware check-lists in the host editor and the wizard say
+  "sign-in" for an `auth` middleware, as the rail does (#57).
+- The three font files no stylesheet declared (Inter, Space Grotesk,
+  JetBrains Mono) are gone from the embedded bundle, about 100 KB off the
+  binary; a test now refuses an embedded face nothing names (#57).
+
+- Proxy Hosts list: the Source column is gone. A discovered host's source
+  (`k8s-managed`, `docker-managed`) is the first chip in the Tags column,
+  which is always shown, and a display or object name that differs from the
+  domain sits beside the domain.
+
+### Security
+
+- Guard `queryEquals` triggers fail closed on a repeated query key:
+  `?direct=0&direct=1` counts as matching the trigger instead of being judged
+  on the first value only (#50).
+- `GET /version` requires a signed-in session or an API token (any role), so
+  the build commit, date and Go version are no longer visible to anonymous
+  clients; `/healthz` stays open (#51).
+- Restoring a backup archive keeps the live `api-tokens/*` and ignores the
+  archive's, matching Revert; the ignored files are logged (#51).
+- Local login is also locked per username: twenty failures against one
+  account within 15 minutes, from any clients, lock it for the window (the
+  per-IP limit stays five), so a distributed guess is bounded; a locked
+  username and a locked IP get the identical response (#51).
+
+### Fixed
+
+- Saving an object without changing anything no longer writes a file, commits
+  or restamps `updatedAt`; the API answers with an empty `X-Config-Commit` and
+  the UI says "No changes" (#58).
+- Access Logs: with nothing captured the page no longer shows "No request
+  matches this filter".
+- mTLS: the 421 that refuses a request whose connection never presented the
+  client certificate now closes that connection (GOAWAY on HTTP/2), so the
+  browser re-handshakes under the host's own SNI and is asked for the
+  certificate. Before, a connection kept busy from before the host required a
+  certificate, or one coalesced from a non-mTLS host under the same wildcard
+  certificate, answered "Misdirected Request" until it went idle.
+
 ## [2.4.0] - 2026-10-20
 
 ### Added
@@ -535,7 +613,8 @@ First public release.
   viewer role, Prometheus metrics, and an Overview that lists only what needs
   attention.
 
-[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Rake-Pro/go-proxy-manager/compare/v2.1.0...v2.2.0

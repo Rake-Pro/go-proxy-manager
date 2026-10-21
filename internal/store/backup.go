@@ -148,11 +148,37 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 		return "", err
 	}
 
+	// Like Revert, a restore must not roll back api-tokens: an archive would
+	// otherwise revive revoked or rotated-away digests. The live tokens survive
+	// and any the archive carries are ignored (writeDirs prunes them).
+	preserved, err := s.snapshotDirs(preservedOnRevert)
+	if err != nil {
+		return "", fmt.Errorf("restore: snapshot %v: %w", preservedOnRevert, err)
+	}
+	ignored := 0
+	for rel := range files {
+		for _, d := range preservedOnRevert {
+			if strings.HasPrefix(rel, d+"/") {
+				ignored++
+			}
+		}
+	}
+
 	if err := s.replaceConfigFiles(files); err != nil {
 		if head != "" {
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", err
+	}
+	if err := s.writeDirs(preserved); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("restore: preserve %v: %w", preservedOnRevert, err)
+	}
+	if ignored > 0 {
+		log.Info().Int("ignored", ignored).Strs("dirs", preservedOnRevert).
+			Msg("restore: archive api-token files ignored, live tokens kept")
 	}
 	restored, restoredSettings, err := s.loadLocked()
 	if err != nil {

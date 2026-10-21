@@ -45,8 +45,11 @@ below map each row's wording to its cause and fix.
 | Every code is rejected | Server and phone clocks differ by more than 30 seconds | Fix NTP on the host ([TOTP](../how-to/totp.md)) |
 | Every code is rejected, log says the secret is not usable base32 | Stale container: gpm refuses to start on an unparseable secret | Regenerate with `gpm totp-secret` and restart |
 | A code that just worked is refused | Codes are single-use; the accepted step cannot be replayed | Wait for the next 30-second step |
-| Login page says "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts from one client IP within 15 minutes | Wait the minutes shown, or restart (the lockout is in memory only) |
+| Login page says "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts from one client IP, or twenty against that username from any clients, within 15 minutes | Wait the minutes shown, or restart (the lockout is in memory only) |
 | Locked out with no authenticator | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*`, restart, sign in, enrol a new secret |
+| Login says too many attempts, but this client never failed | The username is locked by guesses from other clients (twenty in 15 minutes) | Wait out the window, or sign in through an SSO provider; the log names the locked username |
+| A guarded path answers 403 on a request that repeats a query key (`?k=0&k=1`) | A repeated `queryEquals` key counts as matching the trigger (fail closed) | Send the key once, or come from an `allowFrom` network |
+| Restore did not bring back the API tokens in the archive | Restore keeps the live tokens and ignores the archive's, like Revert | Re-create the token you need; the ignored files are listed in the log |
 
 ## Certificates
 

@@ -31,6 +31,8 @@ type MetricsHook interface {
 	WebsocketUpgrade(host string)
 	// Denial records a request an access-control tier refused.
 	Denial(host, reason string)
+	// MaintenanceResponse records a maintenance 503 served for a host.
+	MaintenanceResponse(host string)
 	// StreamOpened and StreamClosed bracket a raw TCP/UDP stream connection.
 	StreamOpened(host string)
 	StreamClosed(host string)

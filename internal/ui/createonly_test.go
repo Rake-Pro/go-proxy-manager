@@ -141,7 +141,7 @@ func TestWizardBatchMarkers(t *testing.T) {
 func TestListsAndShellBatchMarkers(t *testing.T) {
 	js := loadAppJS(t)
 	for _, want := range []string{
-		"let sort = { key: 'domains', dir: 1 };",
+		"const sort = loadSort(HOSTS_SORT_KEY, { key: 'domains', dir: 1 }",
 		"const zoneOk = !showZones || !r.zone || !zonesOff.has(r.zone);",
 		"r.tags.length > 3 ? moreToggle(r.tags.slice(3)",
 		"{ key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },",

@@ -238,3 +238,39 @@ func TestNoRoleIsStillUnauthenticated(t *testing.T) {
 		}
 	}
 }
+
+// /version carries build identity, so it needs an authenticated session; the
+// SPA's own (any-role) session still gets the full payload. /healthz stays open.
+func TestVersionRequiresAuthentication(t *testing.T) {
+	e := newRoleEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	rec := httptest.NewRecorder()
+	e.srv.http.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET /version = %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "goVersion") || strings.Contains(rec.Body.String(), "commit") {
+		t.Fatalf("anonymous response leaks build identity: %s", rec.Body.String())
+	}
+
+	for _, role := range []auth.Role{auth.RoleUser, auth.RoleAdmin} {
+		t.Run(string(role), func(t *testing.T) {
+			cookie, _ := e.login(t, role)
+			rec := e.request(t, http.MethodGet, "/version", cookie, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /version = %d, want 200", rec.Code)
+			}
+			var v map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil || len(v) == 0 {
+				t.Fatalf("payload = %s (err %v), want the full version object", rec.Body.String(), err)
+			}
+		})
+	}
+
+	hrec := httptest.NewRecorder()
+	e.srv.http.Handler.ServeHTTP(hrec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if hrec.Code != http.StatusOK {
+		t.Fatalf("GET /healthz = %d, want 200 without auth", hrec.Code)
+	}
+}

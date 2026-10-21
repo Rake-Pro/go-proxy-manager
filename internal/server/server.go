@@ -36,7 +36,9 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	s := &Server{addr: addr, store: st, authn: authn}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /version", s.handleVersion)
+	// Build identity (commit, build date, Go version) is fingerprinting data, so
+	// it needs an authenticated session or token like /api/me; /healthz stays open.
+	mux.Handle("GET /version", s.authn.RequireRole(auth.RoleUser, http.HandlerFunc(s.handleVersion)))
 
 	// Authentication endpoints. The credential-bearing POSTs are wrapped in the
 	// same-origin guard so a sibling subdomain cannot force login/logout (the

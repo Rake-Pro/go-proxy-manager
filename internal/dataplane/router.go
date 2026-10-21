@@ -572,6 +572,13 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	// that host's own config (SNI==Host) and, for require mode, actually verified a
 	// client certificate. Hosts without mTLS take no new rejection path.
 	if req := rt.clientAuth[name]; req != nil && !rt.clientAuthSatisfied(req, r) {
+		// Close the connection with the 421 (HTTP/1.1 closes; the HTTP/2 server
+		// turns this header into a GOAWAY). The client's next request then opens a
+		// fresh handshake under this host's own SNI config, where the certificate
+		// is actually asked for. Without it a connection negotiated before the host
+		// turned mTLS on, or coalesced from a non-mTLS host under the same cert,
+		// keeps answering 421 for as long as the client keeps it busy.
+		w.Header().Set("Connection", "close")
 		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
 		return
 	}

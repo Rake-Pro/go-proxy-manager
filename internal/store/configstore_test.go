@@ -1,12 +1,16 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
@@ -1315,5 +1319,89 @@ func TestAdminEdgeRevertCannotReintroduceCollision(t *testing.T) {
 	}
 	if s.AdminEdge.Enabled || len(cfg.ProxyHosts) != 1 {
 		t.Fatalf("after revert: edge=%v hosts=%d", s.AdminEdge.Enabled, len(cfg.ProxyHosts))
+	}
+}
+
+// Saving an object whose content is unchanged must write nothing, commit
+// nothing and leave updatedAt alone; a real change still commits.
+func TestSaveNoOpMakesNoCommit(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(h *model.ProxyHost)
+		wantCommit bool
+		dirty      bool
+	}{
+		{"identical object", func(h *model.ProxyHost) {}, false, false},
+		{"real change", func(h *model.ProxyHost) { h.Upstream.Port = 9090 }, true, false},
+		// An uncommitted change elsewhere in the tree (a commit that failed
+		// after its write) is swept in by the retry rather than left behind.
+		{"identical object, dirty tree", func(h *model.ProxyHost) {}, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			au := Author{Name: "admin", Email: "admin@example.com"}
+			if _, err := st.Save(ctx, sampleHost("app"), au); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dirty {
+				if _, err := st.Save(ctx, sampleHost("other"), au); err != nil {
+					t.Fatal(err)
+				}
+				// A comment keeps the file valid: a dirty tree, not a broken one.
+				stray := filepath.Join(st.dir, "proxy-hosts", "other.yaml")
+				cur, err := os.ReadFile(stray)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(stray, append(cur, []byte("# hand edit\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			file := filepath.Join(st.dir, "proxy-hosts", "app.yaml")
+			before, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commits := func() int {
+				out, err := exec.Command("git", "-C", st.dir, "rev-list", "--count", "HEAD").Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+				return n
+			}
+			n0 := commits()
+
+			time.Sleep(10 * time.Millisecond) // a restamp would change updatedAt
+			h := sampleHost("app")
+			tc.mutate(&h)
+			sha, err := st.Save(ctx, h, au)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _ := os.ReadFile(file)
+			if tc.wantCommit {
+				if sha == "" || commits() != n0+1 {
+					t.Fatalf("sha=%q commits=%d, want a new commit over %d", sha, commits(), n0)
+				}
+				if tc.dirty {
+					if clean, err := st.git.IsClean(ctx); err != nil || !clean {
+						t.Fatalf("tree still dirty after the retry (clean=%v err=%v)", clean, err)
+					}
+				}
+				return
+			}
+			if sha != "" {
+				t.Errorf("sha = %q, want empty (no change)", sha)
+			}
+			if commits() != n0 {
+				t.Errorf("commit count = %d, want unchanged %d", commits(), n0)
+			}
+			if !bytes.Equal(before, after) {
+				t.Errorf("file changed on a no-op save:\n%s\n---\n%s", before, after)
+			}
+		})
 	}
 }

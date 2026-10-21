@@ -173,6 +173,24 @@ func New(c Config) *Server {
 	return s
 }
 
+// ClearLogs empties the access-log ring (admin DELETE /api/logs). Capture
+// state is untouched.
+func (s *Server) ClearLogs() {
+	if s.logBuf != nil {
+		s.logBuf.clear()
+	}
+	log.Info().Msg("access-log buffer cleared")
+}
+
+// AccessLogCapacity is the number of entries the ring retains before the
+// oldest is overwritten.
+func (s *Server) AccessLogCapacity() int {
+	if s.logBuf == nil {
+		return 0
+	}
+	return s.logBuf.cap
+}
+
 // AccessLogEnabled reports whether request capture is on. When false the /api/logs
 // viewer has nothing to show and the UI surfaces how to enable it.
 func (s *Server) AccessLogEnabled() bool { return s.accessLog.Load() }
