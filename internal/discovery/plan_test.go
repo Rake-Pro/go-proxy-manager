@@ -122,3 +122,87 @@ func TestPlanDeriveFailureProtectsTheStoredHost(t *testing.T) {
 		})
 	}
 }
+
+// A new source item whose name sorts before an existing managed host must not
+// take that host's domain: the existing owner keeps it and the newcomer is the
+// one skipped. Before this rule the newcomer claimed first (placement runs in
+// name order), the existing host was skipped while its stored object kept the
+// same domain, and the batch carried a duplicate domain that failed
+// validation on every poll (issue #50).
+func TestExistingManagedHostKeepsItsDomainAheadOfANewClaimant(t *testing.T) {
+	o := own("a discovery", "a-discovery")
+	existing := host("zeta", "a-discovery", "app.example.com")
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	items := []Item{
+		{Ref: "ns/alpha", Name: "alpha", Host: host("alpha", "a-discovery", "app.example.com")},
+		{Ref: "ns/zeta", Name: "zeta", Host: host("zeta", "a-discovery", "app.example.com")},
+	}
+	p := Plan(cfg, o, items)
+	if p.Skipped != 1 {
+		t.Fatalf("skipped = %d, want the newcomer alone: %+v", p.Skipped, p.Hosts)
+	}
+	for _, h := range p.Hosts {
+		switch h.Name {
+		case "alpha":
+			if h.Action != ActionSkipped || !strings.Contains(h.Reason, `claimed by proxy host "zeta"`) {
+				t.Fatalf("alpha = %+v, want skipped in favour of zeta", h)
+			}
+		case "zeta":
+			if h.Action == ActionSkipped {
+				t.Fatalf("zeta must keep its domain, got %+v", h)
+			}
+		}
+	}
+	for _, u := range p.Upserts {
+		if u.Name == "alpha" {
+			t.Fatalf("alpha must not be written: %+v", u)
+		}
+	}
+	// An existing managed host moving onto a domain ANOTHER existing managed
+	// host serves today is the one skipped, whatever the names sort like: the
+	// domain stays with the host that has it, so the applied batch never
+	// carries a duplicate.
+	cfg2 := model.Config{ProxyHosts: []model.ProxyHost{
+		host("alpha", "a-discovery", "one.example.com"),
+		host("beta", "a-discovery", "two.example.com"),
+	}}
+	p2 := Plan(cfg2, o, []Item{
+		{Ref: "ns/alpha", Name: "alpha", Host: host("alpha", "a-discovery", "two.example.com")},
+		{Ref: "ns/beta", Name: "beta", Host: host("beta", "a-discovery", "two.example.com")},
+	})
+	if p2.Skipped != 1 {
+		t.Fatalf("skipped = %d, want alpha alone: %+v", p2.Skipped, p2.Hosts)
+	}
+	for _, h := range p2.Hosts {
+		if h.Name == "alpha" && h.Action != ActionSkipped {
+			t.Fatalf("alpha must be skipped, got %+v", h)
+		}
+		if h.Name == "beta" && h.Action == ActionSkipped {
+			t.Fatalf("beta must keep two.example.com, got %+v", h)
+		}
+	}
+	for _, u := range p2.Upserts {
+		if u.Name == "alpha" {
+			t.Fatalf("alpha must not be written: %+v", u)
+		}
+	}
+	// Applying what the plan writes on top of what it leaves alone must
+	// validate: no duplicate domain.
+	byName := map[string]model.ProxyHost{}
+	for _, h := range cfg2.ProxyHosts {
+		byName[h.Name] = h
+	}
+	for _, u := range p2.Upserts {
+		byName[u.Name] = u // SaveBatch replaces by name
+	}
+	for _, d := range p2.Deletes {
+		delete(byName, d)
+	}
+	applied := model.Config{}
+	for _, h := range byName {
+		applied.ProxyHosts = append(applied.ProxyHosts, h)
+	}
+	if err := applied.Validate(); err != nil {
+		t.Fatalf("applied plan does not validate: %v", err)
+	}
+}

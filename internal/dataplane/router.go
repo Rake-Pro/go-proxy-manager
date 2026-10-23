@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/textproto"
 	"path"
 	"sort"
@@ -70,6 +71,7 @@ type router struct {
 type clientAuthReq struct {
 	cfg          *tls.Config
 	requireChain bool
+	anchor       *clientCAAnchor // the host's trust anchor, for per-request revocation
 }
 
 // buildRouter compiles the config into a router. certDir resolves relative
@@ -126,7 +128,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		if tlsSettings.ClientAuth != nil {
 			// require is the fail-closed default; only an explicit "optional" mode
 			// waives the verified-chain requirement (matching clientAuthType).
-			req := &clientAuthReq{cfg: c, requireChain: tlsSettings.ClientAuth.Mode != "optional"}
+			req := &clientAuthReq{cfg: c, requireChain: tlsSettings.ClientAuth.Mode != "optional", anchor: clientCAs[tlsSettings.ClientAuth.CARef]}
 			for _, d := range domains {
 				rt.clientAuth[hostKey(d)] = req
 			}
@@ -530,7 +532,21 @@ func normalizeRequestPath(r *http.Request) bool {
 // a backend. The baseline denylist is stripped for every host (even one with no
 // IdP); a host's own provider headers are stripped on top.
 func (hh *hostHandler) stripUntrustedIdentity(r *http.Request) {
-	if ip := peerIP(r); ip != nil && ipInNets(ip, hh.trustedNets) {
+	ip := peerIP(r)
+	// URL and method overrides are dropped from every peer; the client-address
+	// headers (True-Client-IP, CF-Connecting-IP, Forwarded, ...) ride the
+	// client-IP trust tier: a proxy whose X-Forwarded-For this host believes
+	// (settings/host trustedProxies) may carry them to the backend, as a CDN
+	// or load balancer does, any other peer may not.
+	for _, name := range baselineOverrideHeaders {
+		r.Header.Del(name)
+	}
+	if ip == nil || !ipInNets(ip, hh.trustedProxies) {
+		for _, name := range clientAddressHeaders {
+			r.Header.Del(name)
+		}
+	}
+	if ip != nil && ipInNets(ip, hh.trustedNets) {
 		return // a proxy this host trusts may assert identity headers
 	}
 	stripIdentityHeaders(r.Header, hh.identityHeaders)
@@ -553,12 +569,21 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 	if req.requireChain && len(r.TLS.VerifiedChains) == 0 {
 		return false
 	}
+	// A certificate revoked after the handshake is refused on the next request
+	// of a long-lived connection, not only at the next handshake.
+	if req.anchor != nil && len(r.TLS.VerifiedChains) > 0 && req.anchor.chainRevoked(r.TLS.VerifiedChains) {
+		return false
+	}
 	return true
 }
 
 // serveHTTPS dispatches a TLS-terminated request to its host by Host header:
 // proxy hosts run the middleware chain; redirect and parked hosts serve directly.
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
+	if !validHostHeader(r.Host) {
+		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
 	name := hostKey(r.Host)
 	// Configured security headers are injected set-if-absent at this dispatch
 	// layer - the same response layer HSTS rides - so they reach every response
@@ -629,9 +654,64 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no such host", http.StatusNotFound)
 }
 
+// validHostHeader accepts a Host header the router can route and forward
+// safely: a non-empty name, optionally with a numeric port in range. The
+// router routes on the name alone (hostKey), so without this a port part of
+// any shape would reach the upstream verbatim in the Host it forwards
+// (applyHostHeader keeps the client's Host by default).
+func validHostHeader(h string) bool {
+	if h == "" {
+		return false
+	}
+	host, port := h, ""
+	if strings.HasPrefix(h, "[") {
+		end := strings.IndexByte(h, ']')
+		if end < 0 {
+			return false
+		}
+		if ip, err := netip.ParseAddr(h[1:end]); err != nil || !ip.Is6() {
+			return false // only an IPv6 literal (zone allowed) goes in brackets
+		}
+		host = h[:end+1]
+		rest := h[end+1:]
+		if rest != "" {
+			if rest[0] != ':' || len(rest) == 1 {
+				return false
+			}
+			port = rest[1:]
+		}
+	} else if i := strings.IndexByte(h, ':'); i >= 0 {
+		host, port = h[:i], h[i+1:]
+		if port == "" || strings.Contains(port, ":") {
+			return false // "host:" and "host:1:2" are not a host and a port
+		}
+	}
+	if host == "" || strings.ContainsAny(host, " /\\?#@") {
+		return false
+	}
+	if port == "" {
+		return true
+	}
+	if len(port) > 5 || (len(port) > 1 && port[0] == '0') {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n >= 1 && n <= 65535
+}
+
 // serveHTTP handles plaintext requests: force-SSL hosts (of any type) are
 // redirected to https, others are served in the clear.
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if !validHostHeader(r.Host) {
+		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
 	name := hostKey(r.Host)
 	// Same set-if-absent injection as serveHTTPS (HSTS aside, which is HTTPS-only):
 	// gpm-generated plaintext responses (a non-forceSSL host's denial, a 400/404)

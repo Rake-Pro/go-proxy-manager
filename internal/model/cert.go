@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -324,10 +325,11 @@ func ValidateOutboundBaseURL(field, raw string, allowLocal bool) error {
 		return fmt.Errorf("%s: must be an http or https URL, got %q", field, raw)
 	}
 	host := u.Hostname()
-	ip := net.ParseIP(host)
-	if ip == nil || allowLocal {
+	addr, err := netip.ParseAddr(host) // keeps a zone, which net.ParseIP would reject
+	if err != nil || allowLocal {
 		return nil
 	}
+	ip := net.IP(addr.WithZone("").AsSlice())
 	switch {
 	case ip.IsLoopback():
 		return fmt.Errorf("%s: points at the loopback address %s; set config.allowInsecureLocal: \"true\" if the service really runs beside gpm", field, ip)

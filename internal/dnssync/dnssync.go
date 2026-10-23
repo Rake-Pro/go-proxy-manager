@@ -55,6 +55,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -235,7 +236,7 @@ func New(load func(context.Context) (model.Config, model.Settings, error), ledge
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
+				Proxy: nil, // never HTTPS_PROXY: a proxy would bypass the link-local guard
 				DialContext: (&net.Dialer{
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
@@ -253,7 +254,7 @@ func refuseLinkLocal(_, address string, _ syscall.RawConn) error {
 	if err != nil {
 		host = address
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) { // netip keeps a %zone, which net.ParseIP rejects and so would let through
 		return fmt.Errorf("dnssync: link-local destination %s refused", ip)
 	}
 	return nil

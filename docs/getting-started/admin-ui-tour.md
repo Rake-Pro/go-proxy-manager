@@ -153,6 +153,13 @@ Every list has the same filter box.
   written `group:k8s` is found by typing it.
 - Commas split a scoped term into alternatives; quote the value
   (`path:"/a,b"`) to keep a literal comma.
+- The last filter typed on a list comes back when you return to it (kept in
+  this browser).
+- **Saved** beside the box lists the named filters stored for this list:
+  pick one to apply it, **Save current filter...** keeps what is in the box
+  under a name, and the x beside an entry deletes it. Saved filters live in
+  settings (`savedFilters`, see [Saved filters](../reference/config/settings/saved-filters.md)),
+  so they are offered on every browser you sign in from and show in History.
 
 ## Access Logs
 
@@ -163,6 +170,9 @@ Every list has the same filter box.
   the filter, the sort and the scroll position; **Refresh** does it once.
   Refreshing pauses while the tab is hidden.
 - **Clear** empties the buffer after a confirmation; capture is unchanged.
+- **Export** downloads the rows the filter shows, in the table's order, as
+  CSV or JSON (`gpm-access-log-<timestamp>.csv|json`). A CSV cell that would
+  read as a spreadsheet formula is prefixed with a quote.
 - With capture off the page says so where the rows would be; there is no
   banner to dismiss.
 - The count line says how many of the captured requests the filter shows and

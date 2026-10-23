@@ -325,6 +325,24 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		claim(h.Name, h.Domains)
 	}
 
+	// A managed host this run keeps (rewritten, not doomed) claims the domains
+	// it WANTS before any new claimant is placed. Placement runs in name order
+	// below, so without this a new source item whose name sorts before an
+	// existing managed host would take that host's domain first; the existing
+	// host would then be skipped (its stored object re-asserting the same
+	// domain) and the batch would carry a duplicate domain the validator
+	// rejects, on every poll, until the newcomer was renamed. An existing
+	// owner keeps its domain; the newcomer is the one that is skipped.
+	for _, name := range SortedKeys(desired) {
+		if cur, exists := current[name]; exists && own.Managed(cur) && !doomed[name] {
+			claim(name, cur.Domains) // what it serves today beats what anyone wants
+		}
+	}
+	for _, name := range SortedKeys(desired) {
+		if cur, exists := current[name]; exists && own.Managed(cur) && !doomed[name] {
+			claim(name, desired[name].Domains) // then its move, if the domain is free
+		}
+	}
 	for _, name := range SortedKeys(desired) {
 		want := desired[name]
 		cur, exists := current[name]
@@ -340,7 +358,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 				claim(name, cur.Domains)
 			}
 		}
-		if conflict, owner := firstClaimed(want.Domains, claimed); conflict != "" {
+		if conflict, owner := firstClaimed(want.Domains, claimed); conflict != "" && owner != name {
 			skip(fmt.Sprintf("domain %q is already claimed by proxy host %q, which %s does not own", conflict, owner, own.Subsystem))
 			log.Warn().Str("host", name).Str("source", source[name]).
 				Str("domain", conflict).Str("owner", owner).

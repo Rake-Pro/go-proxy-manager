@@ -29,6 +29,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -244,7 +245,7 @@ func refuseLinkLocal(_, address string, _ syscall.RawConn) error {
 	if err != nil {
 		host = address
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) { // netip keeps a %zone, which net.ParseIP rejects and so would let through
 		return fmt.Errorf("docker: link-local destination %s refused", ip)
 	}
 	return nil

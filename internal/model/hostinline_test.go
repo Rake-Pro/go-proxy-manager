@@ -28,6 +28,7 @@ func inlineIdPs() []IdentityProvider {
 // still resolve, and that an inline block and a referenced middleware of the
 // same kind may coexist (no mutual exclusivity).
 func TestInlineAuthAndRateLimitValidate(t *testing.T) {
+	corpCA, _ := testCA(t, "corp", true)
 	tests := []struct {
 		name    string
 		cfg     Config
@@ -112,7 +113,21 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 			wantErr: `proxy host "app": auth.allowFrom: is only supported in auth-request and client-cert modes; auth.mode is unset`,
 		},
 		{
-			name: "inline client-cert auth needs no provider",
+			name: "inline client-cert auth needs no provider, but needs the host's own clientAuth",
+			cfg: Config{
+				ClientCAs: []ClientCA{{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: corpCA}},
+				ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
+					h.TLS.ForceSSL = true
+					h.TLS.ClientAuth = &ClientAuth{CARef: "corp", Mode: "require"}
+					h.Auth = &AuthMiddleware{Mode: AuthModeClientCert}
+				})},
+			},
+		},
+		{
+			// A client-cert gate on a host with no tls.clientAuth still loads
+			// (so an older config keeps starting); Warnings names it and the
+			// data plane fails the gate closed. See TestConfigWarningsGates.
+			name: "inline client-cert auth without tls.clientAuth validates, with a warning",
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.Auth = &AuthMiddleware{Mode: AuthModeClientCert}
 			})}},

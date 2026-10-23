@@ -163,7 +163,7 @@ func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net
 		}
 		key := nilIPRateLimitKey
 		if ip != nil {
-			key = ip.String()
+			key = ipBucketKey(ip)
 		}
 		ok, retry := l.allow(key)
 		if !ok {

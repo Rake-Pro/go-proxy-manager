@@ -348,12 +348,54 @@ function fieldValues(recs) {
 }
 
 // filterBoxHtml renders a list's search control: the committed field terms as
-// chips, the input, and the suggestion list under it. fields is
+// chips, the input, and the suggestion list under it, plus the Saved menu
+// (named filters kept in settings, see wireFilter). fields is
 // {name: 'what it matches'}, which the title and the suggestions show.
 function filterBoxHtml(id, placeholder, label, fields) {
   const names = Object.keys(fields || {});
   const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; commas list alternatives, a leading - excludes. Type to see suggestions.`;
-  return `<div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`;
+  return `<div class="fwrap" id="${id}-fwrap"><div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`
+    + `<div class="fsaved"><button class="btn ghost fsaved-btn" id="${id}-saved" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}-menu" title="Saved filters: apply one, or save the current filter under a name">Saved${ICON.caret}</button><div class="menu fsaved-menu" id="${id}-menu" role="menu" hidden></div></div></div>`;
+}
+// A dropdown anchored to a button: opened by the button, closed by a click
+// outside, Escape, or the next route. onOpen fills the menu's innerHTML (it
+// may be async) and the caller handles clicks inside it.
+function wireMenu(btn, menu, onOpen) {
+  if (!btn || !menu) return { close: () => {} };
+  let open = false;
+  function close() {
+    if (!open) return;
+    open = false;
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', onDoc, true);
+    document.removeEventListener('keydown', onKey, true);
+  }
+  function onDoc(e) { if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) close(); }
+  function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); btn.focus(); } }
+  btn.addEventListener('click', async () => {
+    if (open) { close(); return; }
+    await onOpen();
+    open = true;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', onDoc, true);
+    document.addEventListener('keydown', onKey, true);
+    const first = menu.querySelector('button:not([disabled])');
+    if (first) first.focus();
+  });
+  window.addEventListener('hashchange', close, { once: true });
+  return { close };
+}
+// The named filters kept in settings (GET/PUT /api/settings/saved-filters).
+// Loaded on demand; null when the list could not be read.
+async function loadSavedFilters() {
+  try { return arr((await api('/api/settings/saved-filters')).data); } catch (e) { return null; }
+}
+async function putSavedFilters(all, title) {
+  const r = await api('/api/settings/saved-filters', { method: 'PUT', body: JSON.stringify(all) });
+  toastSaved(r.commit, title);
+  return arr(r.data);
 }
 // wireFilter drives a filterBoxHtml control. fields is {name: hint}; values()
 // returns {field: [values]} for the suggestions (read when the list opens, so a
@@ -362,15 +404,24 @@ function filterBoxHtml(id, placeholder, label, fields) {
 // complete field term becomes a chip on space, Enter or when its suggestion
 // is taken, and Backspace on an empty input pulls the last chip back to edit
 // it. Plain words stay in the input and filter as they are typed.
-// Returns {terms} for a caller that re-renders and needs the current terms.
-function wireFilter(id, fields, values, onChange) {
+// list names the list for the filters kept outside the page: the last filter
+// typed is remembered per list in this browser (gpm.filter.<list>) and put
+// back when the list renders again, and the Saved menu offers the named
+// filters stored in settings for the list. Returns {terms, set} for a caller
+// that re-renders and needs the current terms, or wants to set the query.
+function wireFilter(id, fields, values, onChange, list) {
   const input = $('#' + id), wrap = $('#' + id + '-wrap'), sug = $('#' + id + '-sug');
-  if (!input) return { terms: () => [] };
+  if (!input) return { terms: () => [], set: () => {} };
   const chips = [];
   let items = [], active = -1, tokStart = 0;
   const query = () => (chips.join(' ') + ' ' + input.value).trim();
   const terms = () => parseFilter(query(), fields);
-  const fire = () => onChange(terms());
+  const memKey = list ? 'gpm.filter.' + list : '';
+  const remember = () => {
+    if (!memKey) return;
+    try { const q = query(); if (q) localStorage.setItem(memKey, q); else localStorage.removeItem(memKey); } catch (e) { /* ignore */ }
+  };
+  const fire = () => { remember(); onChange(terms()); };
   const fieldRe = /^(-?)([A-Za-z][\w-]*):(.*)$/;
 
   function renderChips() {
@@ -497,7 +548,74 @@ function wireFilter(id, fields, values, onChange) {
     accept(Number(el.dataset.i));
   });
   wrap.addEventListener('click', (e) => { if (e.target === wrap) input.focus(); });
-  return { terms };
+
+  // Replaces the whole query: field terms become chips, words stay in the box.
+  function setQuery(q) {
+    chips.length = 0;
+    input.value = String(q || '');
+    commit(true);
+    renderChips();
+    close();
+    fire();
+  }
+
+  // The Saved menu: the named filters for this list, Save current, Clear.
+  const sbtn = $('#' + id + '-saved'), smenu = $('#' + id + '-menu');
+  if (sbtn && smenu && list) {
+    let mine = [];
+    const menu = wireMenu(sbtn, smenu, async () => {
+      const all = await loadSavedFilters();
+      mine = all === null ? [] : all.filter((f) => f.list === list);
+      const q = query(), ro = isReadOnly();
+      const rows = mine.map((f, i) => `<div class="fsaved-row"><button type="button" role="menuitem" data-apply="${i}" title="${esc(f.query)}"><b>${esc(f.name)}</b><span class="mono">${esc(f.query)}</span></button><button type="button" class="fsaved-del" data-del="${i}" aria-label="Delete saved filter ${esc(f.name)}"${ro ? ' disabled' : ''}>${ICON.x}</button></div>`).join('');
+      smenu.innerHTML = (all === null ? '<div class="m-head"><span>Could not load the saved filters.</span></div>' : '')
+        + (rows || (all === null ? '' : '<div class="m-head"><span>No saved filters for this list yet.</span></div>'))
+        + '<div class="m-sep"></div>'
+        + `<button type="button" role="menuitem" class="fsaved-save" data-save="1"${!q || ro ? ' disabled' : ''}>Save current filter...</button>`
+        + `<button type="button" role="menuitem" data-clear="1"${q ? '' : ' disabled'}>Clear filter</button>`;
+    });
+    smenu.addEventListener('click', async (e) => {
+      const b = e.target.closest('button');
+      if (!b || b.disabled) return;
+      if (b.dataset.apply != null) { menu.close(); setQuery(mine[Number(b.dataset.apply)].query); input.focus(); return; }
+      if (b.dataset.clear) { menu.close(); setQuery(''); input.focus(); return; }
+      if (b.dataset.del != null) {
+        const f = mine[Number(b.dataset.del)];
+        menu.close();
+        try {
+          const all = await loadSavedFilters();
+          if (all === null) throw new Error('could not load the saved filters');
+          await putSavedFilters(all.filter((x) => !(x.list === f.list && x.name === f.name)), 'Deleted');
+        } catch (err) { toastErr(err, `Could not delete "${f.name}"`); }
+        return;
+      }
+      if (b.dataset.save) {
+        const q = query();
+        menu.close();
+        const taken = mine.map((f) => f.name.toLowerCase());
+        const name = await confirmModal({
+          title: 'Save filter',
+          body: `<p>Keeps <span class="mono">${esc(q)}</span> under a name in the Saved menu of this list, on every browser you sign in from. Stored in settings, so it shows in History like any change.</p>`,
+          prompt: { label: 'Name', placeholder: 'e.g. outside, errors only', validate: (v) => (v.length > 64 ? 'At most 64 characters.' : (taken.indexOf(v.toLowerCase()) !== -1 ? 'A saved filter with this name exists for this list.' : '')) },
+          confirmLabel: 'Save', danger: false,
+        });
+        if (!name) return;
+        try {
+          const all = await loadSavedFilters();
+          if (all === null) throw new Error('could not load the saved filters');
+          await putSavedFilters(all.concat([{ name, list, query: q }]), 'Saved');
+        } catch (err) { toastErr(err, `Could not save "${name}"`); }
+      }
+    });
+  }
+
+  // The last filter used on this list comes back with the page.
+  if (memKey) {
+    let stored = '';
+    try { stored = localStorage.getItem(memKey) || ''; } catch (e) { /* ignore */ }
+    if (stored) setQuery(stored);
+  }
+  return { terms, set: setQuery };
 }
 // highlightTerms wraps every match of the filter's words and values inside
 // root's visible rows in <mark>. Previous marks are unwrapped first, so it is
@@ -1817,6 +1935,8 @@ const RO_WRITE_CONTROLS = [
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
   '#ed-src-reconcile', '#logsToggle', '#logsClear', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
+  // Saving or deleting a named filter writes settings.
+  '.fsaved-save', '.fsaved-del',
   // Clone leads to an editor whose Save a read-only caller cannot use, so it is
   // gated like the proxy host band's Clone.
   '#ed-clone', '#ct-clone',
@@ -3597,7 +3717,7 @@ async function viewIntegrations(c, tab) {
       <p class="section-label">Lifecycle webhooks</p>
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
-      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, with the same <span class="mono">X-GPM-Webhook-Secret</span> header a real event carries.</div>
+      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
       ${intSaveBar()}
     </div>
     </div>
@@ -5106,7 +5226,7 @@ async function listHosts(c) {
     if (c.isConnected) await route();
   }
 
-  wireFilter('hostFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
+  wireFilter('hostFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); }, 'hosts');
   const zoneChips = $('#zoneChips');
   if (zoneChips) {
     zoneChips.addEventListener('click', (e) => {
@@ -6438,7 +6558,7 @@ async function listCerts(c) {
       $$('#certRows .ct-renew').forEach((b) => gateControl(b, false, readOnlyReason()));
     }
   }
-  wireFilter('certFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
+  wireFilter('certFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); }, 'certificates');
   render();
 }
 
@@ -6876,7 +6996,7 @@ async function genericList(c, section) {
   wireFilter('gsFilter', FILTER_FIELDS, () => fieldValues(Object.values(recs)), (terms) => {
     applyRowFilter($$('#gsRows tr[data-name]'), recs, terms, $('#gsNone'));
     highlightTerms($('#gsRows'), terms);
-  });
+  }, section);
 
   $$('#gsRows tr[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
@@ -9350,7 +9470,7 @@ async function viewTokens(c) {
   wireFilter('tokFilter', TOK_FIELDS, () => fieldValues(Object.values(tokRecs)), (terms) => {
     applyRowFilter($$('#tokRows tr[data-name]'), tokRecs, terms, $('#tokNone'));
     highlightTerms($('#tokRows'), terms);
-  });
+  }, 'tokens');
 
   const adminSw = $('#tok-admin');
   const scopeGrid = $('#tok-scopes');
@@ -9635,6 +9755,10 @@ async function viewLogs(c) {
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
       <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
       <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
+      <div class="fsaved"><button class="btn" id="logsExport" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="logsExportMenu"${entries.length ? '' : ' disabled'} title="Download the rows the filter shows, in the table's order">Export${ICON.caret}</button><div class="menu fsaved-menu" id="logsExportMenu" role="menu" hidden>
+        <button type="button" role="menuitem" data-fmt="csv">CSV, the rows shown</button>
+        <button type="button" role="menuitem" data-fmt="json">JSON, the rows shown</button>
+      </div></div>
     </div>
     <div class="toolbar" id="logsToolbar"${entries.length ? '' : ' hidden'}>
       ${filterBoxHtml('logFilter', 'filter requests...', 'Filter log entries', LOG_FIELDS)}
@@ -9667,16 +9791,55 @@ async function viewLogs(c) {
     $('#logsToolbar').hidden = !entries.length;
     $('#logsWrap').hidden = !entries.length;
     $('#logsClear').disabled = !entries.length || $('#logsClear').classList.contains('cap-disabled');
+    $('#logsExport').disabled = !entries.length;
     $('#logsEmpty').innerHTML = entries.length ? '' : emptyHtml();
   }
   paint();
+  // Export: the rows the filter shows, in the order the table sorts them.
+  // A cell that would read as a spreadsheet formula is prefixed with a quote
+  // so a crafted request path cannot run in whatever opens the CSV.
+  const shownEntries = () => $$('#logRows tr[data-i]').filter((r) => r.style.display !== 'none').map((r) => entries[Number(r.dataset.i)]).filter(Boolean);
+  const csvCell = (v) => {
+    let t = v == null ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+    return '"' + t.replace(/"/g, '""') + '"';
+  };
+  function exportLogs(fmt) {
+    const rows = shownEntries();
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let text, type;
+    if (fmt === 'csv') {
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'];
+      text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
+      type = 'text/csv';
+    } else {
+      text = JSON.stringify(rows, null, 2) + '\n';
+      type = 'application/json';
+    }
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    a.href = url;
+    a.download = `gpm-access-log-${stamp}.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('Exported', `${rows.length} ${rows.length === 1 ? 'request' : 'requests'} as ${fmt.toUpperCase()}`, 'ok');
+  }
+  const exportMenu = wireMenu($('#logsExport'), $('#logsExportMenu'), () => {});
+  $('#logsExportMenu').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-fmt]');
+    if (!b) return;
+    exportMenu.close();
+    exportLogs(b.dataset.fmt);
+  });
   // Suggestions for client: the @lists first, then the addresses present.
   const suggestions = () => {
     const v = fieldValues(recs);
     v.client = Object.keys(nets).sort().map((n) => '@' + n).concat(v.client || []);
     return v;
   };
-  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; paint(); });
+  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; paint(); }, 'logs');
 
   // A refresh replaces the rows in place and keeps the filter, the sort and
   // the scroll position; the capture state and the shell banners are only
@@ -9852,7 +10015,7 @@ async function viewHistory(c) {
   wireFilter('histFilter', HIST_FIELDS, () => fieldValues(histRecs), (terms) => {
     applyRowFilter($$('.timeline .tl-item[data-i]'), histRecs, terms, $('#histNone'));
     highlightTerms($('.timeline', c), terms);
-  });
+  }, 'history');
   $('#backupBtn').addEventListener('click', () => { window.location.href = '/api/backup'; });
   const fileInput = $('#restoreFile');
   $('#restoreBtn').addEventListener('click', () => fileInput.click());
@@ -10550,6 +10713,8 @@ async function viewSettings(c, tab) {
     if (s.accessListSync && Object.keys(s.accessListSync).length) body.accessListSync = s.accessListSync;
     if (arr(s.webhooks).length) body.webhooks = s.webhooks;
     if (s.notifications && Object.keys(s.notifications).length) body.notifications = s.notifications;
+    // Saved list filters are edited from each list's Saved menu; carried forward.
+    if (arr(s.savedFilters).length) body.savedFilters = s.savedFilters;
 
     btn.disabled = true;
     try {

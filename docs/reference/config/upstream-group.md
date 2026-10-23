@@ -36,7 +36,8 @@ whatever the policy):
 (optional name, default `gpm-sticky-<group>`). On a client's first request the
 proxy listeners assign an upstream by the policy and set an HMAC-signed cookie
 (`HttpOnly`, `Path=/`, `SameSite=Lax`, `Secure` when the client came over
-HTTPS) naming it; later requests honor the pin while the cookie is valid and
+HTTPS) carrying an opaque tag for it (a keyed hash of the group and upstream, so the
+cookie names no backend); later requests honor the pin while the cookie is valid and
 that upstream is healthy. Semantics worth knowing:
 
 - **TTL is enforced server-side**: the expiry rides inside the signed value, so

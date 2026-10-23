@@ -291,7 +291,7 @@ func compileBouncer(name string, spec model.BouncerMiddleware) *bouncer {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
 			Proxy:               nil,
-			DialContext:         (&net.Dialer{Timeout: b.timeout, KeepAlive: 30 * time.Second}).DialContext,
+			DialContext:         (&net.Dialer{Timeout: b.timeout, KeepAlive: 30 * time.Second, Control: refuseLinkLocal}).DialContext,
 			MaxIdleConns:        64,
 			MaxIdleConnsPerHost: 64,
 			IdleConnTimeout:     90 * time.Second,

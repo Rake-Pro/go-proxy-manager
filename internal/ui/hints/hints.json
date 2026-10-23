@@ -1268,7 +1268,7 @@
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.secret": {
-    "text": "Sent as the X-GPM-Webhook-Secret header so the receiver can verify the call. Use an ${ENV:...} placeholder.",
+    "text": "Signs every delivery: the receiver gets X-GPM-Webhook-Timestamp and X-GPM-Webhook-Signature (v1=hex HMAC-SHA256 over timestamp.body), never the secret itself. Use an ${ENV:...} placeholder.",
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.disabled": {

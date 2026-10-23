@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -353,16 +354,68 @@ func isUpstreamTimeout(err error) bool {
 // either way.
 func longLivedProxy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isUpgradeRequest(r) || r.ContentLength != 0 {
+		if isUpgradeRequest(r) {
 			rc := http.NewResponseController(w)
 			// Both are best-effort: an http.ResponseWriter that does not support
-			// deadlines (an httptest recorder, HTTP/2) returns ErrNotSupported,
-			// which is not a reason to fail the request.
+			// deadlines (an httptest recorder) returns ErrNotSupported, which is
+			// not a reason to fail the request.
 			_ = rc.SetReadDeadline(time.Time{})
 			_ = rc.SetWriteDeadline(time.Time{})
+		} else if r.ContentLength != 0 {
+			// A body is bounded by progress, not by a total: each read of it
+			// moves the connection's read deadline bodyIdleTimeout ahead, so a
+			// large upload streams for as long as it keeps moving while a
+			// client that opens a body and then stalls is cut off, instead of
+			// holding the handler and an upstream connection open for good.
+			rc := http.NewResponseController(w)
+			_ = rc.SetWriteDeadline(time.Time{})
+			if err := rc.SetReadDeadline(time.Now().Add(bodyIdleTimeout)); err == nil {
+				r.Body = &idleBody{ReadCloser: r.Body, rc: rc}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// bodyIdleTimeout is the longest a request body may make no progress before
+// the connection's read deadline expires and the body read fails.
+var bodyIdleTimeout = 60 * time.Second
+
+// idleBody pushes the connection's read deadline ahead on every read, so the
+// deadline measures idle time between chunks rather than the whole body. Once
+// the body has ended (any read error, EOF included) or been closed it never
+// touches the deadline again: the transport reads a bodied request once more
+// after its Content-Length is exhausted, and the stdlib has by then cleared
+// the deadline for its own background read, so re-arming there would cancel
+// a slow RESPONSE 60 s later, and a read after the handler returned must not
+// move a reused connection's deadline.
+type idleBody struct {
+	io.ReadCloser
+	rc   *http.ResponseController
+	mu   sync.Mutex
+	done bool
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if !b.done {
+		_ = b.rc.SetReadDeadline(time.Now().Add(bodyIdleTimeout))
+	}
+	b.mu.Unlock()
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.mu.Lock()
+		b.done = true
+		b.mu.Unlock()
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.mu.Lock()
+	b.done = true
+	b.mu.Unlock()
+	return b.ReadCloser.Close()
 }
 
 // isUpgradeRequest reports whether a request asks to switch protocols, per RFC

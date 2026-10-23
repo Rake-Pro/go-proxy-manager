@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -311,6 +312,43 @@ func (c Config) Validate() error {
 	return errors.Join(errs...)
 }
 
+// checkClientCertMode warns about a client-cert auth gate (inline or by
+// middleware, on the host or a location) on a proxy host that has no
+// tls.clientAuth of its own. Such a gate would only ever see a certificate the
+// handshake verified under ANOTHER host's SNI configuration (a connection
+// coalesced from an mTLS host under a shared certificate), and would accept
+// a chain this host never asked for (issue #50). The gate itself refuses a
+// certificate verified under another host's SNI, so on such a host it can
+// admit nothing but its allowFrom exemptions; this is a warning rather than a
+// validation error so a config written before the rule still loads.
+func checkClientCertMode(out *[]string, h ProxyHost, clientCertMWs map[string]bool) {
+	if h.TLS.ClientAuth != nil {
+		return
+	}
+	fail := func(where string) {
+		*out = append(*out, fmt.Sprintf("proxy host %q: %s uses auth mode client-cert, which needs this host's own tls.clientAuth (the certificate must be verified under this host's SNI configuration); the gate admits only its allowFrom exemptions until it is set", h.Name, where))
+	}
+	if h.Auth != nil && h.Auth.Mode == AuthModeClientCert {
+		fail("auth")
+	}
+	for _, m := range h.Middlewares {
+		if clientCertMWs[m] {
+			fail(fmt.Sprintf("middleware %q", m))
+		}
+	}
+	for _, l := range h.Locations {
+		loc := fmt.Sprintf("location %q", l.Path)
+		if l.Auth != nil && l.Auth.Mode == AuthModeClientCert {
+			fail(loc + ": auth")
+		}
+		for _, m := range l.Middlewares {
+			if clientCertMWs[m] {
+				fail(fmt.Sprintf("%s: middleware %q", loc, m))
+			}
+		}
+	}
+}
+
 // checkClientAuthRef verifies a host's mTLS trust anchor resolves to a known,
 // ENABLED ClientCA. A missing CA fails closed (refusing every client); a disabled
 // CA is worse - it is excluded from the compiled CA pools, yielding a nil pool and
@@ -441,6 +479,67 @@ func (c Config) Warnings() []string {
 		byName[ct.Name] = ct.Domains
 	}
 	var out []string
+	// Auth middlewares by mode, for the two per-host gate checks below.
+	clientCertMWs := map[string]bool{}
+	oidcMWs := map[string]string{}
+	idpTypes := map[string]string{}
+	for _, p := range c.IdentityProviders {
+		idpTypes[p.Name] = p.Type
+	}
+	// oidcProvider names the provider an OIDC gate uses, or "" for a gate
+	// that is not OIDC.
+	oidcProvider := func(a *AuthMiddleware) string {
+		if a == nil {
+			return ""
+		}
+		if a.Mode == AuthModeOIDC || (a.Mode == "" && idpTypes[a.IdentityProvider] == IdPTypeOIDC) {
+			return a.IdentityProvider
+		}
+		return ""
+	}
+	for _, m := range c.Middlewares {
+		if m.Auth != nil && m.Auth.Mode == AuthModeClientCert {
+			clientCertMWs[m.Name] = true
+		}
+		if p := oidcProvider(m.Auth); p != "" {
+			oidcMWs[m.Name] = p
+		}
+	}
+	for _, h := range c.ProxyHosts {
+		checkClientCertMode(&out, h, clientCertMWs)
+		// Every OIDC gate on a host shares one session cookie and one callback
+		// path, and a session is bound to the provider that minted it, so gates
+		// for two DIFFERENT providers on one host sign the user in and out of
+		// each other. Several gates for one provider (a role-restricted
+		// location, say) share the session and are fine.
+		providers := map[string]struct{}{}
+		if p := oidcProvider(h.Auth); p != "" {
+			providers[p] = struct{}{}
+		}
+		for _, m := range h.Middlewares {
+			if p := oidcMWs[m]; p != "" {
+				providers[p] = struct{}{}
+			}
+		}
+		for _, l := range h.Locations {
+			if p := oidcProvider(l.Auth); p != "" {
+				providers[p] = struct{}{}
+			}
+			for _, m := range l.Middlewares {
+				if p := oidcMWs[m]; p != "" {
+					providers[p] = struct{}{}
+				}
+			}
+		}
+		if len(providers) > 1 {
+			names := make([]string, 0, len(providers))
+			for p := range providers {
+				names = append(names, p)
+			}
+			sort.Strings(names)
+			out = append(out, fmt.Sprintf("proxy host %q: OIDC gates for %d different identity providers (%s) on one host; they share one session cookie and callback, so each login invalidates the other. Keep one OIDC provider per host", h.Name, len(names), strings.Join(names, ", ")))
+		}
+	}
 	check := func(kind, name, ref string, domains []string) {
 		if ref == "" {
 			return

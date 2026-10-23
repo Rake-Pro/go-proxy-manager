@@ -442,7 +442,7 @@ func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
 	if ip == nil {
 		return "unknown"
 	}
-	return ip.String()
+	return ipBucketKey(ip)
 }
 
 // peerIP, clientIPResolver and the rest of the client-IP derivation live in

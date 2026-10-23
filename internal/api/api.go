@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -345,6 +346,60 @@ func (d Deps) scope(w http.ResponseWriter, r *http.Request, required string) boo
 	return true
 }
 
+// errAdminRequired marks a beforeSave refusal that is about the caller's
+// scope, not the object: the PUT handler answers it with 403 rather than 400.
+var errAdminRequired = errors.New("this write needs the admin scope")
+
+// guardSecretDestination is the middlewares' beforeSave: a bouncer that pairs
+// a ${ENV:}/${FILE:} API key with a URL is a way to send a resolved secret
+// off-box, so creating one, or changing the URL or the key of one, needs the
+// admin scope (issue #49). Every other middleware write, and an edit that
+// leaves the bouncer's url and apiKey as stored, stays on middlewares:write.
+func (d Deps) guardSecretDestination(r *http.Request, cfg model.Config, obj model.Middleware) (model.Middleware, map[string]any, error) {
+	b := obj.Bouncer
+	if b == nil || !b.APIKey.IsPlaceholder() || d.allows(r, model.ScopeAdmin) {
+		return obj, nil, nil
+	}
+	for _, cur := range cfg.Middlewares {
+		if cur.Name == obj.Name && cur.Bouncer != nil && cur.Bouncer.URL == b.URL && cur.Bouncer.APIKey == b.APIKey {
+			return obj, nil, nil
+		}
+	}
+	return obj, nil, fmt.Errorf("%w: a bouncer that sends a secret placeholder to a URL may only be created, or have its url or apiKey changed, by an admin", errAdminRequired)
+}
+
+// redactSettingsURLs returns a copy of settings with the path and query of
+// every webhook and notification target URL replaced, for a caller without the
+// admin scope. The slices are copied so the loaded settings are untouched.
+func redactSettingsURLs(s model.Settings) model.Settings {
+	redact := func(raw string) string {
+		if raw == "" {
+			return raw
+		}
+		if u, err := url.Parse(raw); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host + "/(redacted)"
+		}
+		return "(redacted)"
+	}
+	if len(s.Webhooks) > 0 {
+		whs := make([]model.WebhookConfig, len(s.Webhooks))
+		copy(whs, s.Webhooks)
+		for i := range whs {
+			whs[i].URL = redact(whs[i].URL)
+		}
+		s.Webhooks = whs
+	}
+	if len(s.Notifications.Targets) > 0 {
+		ts := make([]model.NotificationTarget, len(s.Notifications.Targets))
+		copy(ts, s.Notifications.Targets)
+		for i := range ts {
+			ts[i].URL = redact(ts[i].URL)
+		}
+		s.Notifications.Targets = ts
+	}
+	return s
+}
+
 // allows reports whether the caller holds required, without writing a response.
 // It exists for payloads that must be NARROWED for a caller rather than refused
 // outright (see GET /config). With no RequireScope wired it allows, exactly like
@@ -500,9 +555,15 @@ func New(d Deps) http.Handler {
 	// operator already sees spread across other pages.
 	mux.HandleFunc("GET /health", d.scoped("*:read", d.handleHealth))
 
+	// Writing a DNS provider or an identity provider is admin-equivalent (see
+	// issue #49): a DNS provider pairs a ${ENV:}/${FILE:} credential with an API
+	// endpoint, so its writer can point a resolved secret at a host of their
+	// choosing, and an identity provider named by adminAuth.providers decides
+	// who gets an admin session. Reads stay on the kind's own read scope.
 	register(mux, d, "dns-providers", resource[model.DNSProvider]{
-		kind: "DNSProvider",
-		list: func(c model.Config) []model.DNSProvider { return c.DNSProviders },
+		kind:       "DNSProvider",
+		writeScope: model.ScopeAdmin,
+		list:       func(c model.Config) []model.DNSProvider { return c.DNSProviders },
 		decode: func(b []byte, name string) (model.DNSProvider, error) {
 			var v model.DNSProvider
 			err := json.Unmarshal(b, &v)
@@ -511,8 +572,9 @@ func New(d Deps) http.Handler {
 		},
 	})
 	register(mux, d, "identity-providers", resource[model.IdentityProvider]{
-		kind: "IdentityProvider",
-		list: func(c model.Config) []model.IdentityProvider { return c.IdentityProviders },
+		kind:       "IdentityProvider",
+		writeScope: model.ScopeAdmin,
+		list:       func(c model.Config) []model.IdentityProvider { return c.IdentityProviders },
 		decode: func(b []byte, name string) (model.IdentityProvider, error) {
 			var v model.IdentityProvider
 			err := json.Unmarshal(b, &v)
@@ -548,8 +610,10 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /access-lists/{name}/migrate-basic-auth", d.scoped(model.ScopeAdmin, d.handleMigrateBasicAuth))
 
 	register(mux, d, "middlewares", resource[model.Middleware]{
-		kind: "Middleware",
-		list: func(c model.Config) []model.Middleware { return c.Middlewares },
+		kind:        "Middleware",
+		beforeSave:  d.guardSecretDestination,
+		revertScope: model.ScopeAdmin,
+		list:        func(c model.Config) []model.Middleware { return c.Middlewares },
 		decode: func(b []byte, name string) (model.Middleware, error) {
 			var v model.Middleware
 			if err := json.Unmarshal(b, &v); err != nil {
@@ -1043,6 +1107,12 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
+		// The webhook and notification target URLs are credentials for Discord,
+		// Slack and ntfy receivers; a caller below admin sees them the way the
+		// status routes show them (scheme and host only), see issue #50.
+		if !d.allows(r, model.ScopeAdmin) {
+			settings = redactSettingsURLs(settings)
+		}
 		writeJSON(w, http.StatusOK, settings)
 	}))
 	// Writing settings is admin-equivalent, so it takes the admin scope rather
@@ -1072,6 +1142,56 @@ func New(d Deps) http.Handler {
 		}
 		w.Header().Set(commitHeader, sha)
 		writeJSON(w, http.StatusOK, settings)
+	}))
+
+	// The admin UI's saved list filters, a section of settings with its own
+	// routes so saving a preset from a list page neither needs nor exercises
+	// the admin-scoped full-settings write: this section is inert (the UI
+	// interprets a query locally; nothing resolves or dispatches), so
+	// "settings:write" is enough, and the write replaces this section only.
+	mux.HandleFunc("GET /settings/saved-filters", d.scoped("settings:read", func(w http.ResponseWriter, r *http.Request) {
+		_, settings, err := d.Store.Load(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		out := settings.SavedFilters
+		if out == nil {
+			out = []model.SavedFilter{}
+		}
+		writeJSON(w, http.StatusOK, out)
+	}))
+	mux.HandleFunc("PUT /settings/saved-filters", d.scoped("settings:write", func(w http.ResponseWriter, r *http.Request) {
+		body, err := readBody(w, r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		var filters []model.SavedFilter
+		if err := json.Unmarshal(body, &filters); err != nil {
+			writeErr(w, http.StatusBadRequest, decodeError(err))
+			return
+		}
+		if err := model.ValidateSavedFilters(filters); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		_, sha, err := d.Store.UpdateSettings(r.Context(), func(st *model.Settings) error {
+			st.SavedFilters = filters
+			return nil
+		}, d.author(r))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if !d.applyChange(w, "settings", "Settings", "", sha) {
+			return
+		}
+		w.Header().Set(commitHeader, sha)
+		if filters == nil {
+			filters = []model.SavedFilter{}
+		}
+		writeJSON(w, http.StatusOK, filters)
 	}))
 
 	registerRuntime(mux, d)
@@ -1132,6 +1252,11 @@ type resource[T model.Object] struct {
 	// strength of a resource scope, which would be a privilege-escalation path.
 	readScope  string
 	writeScope string
+	// revertScope overrides the scope of POST /{name}/revert (default: the
+	// write scope). middlewares sets it to admin: a revert restores a stored
+	// object without running beforeSave, so it could bring back a bouncer's
+	// earlier url/apiKey pair that only an admin may set.
+	revertScope string
 
 	// beforeSave, if set, runs on PUT after decoding and before the store write.
 	// It sees the current config so it can act on whether the object already
@@ -1238,7 +1363,11 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 				return
 			}
 			if obj, extra, err = res.beforeSave(r, cfg, obj); err != nil {
-				writeErr(w, http.StatusBadRequest, err)
+				status := http.StatusBadRequest
+				if errors.Is(err, errAdminRequired) {
+					status = http.StatusForbidden
+				}
+				writeErr(w, status, err)
 				return
 			}
 		}
@@ -1371,7 +1500,11 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 	// commit, committing just that change (every other object is left as-is).
 	// Body: {"hash":"<commit>"}. Contrast POST /revert, which resets the whole
 	// config tree. Same auth/CSRF/reload/webhook wiring as every other write.
-	mux.HandleFunc("POST "+base+"/{name}/revert", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
+	revertScope := res.revertScope
+	if revertScope == "" {
+		revertScope = writeScope
+	}
+	mux.HandleFunc("POST "+base+"/{name}/revert", d.scoped(revertScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if err := model.ValidateName(name); err != nil {
 			writeErr(w, http.StatusBadRequest, err)

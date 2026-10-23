@@ -8,12 +8,17 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -90,7 +95,9 @@ func NewSecureClient(timeout time.Duration) *http.Client {
 			return http.ErrUseLastResponse // surface the 3xx; never follow
 		},
 		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			// No proxy from the environment: HTTPS_PROXY would route the call
+			// through a proxy the link-local guard below never sees.
+			Proxy: nil,
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
@@ -111,7 +118,7 @@ func refuseLinkLocal(network, address string, _ syscall.RawConn) error {
 	if err != nil {
 		host = address
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) { // netip keeps a %zone, which net.ParseIP rejects and so would let through
 		return fmt.Errorf("webhook: link-local destination %s refused", ip)
 	}
 	return nil
@@ -183,6 +190,26 @@ func (d *Dispatcher) post(t model.WebhookConfig, body []byte) {
 	}
 }
 
+// The receiver verifies a delivery with the shared secret instead of reading
+// it off the wire: the request carries the time it was signed and
+// "v1=" + hex(HMAC-SHA256(secret, timestamp + "." + body)). A receiver should
+// recompute the MAC over the raw body, compare in constant time, and reject a
+// timestamp far from its own clock (five minutes is customary) so a captured
+// request cannot be replayed indefinitely.
+const (
+	SignatureHeader          = "X-GPM-Webhook-Signature"
+	SignatureTimestampHeader = "X-GPM-Webhook-Timestamp"
+)
+
+// Sign computes the X-GPM-Webhook-Signature value for a timestamp and body.
+func Sign(secret, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return "v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 // deliver performs one POST and reports the status, how long it took, and any
 // transport-level error. A non-2xx status is NOT an error here: the caller
 // decides what to make of it, so both the async path and the synchronous test
@@ -200,7 +227,9 @@ func (d *Dispatcher) deliver(ctx context.Context, t model.WebhookConfig, body []
 		if err != nil {
 			return 0, time.Since(started), fmt.Errorf("resolve secret: %w", err)
 		}
-		req.Header.Set("X-GPM-Webhook-Secret", secret)
+		ts := strconv.FormatInt(started.Unix(), 10)
+		req.Header.Set(SignatureTimestampHeader, ts)
+		req.Header.Set(SignatureHeader, Sign(secret, ts, body))
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {

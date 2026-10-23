@@ -59,6 +59,23 @@ inline auth block's identity provider also contributes to that host's
 identity-header strip set and trusted-proxy set, exactly as a referenced auth
 middleware's does.
 
+**Headers a direct client may not send.** Besides the identity headers (whose
+trust tier is the auth provider's `trustedProxies`), every request loses the
+URL and method overrides that would ask a backend to treat it as a different
+request, whoever sent them (a CDN forwards them from the client unchanged):
+`X-Original-URL`, `X-Rewrite-URL`, `X-Original-URI`, `X-Forwarded-URI`,
+`X-Forwarded-Method`, `X-HTTP-Method-Override`, `X-HTTP-Method` and
+`X-Method-Override`. The client-address headers `True-Client-IP`,
+`X-Client-IP`, `X-Real-IP`, `CF-Connecting-IP` and `Forwarded` follow the
+client-IP tier: a peer in the host's effective `trustedProxies` may carry
+them, any other peer loses them. gpm sets `X-Real-IP` and `X-Forwarded-For`
+itself afterwards. A `Host` header whose port part is not a
+number in range (or that carries a second colon) is answered `400` before
+routing, so nothing but a name and a real port is ever forwarded upstream. A
+request body may stall for at most 60 seconds between reads before the
+connection's read deadline cuts it off; an upload that keeps moving is not
+bounded (protocol upgrades keep no deadline at all).
+
 **Request-aware access-list rules.** An IP rule may carry `paths` (and
 `methods`), in which case it matches only a request to one of those exact paths
 with one of those methods; without them it applies to every request exactly as

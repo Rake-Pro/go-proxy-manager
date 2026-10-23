@@ -12,7 +12,7 @@ Outbound lifecycle notifications: one JSON POST per successful config change.
 |-----|------|---------|----------|-------------|
 | <span id="settings-webhooks-name"></span> `name` | string | none | yes | Name-safe identifier, used in the status and test endpoints and in logs. |
 | <span id="settings-webhooks-url"></span> `url` | string | none | yes | Absolute `http`/`https` endpoint the event is POSTed to. |
-| <span id="settings-webhooks-secret"></span> `secret` | Secret | none | no | Placeholder-resolved shared secret, sent as the `X-GPM-Webhook-Secret` header. |
+| <span id="settings-webhooks-secret"></span> `secret` | Secret | none | no | Placeholder-resolved shared secret that signs every delivery. The receiver gets `X-GPM-Webhook-Timestamp` (Unix seconds at signing) and `X-GPM-Webhook-Signature: v1=<hex HMAC-SHA256(secret, timestamp + "." + raw body)>`, never the secret itself. Verify by recomputing the MAC over the raw body, comparing in constant time, and rejecting a timestamp more than a few minutes from your clock. |
 | <span id="settings-webhooks-disabled"></span> `disabled` | bool | `false` | no | Keep the target configured without firing it. A disabled target is still reachable through the test endpoint. |
 
 ## Payload and delivery

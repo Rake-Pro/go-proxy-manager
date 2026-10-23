@@ -59,6 +59,9 @@ func newFakeAPI(t *testing.T, token string) *fakeAPI {
 	if err := os.WriteFile(f.caFile, caPEM, 0o600); err != nil {
 		t.Fatalf("write ca: %v", err)
 	}
+	// Explicit token/CA files are confined to the secret file roots (the
+	// in-cluster defaults are exempt); the fixture's temp dir is the root here.
+	t.Setenv("GPM_SECRET_FILE_ROOTS", dir)
 	f.tokenFile = filepath.Join(dir, "token")
 	if err := os.WriteFile(f.tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
