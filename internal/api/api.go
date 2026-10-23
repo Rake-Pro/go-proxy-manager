@@ -677,6 +677,45 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, plan)
 	}))
 
+	// The networks each access list allows, by list name: its literal cidr
+	// rules plus, for a rule that matches a named source, that source's most
+	// recently fetched set from the ledger (a never-fetched source adds
+	// nothing, as on the data plane). Read-only, for the access-log viewer's
+	// `client:@name` filter; the listeners never read this route.
+	mux.HandleFunc("GET /access-list-networks", d.scoped("access-lists:read", func(w http.ResponseWriter, r *http.Request) {
+		cfg, _, err := d.Store.Load(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		ledger, _, err := d.Store.LoadAccessListSourceLedger(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		fetched := map[string][]string{}
+		for _, e := range ledger.Sources {
+			fetched[e.Key()] = e.Entries
+		}
+		out := map[string][]string{}
+		for _, l := range cfg.AccessLists {
+			nets := []string{}
+			for _, rule := range l.Rules {
+				if rule.Action != model.ActionAllow {
+					continue
+				}
+				switch {
+				case rule.CIDR != "":
+					nets = append(nets, rule.CIDR)
+				case rule.Source != "":
+					nets = append(nets, fetched[model.AccessListSourceKey(l.Name, rule.Source)]...)
+				}
+			}
+			out[l.Name] = nets
+		}
+		writeJSON(w, http.StatusOK, out)
+	}))
+
 	// Access-list remote sources: report what each declared source last resolved
 	// to, and fetch the due ones now. Both are scoped on access-lists rather than
 	// a subject of their own - a source is part of an access list, and a token

@@ -278,7 +278,8 @@ const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit' };
 // scopes a term when its left side is one of the list's fields, so an
 // upstream written "group:k8s" is still found by typing it. A leading "-"
 // excludes. A field with nothing after the colon (still being typed) matches
-// everything.
+// everything. Commas in a scoped term list alternatives (`status:4xx,5xx`
+// holds when either does); a quoted value is one value, commas and all.
 function parseFilter(q, fields) {
   const terms = [];
   const re = /(-)?(?:([A-Za-z][\w-]*):)?(?:"([^"]*)"|(\S*))/g;
@@ -293,20 +294,26 @@ function parseFilter(q, fields) {
     }
     value = value.trim().toLowerCase();
     if (!value) continue;
-    terms.push({ neg: !!m[1], field, value });
+    const values = field && m[3] == null ? value.split(',').map((v) => v.trim()).filter(Boolean) : [value];
+    if (!values.length) continue;
+    terms.push({ neg: !!m[1], field, value: values[0], values });
   }
   return terms;
 }
-// A filterable record is {blob, f}: blob is every value the row was built from
-// (lowercase, never the markup), f maps a field name to its lowercase values.
-// Every term must hold; a scoped term matches a substring of any of the
-// field's values, a word matches the blob.
+// A filterable record is {blob, f, m}: blob is every value the row was built
+// from (lowercase, never the markup), f maps a field name to its lowercase
+// values, and the optional m maps a field name to a matcher (value) => bool
+// for a field whose values are not plain text (the access log's client IP).
+// Every term must hold; a scoped term holds when any of its alternatives
+// matches a substring of any of the field's values (or satisfies the field's
+// matcher), a word matches the blob.
 function filterHit(rec, terms) {
   for (const t of terms) {
     let hit;
     if (t.field) {
+      const match = rec.m && rec.m[t.field];
       const vals = (rec.f && rec.f[t.field]) || [];
-      hit = vals.some((v) => v.indexOf(t.value) !== -1);
+      hit = (t.values || [t.value]).some((alt) => (match ? match(alt) : vals.some((v) => v.indexOf(alt) !== -1)));
     } else {
       hit = (rec.blob || '').indexOf(t.value) !== -1;
     }
@@ -345,7 +352,7 @@ function fieldValues(recs) {
 // {name: 'what it matches'}, which the title and the suggestions show.
 function filterBoxHtml(id, placeholder, label, fields) {
   const names = Object.keys(fields || {});
-  const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; a leading - excludes. Type to see suggestions.`;
+  const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; commas list alternatives, a leading - excludes. Type to see suggestions.`;
   return `<div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`;
 }
 // wireFilter drives a filterBoxHtml control. fields is {name: hint}; values()
@@ -500,7 +507,16 @@ function highlightTerms(root, terms) {
   if (!root) return;
   $$('mark.hl', root).forEach((m) => { m.replaceWith(document.createTextNode(m.textContent)); });
   root.normalize();
-  const needles = terms.filter((t) => !t.neg && t.value).map((t) => t.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // A network (10.0.0.0/8) or an @list is matched by address, not by text,
+  // so there is nothing to mark for it.
+  const needles = [];
+  terms.forEach((t) => {
+    if (t.neg) return;
+    (t.values || [t.value]).forEach((v) => {
+      if (!v || v.charAt(0) === '@' || (v.indexOf('/') !== -1 && isCidrOrIP(v))) return;
+      needles.push(v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    });
+  });
   if (!needles.length) return;
   const re = new RegExp(needles.join('|'), 'gi');
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -2336,6 +2352,64 @@ function isCidrOrIP(v) {
 function firstBadCidr(list) {
   for (const v of arr(list)) { if (!isCidrOrIP(v)) return v; }
   return '';
+}
+// ipBytes parses an IPv4 or IPv6 address to its bytes (4 or 16), or null. An
+// IPv4-mapped IPv6 address (::ffff:10.0.0.1) comes back as 4 bytes, so a
+// client logged either way matches an IPv4 network.
+function ipBytes(s) {
+  s = String(s == null ? '' : s).trim().toLowerCase();
+  if (!s) return null;
+  if (s.indexOf(':') === -1) {
+    const p = s.split('.');
+    if (p.length !== 4 || !p.every((x) => /^\d{1,3}$/.test(x) && parseInt(x, 10) <= 255)) return null;
+    return p.map((x) => parseInt(x, 10));
+  }
+  if (!/^[0-9a-f:.]+$/.test(s)) return null;
+  let head = s, tail = '';
+  const dbl = s.indexOf('::');
+  if (dbl !== -1) {
+    if (s.indexOf('::', dbl + 1) !== -1) return null;
+    head = s.slice(0, dbl);
+    tail = s.slice(dbl + 2);
+  }
+  let h = head ? head.split(':') : [], t = tail ? tail.split(':') : [];
+  // A trailing dotted quad (::ffff:1.2.3.4) is two groups.
+  const last = t.length ? t[t.length - 1] : (h.length ? h[h.length - 1] : '');
+  if (last.indexOf('.') !== -1) {
+    const v4 = ipBytes(last);
+    if (!v4) return null;
+    const rep = [((v4[0] << 8) | v4[1]).toString(16), ((v4[2] << 8) | v4[3]).toString(16)];
+    if (t.length) t = t.slice(0, -1).concat(rep); else h = h.slice(0, -1).concat(rep);
+  }
+  if (h.concat(t).some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  const fill = 8 - h.length - t.length;
+  if (dbl === -1 ? fill !== 0 : fill < 1) return null;
+  const words = h.concat(dbl === -1 ? [] : new Array(fill).fill('0'), t).map((g) => parseInt(g, 16));
+  const out = [];
+  words.forEach((w) => { out.push(w >> 8, w & 255); });
+  if (out.slice(0, 10).every((b) => b === 0) && out[10] === 255 && out[11] === 255) return out.slice(12);
+  return out;
+}
+// cidrHit says whether an address lies in a CIDR, or equals a bare IP. A
+// family mismatch (an IPv6 client against an IPv4 network) is no match.
+function cidrHit(ip, cidr) {
+  cidr = String(cidr == null ? '' : cidr).trim();
+  const slash = cidr.indexOf('/');
+  const net = ipBytes(slash === -1 ? cidr : cidr.slice(0, slash));
+  const addr = ipBytes(ip);
+  if (!net || !addr || net.length !== addr.length) return false;
+  let bits = net.length * 8;
+  if (slash !== -1) {
+    const b = cidr.slice(slash + 1);
+    if (!/^\d{1,3}$/.test(b)) return false;
+    bits = parseInt(b, 10);
+    if (bits > net.length * 8) return false;
+  }
+  for (let i = 0; i < net.length && bits > 0; i++, bits -= 8) {
+    const mask = bits >= 8 ? 255 : (256 - (1 << (8 - bits))) & 255;
+    if ((net[i] & mask) !== (addr[i] & mask)) return false;
+  }
+  return true;
 }
 // True when the list trusts every peer, which makes every IP rule spoofable.
 function hasWildcardProxy(list) {
@@ -9486,9 +9560,21 @@ const LOGS_AUTO_KEY = 'gpm.logs.auto';
 const LOGS_SORT_KEY = 'gpm.logs.sort';
 const LOG_FIELDS = {
   method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
-  client: 'client address', slow: 'yes: requests slower than 1s',
+  client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
 };
-function logRec(e) {
+// clientHit matches one client alternative: a CIDR or bare IP by address,
+// @name by the literal allow networks of that access list (nets is
+// {name: [cidr]}; an unknown name matches nothing), anything else as a
+// substring of the logged address, so `client:10.10.2.` still works.
+function clientHit(client, alt, nets) {
+  if (alt.charAt(0) === '@') {
+    const list = (nets || {})[alt.slice(1)];
+    return !!list && list.some((n) => cidrHit(client, n));
+  }
+  if (isCidrOrIP(alt)) return cidrHit(client, alt);
+  return String(client || '').toLowerCase().indexOf(alt) !== -1;
+}
+function logRec(e, nets) {
   const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
   return {
     blob: [e.method, e.host, e.path, e.status, cls, e.client].join(' ').toLowerCase(),
@@ -9496,7 +9582,22 @@ function logRec(e) {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
       client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'),
     },
+    m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
+}
+// The networks each access list allows (its literal cidr rules plus what
+// its named sources last fetched), keyed by lower-cased list name, for
+// `client:@name` terms and their suggestions. A failed load (or a token
+// without access-lists:read) just means no @ terms.
+async function accessListNets() {
+  let byList;
+  try { byList = (await api('/api/access-list-networks')).data || {}; } catch (e) { return {}; }
+  const nets = {};
+  Object.keys(byList).forEach((name) => {
+    const cidrs = arr(byList[name]).map((c) => String(c).trim()).filter(Boolean);
+    if (cidrs.length) nets[name.toLowerCase()] = cidrs;
+  });
+  return nets;
 }
 function logRowHtml(e, i) {
   const statusClass = e.status >= 500 ? 'err' : (e.status >= 400 ? 'warn' : 'ok');
@@ -9519,8 +9620,9 @@ function fmtBytes(n) {
 async function viewLogs(c) {
   const data = (await api('/api/logs')).data || {};
   const enabled = !!data.enabled;
+  const nets = await accessListNets();
   let entries = arr(data.entries);
-  let recs = entries.map(logRec);
+  let recs = entries.map((e) => logRec(e, nets));
   const capacity = data.capacity || 0;
   let auto = 0;
   try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
@@ -9568,7 +9670,13 @@ async function viewLogs(c) {
     $('#logsEmpty').innerHTML = entries.length ? '' : emptyHtml();
   }
   paint();
-  wireFilter('logFilter', LOG_FIELDS, () => fieldValues(recs), (t) => { terms = t; paint(); });
+  // Suggestions for client: the @lists first, then the addresses present.
+  const suggestions = () => {
+    const v = fieldValues(recs);
+    v.client = Object.keys(nets).sort().map((n) => '@' + n).concat(v.client || []);
+    return v;
+  };
+  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; paint(); });
 
   // A refresh replaces the rows in place and keeps the filter, the sort and
   // the scroll position; the capture state and the shell banners are only
@@ -9578,7 +9686,7 @@ async function viewLogs(c) {
     try { d = (await api('/api/logs')).data || {}; } catch (e) { toastErr(e, 'Could not refresh the access log'); return; }
     if (!!d.enabled !== enabled) { if (c.isConnected) await route(); return; }
     entries = arr(d.entries);
-    recs = entries.map(logRec);
+    recs = entries.map((e) => logRec(e, nets));
     paint();
   }
   // The timer belongs to this render: it stops when the route moves on

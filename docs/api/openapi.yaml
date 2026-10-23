@@ -1331,6 +1331,13 @@ components:
       - name
       - url
       description: A remote published IP feed referenced by an IPRule's source field.
+    AccessListNetworks:
+      type: object
+      description: Access-list name to the CIDRs and bare IPs its allow rules cover.
+      additionalProperties:
+        type: array
+        items:
+          type: string
     AccessListSourceStatus:
       type: object
       properties:
@@ -3109,6 +3116,26 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: access-lists:write
+  /api/access-list-networks:
+    get:
+      summary: The networks each access list allows, by list name
+      description: Literal `cidr` allow rules plus, for a rule that matches a named source, the
+        source's most recently fetched set. A source that has never been fetched adds nothing.
+        Read by the access-log viewer for its `client:@name` filter.
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessListNetworks'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
   /api/access-list-sources/status:
     get:
       summary: Report what each access-list source last resolved to
