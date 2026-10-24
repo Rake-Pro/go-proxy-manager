@@ -30,6 +30,7 @@ var hintExempt = map[string]string{
 	`id="cm-prompt"`: "confirmation modal: free-text prompt, labelled by the modal itself",
 	`<input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}"`: "the shared list filter box (filterBoxHtml); its title says what it matches",
 	`id="logsAuto"`:    "access-log auto-refresh interval, a view control rather than a config field",
+	`id="logsCap"`:     "access-log buffer size, a runtime control rather than a config field",
 	`id="hostSelAll"`:  "bulk-selection checkbox, not a config field",
 	`class="tl-cmp"`:   "history compare pick, not a config field; its label says what it does",
 	`class="host-sel"`: "bulk-selection checkbox, not a config field",

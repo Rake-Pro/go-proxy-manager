@@ -7,6 +7,11 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Access Logs: the in-memory buffer is sizeable. `-access-log-buffer` /
+  `GPM_ACCESS_LOG_BUFFER` sets the startup size (default `5000`, was a fixed
+  `1000`), and the Buffer selector on the Access Logs page (or `PUT /api/logs`
+  with `{"capacity": n}`) resizes it live between 100 and 100000, keeping
+  the newest entries. Runtime-only, like the capture toggle.
 - Rate limit `blockBackoff` and `blockMax`: a client that trips the limit
   again after its block ended is blocked `blockBackoff` times longer each
   round (`2` doubles it), capped at `blockMax` (default `24h`). The streak is

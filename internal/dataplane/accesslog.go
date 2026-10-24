@@ -61,6 +61,32 @@ func (r *logRing) clear() {
 	r.n = 0
 }
 
+// capacity returns the ring's current size under the lock (resize may run
+// concurrently).
+func (r *logRing) capacity() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cap
+}
+
+// resize changes the capacity live, keeping the newest entries that still fit
+// (oldest first in the new backing slice, so the ring restarts unwrapped).
+func (r *logRing) resize(capacity int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := len(r.buf)
+	if keep > capacity {
+		keep = capacity
+	}
+	nb := make([]AccessEntry, 0, keep)
+	for i := keep - 1; i >= 0; i-- {
+		nb = append(nb, r.buf[(r.n-1-i)%r.cap])
+	}
+	r.buf = nb
+	r.n = keep
+	r.cap = capacity
+}
+
 // recent returns up to cap entries, newest first.
 func (r *logRing) recent() []AccessEntry {
 	r.mu.Lock()

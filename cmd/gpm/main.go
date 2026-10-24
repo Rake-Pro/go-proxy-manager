@@ -68,6 +68,7 @@ func main() {
 		logLevel      = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole    = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
 		accessLog     = flag.Bool("access-log", os.Getenv("GPM_ACCESS_LOG") == "1", "log every data-plane request (method, host, path, status, bytes, duration)")
+		accessLogBuf  = flag.Int("access-log-buffer", envInt("GPM_ACCESS_LOG_BUFFER", dataplane.DefaultAccessLogCapacity), "access-log entries kept in memory for the Access Logs page (100-100000); the page resizes it live, a restart reverts to this value")
 		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
@@ -198,6 +199,7 @@ func main() {
 		HTTPAddr:                      *httpAddr,
 		CertDir:                       *certDir,
 		AccessLog:                     *accessLog,
+		AccessLogBufferSize:           *accessLogBuf,
 		SlowRequestThreshold:          time.Duration(*slowReqMS) * time.Millisecond,
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
@@ -756,11 +758,12 @@ func main() {
 		RecentLogs: func() any {
 			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity()}
 		},
-		ClearLogs:         dp.ClearLogs,
-		SetAccessLog:      dp.SetAccessLog,
-		GeoDBLoaded:       geoResolver.Loaded,
-		MaintenanceGlobal: dataplane.MaintenanceGlobalEnabled,
-		MaintenanceExempt: dataplane.MaintenanceExemptDomains,
+		ClearLogs:            dp.ClearLogs,
+		SetAccessLog:         dp.SetAccessLog,
+		SetAccessLogCapacity: dp.SetAccessLogCapacity,
+		GeoDBLoaded:          geoResolver.Loaded,
+		MaintenanceGlobal:    dataplane.MaintenanceGlobalEnabled,
+		MaintenanceExempt:    dataplane.MaintenanceExemptDomains,
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},

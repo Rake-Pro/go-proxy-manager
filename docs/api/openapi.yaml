@@ -5280,9 +5280,11 @@ paths:
           $ref: '#/components/responses/Forbidden'
       x-scope: '*:read'
     put:
-      summary: Toggle proxied-request capture live
-      description: Runtime-only - never persisted, so a restart reverts to the `-access-log` flag /
-        `GPM_ACCESS_LOG`. Admin scope because it changes global logging output, not one resource.
+      summary: Toggle proxied-request capture live and/or resize its buffer
+      description: Runtime-only - never persisted, so a restart reverts to the `-access-log` /
+        `-access-log-buffer` flags (`GPM_ACCESS_LOG`, `GPM_ACCESS_LOG_BUFFER`). At least one of
+        `enabled` and `capacity` is required; a resize keeps the newest entries that fit. Admin scope
+        because it changes global logging output, not one resource.
       tags:
       - Meta
       requestBody:
@@ -5291,14 +5293,18 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-              - enabled
+              minProperties: 1
               properties:
                 enabled:
                   type: boolean
+                capacity:
+                  type: integer
+                  minimum: 100
+                  maximum: 100000
+                  description: Entries kept in memory.
       responses:
         '200':
-          description: OK
+          description: OK, echoing the fields that were set
           content:
             application/json:
               schema:
@@ -5306,6 +5312,8 @@ paths:
                 properties:
                   enabled:
                     type: boolean
+                  capacity:
+                    type: integer
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

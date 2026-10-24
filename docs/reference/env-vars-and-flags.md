@@ -57,6 +57,7 @@ var wins for container deployments).
 | `GPM_LOG_LEVEL`<br>`-log-level` | `info` | trace/debug/info/warn/error | Yes |
 | `GPM_LOG_CONSOLE`<br>`-log-console` | `false` | Human-readable console logs | Yes |
 | `GPM_ACCESS_LOG`<br>`-access-log` | `false` | Log every proxied request. Startup default only: capture can be flipped live from the Access Logs page or `PUT /api/logs` (admin scope); the runtime toggle is never persisted, so a restart reverts to this flag | Yes |
+| `GPM_ACCESS_LOG_BUFFER`<br>`-access-log-buffer` | `5000` | Access-log entries kept in memory for the Access Logs page (100-100000, clamped). Startup default only: the page's Buffer selector, or `PUT /api/logs` with `{"capacity": n}` (admin scope), resizes it live keeping the newest entries; a restart reverts to this value | Yes |
 | `GPM_SLOW_REQUEST_MS`<br>`-slow-request-ms` | `0` (off) | Warn on requests slower than N ms | Yes |
 | `GPM_DEBUG_HEADERS`<br>`-debug-headers` | `false` | Add `X-GPM-*` diagnostic response headers (leaks upstream info, keep off in production) | Yes |
 | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT`<br>`-upstream-response-header-timeout` | `0` (unbounded) | Cap time-to-first-byte from an upstream | Yes |

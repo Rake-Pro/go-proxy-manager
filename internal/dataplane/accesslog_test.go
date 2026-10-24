@@ -98,6 +98,58 @@ func TestLogRingClearAfterWrap(t *testing.T) {
 	}
 }
 
+// resize keeps the newest entries that fit and the ring keeps working at the
+// new size, both when shrinking after a wrap and when growing.
+func TestLogRingResize(t *testing.T) {
+	r := newLogRing(3)
+	for i := 1; i <= 5; i++ {
+		r.add(AccessEntry{Status: i})
+	}
+	r.resize(2)
+	if got := r.recent(); len(got) != 2 || got[0].Status != 5 || got[1].Status != 4 || r.capacity() != 2 {
+		t.Fatalf("after shrink: %+v cap=%d, want [5 4] cap 2", got, r.capacity())
+	}
+	r.resize(10)
+	r.add(AccessEntry{Status: 6})
+	if got := r.recent(); len(got) != 3 || got[0].Status != 6 || got[2].Status != 4 || r.capacity() != 10 {
+		t.Fatalf("after grow: %+v cap=%d, want [6 5 4] cap 10", got, r.capacity())
+	}
+	for i := 7; i <= 20; i++ {
+		r.add(AccessEntry{Status: i})
+	}
+	if got := r.recent(); len(got) != 10 || got[0].Status != 20 || got[9].Status != 11 {
+		t.Fatalf("after wrap at new size: len=%d first=%d last=%d, want 10/20/11", len(got), got[0].Status, got[len(got)-1].Status)
+	}
+}
+
+// New clamps the configured buffer size and SetAccessLogCapacity rejects
+// out-of-range values without touching the ring.
+func TestAccessLogCapacityBounds(t *testing.T) {
+	SetMetricsHook(nil)
+	if got := New(Config{}).AccessLogCapacity(); got != DefaultAccessLogCapacity {
+		t.Fatalf("default capacity = %d, want %d", got, DefaultAccessLogCapacity)
+	}
+	if got := New(Config{AccessLogBufferSize: 1}).AccessLogCapacity(); got != MinAccessLogCapacity {
+		t.Fatalf("tiny config clamped to %d, want %d", got, MinAccessLogCapacity)
+	}
+	s := New(Config{AccessLogBufferSize: MaxAccessLogCapacity + 1})
+	if got := s.AccessLogCapacity(); got != MaxAccessLogCapacity {
+		t.Fatalf("huge config clamped to %d, want %d", got, MaxAccessLogCapacity)
+	}
+	if err := s.SetAccessLogCapacity(MinAccessLogCapacity - 1); err == nil {
+		t.Fatal("below minimum accepted")
+	}
+	if err := s.SetAccessLogCapacity(MaxAccessLogCapacity + 1); err == nil {
+		t.Fatal("above maximum accepted")
+	}
+	if got := s.AccessLogCapacity(); got != MaxAccessLogCapacity {
+		t.Fatalf("rejected resize changed capacity to %d", got)
+	}
+	if err := s.SetAccessLogCapacity(250); err != nil || s.AccessLogCapacity() != 250 {
+		t.Fatalf("resize to 250: err=%v cap=%d", err, s.AccessLogCapacity())
+	}
+}
+
 // A startup toggle that needs the observer (here: a metrics hook) keeps the
 // observed chain active even when access logging is switched off live; only
 // the access-log work inside the wrapper is skipped.

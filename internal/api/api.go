@@ -53,6 +53,10 @@ type Deps struct {
 	// SetAccessLog, if set, flips data-plane request capture live. The change
 	// is runtime-only: the -access-log flag decides the state after a restart.
 	SetAccessLog func(enabled bool)
+	// SetAccessLogCapacity, if set, resizes the data-plane access-log buffer
+	// live (PUT /logs with "capacity"); an error means the value is out of
+	// range. Runtime-only, like SetAccessLog. May be nil.
+	SetAccessLogCapacity func(n int) error
 	// RecentLogs, if set, returns the data-plane access-log viewer payload
 	// (marshalled as-is) for GET /logs. May be nil.
 	RecentLogs func() any
@@ -1042,28 +1046,47 @@ func New(d Deps) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	// Flip data-plane request capture live. Runtime-only - never persisted, so
-	// a restart reverts to the -access-log flag. Admin scope: it changes global
-	// logging output (volume, captured client IPs and paths), not one resource.
+	// Flip data-plane request capture live and/or resize its buffer.
+	// Runtime-only - never persisted, so a restart reverts to the -access-log
+	// and -access-log-buffer flags. Admin scope: it changes global logging
+	// output (volume, captured client IPs and paths), not one resource. The
+	// capacity is validated before either change is applied, so a rejected body
+	// changes nothing.
 	mux.HandleFunc("PUT /logs", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
-		if d.SetAccessLog == nil {
-			writeErr(w, http.StatusNotImplemented, errors.New("access-log toggle is not wired"))
-			return
-		}
 		body, err := readBody(w, r)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
 		var req struct {
-			Enabled *bool `json:"enabled"`
+			Enabled  *bool `json:"enabled"`
+			Capacity *int  `json:"capacity"`
 		}
-		if err := json.Unmarshal(body, &req); err != nil || req.Enabled == nil {
-			writeErr(w, http.StatusBadRequest, errors.New(`body must be {"enabled": true|false}`))
+		if err := json.Unmarshal(body, &req); err != nil || (req.Enabled == nil && req.Capacity == nil) {
+			writeErr(w, http.StatusBadRequest, errors.New(`body must set "enabled" (true|false) and/or "capacity" (entries)`))
 			return
 		}
-		d.SetAccessLog(*req.Enabled)
-		writeJSON(w, http.StatusOK, map[string]bool{"enabled": *req.Enabled})
+		if req.Capacity != nil && d.SetAccessLogCapacity == nil {
+			writeErr(w, http.StatusNotImplemented, errors.New("access-log buffer is not wired"))
+			return
+		}
+		if req.Enabled != nil && d.SetAccessLog == nil {
+			writeErr(w, http.StatusNotImplemented, errors.New("access-log toggle is not wired"))
+			return
+		}
+		resp := map[string]any{}
+		if req.Capacity != nil {
+			if err := d.SetAccessLogCapacity(*req.Capacity); err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+			resp["capacity"] = *req.Capacity
+		}
+		if req.Enabled != nil {
+			d.SetAccessLog(*req.Enabled)
+			resp["enabled"] = *req.Enabled
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}))
 
 	// Download a portable archive of the entire config. Admin scope, not "*:read":

@@ -1933,7 +1933,7 @@ const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '.btn.danger-soft', '[data-revert]', '[data-revert-obj]',
   '.tok-rotate', '.tok-toggle', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
-  '#ed-src-reconcile', '#logsToggle', '#logsClear', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
+  '#ed-src-reconcile', '#logsToggle', '#logsClear', '#logsCap', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
   // Saving or deleting a named filter writes settings.
   '.fsaved-save', '.fsaved-del',
@@ -9767,11 +9767,17 @@ async function viewLogs(c) {
   let auto = 0;
   try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
   const AUTO = [[0, 'Off'], [2, 'Every 2s'], [5, 'Every 5s'], [15, 'Every 15s'], [60, 'Every minute']];
+  // Buffer sizes offered for the live resize; the running size is always listed
+  // so a value set by flag or API shows as selected rather than as a blank.
+  const CAPS = [1000, 2000, 5000, 10000, 20000, 50000, 100000];
+  if (capacity && !CAPS.includes(capacity)) CAPS.push(capacity);
+  CAPS.sort((a, b) => a - b);
 
   c.innerHTML = `
     ${pageHead('Access Logs', 'Most recent proxied requests, newest first (in-memory buffer).')}
     <div class="view-head">
       <label class="auto-refresh" for="logsAuto"><span>Auto-refresh</span><select class="field" id="logsAuto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="logsCap" title="Requests kept in memory; the oldest drop off when it is full. Runtime only: a restart goes back to -access-log-buffer."><span>Buffer</span><select class="field" id="logsCap" aria-label="Access-log buffer size"${capacity ? '' : ' disabled'}>${CAPS.map((v) => `<option value="${v}"${v === capacity ? ' selected' : ''}>${v.toLocaleString()}</option>`).join('')}</select></label>
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
       <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
       <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
@@ -9892,6 +9898,18 @@ async function viewLogs(c) {
     schedule();
   });
   $('#logsRefresh').addEventListener('click', refresh);
+  // Resize keeps the newest entries that fit, so shrinking drops the oldest
+  // rows at once; route() re-reads the capacity the server settled on.
+  $('#logsCap').addEventListener('change', async () => {
+    const sel = $('#logsCap');
+    const next = Number(sel.value) || 0;
+    sel.disabled = true;
+    try {
+      await api('/api/logs', { method: 'PUT', body: { capacity: next } });
+      toast('Buffer resized', `Keeps the newest ${next.toLocaleString()} requests. Runtime only: a restart goes back to -access-log-buffer.`, 'ok');
+      if (c.isConnected) await route();
+    } catch (e) { toastErr(e, 'Could not resize the buffer'); sel.value = String(capacity); sel.disabled = false; }
+  });
   $('#logsClear').addEventListener('click', async () => {
     const ok = await confirmModal({
       title: 'Clear the access log?',
