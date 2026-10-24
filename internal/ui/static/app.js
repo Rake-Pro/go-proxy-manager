@@ -2813,15 +2813,21 @@ function rateLimitBlockHtml(p, rl) {
       <div class="field-group"><label>Burst</label><input class="field mono" id="${p}-burst" data-hint="middleware.rateLimit.burst" type="number" min="0" value="${esc(rl.burst > 0 ? rl.burst : '')}" placeholder="ceil(requests)" /></div>
       <div class="field-group"><label>Block for</label><input class="field mono" id="${p}-block" data-hint="middleware.rateLimit.blockFor" value="${esc(rl.blockFor || '')}" placeholder="10m (optional)" /></div>
     </div>
-    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="middleware.rateLimit.allowFrom"></div>
-      <div class="hint">CIDRs or bare IPs that bypass the limit entirely.</div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Block backoff</label><input class="field mono" id="${p}-backoff" data-hint="middleware.rateLimit.blockBackoff" type="number" step="0.1" min="0" value="${esc(rl.blockBackoff > 1 ? rl.blockBackoff : '')}" placeholder="2 (optional)" /></div>
+      <div class="field-group"><label>Block max</label><input class="field mono" id="${p}-blockmax" data-hint="middleware.rateLimit.blockMax" value="${esc(rl.blockMax || '')}" placeholder="24h" /></div>
     </div>
-    <div class="hint">Once a client exceeds the limit, Block for refuses it for that long regardless of token refill.</div>`;
+    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="middleware.rateLimit.allowFrom"></div>
+      <div class="hint">CIDRs, bare IPs, or <span class="mono">@access-list</span> (everything that list allows) that bypass the limit entirely.</div>
+    </div>
+    <div class="hint">Once a client exceeds the limit, Block for refuses it for that long regardless of token refill. Block backoff multiplies each repeat block (2 doubles it) up to Block max.</div>`;
 }
 const GO_DURATION_RE = /^(\d+(\.\d+)?(ns|us|ms|s|m|h))+$/;
+// ACCESS_LIST_REF_RE is "@" plus a valid object name (see model.ValidateName).
+const ACCESS_LIST_REF_RE = /^@[a-z0-9]([a-z0-9-_.]{0,251}[a-z0-9])?$/;
 function wireRateLimitBlock(p, rl) {
   rl = rl || {};
-  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(rl.allowFrom), 'add CIDR...');
+  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(rl.allowFrom), 'add CIDR or @list...');
   const winBtn = $('#' + p + '-rf-win');
   const secBtn = $('#' + p + '-rf-sec');
   function pick(perSecond) {
@@ -2860,14 +2866,28 @@ function wireRateLimitBlock(p, rl) {
       if (!isNaN(burst) && burst > 0) spec.burst = burst;
       const allow = allowCtl.get();
       if (allow.length) {
-        const bad = firstBadCidr(allow);
-        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, $('#' + p + '-allow')); return null; }
+        const bad = allow.find(v => !(v.startsWith('@') ? ACCESS_LIST_REF_RE.test(v) : isCidrOrIP(v)));
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR, an IP address or an @access-list name.`, $('#' + p + '-allow')); return null; }
         spec.allowFrom = allow;
       }
       const block = $('#' + p + '-block').value.trim();
       if (block) {
         if (!GO_DURATION_RE.test(block)) { showInvalid('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.', $('#' + p + '-block')); return null; }
         spec.blockFor = block;
+      }
+      const backoffRaw = $('#' + p + '-backoff').value.trim();
+      const blockMax = $('#' + p + '-blockmax').value.trim();
+      if (backoffRaw || blockMax) {
+        if (!block) { showInvalid('Block for required', where + 'Block backoff and Block max need a Block for duration to grow from.', $('#' + p + '-block')); return null; }
+      }
+      if (backoffRaw) {
+        const backoff = parseFloat(backoffRaw);
+        if (isNaN(backoff) || backoff <= 1) { showInvalid('Invalid block backoff', where + 'Block backoff must be a multiplier greater than 1, such as 2.', $('#' + p + '-backoff')); return null; }
+        spec.blockBackoff = backoff;
+      }
+      if (blockMax) {
+        if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
+        spec.blockMax = blockMax;
       }
       return spec;
     },
@@ -6797,7 +6817,7 @@ const SECTION_META = {
       (o.auth && o.auth.identityProvider ? `<span class="k">Identity provider</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
       (o.auth && o.auth.basic ? `<span class="k">Credentials</span><span class="v">${plural(arr(o.auth.basic.users).length, 'user', 'users')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
-      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : '') +
+      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}${o.rateLimit.blockBackoff > 1 ? ' x' + esc(o.rateLimit.blockBackoff) + ' up to ' + esc(o.rateLimit.blockMax || '24h') : ''}</span>` : '') +
       (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${plural(Object.keys(o.rewrite.replacePath).length, 'path', 'paths')}</span>` : '') +
       (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
   },

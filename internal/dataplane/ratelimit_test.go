@@ -291,7 +291,7 @@ func serveRL(h http.Handler, remote, target string) *httptest.ResponseRecorder {
 }
 
 func TestRateLimitHandler429WithRetryAfter(t *testing.T) {
-	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 2}, peerIP, "", nil, okHandler())
+	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 2}, peerIP, "", nil, okHandler(), nil)
 
 	if rec := serveRL(h, "9.9.9.9:1", "http://c/"); rec.Code != http.StatusOK {
 		t.Fatalf("request 1 should pass, got %d", rec.Code)
@@ -310,7 +310,7 @@ func TestRateLimitHandler429WithRetryAfter(t *testing.T) {
 
 func TestRateLimitHandlerNilIPSharedBucket(t *testing.T) {
 	nilIP := func(*http.Request) net.IP { return nil }
-	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1}, nilIP, "", nil, okHandler())
+	h := rateLimitHandler(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1}, nilIP, "", nil, okHandler(), nil)
 
 	// Distinct source addresses, but an unresolvable IP collapses them to one
 	// shared bucket, so the second request is denied regardless of source.
@@ -350,7 +350,7 @@ func TestChainEnforcesRateLimit(t *testing.T) {
 // sends, while a non-matching client is still limited as today.
 func TestRateLimitHandlerAllowFromBypasses(t *testing.T) {
 	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"10.0.0.0/8"}}
-	h := rateLimitHandler(rl, peerIP, "", nil, okHandler())
+	h := rateLimitHandler(rl, peerIP, "", nil, okHandler(), nil)
 
 	for i := 0; i < 10; i++ {
 		if rec := serveRL(h, "10.1.2.3:1", "http://c/"); rec.Code != http.StatusOK {
@@ -374,7 +374,7 @@ func TestRateLimitHandlerAllowFromBypasses(t *testing.T) {
 func TestRateLimitHandlerNilIPNeverMatchesAllowFrom(t *testing.T) {
 	nilIP := func(*http.Request) net.IP { return nil }
 	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"0.0.0.0/0"}}
-	h := rateLimitHandler(rl, nilIP, "", nil, okHandler())
+	h := rateLimitHandler(rl, nilIP, "", nil, okHandler(), nil)
 
 	if rec := serveRL(h, "1.1.1.1:1", "http://c/"); rec.Code != http.StatusOK {
 		t.Fatalf("first nil-IP request should pass, got %d", rec.Code)
@@ -457,5 +457,139 @@ func TestAccessListRunsBeforeAuth(t *testing.T) {
 	allow := model.AccessList{ObjectMeta: model.ObjectMeta{Name: "allow-all"}, DefaultAction: model.ActionAllow}
 	if code := serve(allow); code != http.StatusUnauthorized {
 		t.Fatalf("allowed IP must fall through the access-list to auth (401), got %d", code)
+	}
+}
+
+// TestRateLimiterBlockBackoffGrowsRepeatBlocks proves that with blockBackoff
+// set, each block earned after the previous one ended lasts backoff times
+// longer, up to blockMax, while requests during a block never extend it.
+func TestRateLimiterBlockBackoffGrowsRepeatBlocks(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, BlockFor: "1m", BlockBackoff: 2, BlockMax: "5m"})
+	l.now = func() time.Time { return now }
+
+	trip := func(want int) {
+		t.Helper()
+		if ok, _ := l.allow("ip"); !ok {
+			t.Fatal("first request after a block must pass (bucket refilled)")
+		}
+		ok, retry := l.allow("ip")
+		if ok {
+			t.Fatal("second request within the same second must trip the limit")
+		}
+		if retry != want {
+			t.Fatalf("expected a %ds block, got %d", want, retry)
+		}
+		// Hammering during the block neither passes nor extends it.
+		now = now.Add(30 * time.Second)
+		if ok, r := l.allow("ip"); ok || r > want-30 {
+			t.Fatalf("mid-block request must be denied with the remaining time (<= %d), got ok=%v retry=%d", want-30, ok, r)
+		}
+		now = now.Add(time.Duration(want-30) * time.Second) // block just expired
+	}
+	trip(60)  // first block: blockFor
+	trip(120) // second: x2
+	trip(240) // third: x4
+	trip(300) // fourth: capped at blockMax
+	trip(300) // stays at the cap
+}
+
+// TestRateLimiterBlockBackoffForgetsAfterQuietPeriod proves the streak resets
+// once the client stays within the limit for one full last-block length after
+// that block ended, so an old offender starts over at blockFor.
+func TestRateLimiterBlockBackoffForgetsAfterQuietPeriod(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, BlockFor: "1m", BlockBackoff: 2})
+	l.now = func() time.Time { return now }
+
+	l.allow("ip")
+	if _, retry := l.allow("ip"); retry != 60 {
+		t.Fatalf("first block should be 60s, got %d", retry)
+	}
+	now = now.Add(60 * time.Second) // block over
+	l.allow("ip")
+	if _, retry := l.allow("ip"); retry != 120 {
+		t.Fatalf("second block should be 120s, got %d", retry)
+	}
+	// Block ends at t=180s; staying clean until t=300s (one more lastBlock)
+	// forgets the streak. One request per second stays within the limit.
+	now = now.Add(120 * time.Second)
+	for i := 0; i < 120; i++ {
+		now = now.Add(time.Second)
+		if ok, _ := l.allow("ip"); !ok {
+			t.Fatalf("in-limit request %d must pass after the block ended", i)
+		}
+	}
+	if ok, retry := l.allow("ip"); ok || retry != 60 {
+		t.Fatalf("after a quiet period the block must restart at blockFor (60s), got ok=%v retry=%d", ok, retry)
+	}
+}
+
+// TestRateLimiterBlockBackoffDefaultsCapTo24h proves an unset blockMax caps a
+// backed-off block at model.DefaultBlockMax.
+func TestRateLimiterBlockBackoffDefaultsCapTo24h(t *testing.T) {
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, BlockFor: "1h", BlockBackoff: 1000})
+	if l.blockMax != model.DefaultBlockMax {
+		t.Fatalf("blockMax default = %s, want %s", l.blockMax, model.DefaultBlockMax)
+	}
+	now := l.now()
+	b := &tokenBucket{strikes: 3, blockedUntil: now, lastBlock: time.Hour} // last block ended just now
+	if d := l.nextBlock(b, now); d != model.DefaultBlockMax {
+		t.Fatalf("backed-off block = %s, want the 24h cap", d)
+	}
+}
+
+// TestRateLimiterBlockWithoutBackoffStaysFixed proves blockFor alone keeps every
+// block at the same length, the behavior before blockBackoff existed.
+func TestRateLimiterBlockWithoutBackoffStaysFixed(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := newRateLimiter(model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, BlockFor: "1m"})
+	l.now = func() time.Time { return now }
+	for i := 0; i < 3; i++ {
+		l.allow("ip")
+		if _, retry := l.allow("ip"); retry != 60 {
+			t.Fatalf("block %d should stay 60s without backoff, got %d", i+1, retry)
+		}
+		now = now.Add(60 * time.Second)
+	}
+}
+
+// TestRateLimitHandlerAccessListExemption proves an "@<list>" allowFrom entry
+// exempts the networks that access list allows (literal cidr rules and fetched
+// source sets), skips its path-scoped rules, and ignores an unknown list.
+func TestRateLimitHandlerAccessListExemption(t *testing.T) {
+	SetAccessListSources(model.AccessListSourceLedger{Sources: []model.AccessListSourceEntry{
+		{List: "lan", Source: "probes", Entries: []string{"203.0.113.0/24"}},
+	}})
+	t.Cleanup(func() { SetAccessListSources(model.AccessListSourceLedger{}) })
+	lists := map[string]model.AccessList{
+		"lan": {ObjectMeta: model.ObjectMeta{Name: "lan"}, DefaultAction: model.ActionDeny, Rules: []model.IPRule{
+			{Action: model.ActionAllow, CIDR: "10.0.0.0/8"},
+			{Action: model.ActionAllow, Source: "probes"},
+			{Action: model.ActionAllow, CIDR: "0.0.0.0/0", Paths: []string{"/public"}},
+			{Action: model.ActionDeny, CIDR: "10.9.0.0/16"},
+		}},
+	}
+	listNets := func(name string) []*net.IPNet {
+		al, ok := lists[name]
+		if !ok {
+			return nil
+		}
+		return accessListAllowNets(al)
+	}
+	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"@lan", "@nope", "192.0.2.1"}}
+	h := rateLimitHandler(rl, peerIP, "", nil, okHandler(), listNets)
+
+	for _, ip := range []string{"10.1.2.3", "203.0.113.7", "192.0.2.1"} {
+		for i := 0; i < 3; i++ {
+			if rec := serveRL(h, ip+":1", "http://c/"); rec.Code != http.StatusOK {
+				t.Fatalf("%s request %d should be exempt, got %d", ip, i+1, rec.Code)
+			}
+		}
+	}
+	// The path-scoped allow-all rule must not have exempted everyone.
+	serveRL(h, "198.51.100.5:1", "http://c/public")
+	if rec := serveRL(h, "198.51.100.5:1", "http://c/public"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("a client outside the list must still be limited, got %d", rec.Code)
 	}
 }

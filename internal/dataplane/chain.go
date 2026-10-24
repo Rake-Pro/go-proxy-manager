@@ -524,18 +524,26 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
 	// flood is rejected (429) before it can drive an auth subrequest or any other
-	// per-request work.
+	// per-request work. An "@<list>" exemption resolves against the registry's
+	// access lists at build time, like the lists themselves.
+	listNets := func(name string) []*net.IPNet {
+		al, ok := reg.accessLists[name]
+		if !ok {
+			return nil
+		}
+		return accessListAllowNets(al)
+	}
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeRateLimit || mw.RateLimit == nil {
 			continue
 		}
-		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h)
+		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h, listNets)
 	}
 	// Inline rate-limit blocks, outside the referenced ones for the same reason:
 	// an inline limit sheds the flood first, and every limit still applies.
 	for _, rl := range inline.rateLimit {
-		h = rateLimitHandler(rl, clientIP, host.Name, ep, h)
+		h = rateLimitHandler(rl, clientIP, host.Name, ep, h, listNets)
 	}
 
 	return h

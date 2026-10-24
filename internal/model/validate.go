@@ -97,6 +97,14 @@ func (c Config) Validate() error {
 		register("apiToken", o.Name, tokens)
 	}
 
+	for _, o := range c.Middlewares {
+		if o.Type != MWTypeRateLimit || o.RateLimit == nil {
+			continue
+		}
+		for _, a := range o.RateLimit.AccessListRefs() {
+			checkRef(&errs, "middleware", o.Name, "rateLimit.allowFrom", "accessList", a, als)
+		}
+	}
 	seenHost := map[string]bool{}
 	for _, h := range c.ProxyHosts {
 		if err := h.Validate(); err != nil {
@@ -124,8 +132,18 @@ func (c Config) Validate() error {
 			checkRef(&errs, "proxy host", h.Name, "accessLists", "accessList", a, als)
 		}
 		checkInlineAuth(&errs, "proxy host", h.Name, "", h.Auth, idps, idpTypes)
+		if h.RateLimit != nil {
+			for _, a := range h.RateLimit.AccessListRefs() {
+				checkRef(&errs, "proxy host", h.Name, "rateLimit.allowFrom", "accessList", a, als)
+			}
+		}
 		for _, l := range h.Locations {
 			loc := fmt.Sprintf("locations: location %q: ", l.Path)
+			if l.RateLimit != nil {
+				for _, a := range l.RateLimit.AccessListRefs() {
+					checkRef(&errs, "proxy host", h.Name, loc+"rateLimit.allowFrom", "accessList", a, als)
+				}
+			}
 			checkGroupRef(loc+"upstreamGroupRef", l.UpstreamGroupRef)
 			for _, m := range l.Middlewares {
 				checkRef(&errs, "proxy host", h.Name, loc+"middlewares", "middleware", m, mws)

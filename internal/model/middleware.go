@@ -235,12 +235,49 @@ type RateLimitMiddleware struct {
 	// AllowFrom lists client CIDRs that bypass rate limiting entirely: a matching
 	// request skips the limiter (no token consumed, no 429). An any-of,
 	// network-exempt bypass so trusted networks (e.g. LAN) are never throttled.
+	// An entry "@<name>" stands for the networks access list <name> allows (its
+	// allow cidr rules plus the fetched sets of its allow source rules; path-
+	// scoped rules are ignored), so one list can feed both the gate and the
+	// exemption.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 	// BlockFor, if set, is a Go duration string: once a client exceeds the limit,
 	// further requests from it are rejected for this long regardless of token
 	// refill. The block is fixed - it does not extend on repeat requests during
 	// the block window. Optional; empty means no extra block (today's behavior).
 	BlockFor string `json:"blockFor,omitempty" yaml:"blockFor,omitempty"`
+	// BlockBackoff, if set (> 1), multiplies the block for a client that trips
+	// the limit again after a block ended: the second block lasts
+	// BlockFor*BlockBackoff, the third BlockFor*BlockBackoff^2, and so on, up to
+	// BlockMax. The strike count is forgotten once the client has stayed within
+	// the limit for as long as its last block lasted, counted from the moment
+	// that block ended. Requires BlockFor. Unset keeps every block at BlockFor.
+	BlockBackoff float64 `json:"blockBackoff,omitempty" yaml:"blockBackoff,omitempty"`
+	// BlockMax caps a backed-off block (Go duration string). Default "24h" when
+	// BlockBackoff is set; must be at least BlockFor.
+	BlockMax string `json:"blockMax,omitempty" yaml:"blockMax,omitempty"`
+}
+
+// DefaultBlockMax caps a backed-off rate-limit block when blockMax is unset.
+const DefaultBlockMax = 24 * time.Hour
+
+// AccessListRef reports whether an allowFrom entry is an "@<name>" access list
+// reference and returns the name.
+func AccessListRef(entry string) (string, bool) {
+	if !strings.HasPrefix(entry, "@") {
+		return "", false
+	}
+	return entry[1:], true
+}
+
+// AccessListRefs returns the access list names an allowFrom list references.
+func (r RateLimitMiddleware) AccessListRefs() []string {
+	var out []string
+	for _, c := range r.AllowFrom {
+		if name, ok := AccessListRef(c); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // usesWindow reports whether the Requests+Window form is set (vs. the legacy
@@ -297,10 +334,17 @@ func (r *RateLimitMiddleware) validate(owner string) error {
 		}
 	}
 	for _, c := range r.AllowFrom {
+		if name, ok := AccessListRef(c); ok {
+			if err := ValidateName(name); err != nil {
+				return fmt.Errorf("%s: rateLimit.allowFrom: %q is not a valid access list reference: %w", owner, c, err)
+			}
+			continue
+		}
 		if !validCIDROrIP(c) {
-			return fmt.Errorf("%s: rateLimit.allowFrom: has invalid CIDR/IP %q", owner, c)
+			return fmt.Errorf("%s: rateLimit.allowFrom: has invalid CIDR/IP or @access-list %q", owner, c)
 		}
 	}
+	var blockFor time.Duration
 	if r.BlockFor != "" {
 		d, err := time.ParseDuration(r.BlockFor)
 		if err != nil {
@@ -308,6 +352,27 @@ func (r *RateLimitMiddleware) validate(owner string) error {
 		}
 		if d <= 0 {
 			return fmt.Errorf("%s: rateLimit.blockFor: must be > 0, got %q", owner, r.BlockFor)
+		}
+		blockFor = d
+	}
+	if r.BlockBackoff != 0 {
+		if blockFor == 0 {
+			return fmt.Errorf("%s: rateLimit.blockBackoff: requires blockFor", owner)
+		}
+		if r.BlockBackoff <= 1 {
+			return fmt.Errorf("%s: rateLimit.blockBackoff: must be > 1 (e.g. 2 doubles each repeat block), got %v", owner, r.BlockBackoff)
+		}
+	}
+	if r.BlockMax != "" {
+		if blockFor == 0 {
+			return fmt.Errorf("%s: rateLimit.blockMax: requires blockFor", owner)
+		}
+		d, err := time.ParseDuration(r.BlockMax)
+		if err != nil {
+			return fmt.Errorf("%s: rateLimit.blockMax: must be a valid duration (e.g. \"1h\", \"24h\"), got %q: %w", owner, r.BlockMax, err)
+		}
+		if d < blockFor {
+			return fmt.Errorf("%s: rateLimit.blockMax: must be at least blockFor (%s), got %q", owner, r.BlockFor, r.BlockMax)
 		}
 	}
 	return nil

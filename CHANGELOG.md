@@ -7,6 +7,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Rate limit `blockBackoff` and `blockMax`: a client that trips the limit
+  again after its block ended is blocked `blockBackoff` times longer each
+  round (`2` doubles it), capped at `blockMax` (default `24h`). The streak is
+  forgotten after one block length of good behaviour. Available on
+  `type: rate-limit` middlewares and inline host/location `rateLimit` blocks,
+  with the matching fields in the UI form.
+- Rate limit `allowFrom` accepts `@<access-list>`: the client networks that
+  list allows (allow `cidr` rules plus fetched `source` sets, path-scoped
+  rules excluded) bypass the limit, so the list that gates a host also exempts
+  it. Validation requires the list to exist.
+
 - List filters take alternatives: commas inside a scoped term
   (`status:4xx,5xx`, `host:a.example,b.example`) make the term hold when any
   of them does; a quoted value keeps a literal comma.

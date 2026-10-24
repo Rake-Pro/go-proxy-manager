@@ -208,7 +208,7 @@ func TestInlineAuthAndRateLimitValidate(t *testing.T) {
 			cfg: Config{ProxyHosts: []ProxyHost{proxyHost("app", func(h *ProxyHost) {
 				h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, AllowFrom: []string{"lan"}}
 			})}},
-			wantErr: `proxy host "app": rateLimit.allowFrom: has invalid CIDR/IP "lan"`,
+			wantErr: `proxy host "app": rateLimit.allowFrom: has invalid CIDR/IP or @access-list "lan"`,
 		},
 		{
 			name: "inline rateLimit with an invalid blockFor",

@@ -29,7 +29,9 @@ const nilIPRateLimitKey = "\x00nil"
 type tokenBucket struct {
 	tokens       float64
 	last         time.Time
-	blockedUntil time.Time // zero if not blocked
+	blockedUntil time.Time     // zero if never blocked
+	lastBlock    time.Duration // length of the most recent block, for backoff and forgetting
+	strikes      int           // blocks served so far in the current streak
 }
 
 // lruBucket is one map/list node: the bucket plus its key (kept so the front
@@ -49,6 +51,8 @@ type rateLimiter struct {
 	capacity float64
 	refill   float64       // tokens per second
 	blockFor time.Duration // 0 disables the extra block period
+	backoff  float64       // > 1 multiplies repeat blocks; 0/1 keeps them fixed
+	blockMax time.Duration // cap for a backed-off block
 	now      func() time.Time
 
 	mu      sync.Mutex
@@ -71,10 +75,23 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 			blockFor = d
 		}
 	}
+	var backoff float64
+	blockMax := blockFor
+	if blockFor > 0 && rl.BlockBackoff > 1 {
+		backoff = rl.BlockBackoff
+		blockMax = model.DefaultBlockMax
+		if rl.BlockMax != "" {
+			if d, err := time.ParseDuration(rl.BlockMax); err == nil && d >= blockFor {
+				blockMax = d
+			}
+		}
+	}
 	return &rateLimiter{
 		capacity: float64(burst),
 		refill:   rate,
 		blockFor: blockFor,
+		backoff:  backoff,
+		blockMax: blockMax,
 		now:      time.Now,
 		buckets:  map[string]*list.Element{},
 		order:    list.New(),
@@ -85,8 +102,12 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 // can, and returns the seconds a denied caller should wait before retrying. When
 // blockFor is set, exceeding the limit blocks the key for a fixed period rather
 // than the usual "wait for the next token": further requests during the block
-// are denied outright, and the block does not extend on repeat hits. A blocked
-// key can still be evicted by the LRU cap like any other idle bucket.
+// are denied outright, and the block does not extend on repeat hits. With
+// backoff set, each block a key earns after the previous one ended lasts
+// backoff times longer (capped at blockMax); the streak is forgotten once the
+// key has gone one full block length past the end of its last block without
+// tripping again (see nextBlock). A blocked key can still be evicted by the LRU
+// cap like any other idle bucket, which also forgets its streak.
 func (l *rateLimiter) allow(key string) (bool, int) {
 	now := l.now()
 	l.mu.Lock()
@@ -120,11 +141,32 @@ func (l *rateLimiter) allow(key string) (bool, int) {
 		return true, 0
 	}
 	if l.blockFor > 0 {
-		b.blockedUntil = now.Add(l.blockFor)
-		return false, int(math.Ceil(l.blockFor.Seconds()))
+		d := l.nextBlock(b, now)
+		b.blockedUntil = now.Add(d)
+		b.lastBlock = d
+		b.strikes++
+		return false, int(math.Ceil(d.Seconds()))
 	}
 	retry := (1 - b.tokens) / l.refill // time until the next whole token
 	return false, int(math.Ceil(retry))
+}
+
+// nextBlock returns how long the block starting now should last. Without
+// backoff it is always blockFor. With backoff the streak is first forgotten if
+// the key stayed clean for one full lastBlock after its previous block ended,
+// then the length is blockFor*backoff^strikes, capped at blockMax.
+func (l *rateLimiter) nextBlock(b *tokenBucket, now time.Time) time.Duration {
+	if l.backoff <= 1 {
+		return l.blockFor
+	}
+	if b.strikes > 0 && !now.Before(b.blockedUntil.Add(b.lastBlock)) {
+		b.strikes = 0
+	}
+	d := time.Duration(float64(l.blockFor) * math.Pow(l.backoff, float64(b.strikes)))
+	if d <= 0 || d > l.blockMax {
+		d = l.blockMax
+	}
+	return d
 }
 
 // evictLRULocked drops the least-recently-used bucket in O(1). That bucket is the
@@ -145,12 +187,20 @@ func (l *rateLimiter) evictLRULocked() {
 // resolved via ipOf (the registry's shared, XFF-aware resolver); an unresolvable
 // IP falls back to the shared nil bucket. A client matching rl.AllowFrom bypasses
 // the limiter entirely (no token consumed, no 429); a nil/unresolvable IP never
-// matches, so it falls through to the shared bucket as before. host and ep
-// resolve the custom error page for the 429 (see serveErrorPage).
-func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
+// matches, so it falls through to the shared bucket as before. An "@<name>"
+// entry resolves through listNets to the networks that access list allows
+// (nil listNets, or an unknown name, contributes nothing). host and ep resolve
+// the custom error page for the 429 (see serveErrorPage).
+func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listNets func(name string) []*net.IPNet) http.Handler {
 	l := newRateLimiter(rl)
 	var allowNets []*net.IPNet
 	for _, c := range rl.AllowFrom {
+		if name, ok := model.AccessListRef(c); ok {
+			if listNets != nil {
+				allowNets = append(allowNets, listNets(name)...)
+			}
+			continue
+		}
 		if n := parseNet(c); n != nil {
 			allowNets = append(allowNets, n)
 		}

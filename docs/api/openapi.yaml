@@ -1516,11 +1516,20 @@ components:
           type: array
           items:
             type: string
-          description: CIDRs that bypass rate limiting entirely.
+          description: CIDRs, IPs or "@<access-list>" references (the networks that list allows, path-scoped
+            rules excluded) that bypass rate limiting entirely.
         blockFor:
           type: string
           description: Go duration; once exceeded, further requests are rejected for this long regardless
             of refill.
+        blockBackoff:
+          type: number
+          description: Multiplier (> 1) applied to each block a client earns after its previous block
+            ended, up to blockMax. Requires blockFor. The streak is forgotten after the client stays
+            within the limit for one full block length past the end of its last block.
+        blockMax:
+          type: string
+          description: Go duration capping a backed-off block. Default 24h. Must be at least blockFor.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
     RewriteRule:
