@@ -5,7 +5,7 @@ Read it before opening a PR.
 
 ## Prerequisites
 
-- Go 1.26+ (the language minimum from `go.mod`; CI and the builder images
+- Go 1.27+ (the language minimum from `go.mod`; CI and the builder images
   use the toolchain pinned in `.go-version`, bump it with `make bump-go VERSION=X.Y.Z`)
 - `git` on `PATH` (the test suite shells out to it)
 
