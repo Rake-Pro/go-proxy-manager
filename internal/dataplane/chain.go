@@ -165,6 +165,27 @@ var baselineIdentityHeaders = []string{
 	model.ClientCertFingerprintHeader,
 }
 
+// baselineOverrideHeaders are request headers that ask a backend (or a proxy
+// further in) to treat the request as something other than what it is: a
+// different URL, method or client address. They are stripped from every
+// request whose peer is not a proxy the host trusts, like the identity
+// headers above, from EVERY peer, so nobody can smuggle a path past a guard
+// or a location match or override the method (see
+// hostHandler.stripUntrustedIdentity, which applies them). gpm sets
+// X-Original-URL only on its own auth-request and bouncer calls.
+var baselineOverrideHeaders = []string{
+	"X-Original-Url", "X-Rewrite-Url", "X-Original-Uri", "X-Forwarded-Uri", "X-Forwarded-Method",
+	"X-Http-Method-Override", "X-Http-Method", "X-Method-Override",
+}
+
+// clientAddressHeaders name a client address the way a CDN or load balancer
+// does. They follow the client-IP trust tier: a peer whose X-Forwarded-For
+// the host believes may carry them to the backend, any other peer loses
+// them. The URL and method overrides above are never passed on from anyone:
+// a CDN forwards those unchanged from the client, so trusting the CDN would
+// reopen the guard bypass.
+var clientAddressHeaders = []string{"True-Client-Ip", "X-Client-Ip", "X-Real-Ip", "Cf-Connecting-Ip", "Forwarded"}
+
 // baselineIdentityPrefixes strip whole header families whose member names vary:
 // oauth2-proxy's X-Auth-Request-* and authentik's X-Authentik-*.
 var baselineIdentityPrefixes = []string{"X-Auth-Request-", "X-Authentik-"}
@@ -465,12 +486,12 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authHandler(*mw.Auth, reg, host.Name, host.Domains, clientIP, ep, h)
+		h = authHandlerFor(*mw.Auth, host, reg, clientIP, ep, h)
 	}
 	// Inline auth blocks wrap OUTSIDE the referenced auth middlewares, so they
 	// run first; both must pass, exactly as two referenced auth middlewares do.
 	for _, a := range inline.auth {
-		h = authHandler(a, reg, host.Name, host.Domains, clientIP, ep, h)
+		h = authHandlerFor(a, host, reg, clientIP, ep, h)
 	}
 
 	// Bouncer deny hooks, just outside auth: an IP an operator-run bouncer
@@ -503,19 +524,52 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
 	// flood is rejected (429) before it can drive an auth subrequest or any other
-	// per-request work.
+	// per-request work. An "@<list>" exemption resolves against the registry's
+	// access lists at build time, like the lists themselves.
+	listNets := func(name string) []*net.IPNet {
+		al, ok := reg.accessLists[name]
+		if !ok {
+			return nil
+		}
+		return accessListAllowNets(al)
+	}
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeRateLimit || mw.RateLimit == nil {
 			continue
 		}
-		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h)
+		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h, listNets)
 	}
 	// Inline rate-limit blocks, outside the referenced ones for the same reason:
 	// an inline limit sheds the flood first, and every limit still applies.
 	for _, rl := range inline.rateLimit {
-		h = rateLimitHandler(rl, clientIP, host.Name, ep, h)
+		h = rateLimitHandler(rl, clientIP, host.Name, ep, h, listNets)
 	}
 
 	return h
+}
+
+// authHandlerFor is authHandler plus the one check that needs the host object:
+// a client-cert gate on a host with no tls.clientAuth of its own admits only
+// its allowFrom exemptions. In steady state such a host never sees a verified
+// chain (its SNI configuration asks for no certificate, and the gate refuses a
+// chain verified under another host's SNI), but a keep-alive or HTTP/2
+// connection that outlives a reload which moved a domain from an mTLS host,
+// or removed the host's clientAuth, still carries the chain it verified
+// before. Validation warns about this configuration (checkClientCertMode).
+func authHandlerFor(a model.AuthMiddleware, host model.ProxyHost, reg *registry, clientIP func(*http.Request) net.IP, ep *compiledErrorPages, next http.Handler) http.Handler {
+	if a.Mode != model.AuthModeClientCert || host.TLS.ClientAuth != nil {
+		return authHandler(a, reg, host.Name, host.Domains, clientIP, ep, next)
+	}
+	allowNets := allowFromNets(a.AllowFrom)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(allowNets) > 0 && clientIP != nil {
+			if ip := clientIP(r); ip != nil && ipInNets(ip, allowNets) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		countDenial(r, "auth-client-cert")
+		refuse(w, http.StatusUnauthorized, ep, host.Name, "authentication required")
+	})
 }

@@ -310,6 +310,7 @@ func TestInlineAuthRunsBeforeReferencedMiddleware(t *testing.T) {
 		ObjectMeta:  model.ObjectMeta{Name: "app"},
 		Domains:     []string{"app.example.com"},
 		Middlewares: []string{"sso"},
+		TLS:         model.TLSSettings{ClientAuth: &model.ClientAuth{CARef: "corp-ca", Mode: "optional"}},
 		Auth: &model.AuthMiddleware{
 			Mode:            model.AuthModeClientCert,
 			RequiredRoles:   []string{"admin"},

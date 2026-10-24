@@ -25,7 +25,16 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
 | `*:read` | Every read, including whole-config reads (`/api/config`, `/api/history`, `/api/logs`, `/api/upstream-health`) |
 | `*:write` | Every read and write, except the `admin`-only routes below |
 | `metrics:read` | `GET /metrics` only, and nothing else |
-| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
+| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, every write on `/api/dns-providers` and `/api/identity-providers`, a bouncer middleware write that creates, or changes the `url` or `apiKey` of, a bouncer whose `apiKey` is a placeholder, `POST /api/middlewares/{name}/revert` (a revert restores a stored bouncer without that check), `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
+
+Why the two provider kinds are admin-only: a DNS provider pairs a
+`${ENV:...}` / `${FILE:...}` credential with an API endpoint, so whoever can
+write one can point a resolved secret at a host of their choosing; an identity
+provider named by `adminAuth.providers` decides who gets an admin session. A
+bouncer with a placeholder `apiKey` is the same shape, so only its secret
+destination is admin-gated and every other middleware write stays on
+`middlewares:write`. The `dns-providers:read` and `identity-providers:read`
+scopes are unchanged.
 
 Valid subjects are the REST resource plurals plus the pseudo-resources
 `settings`, `dns-sync`, `ingress-discovery`, `docker-discovery` and `metrics`.
@@ -34,7 +43,7 @@ The full rules, including why `settings:write` does not reach
 
 ## What a non-admin caller does not see
 
-Three read endpoints redact operational detail for a caller without the `admin`
+Four read endpoints redact operational detail for a caller without the `admin`
 scope. A viewer-role session and a resource-scoped token both hit this.
 
 | Endpoint | Redacted for a non-admin caller |
@@ -42,6 +51,7 @@ scope. A viewer-role session and a resource-scoped token both hit this.
 | `GET /runtime` | `paths` and `secretFileRoots` are omitted entirely; the rest of the payload is unchanged. |
 | `GET /webhooks/status` | Each target URL is reduced to `scheme://host/(redacted)`. |
 | `GET /notifications/status` | The same URL redaction. |
+| `GET /settings` | `webhooks[].url` and `notifications.targets[].url` get the same redaction: for Discord, Slack and ntfy the URL path is the credential. |
 
 **`GET /health` is classified for every caller, admin included.**
 `acme.lastError` is always a classification plus the certificate name, e.g.

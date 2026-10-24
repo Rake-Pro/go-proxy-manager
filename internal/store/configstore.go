@@ -1047,6 +1047,15 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 		}
 		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
 	}
+	// The write paths refuse a literal secret; a revert to a commit that
+	// carried one (from before the rule, or hand-edited) must not bring it
+	// back as live config.
+	if lits := append(model.LiteralSecrets(restored), model.LiteralSecrets(restoredSettings)...); len(lits) > 0 {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q holds literal secret(s): %v", hash, lits)
+	}
 
 	short := hash
 	if len(short) > 12 {
@@ -1128,6 +1137,12 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 		}
 		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
 	}
+	if lits := append(model.LiteralSecrets(restored), model.LiteralSecrets(restoredSettings)...); len(lits) > 0 {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q holds literal secret(s): %v", hash, lits)
+	}
 
 	short := hash
 	if len(short) > 12 {
@@ -1149,6 +1164,28 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 func (s *Store) SaveSettings(ctx context.Context, settings model.Settings, author Author) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveSettingsLocked(ctx, settings, author)
+}
+
+// UpdateSettings loads the current settings, applies mutate to them and saves
+// the result, all under the store lock, so a section written on its own (the
+// saved filters) can never undo a whole-settings write that landed between a
+// separate load and save.
+func (s *Store) UpdateSettings(ctx context.Context, mutate func(*model.Settings) error, author Author) (model.Settings, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, settings, err := s.loadLocked()
+	if err != nil {
+		return model.Settings{}, "", err
+	}
+	if err := mutate(&settings); err != nil {
+		return model.Settings{}, "", err
+	}
+	sha, err := s.saveSettingsLocked(ctx, settings, author)
+	return settings, sha, err
+}
+
+func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings, author Author) (string, error) {
 	if err := settings.Validate(); err != nil {
 		return "", err
 	}

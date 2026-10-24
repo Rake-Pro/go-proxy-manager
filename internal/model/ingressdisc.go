@@ -565,12 +565,26 @@ func (d IngressDiscoverySettings) Validate() error {
 			return fmt.Errorf("ingressDiscovery.apiURL: must be an absolute https URL, got %q", d.APIURL)
 		}
 	}
+	// An explicit file is confined like a ${FILE:} reference: inside the
+	// secret file roots and never one of gpm's own credential files, so the
+	// discovery client cannot be pointed at an arbitrary path (issue #51). The
+	// in-cluster defaults apply only when the field is empty and are not
+	// checked against the roots.
 	for _, f := range []struct{ label, path string }{
 		{"tokenFile", d.TokenFile},
 		{"caFile", d.CAFile},
 	} {
-		if f.path != "" && !strings.HasPrefix(f.path, "/") {
+		if f.path == "" {
+			continue
+		}
+		if !strings.HasPrefix(f.path, "/") {
 			return fmt.Errorf("ingressDiscovery.%s: must be an absolute path, got %q", f.label, f.path)
+		}
+		if f.path == DefaultKubernetesTokenFile || f.path == DefaultKubernetesCAFile {
+			continue // the projected in-cluster files, spelled out
+		}
+		if err := allowedSecretFile(f.path); err != nil {
+			return fmt.Errorf("ingressDiscovery.%s: %w", f.label, err)
 		}
 	}
 	if d.Namespace != "" && !dnsLabelRe.MatchString(d.Namespace) {

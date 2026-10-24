@@ -251,6 +251,71 @@ func TestConfigValidate(t *testing.T) {
 			}}},
 		},
 		{
+			name: "valid rate-limit middleware exempting an access list",
+			cfg: Config{
+				AccessLists: []AccessList{{ObjectMeta: ObjectMeta{Name: "lan"}, DefaultAction: ActionDeny, Rules: []IPRule{{Action: ActionAllow, CIDR: "10.0.0.0/8"}}}},
+				Middlewares: []Middleware{{
+					ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+					RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, AllowFrom: []string{"@lan", "192.0.2.0/24"}},
+				}},
+			},
+		},
+		{
+			name: "rate-limit rejects an unknown access list exemption",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, AllowFrom: []string{"@nope"}},
+			}}},
+			wantErr: `middleware "rl": rateLimit.allowFrom: references unknown accessList "nope"`,
+		},
+		{
+			name: "rate-limit rejects a malformed access list exemption",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, AllowFrom: []string{"@Not A List"}},
+			}}},
+			wantErr: "is not a valid access list reference",
+		},
+		{
+			name: "valid rate-limit middleware with blockBackoff and blockMax",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1m", BlockBackoff: 2, BlockMax: "1h"},
+			}}},
+		},
+		{
+			name: "rate-limit rejects blockBackoff without blockFor",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockBackoff: 2},
+			}}},
+			wantErr: "blockBackoff: requires blockFor",
+		},
+		{
+			name: "rate-limit rejects blockBackoff of 1 or less",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1m", BlockBackoff: 1},
+			}}},
+			wantErr: "blockBackoff: must be > 1",
+		},
+		{
+			name: "rate-limit rejects blockMax shorter than blockFor",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1m", BlockBackoff: 2, BlockMax: "30s"},
+			}}},
+			wantErr: "blockMax: must be at least blockFor",
+		},
+		{
+			name: "rate-limit rejects unparseable blockMax",
+			cfg: Config{Middlewares: []Middleware{{
+				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,
+				RateLimit: &RateLimitMiddleware{RequestsPerSecond: 10, BlockFor: "1m", BlockMax: "soon"},
+			}}},
+			wantErr: "blockMax: must be a valid duration",
+		},
+		{
 			name: "rate-limit rejects unparseable blockFor",
 			cfg: Config{Middlewares: []Middleware{{
 				ObjectMeta: ObjectMeta{Name: "rl"}, Type: MWTypeRateLimit,

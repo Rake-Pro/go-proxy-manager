@@ -22,6 +22,7 @@ has its own reference page; the complete example at the end shows them together.
 | Webhooks | `webhooks` | [Webhooks](webhooks.md) |
 | Notifications | `notifications` | [Notifications](notifications.md) |
 | PROXY protocol | `proxyProtocol` | [PROXY protocol](proxy-protocol.md) |
+| Saved filters | `savedFilters` | [Saved filters](saved-filters.md) |
 
 ## Complete example
 

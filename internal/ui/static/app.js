@@ -278,7 +278,8 @@ const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit' };
 // scopes a term when its left side is one of the list's fields, so an
 // upstream written "group:k8s" is still found by typing it. A leading "-"
 // excludes. A field with nothing after the colon (still being typed) matches
-// everything.
+// everything. Commas in a scoped term list alternatives (`status:4xx,5xx`
+// holds when either does); a quoted value is one value, commas and all.
 function parseFilter(q, fields) {
   const terms = [];
   const re = /(-)?(?:([A-Za-z][\w-]*):)?(?:"([^"]*)"|(\S*))/g;
@@ -293,20 +294,26 @@ function parseFilter(q, fields) {
     }
     value = value.trim().toLowerCase();
     if (!value) continue;
-    terms.push({ neg: !!m[1], field, value });
+    const values = field && m[3] == null ? value.split(',').map((v) => v.trim()).filter(Boolean) : [value];
+    if (!values.length) continue;
+    terms.push({ neg: !!m[1], field, value: values[0], values });
   }
   return terms;
 }
-// A filterable record is {blob, f}: blob is every value the row was built from
-// (lowercase, never the markup), f maps a field name to its lowercase values.
-// Every term must hold; a scoped term matches a substring of any of the
-// field's values, a word matches the blob.
+// A filterable record is {blob, f, m}: blob is every value the row was built
+// from (lowercase, never the markup), f maps a field name to its lowercase
+// values, and the optional m maps a field name to a matcher (value) => bool
+// for a field whose values are not plain text (the access log's client IP).
+// Every term must hold; a scoped term holds when any of its alternatives
+// matches a substring of any of the field's values (or satisfies the field's
+// matcher), a word matches the blob.
 function filterHit(rec, terms) {
   for (const t of terms) {
     let hit;
     if (t.field) {
+      const match = rec.m && rec.m[t.field];
       const vals = (rec.f && rec.f[t.field]) || [];
-      hit = vals.some((v) => v.indexOf(t.value) !== -1);
+      hit = (t.values || [t.value]).some((alt) => (match ? match(alt) : vals.some((v) => v.indexOf(alt) !== -1)));
     } else {
       hit = (rec.blob || '').indexOf(t.value) !== -1;
     }
@@ -341,12 +348,54 @@ function fieldValues(recs) {
 }
 
 // filterBoxHtml renders a list's search control: the committed field terms as
-// chips, the input, and the suggestion list under it. fields is
+// chips, the input, and the suggestion list under it, plus the Saved menu
+// (named filters kept in settings, see wireFilter). fields is
 // {name: 'what it matches'}, which the title and the suggestions show.
 function filterBoxHtml(id, placeholder, label, fields) {
   const names = Object.keys(fields || {});
-  const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; a leading - excludes. Type to see suggestions.`;
-  return `<div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`;
+  const title = `Words match everything. ${names.map((n) => n + ':').join(' ')} narrow to one field; commas list alternatives, a leading - excludes. Type to see suggestions.`;
+  return `<div class="fwrap" id="${id}-fwrap"><div class="search fbox" id="${id}-box">${ICON.search}<div class="chip-input fbox-in" id="${id}-wrap"><input class="mono" id="${id}" placeholder="${esc(placeholder)}" title="${esc(title)}" aria-label="${esc(label)}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-sug" /></div><div class="fsug" id="${id}-sug" role="listbox" hidden></div></div>`
+    + `<div class="fsaved"><button class="btn ghost fsaved-btn" id="${id}-saved" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}-menu" title="Saved filters: apply one, or save the current filter under a name">Saved${ICON.caret}</button><div class="menu fsaved-menu" id="${id}-menu" role="menu" hidden></div></div></div>`;
+}
+// A dropdown anchored to a button: opened by the button, closed by a click
+// outside, Escape, or the next route. onOpen fills the menu's innerHTML (it
+// may be async) and the caller handles clicks inside it.
+function wireMenu(btn, menu, onOpen) {
+  if (!btn || !menu) return { close: () => {} };
+  let open = false;
+  function close() {
+    if (!open) return;
+    open = false;
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', onDoc, true);
+    document.removeEventListener('keydown', onKey, true);
+  }
+  function onDoc(e) { if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) close(); }
+  function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); btn.focus(); } }
+  btn.addEventListener('click', async () => {
+    if (open) { close(); return; }
+    await onOpen();
+    open = true;
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', onDoc, true);
+    document.addEventListener('keydown', onKey, true);
+    const first = menu.querySelector('button:not([disabled])');
+    if (first) first.focus();
+  });
+  window.addEventListener('hashchange', close, { once: true });
+  return { close };
+}
+// The named filters kept in settings (GET/PUT /api/settings/saved-filters).
+// Loaded on demand; null when the list could not be read.
+async function loadSavedFilters() {
+  try { return arr((await api('/api/settings/saved-filters')).data); } catch (e) { return null; }
+}
+async function putSavedFilters(all, title) {
+  const r = await api('/api/settings/saved-filters', { method: 'PUT', body: all });
+  toastSaved(r.commit, title);
+  return arr(r.data);
 }
 // wireFilter drives a filterBoxHtml control. fields is {name: hint}; values()
 // returns {field: [values]} for the suggestions (read when the list opens, so a
@@ -355,15 +404,24 @@ function filterBoxHtml(id, placeholder, label, fields) {
 // complete field term becomes a chip on space, Enter or when its suggestion
 // is taken, and Backspace on an empty input pulls the last chip back to edit
 // it. Plain words stay in the input and filter as they are typed.
-// Returns {terms} for a caller that re-renders and needs the current terms.
-function wireFilter(id, fields, values, onChange) {
+// list names the list for the filters kept outside the page: the last filter
+// typed is remembered per list in this browser (gpm.filter.<list>) and put
+// back when the list renders again, and the Saved menu offers the named
+// filters stored in settings for the list. Returns {terms, set} for a caller
+// that re-renders and needs the current terms, or wants to set the query.
+function wireFilter(id, fields, values, onChange, list) {
   const input = $('#' + id), wrap = $('#' + id + '-wrap'), sug = $('#' + id + '-sug');
-  if (!input) return { terms: () => [] };
+  if (!input) return { terms: () => [], set: () => {} };
   const chips = [];
   let items = [], active = -1, tokStart = 0;
   const query = () => (chips.join(' ') + ' ' + input.value).trim();
   const terms = () => parseFilter(query(), fields);
-  const fire = () => onChange(terms());
+  const memKey = list ? 'gpm.filter.' + list : '';
+  const remember = () => {
+    if (!memKey) return;
+    try { const q = query(); if (q) localStorage.setItem(memKey, q); else localStorage.removeItem(memKey); } catch (e) { /* ignore */ }
+  };
+  const fire = () => { remember(); onChange(terms()); };
   const fieldRe = /^(-?)([A-Za-z][\w-]*):(.*)$/;
 
   function renderChips() {
@@ -490,7 +548,74 @@ function wireFilter(id, fields, values, onChange) {
     accept(Number(el.dataset.i));
   });
   wrap.addEventListener('click', (e) => { if (e.target === wrap) input.focus(); });
-  return { terms };
+
+  // Replaces the whole query: field terms become chips, words stay in the box.
+  function setQuery(q) {
+    chips.length = 0;
+    input.value = String(q || '');
+    commit(true);
+    renderChips();
+    close();
+    fire();
+  }
+
+  // The Saved menu: the named filters for this list, Save current, Clear.
+  const sbtn = $('#' + id + '-saved'), smenu = $('#' + id + '-menu');
+  if (sbtn && smenu && list) {
+    let mine = [];
+    const menu = wireMenu(sbtn, smenu, async () => {
+      const all = await loadSavedFilters();
+      mine = all === null ? [] : all.filter((f) => f.list === list);
+      const q = query(), ro = isReadOnly();
+      const rows = mine.map((f, i) => `<div class="fsaved-row"><button type="button" role="menuitem" data-apply="${i}" title="${esc(f.query)}"><b>${esc(f.name)}</b><span class="mono">${esc(f.query)}</span></button><button type="button" class="fsaved-del" data-del="${i}" aria-label="Delete saved filter ${esc(f.name)}"${ro ? ' disabled' : ''}>${ICON.x}</button></div>`).join('');
+      smenu.innerHTML = (all === null ? '<div class="m-head"><span>Could not load the saved filters.</span></div>' : '')
+        + (rows || (all === null ? '' : '<div class="m-head"><span>No saved filters for this list yet.</span></div>'))
+        + '<div class="m-sep"></div>'
+        + `<button type="button" role="menuitem" class="fsaved-save" data-save="1"${!q || ro ? ' disabled' : ''}>Save current filter...</button>`
+        + `<button type="button" role="menuitem" data-clear="1"${q ? '' : ' disabled'}>Clear filter</button>`;
+    });
+    smenu.addEventListener('click', async (e) => {
+      const b = e.target.closest('button');
+      if (!b || b.disabled) return;
+      if (b.dataset.apply != null) { menu.close(); setQuery(mine[Number(b.dataset.apply)].query); input.focus(); return; }
+      if (b.dataset.clear) { menu.close(); setQuery(''); input.focus(); return; }
+      if (b.dataset.del != null) {
+        const f = mine[Number(b.dataset.del)];
+        menu.close();
+        try {
+          const all = await loadSavedFilters();
+          if (all === null) throw new Error('could not load the saved filters');
+          await putSavedFilters(all.filter((x) => !(x.list === f.list && x.name === f.name)), 'Deleted');
+        } catch (err) { toastErr(err, `Could not delete "${f.name}"`); }
+        return;
+      }
+      if (b.dataset.save) {
+        const q = query();
+        menu.close();
+        const taken = mine.map((f) => f.name.toLowerCase());
+        const name = await confirmModal({
+          title: 'Save filter',
+          body: `<p>Keeps <span class="mono">${esc(q)}</span> under a name in the Saved menu of this list, on every browser you sign in from. Stored in settings, so it shows in History like any change.</p>`,
+          prompt: { label: 'Name', placeholder: 'e.g. outside, errors only', validate: (v) => (v.length > 64 ? 'At most 64 characters.' : (taken.indexOf(v.toLowerCase()) !== -1 ? 'A saved filter with this name exists for this list.' : '')) },
+          confirmLabel: 'Save', danger: false,
+        });
+        if (!name) return;
+        try {
+          const all = await loadSavedFilters();
+          if (all === null) throw new Error('could not load the saved filters');
+          await putSavedFilters(all.concat([{ name, list, query: q }]), 'Saved');
+        } catch (err) { toastErr(err, `Could not save "${name}"`); }
+      }
+    });
+  }
+
+  // The last filter used on this list comes back with the page.
+  if (memKey) {
+    let stored = '';
+    try { stored = localStorage.getItem(memKey) || ''; } catch (e) { /* ignore */ }
+    if (stored) setQuery(stored);
+  }
+  return { terms, set: setQuery };
 }
 // highlightTerms wraps every match of the filter's words and values inside
 // root's visible rows in <mark>. Previous marks are unwrapped first, so it is
@@ -500,7 +625,16 @@ function highlightTerms(root, terms) {
   if (!root) return;
   $$('mark.hl', root).forEach((m) => { m.replaceWith(document.createTextNode(m.textContent)); });
   root.normalize();
-  const needles = terms.filter((t) => !t.neg && t.value).map((t) => t.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // A network (10.0.0.0/8) or an @list is matched by address, not by text,
+  // so there is nothing to mark for it.
+  const needles = [];
+  terms.forEach((t) => {
+    if (t.neg) return;
+    (t.values || [t.value]).forEach((v) => {
+      if (!v || v.charAt(0) === '@' || (v.indexOf('/') !== -1 && isCidrOrIP(v))) return;
+      needles.push(v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    });
+  });
   if (!needles.length) return;
   const re = new RegExp(needles.join('|'), 'gi');
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -1801,6 +1935,8 @@ const RO_WRITE_CONTROLS = [
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
   '#ed-src-reconcile', '#logsToggle', '#logsClear', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
+  // Saving or deleting a named filter writes settings.
+  '.fsaved-save', '.fsaved-del',
   // Clone leads to an editor whose Save a read-only caller cannot use, so it is
   // gated like the proxy host band's Clone.
   '#ed-clone', '#ct-clone',
@@ -2337,6 +2473,64 @@ function firstBadCidr(list) {
   for (const v of arr(list)) { if (!isCidrOrIP(v)) return v; }
   return '';
 }
+// ipBytes parses an IPv4 or IPv6 address to its bytes (4 or 16), or null. An
+// IPv4-mapped IPv6 address (::ffff:10.0.0.1) comes back as 4 bytes, so a
+// client logged either way matches an IPv4 network.
+function ipBytes(s) {
+  s = String(s == null ? '' : s).trim().toLowerCase();
+  if (!s) return null;
+  if (s.indexOf(':') === -1) {
+    const p = s.split('.');
+    if (p.length !== 4 || !p.every((x) => /^\d{1,3}$/.test(x) && parseInt(x, 10) <= 255)) return null;
+    return p.map((x) => parseInt(x, 10));
+  }
+  if (!/^[0-9a-f:.]+$/.test(s)) return null;
+  let head = s, tail = '';
+  const dbl = s.indexOf('::');
+  if (dbl !== -1) {
+    if (s.indexOf('::', dbl + 1) !== -1) return null;
+    head = s.slice(0, dbl);
+    tail = s.slice(dbl + 2);
+  }
+  let h = head ? head.split(':') : [], t = tail ? tail.split(':') : [];
+  // A trailing dotted quad (::ffff:1.2.3.4) is two groups.
+  const last = t.length ? t[t.length - 1] : (h.length ? h[h.length - 1] : '');
+  if (last.indexOf('.') !== -1) {
+    const v4 = ipBytes(last);
+    if (!v4) return null;
+    const rep = [((v4[0] << 8) | v4[1]).toString(16), ((v4[2] << 8) | v4[3]).toString(16)];
+    if (t.length) t = t.slice(0, -1).concat(rep); else h = h.slice(0, -1).concat(rep);
+  }
+  if (h.concat(t).some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  const fill = 8 - h.length - t.length;
+  if (dbl === -1 ? fill !== 0 : fill < 1) return null;
+  const words = h.concat(dbl === -1 ? [] : new Array(fill).fill('0'), t).map((g) => parseInt(g, 16));
+  const out = [];
+  words.forEach((w) => { out.push(w >> 8, w & 255); });
+  if (out.slice(0, 10).every((b) => b === 0) && out[10] === 255 && out[11] === 255) return out.slice(12);
+  return out;
+}
+// cidrHit says whether an address lies in a CIDR, or equals a bare IP. A
+// family mismatch (an IPv6 client against an IPv4 network) is no match.
+function cidrHit(ip, cidr) {
+  cidr = String(cidr == null ? '' : cidr).trim();
+  const slash = cidr.indexOf('/');
+  const net = ipBytes(slash === -1 ? cidr : cidr.slice(0, slash));
+  const addr = ipBytes(ip);
+  if (!net || !addr || net.length !== addr.length) return false;
+  let bits = net.length * 8;
+  if (slash !== -1) {
+    const b = cidr.slice(slash + 1);
+    if (!/^\d{1,3}$/.test(b)) return false;
+    bits = parseInt(b, 10);
+    if (bits > net.length * 8) return false;
+  }
+  for (let i = 0; i < net.length && bits > 0; i++, bits -= 8) {
+    const mask = bits >= 8 ? 255 : (256 - (1 << (8 - bits))) & 255;
+    if ((net[i] & mask) !== (addr[i] & mask)) return false;
+  }
+  return true;
+}
 // True when the list trusts every peer, which makes every IP rule spoofable.
 function hasWildcardProxy(list) {
   return arr(list).some((v) => v === '0.0.0.0/0' || v === '::/0');
@@ -2619,15 +2813,21 @@ function rateLimitBlockHtml(p, rl) {
       <div class="field-group"><label>Burst</label><input class="field mono" id="${p}-burst" data-hint="middleware.rateLimit.burst" type="number" min="0" value="${esc(rl.burst > 0 ? rl.burst : '')}" placeholder="ceil(requests)" /></div>
       <div class="field-group"><label>Block for</label><input class="field mono" id="${p}-block" data-hint="middleware.rateLimit.blockFor" value="${esc(rl.blockFor || '')}" placeholder="10m (optional)" /></div>
     </div>
-    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="middleware.rateLimit.allowFrom"></div>
-      <div class="hint">CIDRs or bare IPs that bypass the limit entirely.</div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Block backoff</label><input class="field mono" id="${p}-backoff" data-hint="middleware.rateLimit.blockBackoff" type="number" step="0.1" min="0" value="${esc(rl.blockBackoff > 1 ? rl.blockBackoff : '')}" placeholder="2 (optional)" /></div>
+      <div class="field-group"><label>Block max</label><input class="field mono" id="${p}-blockmax" data-hint="middleware.rateLimit.blockMax" value="${esc(rl.blockMax || '')}" placeholder="24h" /></div>
     </div>
-    <div class="hint">Once a client exceeds the limit, Block for refuses it for that long regardless of token refill.</div>`;
+    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="middleware.rateLimit.allowFrom"></div>
+      <div class="hint">CIDRs, bare IPs, or <span class="mono">@access-list</span> (everything that list allows) that bypass the limit entirely.</div>
+    </div>
+    <div class="hint">Once a client exceeds the limit, Block for refuses it for that long regardless of token refill. Block backoff multiplies each repeat block (2 doubles it) up to Block max.</div>`;
 }
 const GO_DURATION_RE = /^(\d+(\.\d+)?(ns|us|ms|s|m|h))+$/;
+// ACCESS_LIST_REF_RE is "@" plus a valid object name (see model.ValidateName).
+const ACCESS_LIST_REF_RE = /^@[a-z0-9]([a-z0-9-_.]{0,251}[a-z0-9])?$/;
 function wireRateLimitBlock(p, rl) {
   rl = rl || {};
-  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(rl.allowFrom), 'add CIDR...');
+  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(rl.allowFrom), 'add CIDR or @list...');
   const winBtn = $('#' + p + '-rf-win');
   const secBtn = $('#' + p + '-rf-sec');
   function pick(perSecond) {
@@ -2666,14 +2866,28 @@ function wireRateLimitBlock(p, rl) {
       if (!isNaN(burst) && burst > 0) spec.burst = burst;
       const allow = allowCtl.get();
       if (allow.length) {
-        const bad = firstBadCidr(allow);
-        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR or IP address.`, $('#' + p + '-allow')); return null; }
+        const bad = allow.find(v => !(v.startsWith('@') ? ACCESS_LIST_REF_RE.test(v) : isCidrOrIP(v)));
+        if (bad) { showInvalid('Invalid network', where + `"${bad}" is not a CIDR, an IP address or an @access-list name.`, $('#' + p + '-allow')); return null; }
         spec.allowFrom = allow;
       }
       const block = $('#' + p + '-block').value.trim();
       if (block) {
         if (!GO_DURATION_RE.test(block)) { showInvalid('Invalid block duration', where + 'Block for must be a duration greater than zero, such as 10m.', $('#' + p + '-block')); return null; }
         spec.blockFor = block;
+      }
+      const backoffRaw = $('#' + p + '-backoff').value.trim();
+      const blockMax = $('#' + p + '-blockmax').value.trim();
+      if (backoffRaw || blockMax) {
+        if (!block) { showInvalid('Block for required', where + 'Block backoff and Block max need a Block for duration to grow from.', $('#' + p + '-block')); return null; }
+      }
+      if (backoffRaw) {
+        const backoff = parseFloat(backoffRaw);
+        if (isNaN(backoff) || backoff <= 1) { showInvalid('Invalid block backoff', where + 'Block backoff must be a multiplier greater than 1, such as 2.', $('#' + p + '-backoff')); return null; }
+        spec.blockBackoff = backoff;
+      }
+      if (blockMax) {
+        if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
+        spec.blockMax = blockMax;
       }
       return spec;
     },
@@ -3523,7 +3737,7 @@ async function viewIntegrations(c, tab) {
       <p class="section-label">Lifecycle webhooks</p>
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
-      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, with the same <span class="mono">X-GPM-Webhook-Secret</span> header a real event carries.</div>
+      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
       ${intSaveBar()}
     </div>
     </div>
@@ -5032,7 +5246,7 @@ async function listHosts(c) {
     if (c.isConnected) await route();
   }
 
-  wireFilter('hostFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
+  wireFilter('hostFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); }, 'hosts');
   const zoneChips = $('#zoneChips');
   if (zoneChips) {
     zoneChips.addEventListener('click', (e) => {
@@ -6364,7 +6578,7 @@ async function listCerts(c) {
       $$('#certRows .ct-renew').forEach((b) => gateControl(b, false, readOnlyReason()));
     }
   }
-  wireFilter('certFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); });
+  wireFilter('certFilter', FILTER_FIELDS, () => fieldValues(recs), (t) => { terms = t; render(); }, 'certificates');
   render();
 }
 
@@ -6603,7 +6817,7 @@ const SECTION_META = {
       (o.auth && o.auth.identityProvider ? `<span class="k">Identity provider</span><span class="v">${esc(o.auth.identityProvider)}</span>` : '') +
       (o.auth && o.auth.basic ? `<span class="k">Credentials</span><span class="v">${plural(arr(o.auth.basic.users).length, 'user', 'users')}</span>` : '') +
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
-      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}</span>` : '') +
+      (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}${o.rateLimit.blockBackoff > 1 ? ' x' + esc(o.rateLimit.blockBackoff) + ' up to ' + esc(o.rateLimit.blockMax || '24h') : ''}</span>` : '') +
       (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${plural(Object.keys(o.rewrite.replacePath).length, 'path', 'paths')}</span>` : '') +
       (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
   },
@@ -6802,7 +7016,7 @@ async function genericList(c, section) {
   wireFilter('gsFilter', FILTER_FIELDS, () => fieldValues(Object.values(recs)), (terms) => {
     applyRowFilter($$('#gsRows tr[data-name]'), recs, terms, $('#gsNone'));
     highlightTerms($('#gsRows'), terms);
-  });
+  }, section);
 
   $$('#gsRows tr[data-name]').forEach((el) => {
     const open = () => { location.hash = `#/${section}/` + encodeURIComponent(el.dataset.name); };
@@ -9276,7 +9490,7 @@ async function viewTokens(c) {
   wireFilter('tokFilter', TOK_FIELDS, () => fieldValues(Object.values(tokRecs)), (terms) => {
     applyRowFilter($$('#tokRows tr[data-name]'), tokRecs, terms, $('#tokNone'));
     highlightTerms($('#tokRows'), terms);
-  });
+  }, 'tokens');
 
   const adminSw = $('#tok-admin');
   const scopeGrid = $('#tok-scopes');
@@ -9486,9 +9700,21 @@ const LOGS_AUTO_KEY = 'gpm.logs.auto';
 const LOGS_SORT_KEY = 'gpm.logs.sort';
 const LOG_FIELDS = {
   method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
-  client: 'client address', slow: 'yes: requests slower than 1s',
+  client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
 };
-function logRec(e) {
+// clientHit matches one client alternative: a CIDR or bare IP by address,
+// @name by the literal allow networks of that access list (nets is
+// {name: [cidr]}; an unknown name matches nothing), anything else as a
+// substring of the logged address, so `client:10.10.2.` still works.
+function clientHit(client, alt, nets) {
+  if (alt.charAt(0) === '@') {
+    const list = (nets || {})[alt.slice(1)];
+    return !!list && list.some((n) => cidrHit(client, n));
+  }
+  if (isCidrOrIP(alt)) return cidrHit(client, alt);
+  return String(client || '').toLowerCase().indexOf(alt) !== -1;
+}
+function logRec(e, nets) {
   const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
   return {
     blob: [e.method, e.host, e.path, e.status, cls, e.client].join(' ').toLowerCase(),
@@ -9496,7 +9722,22 @@ function logRec(e) {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
       client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'),
     },
+    m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
+}
+// The networks each access list allows (its literal cidr rules plus what
+// its named sources last fetched), keyed by lower-cased list name, for
+// `client:@name` terms and their suggestions. A failed load (or a token
+// without access-lists:read) just means no @ terms.
+async function accessListNets() {
+  let byList;
+  try { byList = (await api('/api/access-list-networks')).data || {}; } catch (e) { return {}; }
+  const nets = {};
+  Object.keys(byList).forEach((name) => {
+    const cidrs = arr(byList[name]).map((c) => String(c).trim()).filter(Boolean);
+    if (cidrs.length) nets[name.toLowerCase()] = cidrs;
+  });
+  return nets;
 }
 function logRowHtml(e, i) {
   const statusClass = e.status >= 500 ? 'err' : (e.status >= 400 ? 'warn' : 'ok');
@@ -9519,8 +9760,9 @@ function fmtBytes(n) {
 async function viewLogs(c) {
   const data = (await api('/api/logs')).data || {};
   const enabled = !!data.enabled;
+  const nets = await accessListNets();
   let entries = arr(data.entries);
-  let recs = entries.map(logRec);
+  let recs = entries.map((e) => logRec(e, nets));
   const capacity = data.capacity || 0;
   let auto = 0;
   try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
@@ -9533,6 +9775,10 @@ async function viewLogs(c) {
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
       <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
       <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
+      <div class="fsaved"><button class="btn" id="logsExport" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="logsExportMenu"${entries.length ? '' : ' disabled'} title="Download the rows the filter shows, in the table's order">Export${ICON.caret}</button><div class="menu fsaved-menu" id="logsExportMenu" role="menu" hidden>
+        <button type="button" role="menuitem" data-fmt="csv">CSV, the rows shown</button>
+        <button type="button" role="menuitem" data-fmt="json">JSON, the rows shown</button>
+      </div></div>
     </div>
     <div class="toolbar" id="logsToolbar"${entries.length ? '' : ' hidden'}>
       ${filterBoxHtml('logFilter', 'filter requests...', 'Filter log entries', LOG_FIELDS)}
@@ -9565,10 +9811,55 @@ async function viewLogs(c) {
     $('#logsToolbar').hidden = !entries.length;
     $('#logsWrap').hidden = !entries.length;
     $('#logsClear').disabled = !entries.length || $('#logsClear').classList.contains('cap-disabled');
+    $('#logsExport').disabled = !entries.length;
     $('#logsEmpty').innerHTML = entries.length ? '' : emptyHtml();
   }
   paint();
-  wireFilter('logFilter', LOG_FIELDS, () => fieldValues(recs), (t) => { terms = t; paint(); });
+  // Export: the rows the filter shows, in the order the table sorts them.
+  // A cell that would read as a spreadsheet formula is prefixed with a quote
+  // so a crafted request path cannot run in whatever opens the CSV.
+  const shownEntries = () => $$('#logRows tr[data-i]').filter((r) => r.style.display !== 'none').map((r) => entries[Number(r.dataset.i)]).filter(Boolean);
+  const csvCell = (v) => {
+    let t = v == null ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+    return '"' + t.replace(/"/g, '""') + '"';
+  };
+  function exportLogs(fmt) {
+    const rows = shownEntries();
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let text, type;
+    if (fmt === 'csv') {
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'];
+      text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
+      type = 'text/csv';
+    } else {
+      text = JSON.stringify(rows, null, 2) + '\n';
+      type = 'application/json';
+    }
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    a.href = url;
+    a.download = `gpm-access-log-${stamp}.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('Exported', `${rows.length} ${rows.length === 1 ? 'request' : 'requests'} as ${fmt.toUpperCase()}`, 'ok');
+  }
+  const exportMenu = wireMenu($('#logsExport'), $('#logsExportMenu'), () => {});
+  $('#logsExportMenu').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-fmt]');
+    if (!b) return;
+    exportMenu.close();
+    exportLogs(b.dataset.fmt);
+  });
+  // Suggestions for client: the @lists first, then the addresses present.
+  const suggestions = () => {
+    const v = fieldValues(recs);
+    v.client = Object.keys(nets).sort().map((n) => '@' + n).concat(v.client || []);
+    return v;
+  };
+  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; paint(); }, 'logs');
 
   // A refresh replaces the rows in place and keeps the filter, the sort and
   // the scroll position; the capture state and the shell banners are only
@@ -9578,7 +9869,7 @@ async function viewLogs(c) {
     try { d = (await api('/api/logs')).data || {}; } catch (e) { toastErr(e, 'Could not refresh the access log'); return; }
     if (!!d.enabled !== enabled) { if (c.isConnected) await route(); return; }
     entries = arr(d.entries);
-    recs = entries.map(logRec);
+    recs = entries.map((e) => logRec(e, nets));
     paint();
   }
   // The timer belongs to this render: it stops when the route moves on
@@ -9744,7 +10035,7 @@ async function viewHistory(c) {
   wireFilter('histFilter', HIST_FIELDS, () => fieldValues(histRecs), (terms) => {
     applyRowFilter($$('.timeline .tl-item[data-i]'), histRecs, terms, $('#histNone'));
     highlightTerms($('.timeline', c), terms);
-  });
+  }, 'history');
   $('#backupBtn').addEventListener('click', () => { window.location.href = '/api/backup'; });
   const fileInput = $('#restoreFile');
   $('#restoreBtn').addEventListener('click', () => fileInput.click());
@@ -10442,6 +10733,8 @@ async function viewSettings(c, tab) {
     if (s.accessListSync && Object.keys(s.accessListSync).length) body.accessListSync = s.accessListSync;
     if (arr(s.webhooks).length) body.webhooks = s.webhooks;
     if (s.notifications && Object.keys(s.notifications).length) body.notifications = s.notifications;
+    // Saved list filters are edited from each list's Saved menu; carried forward.
+    if (arr(s.savedFilters).length) body.savedFilters = s.savedFilters;
 
     btn.disabled = true;
     try {

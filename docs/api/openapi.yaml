@@ -1331,6 +1331,13 @@ components:
       - name
       - url
       description: A remote published IP feed referenced by an IPRule's source field.
+    AccessListNetworks:
+      type: object
+      description: Access-list name to the CIDRs and bare IPs its allow rules cover.
+      additionalProperties:
+        type: array
+        items:
+          type: string
     AccessListSourceStatus:
       type: object
       properties:
@@ -1509,11 +1516,20 @@ components:
           type: array
           items:
             type: string
-          description: CIDRs that bypass rate limiting entirely.
+          description: CIDRs, IPs or "@<access-list>" references (the networks that list allows, path-scoped
+            rules excluded) that bypass rate limiting entirely.
         blockFor:
           type: string
           description: Go duration; once exceeded, further requests are rejected for this long regardless
             of refill.
+        blockBackoff:
+          type: number
+          description: Multiplier (> 1) applied to each block a client earns after its previous block
+            ended, up to blockMax. Requires blockFor. The streak is forgotten after the client stays
+            within the limit for one full block length past the end of its last block.
+        blockMax:
+          type: string
+          description: Go duration capping a backed-off block. Default 24h. Must be at least blockFor.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
     RewriteRule:
@@ -1962,6 +1978,26 @@ components:
           - ''
           - '1.2'
           - '1.3'
+    SavedFilter:
+      type: object
+      description: One named filter query for an admin UI list. The UI defines the list ids and the
+        query grammar; gpm stores and bounds it.
+      required:
+      - name
+      - list
+      - query
+      properties:
+        name:
+          type: string
+          description: Unique within its list, case-insensitively. At most 64 characters, one line.
+        list:
+          type: string
+          description: The list id, e.g. `logs`, `hosts`, `certificates`, `history`, `tokens`, or an
+            object list such as `access`. Lower-case letters, digits and hyphens.
+        query:
+          type: string
+          description: The filter text as typed in the box, e.g. `-client:@home-only -status:2xx`. At
+            most 1024 characters, one line.
     Settings:
       type: object
       properties:
@@ -1981,6 +2017,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WebhookConfig'
+        savedFilters:
+          type: array
+          description: The admin UI's named list filters; see SavedFilter.
+          items:
+            $ref: '#/components/schemas/SavedFilter'
         notifications:
           $ref: '#/components/schemas/NotificationsSettings'
         dnsSync:
@@ -3109,6 +3150,26 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: access-lists:write
+  /api/access-list-networks:
+    get:
+      summary: The networks each access list allows, by list name
+      description: Literal `cidr` allow rules plus, for a rule that matches a named source, the
+        source's most recently fetched set. A source that has never been fetched adds nothing.
+        Read by the access-log viewer for its `client:@name` filter.
+      tags:
+      - Access lists
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessListNetworks'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: access-lists:read
   /api/access-list-sources/status:
     get:
       summary: Report what each access-list source last resolved to
@@ -4573,7 +4634,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dns-providers:write
+      x-scope: admin
   /api/dns-providers/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4626,7 +4687,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dns-providers:write
+      x-scope: admin
     delete:
       summary: Delete a DNSProvider
       tags:
@@ -4644,7 +4705,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dns-providers:write
+      x-scope: admin
   /api/dns-providers/{name}/history:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4698,7 +4759,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: dns-providers:write
+      x-scope: admin
   /api/dns-sync/plan:
     get:
       summary: Preview a DNS sync reconcile
@@ -4923,7 +4984,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: identity-providers:write
+      x-scope: admin
   /api/identity-providers/{name}:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -4976,7 +5037,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: identity-providers:write
+      x-scope: admin
     delete:
       summary: Delete an IdentityProvider
       tags:
@@ -4994,7 +5055,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: identity-providers:write
+      x-scope: admin
   /api/identity-providers/{name}/history:
     parameters:
     - $ref: '#/components/parameters/NamePath'
@@ -5048,7 +5109,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: identity-providers:write
+      x-scope: admin
   /api/docker-discovery/plan:
     get:
       summary: Preview a Docker discovery reconcile
@@ -5473,7 +5534,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: middlewares:write
+      x-scope: admin
   /api/openapi.yaml:
     get:
       summary: This OpenAPI 3.1 specification
@@ -5997,6 +6058,59 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: admin
+  /api/settings/saved-filters:
+    get:
+      summary: The admin UI's saved list filters
+      description: The `savedFilters` section of settings on its own, as a list; `[]` when none.
+      tags:
+      - Settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SavedFilter'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:read
+    put:
+      summary: Replace the admin UI's saved list filters
+      description: Replaces only the `savedFilters` section of settings and commits. `settings:write`
+        rather than admin, as the full settings write requires, because this section is inert
+        (the UI interprets a query locally; nothing resolves or dispatches).
+      tags:
+      - Settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/SavedFilter'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SavedFilter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/FollowerReadOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: settings:write
   /api/sso/revoke:
     post:
       summary: Revoke every outstanding per-host SSO session

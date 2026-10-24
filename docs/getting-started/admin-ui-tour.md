@@ -139,6 +139,9 @@ Every list has the same filter box.
 | `-status:disabled` | Excludes; works on a word too (`-lan`) |
 | `name:"two words"` | A value with spaces |
 | `status:5xx` | Access Logs: a status class; `status:404` a code |
+| `status:4xx,5xx` | Alternatives: the term holds when any of them does |
+| `client:10.0.0.0/8` | Access Logs: the client address inside a network; an IP (`client:10.10.2.55`) matches exactly |
+| `-client:@home-only` | Access Logs: every client outside the networks the `home-only` access list allows |
 
 - Typing suggests the field names, then the values present in the list; Enter
   or a click takes a suggestion, Escape closes it.
@@ -148,6 +151,15 @@ Every list has the same filter box.
 - The matched text is highlighted in the rows.
 - A field whose left side is not a field name is just a word, so an upstream
   written `group:k8s` is found by typing it.
+- Commas split a scoped term into alternatives; quote the value
+  (`path:"/a,b"`) to keep a literal comma.
+- The last filter typed on a list comes back when you return to it (kept in
+  this browser).
+- **Saved** beside the box lists the named filters stored for this list:
+  pick one to apply it, **Save current filter...** keeps what is in the box
+  under a name, and the x beside an entry deletes it. Saved filters live in
+  settings (`savedFilters`, see [Saved filters](../reference/config/settings/saved-filters.md)),
+  so they are offered on every browser you sign in from and show in History.
 
 ## Access Logs
 
@@ -158,12 +170,25 @@ Every list has the same filter box.
   the filter, the sort and the scroll position; **Refresh** does it once.
   Refreshing pauses while the tab is hidden.
 - **Clear** empties the buffer after a confirmation; capture is unchanged.
+- **Export** downloads the rows the filter shows, in the table's order, as
+  CSV or JSON (`gpm-access-log-<timestamp>.csv|json`). A CSV cell that would
+  read as a spreadsheet formula is prefixed with a quote.
 - With capture off the page says so where the rows would be; there is no
   banner to dismiss.
 - The count line says how many of the captured requests the filter shows and
   how many the buffer holds. Filter fields: `method`, `host`, `path`,
   `status` (a code or a class such as `4xx`), `client` and `slow:yes`
   (requests over one second).
+- `client` matches by address: a CIDR (`client:10.0.0.0/8`,
+  `client:2001:db8::/32`) takes every client inside it, a bare IP matches
+  exactly, and `@name` stands for the networks the access list `name` allows:
+  its literal `cidr` rules plus what its named sources last fetched, so a
+  list fed by a monitoring provider's published IP list hides that monitor
+  with `-client:@name`. Anything else is a substring of the logged address, so
+  `client:10.10.2.` still works. To review what reached a host from outside
+  your own networks, exclude the list that names them: `-client:@home-only`,
+  or several at once with `-client:@home-only,@home-vpn`. The suggestions
+  under `client:` offer the `@` lists first.
 
 ## Certificates
 

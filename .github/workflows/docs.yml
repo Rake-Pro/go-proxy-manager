@@ -22,9 +22,6 @@ on:
 
 permissions:
   contents: read
-  # configure-pages (in the build job) reads the Pages site; deploy-pages needs the OIDC token.
-  pages: write
-  id-token: write
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -37,6 +34,11 @@ jobs:
   build:
     name: build (strict)
     runs-on: ubuntu-latest
+    # configure-pages (in this job) only reads the Pages site; deploy-pages
+    # (below) is the one job that holds pages:write and the OIDC token.
+    permissions:
+      contents: read
+      pages: read # configure-pages only reads the site configuration here
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

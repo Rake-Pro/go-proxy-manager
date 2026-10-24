@@ -442,7 +442,7 @@ func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
 	if ip == nil {
 		return "unknown"
 	}
-	return ip.String()
+	return ipBucketKey(ip)
 }
 
 // peerIP, clientIPResolver and the rest of the client-IP derivation live in
@@ -454,3 +454,26 @@ func ipInNets(ip net.IP, nets []*net.IPNet) bool { return clientip.InNets(ip, ne
 // parseNet parses a CIDR or bare IP into an *net.IPNet (a bare IP becomes a
 // /32 or /128). Returns nil on a malformed value.
 func parseNet(s string) *net.IPNet { return clientip.ParseNet(s) }
+
+// accessListAllowNets returns the networks an access list allows without a
+// path condition: its allow cidr rules plus the fetched sets of its allow
+// source rules. Path-scoped rules are skipped because they admit an address
+// only for some paths and must not exempt it everywhere. A rate limit's
+// "@<list>" allowFrom entry resolves through this.
+func accessListAllowNets(al model.AccessList) []*net.IPNet {
+	sources := currentAccessListSources()
+	var nets []*net.IPNet
+	for _, r := range al.Rules {
+		if r.Action != model.ActionAllow || r.PathScoped() {
+			continue
+		}
+		if r.Source != "" {
+			nets = append(nets, sources[model.AccessListSourceKey(al.Name, r.Source)]...)
+			continue
+		}
+		if n := parseNet(r.CIDR); n != nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}

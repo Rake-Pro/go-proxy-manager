@@ -456,6 +456,19 @@ tbody tr.clickable:hover td { background:var(--surface-2); }
 /* structured filter box: chips for committed field terms, the input, and the
    suggestion list under it */
 .fbox { max-width:520px; }
+/* the filter box with its Saved menu beside it; the menu drops from its button */
+.fwrap { display:flex; gap:8px; align-items:flex-start; flex:1 1 280px; min-width:0; }
+.fwrap .fbox { flex:1 1 auto; }
+.fsaved { position:relative; flex:0 0 auto; }
+.fsaved-btn svg, #logsExport svg { width:14px; height:14px; margin-left:4px; }
+.fsaved-menu { top:calc(100% + 4px); left:0; right:auto; min-width:260px; max-width:420px; }
+.fsaved-row { display:flex; align-items:stretch; }
+.fsaved-row > button:first-child { flex:1 1 auto; min-width:0; }
+.fsaved-row > button:first-child b { display:block; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fsaved-row > button:first-child .mono { display:block; font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fsaved-row .fsaved-del { flex:0 0 36px; width:36px; padding:0; display:flex; align-items:center; justify-content:center; color:var(--muted); }
+.fsaved-row .fsaved-del svg { width:14px; height:14px; }
+.fsaved-row .fsaved-del:hover { color:var(--danger-solid); }
 .fbox .fbox-in { padding-left:34px; min-height:34px; }
 .fbox .fbox-in input { min-width:140px; font-family:var(--mono); font-size:13.5px; }
 .fbox .chip-tok { font-family:var(--mono); font-size:12.5px; }

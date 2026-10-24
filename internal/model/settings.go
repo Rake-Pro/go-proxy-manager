@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -98,7 +99,9 @@ type WebhookConfig struct {
 	Name string `json:"name" yaml:"name"`
 	// URL is the absolute http(s) endpoint that receives the POST.
 	URL string `json:"url" yaml:"url"`
-	// Secret, if set, is sent as the X-GPM-Webhook-Secret header so the receiver
+	// Secret, if set, signs every delivery: the receiver gets the signing time in
+	// X-GPM-Webhook-Timestamp and "v1=" + hex(HMAC-SHA256(secret, time + "." +
+	// body)) in X-GPM-Webhook-Signature, never the secret itself, so it
 	// can authenticate the call. Stored as a placeholder, resolved at dispatch.
 	Secret Secret `json:"secret,omitempty" yaml:"secret,omitempty"`
 	// Disabled keeps the target in config without firing it.
@@ -781,6 +784,11 @@ type Settings struct {
 	// publish CNAMEs for proxy hosts opted in via their dns policy.
 	DNSSync DNSSyncSettings `json:"dnsSync,omitempty" yaml:"dnsSync,omitempty"`
 
+	// SavedFilters are the admin UI's named list filters (see SavedFilter).
+	// They live in settings so a filter saved on one browser is offered on
+	// every other; they change nothing about how requests are served.
+	SavedFilters []SavedFilter `json:"savedFilters,omitempty" yaml:"savedFilters,omitempty"`
+
 	// ProxyProtocol enables inbound PROXY protocol on the data-plane listeners
 	// (see ProxyProtocolSettings). nil or disabled leaves them untouched.
 	ProxyProtocol *ProxyProtocolSettings `json:"proxyProtocol,omitempty" yaml:"proxyProtocol,omitempty"`
@@ -927,7 +935,68 @@ func (a AccessListSyncSettings) Validate() error {
 
 func (s Settings) Kind() string { return "Settings" }
 
+// SavedFilter is one named filter query for an admin UI list. The UI defines
+// the list ids (hosts, certificates, logs, history, tokens, the other object
+// lists) and the query grammar (words, field:value terms, a leading "-" to
+// exclude, commas for alternatives); gpm stores and bounds it, nothing more.
+type SavedFilter struct {
+	Name  string `json:"name" yaml:"name"`
+	List  string `json:"list" yaml:"list"`
+	Query string `json:"query" yaml:"query"`
+}
+
+const (
+	maxSavedFilters      = 200
+	maxSavedFilterName   = 64
+	maxSavedFilterQuery  = 1024
+	maxSavedFilterListID = 32
+)
+
+var savedFilterListRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
+// ValidateSavedFilters bounds the list: every entry names a list and carries a
+// one-line query, and a name is unique within its list (case-insensitively, so
+// two presets cannot differ only by case in a menu).
+func ValidateSavedFilters(filters []SavedFilter) error {
+	if len(filters) > maxSavedFilters {
+		return fmt.Errorf("savedFilters: at most %d entries, got %d", maxSavedFilters, len(filters))
+	}
+	seen := map[string]struct{}{}
+	for i, f := range filters {
+		name := strings.TrimSpace(f.Name)
+		switch {
+		case name == "":
+			return fmt.Errorf("savedFilters[%d]: name is required", i)
+		case len(name) > maxSavedFilterName:
+			return fmt.Errorf("savedFilters[%d]: name is longer than %d characters", i, maxSavedFilterName)
+		case strings.ContainsAny(name, "\r\n\t"):
+			return fmt.Errorf("savedFilters[%d]: name must be one line", i)
+		}
+		if len(f.List) > maxSavedFilterListID || !savedFilterListRe.MatchString(f.List) {
+			return fmt.Errorf("savedFilters[%d] (%s): list must be a short lower-case id such as \"logs\", got %q", i, name, f.List)
+		}
+		q := strings.TrimSpace(f.Query)
+		switch {
+		case q == "":
+			return fmt.Errorf("savedFilters[%d] (%s): query is required", i, name)
+		case len(q) > maxSavedFilterQuery:
+			return fmt.Errorf("savedFilters[%d] (%s): query is longer than %d characters", i, name, maxSavedFilterQuery)
+		case strings.ContainsAny(q, "\r\n"):
+			return fmt.Errorf("savedFilters[%d] (%s): query must be one line", i, name)
+		}
+		key := f.List + "/" + strings.ToLower(name)
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("savedFilters[%d]: duplicate name %q for list %q", i, name, f.List)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 func (s Settings) Validate() error {
+	if err := ValidateSavedFilters(s.SavedFilters); err != nil {
+		return err
+	}
 	if s.ExternalBaseURL != "" {
 		u, err := url.Parse(s.ExternalBaseURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {

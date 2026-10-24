@@ -691,8 +691,16 @@
     "text": "Once a client exceeds the limit, it is refused for this long regardless of token refill. Fixed, not extended by repeat requests.",
     "doc": "reference/config/middleware.md"
   },
+  "middleware.rateLimit.blockBackoff": {
+    "text": "Multiplier for a client that trips the limit again after a block ended: 2 doubles each repeat block, up to Block max. The streak is forgotten after one block length of good behaviour.",
+    "doc": "reference/config/middleware.md"
+  },
+  "middleware.rateLimit.blockMax": {
+    "text": "Longest a backed-off block can grow to. Default 24h. Must be at least Block for.",
+    "doc": "reference/config/middleware.md"
+  },
   "middleware.rateLimit.allowFrom": {
-    "text": "Requests from these networks are never counted against the limit, for example your own LAN or a monitoring probe. Empty limits every client.",
+    "text": "Requests from these networks are never counted against the limit, for example your own LAN or a monitoring probe. @name exempts everything access list name allows. Empty limits every client.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.bouncer.provider": {
@@ -1268,7 +1276,7 @@
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.secret": {
-    "text": "Sent as the X-GPM-Webhook-Secret header so the receiver can verify the call. Use an ${ENV:...} placeholder.",
+    "text": "Signs every delivery: the receiver gets X-GPM-Webhook-Timestamp and X-GPM-Webhook-Signature (v1=hex HMAC-SHA256 over timestamp.body), never the secret itself. Use an ${ENV:...} placeholder.",
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.disabled": {

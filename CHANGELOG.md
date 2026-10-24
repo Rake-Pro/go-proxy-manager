@@ -5,6 +5,77 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Rate limit `blockBackoff` and `blockMax`: a client that trips the limit
+  again after its block ended is blocked `blockBackoff` times longer each
+  round (`2` doubles it), capped at `blockMax` (default `24h`). The streak is
+  forgotten after one block length of good behaviour. Available on
+  `type: rate-limit` middlewares and inline host/location `rateLimit` blocks,
+  with the matching fields in the UI form.
+- Rate limit `allowFrom` accepts `@<access-list>`: the client networks that
+  list allows (allow `cidr` rules plus fetched `source` sets, path-scoped
+  rules excluded) bypass the limit, so the list that gates a host also exempts
+  it. Validation requires the list to exist.
+
+- List filters take alternatives: commas inside a scoped term
+  (`status:4xx,5xx`, `host:a.example,b.example`) make the term hold when any
+  of them does; a quoted value keeps a literal comma.
+- Access Logs: the `client` field matches by address. A CIDR
+  (`client:10.0.0.0/8`, `client:2001:db8::/32`) takes every client inside the
+  network, a bare IP matches exactly (an IPv4-mapped IPv6 client counts as
+  IPv4), and `@name` stands for the networks an access list allows (its
+  `cidr` rules plus what its named sources last fetched), so
+  `-client:@home-only` shows only what reached the proxy from outside your
+  own networks and `-client:@uptimerobot` hides a monitor fed by its
+  published IP list. The `client:` suggestions offer the `@` lists first.
+- `GET /api/access-list-networks` (scope `access-lists:read`) returns the
+  networks each access list allows, by name, resolved the same way.
+- Saved filters: every list's filter box has a **Saved** menu that applies a
+  named filter, saves the current one under a name, or deletes one. They are
+  kept in settings (`savedFilters`, new routes `GET`/`PUT
+  /api/settings/saved-filters`, scope `settings:read`/`settings:write`), so
+  they follow you across browsers and show in History. The last filter typed
+  on each list also comes back when you return to it (per browser).
+- Access Logs: **Export** downloads the rows the filter shows as CSV or
+  JSON, in the table's order, with spreadsheet-formula cells neutralised.
+
+### Security
+
+The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
+
+- Writes to `/api/dns-providers` and `/api/identity-providers` take the
+  `admin` scope; a bouncer middleware whose `apiKey` is a placeholder is
+  created, or has its `url`/`apiKey` changed, by `admin` only (403 otherwise).
+  The bouncer client refuses link-local destinations like the other outbound
+  clients. (#49)
+- A secret is a placeholder only when it is nothing but placeholders; mixed
+  values are literals and refused. `GET /settings` redacts webhook and
+  notification URLs below `admin`. The SSO session cookie is bound to the
+  provider that minted it, and a host with more than one OIDC gate is warned
+  about. A client-cert gate refuses a certificate verified under another
+  host's SNI (so on a host without its own `tls.clientAuth`, which is warned
+  about, it admits only its allowFrom exemptions) and re-checks revocation per
+  request, as does the host's own mTLS gate. Rate-limit buckets and the basic-auth lockout key IPv6 by /64.
+  Discovery keeps an existing managed host's current domain ahead of any
+  claimant instead of failing the batch. (#50)
+- Explicit discovery `tokenFile`/`caFile` paths are confined to the secret
+  file roots. Webhooks are signed (`X-GPM-Webhook-Signature`,
+  `X-GPM-Webhook-Timestamp`) instead of carrying the secret. The `Host`
+  header's port is validated; request-override headers (`X-Original-URL`,
+  `X-HTTP-Method-Override`, ...) are stripped from every peer and the
+  client-address headers (`True-Client-IP`, `CF-Connecting-IP`, `Forwarded`,
+  ...) unless the peer is one of the host's trusted proxies; a request body
+  may stall at most
+  60 s between reads; the sticky
+  cookie carries an opaque tag instead of the upstream label; a revert to a
+  commit holding a literal secret is refused; `POST /api/middlewares/{name}/revert`
+  is admin-only; the Kubernetes, DNS-sync, webhook, notification and ACME
+  DNS-01 REST-provider clients ignore proxy environment variables, and every
+  link-local guard refuses zoned addresses; the release workflow only
+  runs from `main` and only builds a tag that sits on `main`, and the docs
+  workflow grants Pages permissions per job. (#51)
+
 ## [2.5.0] - 2026-10-20
 
 ### Added

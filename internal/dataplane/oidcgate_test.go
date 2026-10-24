@@ -267,7 +267,7 @@ func TestDataOIDCSessionBoundToHost(t *testing.T) {
 	}
 
 	// A valid session cookie bound to host "app".
-	payload, _ := json.Marshal(oidcSession{Sub: "u", Host: "app", Exp: time.Now().Add(time.Hour).Unix()})
+	payload, _ := json.Marshal(oidcSession{Sub: "u", Host: "app", IdP: "idp", Exp: time.Now().Add(time.Hour).Unix()})
 	appCookie := &http.Cookie{Name: oidcSessionCookie, Value: signToken(macLabelSSOSession, payload)}
 
 	// Its own host admits it.
@@ -277,6 +277,17 @@ func TestDataOIDCSessionBoundToHost(t *testing.T) {
 	newGate("app").ServeHTTP(recSame, rSame)
 	if recSame.Code != http.StatusOK || recSame.Body.String() != "upstream" {
 		t.Fatalf("cookie must be honored by its own host: got %d %q", recSame.Code, recSame.Body.String())
+	}
+
+	// A session minted by ANOTHER provider on the same host must not pass this
+	// gate either: the cookie is bound to the provider that issued it.
+	otherPayload, _ := json.Marshal(oidcSession{Sub: "u", Host: "app", IdP: "other-idp", Exp: time.Now().Add(time.Hour).Unix()})
+	recOther := httptest.NewRecorder()
+	rOther := httptest.NewRequest("GET", "https://app.example.com/x", nil)
+	rOther.AddCookie(&http.Cookie{Name: oidcSessionCookie, Value: signToken(macLabelSSOSession, otherPayload)})
+	newGate("app").ServeHTTP(recOther, rOther)
+	if recOther.Code == http.StatusOK {
+		t.Fatalf("a session from another provider must not pass this gate: got %d", recOther.Code)
 	}
 
 	// A different host must not honor the replayed cookie; it starts a fresh login.
@@ -310,7 +321,7 @@ func TestSSORevocationWatermark(t *testing.T) {
 
 	mkCookie := func(iat int64) *http.Cookie {
 		payload, _ := json.Marshal(oidcSession{
-			Sub: "u", Host: "app",
+			Sub: "u", Host: "app", IdP: "idp",
 			Exp: time.Now().Add(time.Hour).Unix(),
 			Iat: iat,
 		})

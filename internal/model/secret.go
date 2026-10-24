@@ -23,9 +23,16 @@ type Secret string
 
 var secretRefRe = regexp.MustCompile(`\$\{(ENV|FILE):([^}]+)\}`)
 
-// IsPlaceholder reports whether s contains a ${ENV:...} or ${FILE:...} reference.
+// secretOnlyRe is secretRefRe anchored to the whole value: one or more
+// placeholders and nothing else (whitespace between them aside).
+var secretOnlyRe = regexp.MustCompile(`^\s*(\$\{(ENV|FILE):[^}]+\}\s*)+$`)
+
+// IsPlaceholder reports whether s consists of ${ENV:...} / ${FILE:...}
+// references and nothing else. A value that mixes a placeholder with literal
+// text is NOT a placeholder: the literal part would be committed to git and
+// echoed by the API verbatim, so LiteralSecrets must treat it as a literal.
 func (s Secret) IsPlaceholder() bool {
-	return secretRefRe.MatchString(string(s))
+	return secretOnlyRe.MatchString(string(s))
 }
 
 // IsEmpty reports whether the secret is unset.

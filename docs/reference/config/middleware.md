@@ -32,7 +32,7 @@ object carries exactly one `type` and its matching spec.
 | `oidc` | The IdP, via a browser redirect | gpm is the relying party for the host; a signed SSO cookie admits later requests. |
 | `forward-auth` | A trusted upstream proxy's identity headers | Only headers asserted by the provider's `trustedProxies` are believed. |
 | `auth-request` | An external `auth_request` endpoint | The auth server does authorization; `requiredRoles` is refused. |
-| `client-cert` | The TLS handshake | Names no `identityProvider`; pair with `tls.clientAuth.mode: optional`. |
+| `client-cert` | The TLS handshake | Names no `identityProvider`. The host (or the host a location belongs to) must set its own `tls.clientAuth` (`optional` for a gate that exempts some networks): without it the gate admits only its `allowFrom` exemptions and `GET /health` warns, because a certificate is accepted only when the handshake verified it under this host's SNI configuration, which such a host never requests. The gate also refuses a certificate presented under another host's SNI and re-checks revocation on every request. |
 | `basic` | The middleware's own `basic.users` | Names no `identityProvider`; HTTP basic auth against local bcrypt hashes. |
 
 ### BasicAuthSpec (`auth.basic`, `basic` mode only)
@@ -228,8 +228,10 @@ rewrite:
 | <span id="middleware-rate-limit-window"></span>  `window` | string | none | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
 | <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | none | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
 | <span id="middleware-rate-limit-burst"></span>  `burst` | int | `ceil(requests)` | no | Token-bucket capacity: how far above the steady rate a short spike may go. |
-| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` stands for every network access list `name` allows: its allow `cidr` rules plus the fetched sets of its allow `source` rules, path-scoped rules excluded. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
+| <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
+| <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
@@ -237,7 +239,10 @@ Enforced as a per-host, per-client-IP token bucket (capacity = `burst`, refill
 = `requests`/`window` in tokens/sec). Over-limit requests get `429 Too Many
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
-request is not proxied. The bucket is keyed on the derived client IP (see
+request is not proxied. The bucket is keyed on the derived client IP, with an
+IPv6 client keyed by its /64 (one subscriber holds a whole /64, so a per-address
+key would be a fresh bucket per address); the basic-auth lockout keys the same
+way (see
 [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers));
 a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches
@@ -261,6 +266,23 @@ Omit `blockFor` (the default) for today's behavior: only the token bucket
 governs, and a client that outwaits the refill rate is let back through
 immediately.
 
+`blockBackoff` makes repeat offenders pay more each time:
+
+- The first block lasts `blockFor`. A client that trips the limit again after
+  that block ended is blocked for `blockFor * blockBackoff`, then
+  `blockFor * blockBackoff^2`, and so on, capped at `blockMax` (default `24h`).
+- Requests during a block still never extend it; only a fresh trip after the
+  block ended earns the next, longer one.
+- The streak is forgotten once the client stays within the limit for one full
+  length of its last block, counted from the moment that block ended. A client
+  that served a 4 minute block and then behaves for 4 more minutes starts over
+  at `blockFor`.
+- The streak lives in the same per-client bucket as the tokens, so it is lost
+  with the bucket on an LRU eviction or a reload, exactly like the block itself.
+
+With `blockFor: 1m`, `blockBackoff: 2`, `blockMax: 1h` a scanner that keeps
+coming back is blocked for 1m, 2m, 4m, 8m, 16m, 32m, then 1h per round.
+
 ## BouncerMiddleware (`bouncer`)
 
 | Key | Type | Default | Required | Description |
@@ -276,6 +298,10 @@ immediately.
 | <span id="middleware-bouncer-deny-with"></span>  `denyWith` | string | `error-page` | no | `error-page` renders the host's configured page for `denyStatus`; `plain` sends a bare status body, giving a scanner nothing to fingerprint. |
 | <span id="middleware-bouncer-stream"></span>  `stream` | bool | `false` | no | `crowdsec` only. Pull the whole decision set once and delta it every `cacheTTL`, so the request hot path never calls the LAPI. |
 | <span id="middleware-bouncer-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from the external verdict, compared against the derived client IP. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+
+The bouncer client never follows redirects, ignores proxy environment
+variables and refuses a `url` that resolves to a link-local address (a cloud
+metadata service), like gpm's other outbound clients.
 
 This is a **hook, not a WAF**. gpm ships no rules, no signatures and no
 detection engine: it asks an operator-run bouncer whether the client IP is
@@ -410,6 +436,20 @@ rateLimit:
   requests: 100
   window: 1m
   blockFor: 5m
+```
+```yaml
+# Public site: repeat offenders are blocked twice as long each round, up to a day.
+# Everything the home-only access list allows (LAN, VPN, its fetched monitor
+# feed) is never counted.
+name: public-site-limit
+type: rate-limit
+rateLimit:
+  requests: 60
+  window: 1m
+  allowFrom: ["@home-only"]
+  blockFor: 1m
+  blockBackoff: 2
+  blockMax: 24h
 ```
 ```yaml
 # Generic deny hook: any endpoint answering 2xx/403. Fail closed - this bouncer

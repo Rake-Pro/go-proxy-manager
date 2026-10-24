@@ -33,18 +33,22 @@ func waitDrained(t *testing.T, d *Dispatcher) {
 
 func TestDispatchDeliversEventWithSecret(t *testing.T) {
 	var (
-		mu     sync.Mutex
-		got    Event
-		secret string
-		hits   int
+		mu   sync.Mutex
+		got  Event
+		sig  string
+		ts   string
+		raw  []byte
+		hits int
 	)
 	done := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		hits++
-		secret = r.Header.Get("X-GPM-Webhook-Secret")
+		sig = r.Header.Get(SignatureHeader)
+		ts = r.Header.Get(SignatureTimestampHeader)
 		body, _ := io.ReadAll(r.Body)
+		raw = body
 		_ = json.Unmarshal(body, &got)
 		select {
 		case done <- struct{}{}:
@@ -84,8 +88,16 @@ func TestDispatchDeliversEventWithSecret(t *testing.T) {
 	if got.Time == "" {
 		t.Fatal("event time should be stamped")
 	}
-	if secret != "s3cr3t" {
-		t.Fatalf("resolved secret header = %q, want s3cr3t", secret)
+	// The secret itself never travels: the receiver gets a timestamp and an
+	// HMAC over timestamp and body, computed with the resolved secret.
+	if ts == "" || sig == "" {
+		t.Fatalf("signature headers missing: ts=%q sig=%q", ts, sig)
+	}
+	if want := Sign("s3cr3t", ts, raw); sig != want {
+		t.Fatalf("signature = %q, want %q", sig, want)
+	}
+	if h := Sign("wrong", ts, raw); h == sig {
+		t.Fatal("signature must depend on the secret")
 	}
 }
 
@@ -206,10 +218,13 @@ func TestStatusListsEveryTargetIncludingNeverFired(t *testing.T) {
 
 func TestTestSend(t *testing.T) {
 	var got Event
-	var secret string
+	var sig, ts string
+	var raw []byte
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secret = r.Header.Get("X-GPM-Webhook-Secret")
-		_ = json.NewDecoder(r.Body).Decode(&got)
+		sig = r.Header.Get(SignatureHeader)
+		ts = r.Header.Get(SignatureTimestampHeader)
+		raw, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got)
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer ok.Close()
@@ -271,8 +286,10 @@ func TestTestSend(t *testing.T) {
 	if got.Action != "test" || got.Kind != "Webhook" || got.Name != "off" || got.Time == "" {
 		t.Fatalf("last received event = %+v, want a stamped action:test event", got)
 	}
-	if secret != "s3cr3t" && secret != "" {
-		t.Fatalf("unexpected secret header %q", secret)
+	// The last target delivered to has no secret, so no signature; a target
+	// with one must sign exactly as a real event does.
+	if sig != "" && sig != Sign("s3cr3t", ts, raw) {
+		t.Fatalf("test send carried an invalid signature: ts=%q sig=%q", ts, sig)
 	}
 
 	// Every test send is recorded like an ordinary delivery.

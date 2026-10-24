@@ -21,7 +21,9 @@ env:
 
 jobs:
   version:
-    if: github.ref_type == 'branch'
+    # A manual run from any other branch must not tag, build and sign a
+    # release; the tag push path already only exists for main.
+    if: github.ref_type == 'branch' && github.ref == 'refs/heads/main'
     permissions:
       contents: write # push the release tag
       pull-requests: read # PR labels choose the bump level
@@ -95,7 +97,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ steps.rel.outputs.tag }}
+          fetch-depth: 0 # the ancestor check below needs main's history
           persist-credentials: false
+      # A pushed v* tag (or a dispatch on one) is built and signed only when it
+      # sits on main: a tag on any other commit must not become a release. The
+      # tag name is attacker-chosen on that path, so it reaches the shell only
+      # through an environment variable, quoted.
+      - name: Require the tag to be on main
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            printf '::error::tag %s is not on main; refusing to release it\n' "$TAG"
+            exit 1
+          fi
 
       - name: Set build date
         id: meta-date

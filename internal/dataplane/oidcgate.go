@@ -323,7 +323,12 @@ type oidcSession struct {
 	Name   string   `json:"name,omitempty"`
 	Groups []string `json:"groups,omitempty"`
 	Host   string   `json:"host"`
-	Exp    int64    `json:"exp"`
+	// IdP names the identity provider whose callback minted the session. A gate
+	// accepts only a session from its own provider: with two OIDC gates on one
+	// host (host plus location, or two middlewares) a login at provider A
+	// would otherwise pass provider B's gate and role mapping.
+	IdP string `json:"idp,omitempty"`
+	Exp int64  `json:"exp"`
 	// Iat is the issue time, checked against the revocation watermark (see
 	// RevokeAllSSOSessions). Pre-watermark sessions - including legacy cookies
 	// without the field - are rejected once a revocation is on record.
@@ -404,6 +409,7 @@ type dataOIDC struct {
 	roleMapping *model.RoleMapping
 	required    []string
 	hostName    string
+	idpName     string
 	// domains is the hostKey-normalized set of domains this host serves. The
 	// per-request-Host discovery cache is keyed and ADMITTED by it: a Host header
 	// that is not in this set never reaches the cache, so neither the map nor the
@@ -452,6 +458,7 @@ func compileDataOIDC(idp model.IdentityProvider, required []string, hostName str
 		roleMapping: idp.RoleMapping,
 		required:    required,
 		hostName:    hostName,
+		idpName:     idp.Name,
 		domains:     dom,
 		clients:     map[string]*oidcClientEntry{},
 	}, nil
@@ -545,7 +552,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		}
 		var sess oidcSession
 		if readSignedCookie(r, oidcSessionCookie, macLabelSSOSession, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
-			sess.Iat >= ssoRevokedAt() {
+			sess.IdP == d.idpName && sess.Iat >= ssoRevokedAt() {
 			if !d.authorized(sess.Groups) {
 				countDenial(r, "auth-oidc")
 				refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
@@ -624,7 +631,7 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	setSignedCookie(w, oidcSessionCookie, macLabelSSOSession, oidcSession{
 		Sub: claims.Subject, Email: claims.Email, Name: claims.Name,
-		Groups: claims.Groups, Host: d.hostName,
+		Groups: claims.Groups, Host: d.hostName, IdP: d.idpName,
 		Exp: time.Now().Add(oidcSessionTTL).Unix(),
 		Iat: time.Now().Unix(),
 	}, oidcSessionTTL)

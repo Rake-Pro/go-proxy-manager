@@ -894,7 +894,7 @@ internal/ui/        embedded web UI (go:embed)
 
 ## Dependencies
 
-A deliberately small, vetted set (Go 1.26, CGO disabled):
+A deliberately small, vetted set (Go 1.27, CGO disabled):
 
 | Dependency | Use |
 |------------|-----|

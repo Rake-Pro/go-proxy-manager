@@ -221,7 +221,7 @@ the middleware of that kind, so behaviour, metrics and error pages are identical
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `auth` | AuthMiddleware | none | no | Identical to a `type: auth` middleware's `auth` spec: `identityProvider`, `mode`, `requiredRoles`, `allowFrom`, `clientCertRoles`, `basic`. **Every mode works inline, `basic` included**, so `auth.basic.realm` and `auth.basic.users[].username`/`.passwordHash` are valid here, see [BasicAuthSpec](middleware.md#middleware-auth-basic-users). A plaintext `password` field on a `PUT` is hashed server-side on a host or location exactly as on a middleware. See [AuthMiddleware](middleware.md#authmiddleware-auth) for every field rule. |
-| `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
+| `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`, `blockBackoff`, `blockMax`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
 
 Validation is the middleware's, verbatim: `identityProvider` must resolve to an
 existing IdentityProvider (a dangling name is a load-time error, and the proxy

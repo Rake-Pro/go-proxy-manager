@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -315,12 +316,70 @@ var crlAnchors atomic.Pointer[[]*clientCAAnchor]
 // to the watch loop. Anchors from a superseded build are simply dropped.
 func registerCRLAnchors(anchors map[string]*clientCAAnchor) {
 	watched := []*clientCAAnchor{}
+	configured := []*clientCAAnchor{}
 	for _, a := range anchors {
 		if a.crlFile != "" {
 			watched = append(watched, a)
 		}
+		if a.crlConfigured {
+			configured = append(configured, a)
+		}
 	}
 	crlAnchors.Store(&watched)
+	crlConfiguredAnchors.Store(&configured)
+}
+
+// crlConfiguredAnchors is every anchor that checks revocation (file-backed or
+// inline), for the per-request re-check below.
+var crlConfiguredAnchors atomic.Pointer[[]*clientCAAnchor]
+
+// revokedNow reports whether a client certificate accepted at its handshake is
+// revoked by the CURRENT revocation list of the CA that issued it. The
+// handshake (and every resumption) already checks the CRL, but a connection
+// that outlives a CRL update would keep carrying the certificate until it
+// closed; the client-cert gate asks this on every request so a revocation
+// takes effect at the next request instead. Only a positive listing denies:
+// a missing or expired list is the handshake's fail-open/closed decision.
+func revokedNow(chains [][]*x509.Certificate) bool {
+	if len(chains) == 0 || len(chains[0]) == 0 {
+		return false
+	}
+	anchors := crlConfiguredAnchors.Load()
+	if anchors == nil {
+		return false
+	}
+	leaf := chains[0][0]
+	for _, a := range *anchors {
+		issued := false
+		for _, iss := range a.issuers {
+			if bytes.Equal(iss.RawSubject, leaf.RawIssuer) {
+				issued = true
+				break
+			}
+		}
+		if issued && a.chainRevoked(chains) {
+			return true
+		}
+	}
+	return false
+}
+
+// chainRevoked reports whether any certificate of any verified chain is on
+// this anchor's current revocation list: the leaf, and an intermediate the
+// CA revoked after the handshake. Only a positive listing counts.
+func (a *clientCAAnchor) chainRevoked(chains [][]*x509.Certificate) bool {
+	snap := a.crl.Load()
+	if snap == nil {
+		return false
+	}
+	for _, chain := range chains {
+		for _, c := range chain {
+			if _, revoked := snap.revoked[serialKey(c.SerialNumber)]; revoked {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // watchCRLs polls every configured CRL file's mtime until ctx is cancelled,

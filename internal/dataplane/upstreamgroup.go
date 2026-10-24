@@ -3,7 +3,10 @@ package dataplane
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -522,7 +525,17 @@ func promote(cands []*upstreamHealth, u *upstreamHealth) []*upstreamHealth {
 }
 
 // stickyPayloadPrefix versions the sticky-cookie payload shape.
-const stickyPayloadPrefix = "sticky1"
+const stickyPayloadPrefix = "sticky2"
+
+// stickyTag is the opaque stand-in for an upstream label inside the affinity
+// cookie: a keyed hash of the group and label, so the cookie (which the client
+// can decode, being signed rather than encrypted) names no upstream. The
+// group resolves a tag back to an upstream by comparing against its members.
+func stickyTag(group, label string) string {
+	mac := hmac.New(sha256.New, ssoSigningKey())
+	mac.Write([]byte("gpm-sticky-tag-v1|" + group + "|" + label))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))[:22]
+}
 
 // stickyUpstream returns the healthy upstream a request's affinity cookie pins
 // it to, or nil (stickiness off, no/invalid/expired cookie, foreign group, or
@@ -548,11 +561,15 @@ func (g *groupHealth) stickyUpstream(req *http.Request) *upstreamHealth {
 	if err != nil || time.Now().Unix() >= exp {
 		return nil // TTL enforced server-side; a replayed cookie cannot outlive it
 	}
-	u := g.byLabel[parts[2]]
-	if u == nil || !u.healthy.Load() {
-		return nil
+	for label, u := range g.byLabel {
+		if stickyTag(g.name, label) == parts[2] {
+			if !u.healthy.Load() {
+				return nil
+			}
+			return u
+		}
 	}
-	return u
+	return nil
 }
 
 // stickyCookieFor builds the signed affinity cookie pinning a client to u. The
@@ -561,7 +578,7 @@ func (g *groupHealth) stickyUpstream(req *http.Request) *upstreamHealth {
 // client-facing scheme so plain-HTTP hosts still get affinity.
 func (g *groupHealth) stickyCookieFor(u *upstreamHealth, req *http.Request) *http.Cookie {
 	exp := time.Now().Add(g.stickyTTL)
-	payload := strings.Join([]string{stickyPayloadPrefix, g.name, u.label, strconv.FormatInt(exp.Unix(), 10)}, "|")
+	payload := strings.Join([]string{stickyPayloadPrefix, g.name, stickyTag(g.name, u.label), strconv.FormatInt(exp.Unix(), 10)}, "|")
 	return &http.Cookie{
 		Name:     g.stickyCookie,
 		Value:    signToken(macLabelSticky, []byte(payload)),

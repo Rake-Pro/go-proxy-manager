@@ -110,6 +110,7 @@ nav:
               - Webhooks: reference/config/settings/webhooks.md
               - Notifications: reference/config/settings/notifications.md
               - PROXY protocol: reference/config/settings/proxy-protocol.md
+              - Saved filters: reference/config/settings/saved-filters.md
       - Environment variables, flags and CLI: reference/env-vars-and-flags.md
       - REST API: reference/api.md
       - Prometheus metrics: reference/metrics.md

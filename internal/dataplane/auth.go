@@ -46,7 +46,7 @@ func authHandler(a model.AuthMiddleware, reg *registry, hostName string, domains
 	// local credential set, so both are handled before the identity-provider
 	// lookup - they are the two modes with no IdP.
 	if a.Mode == model.AuthModeClientCert {
-		return clientCertGate(a, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
+		return clientCertGate(a, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next, domains...)
 	}
 	if a.Mode == model.AuthModeBasic {
 		return basicAuthGate(a, hostName, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
@@ -136,9 +136,23 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 // request necessarily reaches the upstream with no client-certificate identity
 // headers, because those are set only from a handshake-verified certificate (see
 // the identity-passthrough strip in router.go), and it has none.
-func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
+//
+// domains, when given, are the host's own domains: the certificate must have
+// been verified in a handshake whose SNI is one of them, so a chain verified
+// under another mTLS host's configuration (a connection coalesced under a
+// shared certificate) is not accepted here. The router's per-request mTLS
+// check enforces the same for hosts with tls.clientAuth; this is the gate's
+// own belt. A certificate revoked after its handshake is refused on the next
+// request (revokedNow), not only on the next handshake.
+func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, host string, ep *compiledErrorPages, next http.Handler, domains ...string) http.Handler {
 	roles := spec.ClientCertRoles
 	required := spec.RequiredRoles
+	own := map[string]struct{}{}
+	for _, d := range domains {
+		if k := hostKey(d); k != "" {
+			own[k] = struct{}{}
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The network exemption is decided first, so an exempt client is never
 		// asked for a certificate and never role-checked.
@@ -149,6 +163,20 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 			}
 		}
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+			countDenial(r, "auth-client-cert")
+			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
+			return
+		}
+		if len(own) > 0 {
+			if _, ok := own[hostKey(r.TLS.ServerName)]; !ok {
+				log.Warn().Str("host", host).Str("sni", r.TLS.ServerName).
+					Msg("client-cert: certificate was verified under another host's SNI configuration; refusing")
+				countDenial(r, "auth-client-cert")
+				refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
+				return
+			}
+		}
+		if revokedNow(r.TLS.VerifiedChains) {
 			countDenial(r, "auth-client-cert")
 			refuse(w, http.StatusUnauthorized, ep, host, "authentication required")
 			return
