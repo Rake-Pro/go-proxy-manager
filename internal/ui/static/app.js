@@ -393,7 +393,7 @@ async function loadSavedFilters() {
   try { return arr((await api('/api/settings/saved-filters')).data); } catch (e) { return null; }
 }
 async function putSavedFilters(all, title) {
-  const r = await api('/api/settings/saved-filters', { method: 'PUT', body: JSON.stringify(all) });
+  const r = await api('/api/settings/saved-filters', { method: 'PUT', body: all });
   toastSaved(r.commit, title);
   return arr(r.data);
 }
