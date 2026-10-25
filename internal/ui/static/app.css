@@ -462,6 +462,9 @@ tbody tr.clickable:hover td { background:var(--surface-2); }
 .fsaved { position:relative; flex:0 0 auto; }
 .fsaved-btn svg, #logsExport svg { width:14px; height:14px; margin-left:4px; }
 .fsaved-menu { top:calc(100% + 4px); left:0; right:auto; min-width:260px; max-width:420px; }
+/* the Export menu hangs off the rightmost header button, so it opens leftwards;
+   anchored left it would overhang the scroll pane and add a horizontal scrollbar */
+#logsExportMenu { left:auto; right:0; }
 .fsaved-row { display:flex; align-items:stretch; }
 .fsaved-row > button:first-child { flex:1 1 auto; min-width:0; }
 .fsaved-row > button:first-child b { display:block; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
