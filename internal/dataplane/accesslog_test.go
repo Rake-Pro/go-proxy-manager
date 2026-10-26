@@ -1,9 +1,12 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 )
 
 // The access-log toggle must flip live: with every startup toggle off the
@@ -124,6 +127,24 @@ func TestLogRingResize(t *testing.T) {
 
 // New clamps the configured buffer size and SetAccessLogCapacity rejects
 // out-of-range values without touching the ring.
+func TestSourceOf(t *testing.T) {
+	SetInternalNetworks([]string{"198.51.100.0/24", "not-a-cidr"})
+	t.Cleanup(func() { SetInternalNetworks(nil) })
+	cases := map[string]string{
+		"10.0.0.7": analytics.SourceInternal, "::ffff:192.168.1.1": analytics.SourceInternal, "fd00::1": analytics.SourceInternal,
+		"127.0.0.1": analytics.SourceInternal, "198.51.100.9": analytics.SourceInternal,
+		"203.0.113.9": analytics.SourceExternal, "2001:db8::1": analytics.SourceExternal,
+	}
+	for ip, want := range cases {
+		if got := sourceOf(net.ParseIP(ip)); got != want {
+			t.Errorf("sourceOf(%s) = %q, want %q", ip, got, want)
+		}
+	}
+	if got := sourceOf(nil); got != "" {
+		t.Errorf("sourceOf(nil) = %q", got)
+	}
+}
+
 func TestAccessLogCapacityBounds(t *testing.T) {
 	SetMetricsHook(nil)
 	if got := New(Config{}).AccessLogCapacity(); got != DefaultAccessLogCapacity {

@@ -23,7 +23,9 @@ All notable changes to go-proxy-manager are documented here. The format follows
   shows all traffic, only requests from public addresses, or only requests
   from private, loopback and link-local addresses plus
   `settings.analytics.internalNetworks` (extra CIDRs, Settings, General,
-  Analytics). The rollup database is schema 2; a file written by a pre-release
+  Analytics). Access Logs gain a `source:internal|external` filter term on the
+  same split (entries, exports and the access log line carry `source`). The
+  rollup database is schema 2; a file written by a pre-release
   dev build (schema 1) is rebuilt on first open and its rows, having no source,
   count in the unfiltered view only.
 - Guard triggers accept an optional `name` (object-name characters, at most

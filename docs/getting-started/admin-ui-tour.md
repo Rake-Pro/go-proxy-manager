@@ -199,7 +199,10 @@ Every list has the same filter box.
 - The count line says how many of the captured requests the filter shows and
   how many the buffer holds. Filter fields: `method`, `host`, `path`,
   `status` (a code or a class such as `4xx`), `client`, `country` (with a
-  GeoIP database loaded) and `slow:yes` (requests over one second).
+  GeoIP database loaded), `source` (`internal` for private, loopback,
+  link-local and configured internal-network clients, else `external`; the
+  same split as the Analytics Source filter) and `slow:yes` (requests over one
+  second).
 - With `GPM_GEOIP_DB` set, a **Country** column shows the client's ISO code
   (private and unknown addresses stay blank); the CSV export gains the same
   column and the JSON log line a `country` field.

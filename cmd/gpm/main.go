@@ -273,6 +273,7 @@ func main() {
 		},
 	})
 	collector.Apply(analyticsSettings(settings.Analytics))
+	dataplane.SetInternalNetworks(settings.Analytics.InternalNetworks)
 	dataplane.SetAnalyticsSink(collector)
 	collector.Start()
 	defer collector.Close()
@@ -470,6 +471,7 @@ func main() {
 		// Analytics follows settings live: the collector's switch, retention and
 		// top-clients mode, then the listeners re-pick the observed chain.
 		collector.Apply(analyticsSettings(st2.Analytics))
+		dataplane.SetInternalNetworks(st2.Analytics.InternalNetworks)
 		dp.RefreshObserve()
 		authn.Configure(c, st2)
 		// Every config change funnels through here, so this is the one place the

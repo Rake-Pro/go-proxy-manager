@@ -9709,6 +9709,7 @@ const LOG_FIELDS = {
   method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
   client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
   country: 'an ISO country code such as US (needs a GeoIP database)',
+  source: 'internal (private, loopback, link-local or a configured internal network) or external',
 };
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
@@ -9729,6 +9730,7 @@ function logRec(e, nets) {
     f: {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
       client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'), country: fvals(e.country || ''),
+      source: fvals(e.source || ''),
     },
     m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
@@ -9849,7 +9851,7 @@ async function viewLogs(c) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     let text, type;
     if (fmt === 'csv') {
-      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []);
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source']);
       text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
       type = 'text/csv';
     } else {

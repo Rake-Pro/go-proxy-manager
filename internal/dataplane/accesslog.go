@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,37 @@ type AccessEntry struct {
 	// Country is the ISO-3166-1 alpha-2 code of Client when a GeoIP database
 	// is loaded; empty otherwise (or for private/unknown addresses).
 	Country string `json:"country,omitempty"`
+	// Source is "internal" for a private, loopback, link-local or configured
+	// internal-network client (settings.analytics.internalNetworks), else
+	// "external"; empty when no client address was resolved.
+	Source string `json:"source,omitempty"`
+}
+
+// internalNets is the operator's extra internal networks, shared with the
+// analytics collector (SetInternalNetworks installs the same list).
+var internalNets atomic.Pointer[[]netip.Prefix]
+
+// SetInternalNetworks installs settings.analytics.internalNetworks for the
+// access log's source column. Entries that do not parse are ignored (settings
+// validation rejects them before they get here).
+func SetInternalNetworks(cidrs []string) {
+	nets, _ := analytics.ParseNetworks(cidrs)
+	internalNets.Store(&nets)
+}
+
+// sourceOf classifies a client address the way the analytics collector does.
+func sourceOf(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	var extra []netip.Prefix
+	if p := internalNets.Load(); p != nil {
+		extra = *p
+	}
+	if analytics.IsInternalIP(ip, extra) {
+		return analytics.SourceInternal
+	}
+	return analytics.SourceExternal
 }
 
 // logRing is a fixed-capacity, mutex-guarded ring buffer of recent access
@@ -329,9 +361,10 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			return
 		}
 
-		var clientStr, country string
+		var clientStr, country, source string
 		if ip := clientIP; ip != nil {
 			clientStr = ip.String()
+			source = sourceOf(ip)
 			// Country for the log viewer and the log line, only while a GeoIP
 			// database is loaded. The lookup is an in-memory mmdb walk (about a
 			// microsecond) after the handler has finished writing.
@@ -353,6 +386,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				DurMs:   dur.Milliseconds(),
 				Client:  clientStr,
 				Country: country,
+				Source:  source,
 			})
 		}
 
@@ -373,6 +407,9 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 		if country != "" {
 			ev = ev.Str("country", country)
+		}
+		if source != "" {
+			ev = ev.Str("source", source)
 		}
 		if rid != "" {
 			ev = ev.Str("rid", rid)

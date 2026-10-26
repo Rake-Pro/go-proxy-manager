@@ -1344,7 +1344,7 @@
     "doc": "reference/config/settings/analytics.md#settings-analytics-top-clients"
   },
   "settings.analytics.internalNetworks": {
-    "text": "Extra CIDRs (or single addresses) whose clients count as internal traffic in the Analytics Source filter, on top of the private, loopback and link-local ranges. Classified as each request is aggregated; earlier data keeps its source.",
+    "text": "Extra CIDRs (or single addresses) whose clients count as internal traffic in the Analytics Source filter and the Access Logs source: filter, on top of the private, loopback and link-local ranges. Classified as each request is aggregated; earlier data keeps its source.",
     "doc": "reference/config/settings/analytics.md#settings-analytics-internal-networks"
   },
   "middleware.guard.triggers.name": {
