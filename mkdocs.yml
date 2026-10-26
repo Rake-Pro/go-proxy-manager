@@ -114,6 +114,7 @@ nav:
       - Environment variables, flags and CLI: reference/env-vars-and-flags.md
       - REST API: reference/api.md
       - Prometheus metrics: reference/metrics.md
+      - Analytics: reference/analytics.md
   - Operations:
       - Backup and restore: operations/backup-and-restore.md
       - Upgrading and rolling back: operations/upgrading.md

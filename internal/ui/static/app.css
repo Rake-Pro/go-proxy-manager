@@ -1035,3 +1035,82 @@ details.sub-fold[open] > summary::before { content:"- "; }
 .diff-files .diff-del { color:var(--err-text); }
 .tl-pick { margin-left:auto; font-size:12.5px; color:var(--muted); }
 .cmp-bar { position:sticky; bottom:0; margin-top:16px; }
+
+/* ---------- analytics ----------
+   Series colours are existing tokens (brand, cyan, err) validated as a set in
+   both themes for CVD and normal-vision separation; dark mode keeps the same
+   hex on purpose (the dark text variants fail the lightness band for marks).
+   Charts are drawn at the container's measured pixel width, so the SVG is
+   never stretched. */
+:root { --vz-1:#0066cc; --vz-2:#009596; --vz-3:#c9190b; --vz-dim:#8a8d90; --vz-grid:var(--border-soft); }
+:root[data-theme="dark"] { --vz-grid:#2b2e33; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { --vz-grid:#2b2e33; } }
+.vz-filters { margin-bottom:16px; }
+/* An in-place refresh dims the current render instead of swapping in a
+   loading screen: no layout jump, no lost scroll position. */
+.vz-refreshing { opacity:.6; transition:opacity .15s; }
+/* The toolbar selects size to their content; a floor keeps the chevron from
+   crowding short values ("Last 1h") and lines the three controls up. */
+.vz-filters select.field { min-width:10rem; }
+.stat-row-grid { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:16px; margin-bottom:16px; }
+@media (max-width:1200px) { .stat-row-grid { grid-template-columns:repeat(3, minmax(0,1fr)); } }
+@media (max-width:720px) { .stat-row-grid { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+.stat { background:var(--panel); box-shadow:var(--shadow-sm); padding:14px 16px 12px; min-width:0; }
+.stat-label { font-size:13.5px; color:var(--muted); margin-bottom:4px; }
+.stat-row { display:flex; align-items:flex-end; justify-content:space-between; gap:8px; }
+.stat-value { font-family:var(--sans); font-size:28px; font-weight:600; line-height:1.1; letter-spacing:-.01em; }
+.spark { flex:none; }
+.stat-foot { font-size:12.5px; color:var(--muted); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.stat-delta { font-weight:700; }
+.stat-delta.up { color:var(--ok-text); }
+.stat-delta.down { color:var(--err-text); }
+.vz-card { margin-bottom:16px; }
+.vz-card .card-head h3 { margin-bottom:2px; }
+.vz-card .card-head .muted { font-size:13.5px; max-width:70ch; }
+.vz-chart-wrap { position:relative; min-height:320px; outline:0; }
+.vz-chart-wrap:focus-visible { box-shadow:0 0 0 2px var(--brand); }
+.viz { display:block; width:100%; height:auto; margin-top:6px; }
+.viz .ax { font-family:var(--mono); font-size:11px; fill:var(--faint); }
+.viz .lbl { font-family:var(--sans); font-size:12.5px; fill:var(--text); font-weight:600; }
+.vz-note-sm { font-size:12px; margin-top:4px; }
+.vz-tip { position:absolute; z-index:5; pointer-events:none; background:var(--panel); box-shadow:var(--shadow-md); padding:8px 12px; font-size:12.5px; min-width:150px; }
+.vz-tip-head { font-family:var(--mono); color:var(--muted); margin-bottom:6px; white-space:nowrap; }
+.vz-tip-row { display:flex; align-items:center; gap:8px; line-height:1.6; }
+.vz-tip-row b { font-variant-numeric:tabular-nums; min-width:4.5ch; text-align:right; }
+.vz-tip-row span { color:var(--muted); }
+.vz-tip-key { display:inline-block; width:12px; height:3px; border-radius:1px; flex:none; }
+.legend { display:flex; gap:14px; font-size:12.5px; color:var(--muted); align-items:center; }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:10px; height:10px; border-radius:2px; display:inline-block; }
+.sw.line { height:2px; width:14px; border-radius:1px; }
+.sm-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:24px; margin-top:16px; padding-top:14px; border-top:1px solid var(--border-soft); }
+@media (max-width:920px) { .sm-grid { grid-template-columns:1fr; } }
+.sm { min-width:0; }
+.sm-head { display:flex; justify-content:space-between; align-items:center; font-size:13px; margin-bottom:2px; }
+.sm-head b { font-size:16px; font-weight:600; }
+.vz-grid { margin-bottom:0; align-items:start; }
+@media (max-width:1000px) { .vz-grid { grid-template-columns:1fr; } }
+.table-wrap.flat { box-shadow:none; margin:0 -24px -20px; width:auto; }
+table.compact { min-width:0; }
+table.compact thead th { font-size:13px; padding:6px 16px; }
+table.compact tbody td { padding:7px 16px; font-size:13.5px; font-variant-numeric:tabular-nums; }
+.col-bar { width:1%; white-space:nowrap; }
+.col-bar .num { display:inline-block; min-width:5.5ch; text-align:right; }
+.ibar { display:inline-block; width:110px; height:8px; background:var(--raised); vertical-align:middle; margin-right:10px; }
+.ibar i { display:block; height:100%; }
+
+/* ---------- hover-to-copy ----------
+   A .cp span is a value plus a copy button that shows on row hover, span
+   hover or keyboard focus (never color-only: the button has an aria-label and
+   a title). .done flashes the brand colour after a successful copy. */
+.cp { display:inline-flex; align-items:center; gap:4px; max-width:100%; min-width:0; }
+.cp .cp-text { min-width:0; }
+.cp-btn { flex:none; display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; padding:0; border:0; border-radius:var(--r); background:transparent; color:var(--muted); opacity:0; cursor:pointer; transition:opacity .12s; }
+.cp-btn svg { width:14px; height:14px; }
+tr:hover .cp-btn, .cp:hover .cp-btn, .cp-btn:focus-visible { opacity:1; }
+.cp-btn:hover { background:var(--raised); color:var(--text); }
+.cp-btn.done { color:var(--brand-text); opacity:1; }
+@media (hover:none) { .cp-btn { opacity:.7; } }
+/* Re-assert the chevron placement on toolbar selects with a specific selector
+   placed last, so no shorthand earlier in the cascade can move it. */
+.content select.field, .modal select.field { background-repeat:no-repeat; background-position:right 8px center; background-size:14px; }

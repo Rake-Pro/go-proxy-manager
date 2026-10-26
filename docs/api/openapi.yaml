@@ -96,6 +96,93 @@ components:
         Every token principal is admin-role by construction; real authorization is per-route scope checking
         (see each operation's x-scope). No CSRF header is used or required.
   schemas:
+    AnalyticsReport:
+      type: object
+      description: GET /api/analytics payload. Series buckets are bucketSeconds wide, oldest first.
+      required: [enabled, range, bucketSeconds, totals, series]
+      properties:
+        enabled: { type: boolean }
+        demo: { type: boolean, description: True when the numbers are seed data, not observed traffic. }
+        geoip: { type: boolean, description: Whether a GeoIP database backed the country columns. }
+        range: { type: string, enum: [1h, 6h, 24h, 7d, 30d] }
+        bucketSeconds: { type: integer }
+        host: { type: string, description: The host filter applied, empty for the global view. }
+        generatedAt: { type: string, format: date-time }
+        totals: { $ref: '#/components/schemas/AnalyticsTotals' }
+        previous: { $ref: '#/components/schemas/AnalyticsTotals' }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              t: { type: integer, description: Bucket start, unix seconds. }
+              requests: { type: integer }
+              denied: { type: integer }
+              threats: { type: integer }
+              status5xx: { type: integer }
+              p95ms: { type: integer }
+              bytesOut: { type: integer }
+        countries:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string, description: ISO-3166-1 alpha-2, or "--" for unknown/private. }
+              name: { type: string }
+              requests: { type: integer }
+              denied: { type: integer }
+              threats: { type: integer }
+        denials:
+          type: array
+          items:
+            type: object
+            properties:
+              reason: { type: string }
+              n: { type: integer }
+        signatures:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              n: { type: integer }
+              countries: { type: array, items: { type: string } }
+              hosts: { type: integer }
+        hosts:
+          type: array
+          description: Per-host rows, global view only; omitted from a host-filtered report. Name "-" is traffic that matched no proxy host.
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              requests: { type: integer }
+              status4xx: { type: integer }
+              status5xx: { type: integer }
+              denied: { type: integer }
+              threats: { type: integer }
+              p95ms: { type: integer }
+        clients:
+          type: array
+          items:
+            type: object
+            properties:
+              ip: { type: string }
+              country: { type: string }
+              requests: { type: integer }
+              denied: { type: integer }
+              threats: { type: integer }
+              lastSeen: { type: string, format: date-time }
+    AnalyticsTotals:
+      type: object
+      properties:
+        requests: { type: integer }
+        bytesOut: { type: integer }
+        denied: { type: integer }
+        threats: { type: integer }
+        status4xx: { type: integer }
+        status5xx: { type: integer }
+        p50ms: { type: integer }
+        p95ms: { type: integer }
     Error:
       type: object
       properties:
@@ -2990,6 +3077,9 @@ components:
         capacity:
           type: integer
           description: How many entries the buffer retains before the oldest is overwritten.
+        geoip:
+          type: boolean
+          description: True when a GeoIP database is loaded, so entries carry a country code.
       description: Recent proxied-request access-log entries for the in-UI log viewer.
     ReconcileAck:
       type: object
@@ -3426,6 +3516,46 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: admin
+  /api/analytics:
+    get:
+      summary: Traffic analytics report (global or one host)
+      description: Aggregates for the Analytics view over a time range - request volume, status
+        classes, countries, denial reasons, threat-signature hits, per-host rows and top clients.
+        Every key is bounded (host names, ISO country codes, fixed reason and signature vocabularies);
+        only the top-clients list carries client addresses. Responds 501 when no collector or seed
+        provider is wired on this instance, and marks seed data with demo:true.
+      tags:
+      - Meta
+      parameters:
+      - name: range
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [1h, 6h, 24h, 7d, 30d]
+          default: 24h
+      - name: host
+        in: query
+        required: false
+        description: Proxy host NAME to narrow the report to; omitted means every host.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          description: Analytics is not enabled on this instance.
+      x-scope: '*:read'
   /api/api-tokens:
     get:
       summary: List api tokens

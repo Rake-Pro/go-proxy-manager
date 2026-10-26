@@ -7,6 +7,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Analytics view (sidebar, Overview group) and `GET /api/analytics`: traffic
+  through the edge for a range, fleet-wide or per proxy host - request volume,
+  denied and threat-signature counts, countries, denial reasons, hosts and top
+  clients, drawn as plain HTML and inline SVG. The API answers 501 until a
+  collector is wired; `GPM_ANALYTICS_DEMO=1` serves seed data for review.
+- Access Logs: a Country column, `country:` filter term and CSV column, filled
+  from the GeoIP database when one is loaded (`GPM_GEOIP_DB`); the JSON log
+  line and `GET /api/logs` entries gain the same `country` field.
+- Hover-to-copy on Access Logs and Analytics rows: host, path, client address,
+  country code and signature label each get a copy button on row hover or
+  keyboard focus; values with control characters are copied percent-encoded.
 - Access Logs: the in-memory buffer is sizeable. `-access-log-buffer` /
   `GPM_ACCESS_LOG_BUFFER` sets the startup size (default `5000`, was a fixed
   `1000`), and the Buffer selector on the Access Logs page (or `PUT /api/logs`

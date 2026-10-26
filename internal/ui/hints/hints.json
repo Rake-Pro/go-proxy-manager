@@ -1314,5 +1314,17 @@
   "settings.notifications.targets.events": {
     "text": "Which event kinds this target receives. Empty selects the default set, which is everything except config.changed.",
     "doc": "reference/config/settings/notifications.md#settings-notifications-targets-events"
+  },
+  "analytics.range": {
+    "text": "The window every tile, chart and table on this page is computed over. Longer ranges use wider buckets.",
+    "doc": "reference/analytics.md#range"
+  },
+  "analytics.host": {
+    "text": "All hosts is the fleet view with the Hosts table; one host narrows every number to that proxy host and makes the page linkable as #/analytics/<name>.",
+    "doc": "reference/analytics.md#host-filter"
+  },
+  "analytics.auto": {
+    "text": "Re-reads the report on a timer. Stops while the tab is hidden and when you leave the view.",
+    "doc": "reference/analytics.md#auto-refresh"
   }
 }

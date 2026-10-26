@@ -22,6 +22,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
@@ -717,6 +718,28 @@ func main() {
 
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
+	// Analytics seed provider. GPM_ANALYTICS_DEMO=1 serves deterministic seed
+	// data (internal/analytics.Demo) so the Analytics view can be reviewed before
+	// the collector exists; the API marks every response demo:true. Unset leaves
+	// GET /analytics answering 501.
+	var analyticsFn func(rng, host string) (any, error)
+	if os.Getenv("GPM_ANALYTICS_DEMO") == "1" {
+		analyticsFn = func(rng, host string) (any, error) {
+			var names []string
+			if cfg, _, err := st.Load(ctx); err == nil {
+				for _, h := range cfg.ProxyHosts {
+					names = append(names, h.Name)
+				}
+			}
+			rep, err := analytics.Demo(names, time.Now(), analytics.Query{Range: rng, Host: host})
+			if err != nil {
+				return nil, err
+			}
+			rep.GeoIP = geoResolver.Loaded() // the one real fact in a seed report
+			return rep, nil
+		}
+		log.Warn().Msg("GPM_ANALYTICS_DEMO=1: GET /analytics serves seed data, not observed traffic")
+	}
 	apiHandler := api.New(api.Deps{
 		Store:    st,
 		OnChange: reload,
@@ -756,9 +779,10 @@ func main() {
 			}
 		},
 		RecentLogs: func() any {
-			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity()}
+			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity(), "geoip": geoResolver.Loaded()}
 		},
 		ClearLogs:            dp.ClearLogs,
+		Analytics:            analyticsFn,
 		SetAccessLog:         dp.SetAccessLog,
 		SetAccessLogCapacity: dp.SetAccessLogCapacity,
 		GeoDBLoaded:          geoResolver.Loaded,

@@ -63,6 +63,11 @@ type Deps struct {
 	// ClearLogs, if set, empties the data-plane access-log buffer
 	// (DELETE /logs). May be nil.
 	ClearLogs func()
+	// Analytics, if set, returns the traffic analytics report for GET /analytics
+	// (see internal/analytics.Report) for a range key and an optional proxy host
+	// name. May be nil: the route then responds 501 and the UI shows its
+	// "analytics is off" state.
+	Analytics func(rng, host string) (any, error)
 	// GeoDBLoaded reports whether a GeoIP database is currently loaded, for the
 	// read-only GET /capabilities probe the UI uses to enable/grey-out geo
 	// controls. May be nil (reported as not loaded).
@@ -970,6 +975,7 @@ func New(d Deps) http.Handler {
 	}))
 	// Sidebar object counts without the whole config graph - see summary.go.
 	mux.HandleFunc("GET /config/summary", d.scoped("*:read", d.handleConfigSummary))
+	mux.HandleFunc("GET /analytics", d.scoped("*:read", d.handleAnalytics))
 	mux.HandleFunc("GET /history", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
 		commits, err := d.Store.RepoHistory(r.Context(), 100)
 		if err != nil {

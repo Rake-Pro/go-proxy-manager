@@ -27,6 +27,9 @@ type AccessEntry struct {
 	Bytes  int64     `json:"bytes"`
 	DurMs  int64     `json:"durMs"`
 	Client string    `json:"client"`
+	// Country is the ISO-3166-1 alpha-2 code of Client when a GeoIP database
+	// is loaded; empty otherwise (or for private/unknown addresses).
+	Country string `json:"country,omitempty"`
 }
 
 // logRing is a fixed-capacity, mutex-guarded ring buffer of recent access
@@ -279,23 +282,30 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			status = http.StatusOK // handler wrote nothing / hijacked
 		}
 
-		var clientStr string
+		var clientStr, country string
 		if ip := s.clientIPOf(r); ip != nil {
 			clientStr = ip.String()
+			// Country for the log viewer and the log line, only while a GeoIP
+			// database is loaded. The lookup is an in-memory mmdb walk (about a
+			// microsecond) after the handler has finished writing.
+			if cc, ok := currentGeoDB().Country(ip); ok {
+				country = cc
+			}
 		}
 
 		// Capture into the in-memory ring for the /api/logs viewer. Only when access
 		// logging is on, so the default (off) path stays allocation-free.
 		if accessLog && s.logBuf != nil {
 			s.logBuf.add(AccessEntry{
-				Time:   start,
-				Method: r.Method,
-				Host:   hostOnly(r.Host),
-				Path:   r.URL.Path,
-				Status: status,
-				Bytes:  obs.bytes,
-				DurMs:  dur.Milliseconds(),
-				Client: clientStr,
+				Time:    start,
+				Method:  r.Method,
+				Host:    hostOnly(r.Host),
+				Path:    r.URL.Path,
+				Status:  status,
+				Bytes:   obs.bytes,
+				DurMs:   dur.Milliseconds(),
+				Client:  clientStr,
+				Country: country,
 			})
 		}
 
@@ -313,6 +323,9 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			Str("peer", peerAddr(r))
 		if clientStr != "" {
 			ev = ev.Str("client", clientStr)
+		}
+		if country != "" {
+			ev = ev.Str("country", country)
 		}
 		if rid != "" {
 			ev = ev.Str("rid", rid)

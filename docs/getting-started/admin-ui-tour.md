@@ -51,6 +51,22 @@ One list, **Needs attention**: certificates that failed to renew or are about to
 expire, unhealthy upstream groups, discovery problems. Each row links to the
 object. With nothing to report it says so and shows the live counts.
 
+## Analytics
+
+- Traffic through the edge for one range: six tiles (requests, denied, threat
+  hits, 5xx, p95, bytes out), a column chart of allowed and denied requests
+  with threat hits as a line, three small charts, then countries, denial
+  reasons, threat signatures, hosts and top clients.
+- **Range**, **Host** and **Auto-refresh** on top scope everything below.
+  Picking a host (or clicking a row in the Hosts table) opens
+  `#/analytics/<name>`; `no host (-)` is traffic that matched no proxy host.
+- Hover a column for the bucket's numbers; arrow keys step buckets when the
+  chart has focus; **Table** swaps the chart for the same numbers as rows.
+- Country code, client address and signature cells copy on hover (the small
+  copy button that appears on the row).
+- Until a collector is wired the page says analytics is not enabled; see the
+  [Analytics reference](../reference/analytics.md).
+
 ## Proxy hosts
 
 ![Proxy hosts list](../assets/ui/proxy-hosts.png)
@@ -142,6 +158,7 @@ Every list has the same filter box.
 | `status:4xx,5xx` | Alternatives: the term holds when any of them does |
 | `client:10.0.0.0/8` | Access Logs: the client address inside a network; an IP (`client:10.10.2.55`) matches exactly |
 | `-client:@home-only` | Access Logs: every client outside the networks the `home-only` access list allows |
+| `country:RU` | Access Logs: the client's ISO country code, when a GeoIP database is loaded |
 
 - Typing suggests the field names, then the values present in the list; Enter
   or a click takes a suggestion, Escape closes it.
@@ -177,8 +194,13 @@ Every list has the same filter box.
   banner to dismiss.
 - The count line says how many of the captured requests the filter shows and
   how many the buffer holds. Filter fields: `method`, `host`, `path`,
-  `status` (a code or a class such as `4xx`), `client` and `slow:yes`
-  (requests over one second).
+  `status` (a code or a class such as `4xx`), `client`, `country` (with a
+  GeoIP database loaded) and `slow:yes` (requests over one second).
+- With `GPM_GEOIP_DB` set, a **Country** column shows the client's ISO code
+  (private and unknown addresses stay blank); the CSV export gains the same
+  column and the JSON log line a `country` field.
+- Host, path, client and country cells copy on hover: a small copy button
+  appears on the row; a path with control characters is copied percent-encoded.
 - `client` matches by address: a CIDR (`client:10.0.0.0/8`,
   `client:2001:db8::/32`) takes every client inside it, a bare IP matches
   exactly, and `@name` stands for the networks the access list `name` allows:

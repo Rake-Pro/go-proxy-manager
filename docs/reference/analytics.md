@@ -1,0 +1,65 @@
+# Analytics
+
+The Analytics view (sidebar, Overview group) is an at-a-glance picture of the traffic
+the edge handled. It reads `GET /api/analytics` and renders plain HTML and inline SVG;
+no third-party script is loaded.
+
+## What the page shows
+
+| Block | Content |
+|---|---|
+| Tiles | Requests, denied, threat hits, 5xx, p95 latency, bytes out; each with a delta against the previous period of the same length and a sparkline |
+| Traffic | One column per bucket: allowed on the bottom, denied stacked on top; threat hits as a line on the same count axis. Hover for the bucket's numbers; **Table** shows them as rows |
+| Small charts | Requests, denied and threat hits, each on its own scale |
+| Countries | Requests, denied and threat hits per ISO country code; `--` is unknown or private |
+| Denials by reason | Which tier refused the request (`access-list`, `geo`, `bouncer`, `rate-limit`, `guard`, `auth-*`); counted once, by the first tier that refused |
+| Threat signatures | Observe-only labels (see below) with hits and top countries |
+| Hosts | Global view only: one row per proxy host plus `no host (-)` for requests that matched none |
+| Top clients | Most active client addresses in the range |
+
+## Range
+
+- Presets: `1h`, `6h`, `24h`, `7d`, `30d`; every tile, chart and table uses the same range.
+- Bucket width follows the range: 1 min, 5 min, 30 min, 3 h, 12 h.
+
+## Host filter
+
+- `All hosts` is the fleet view and includes the Hosts table.
+- One host narrows every number to that proxy host; the URL becomes
+  `#/analytics/<name>`, so the view can be bookmarked. The Hosts table rows link there.
+
+## Auto-refresh
+
+- Off, every 15 s, or every minute; **Refresh** does it once.
+- Refreshes repaint in place (no loading screen, scroll position and the Table toggle kept)
+  and pause while the tab is hidden.
+
+## Copying values
+
+- Country codes, client addresses and signature labels show a copy button when their
+  row is hovered or focused. A value containing control characters is copied
+  percent-encoded.
+
+## Threat signatures
+
+| Label | Source |
+|---|---|
+| `wp-probe`, `secret-probe`, `admin-probe`, `webshell`, `iot-rce`, `traversal`, `injection`, `scanner-ua`, `proto-abuse` | Built-in observe-only classifier over path and User-Agent |
+| `crowdsec:<scenario>` | CrowdSec decision scenario, when the bouncer is in use |
+| `guard:<name>` | A named guard trigger |
+
+A label counts a request; it never blocks one. Blocking stays with access lists,
+guard, rate limits and the bouncer.
+
+## API
+
+- `GET /api/analytics?range=24h&host=<name>` (scope `*:read`). Schema `AnalyticsReport`
+  in the [OpenAPI document](../reference/api.md).
+- Unwired instance: `501`. Bad range or host name: `400`.
+
+## Seed data
+
+- No traffic collector ships yet: a normal instance answers `501` and the view says so.
+- `GPM_ANALYTICS_DEMO=1` serves deterministic seed data (documentation-range addresses,
+  generic host names) so the view can be reviewed. The API marks it `demo: true` and
+  the page shows a `Seed data` chip; only the `geoip` flag reflects the real instance.
