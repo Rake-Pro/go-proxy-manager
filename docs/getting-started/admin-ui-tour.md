@@ -57,9 +57,12 @@ object. With nothing to report it says so and shows the live counts.
   hits, 5xx, p95, bytes out), a column chart of allowed and denied requests
   with threat hits as a line, three small charts, then countries, denial
   reasons, threat signatures, hosts and top clients.
-- **Range**, **Host** and **Auto-refresh** on top scope everything below.
-  Picking a host (or clicking a row in the Hosts table) opens
+- **Range**, **Host**, **Source** and **Auto-refresh** on top scope everything
+  below. Picking a host (or clicking a row in the Hosts table) opens
   `#/analytics/<name>`; `no host (-)` is traffic that matched no proxy host.
+  **Source** shows all traffic, only requests from public addresses, or only
+  requests from private, loopback, link-local and configured internal networks
+  (Settings, General, Analytics, **Internal networks**).
 - Hover a column for the bucket's numbers; arrow keys step buckets when the
   chart has focus; **Table** swaps the chart for the same numbers as rows.
 - Country code, client address and signature cells copy on hover (the small

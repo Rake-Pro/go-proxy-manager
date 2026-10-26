@@ -19,7 +19,7 @@ func testCollector(t *testing.T, now *time.Time, store *Rollup) *Collector {
 		Store:     store,
 		Now:       func() time.Time { return *now },
 	})
-	c.Apply(true, 7, "persist")
+	c.Apply(Settings{Enabled: true, RetentionDays: 7, ClientsMode: "persist"})
 	return c
 }
 
@@ -123,10 +123,10 @@ func TestCollectorStampsAndSlots(t *testing.T) {
 	// rather than wiping the slot.
 	m := now.Unix() / 60
 	c.minutes[m%minuteSlots].minute = m + 1
-	c.minutes[m%minuteSlots].hosts = map[string]*hostMinute{"www": {req: 9}}
+	c.minutes[m%minuteSlots].hosts = map[aggKey]*hostMinute{{"www", SourceExternal}: {req: 9}}
 	c.ingest(Event{Time: now.Add(-30 * time.Minute), Host: "www"}) // different slot: fine
 	c.ingest(Event{Time: now, Host: "www"})                        // this slot holds a newer minute: dropped
-	if c.minutes[m%minuteSlots].hosts["www"].req != 9 {
+	if c.minutes[m%minuteSlots].hosts[aggKey{"www", SourceExternal}].req != 9 {
 		t.Error("newer slot was clobbered")
 	}
 }
@@ -134,7 +134,7 @@ func TestCollectorStampsAndSlots(t *testing.T) {
 func TestCollectorDisabledAndQueue(t *testing.T) {
 	now := time.Now()
 	c := testCollector(t, &now, nil)
-	c.Apply(false, 7, "persist")
+	c.Apply(Settings{Enabled: false, RetentionDays: 7, ClientsMode: "persist"})
 	for i := 0; i < 100; i++ {
 		c.Record(Event{Host: "www"})
 	}
@@ -145,7 +145,7 @@ func TestCollectorDisabledAndQueue(t *testing.T) {
 	if rep.Enabled {
 		t.Fatal("report must say disabled")
 	}
-	c.Apply(true, 7, "off")
+	c.Apply(Settings{Enabled: true, RetentionDays: 7, ClientsMode: "off"})
 	for i := 0; i < 200; i++ {
 		c.Record(Event{Host: "www", Client: net.ParseIP("203.0.113.9")})
 	}
@@ -172,15 +172,15 @@ func TestCollectorTopClientsOffForgets(t *testing.T) {
 	}
 	// Addresses recorded under "memory" never reach the rollups, even if the
 	// mode is persist again by the time the hour is flushed.
-	c.Apply(true, 7, "memory")
+	c.Apply(Settings{Enabled: true, RetentionDays: 7, ClientsMode: "memory"})
 	c.ingest(Event{Time: now, Host: "www", Client: net.ParseIP("192.0.2.77")})
-	c.Apply(true, 7, "persist")
+	c.Apply(Settings{Enabled: true, RetentionDays: 7, ClientsMode: "persist"})
 	now = time.Date(2026, 10, 26, 10, 30, 0, 0, time.UTC)
 	for i := 0; i < 5; i++ {
 		c.ingest(Event{Time: now, Host: "www", Client: net.ParseIP("198.51.100.7")})
 	}
 	c.maybeFlush(false) // persists the previous hour, eligible clients included
-	rows, _ := store.ReadHours(0, now.Unix()+1, "")
+	rows, _ := store.ReadHours(0, now.Unix()+1, "", "")
 	var clientRows int
 	for _, r := range rows {
 		if r.Dim == "client" {
@@ -193,11 +193,11 @@ func TestCollectorTopClientsOffForgets(t *testing.T) {
 	if rep, _ := c.Report(Query{Range: "6h"}); len(rep.Clients) != 3 {
 		t.Fatalf("clients before = %d", len(rep.Clients))
 	}
-	c.Apply(true, 7, "off")
+	c.Apply(Settings{Enabled: true, RetentionDays: 7, ClientsMode: "off"})
 	if rep, _ := c.Report(Query{Range: "6h"}); len(rep.Clients) != 0 {
 		t.Errorf("clients after off = %+v", rep.Clients)
 	}
-	rows, _ = store.ReadHours(0, now.Unix()+1, "")
+	rows, _ = store.ReadHours(0, now.Unix()+1, "", "")
 	for _, r := range rows {
 		if r.Dim == "client" {
 			t.Fatal("persisted client rows survived topClients off")
@@ -212,7 +212,7 @@ func TestCollectorBounds(t *testing.T) {
 		c.ingest(Event{Time: now, Host: "www", Client: net.ParseIP("2001:db8::" + strconv.Itoa(i)), Signature: "crowdsec:s" + strconv.Itoa(i)})
 	}
 	hs := &c.hours[(now.Unix()/3600)%hourSlots]
-	hh := hs.hosts["www"]
+	hh := hs.hosts[aggKey{"www", SourceExternal}]
 	if len(hh.clients) > maxClientsPerHost {
 		t.Errorf("clients %d > cap", len(hh.clients))
 	}
@@ -255,7 +255,7 @@ func TestCollectorRollupFlushReplayAndLongRanges(t *testing.T) {
 	defer store.Close()
 	now := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
 	c := testCollector(t, &now, store)
-	c.Apply(true, 30, "persist")
+	c.Apply(Settings{Enabled: true, RetentionDays: 30, ClientsMode: "persist"})
 	for i := 0; i < 5; i++ {
 		c.ingest(Event{Time: now.Add(time.Duration(i) * time.Minute), Host: "www", Status: 200, DurMs: 30, Client: net.ParseIP("198.51.100.7")})
 	}
@@ -271,7 +271,7 @@ func TestCollectorRollupFlushReplayAndLongRanges(t *testing.T) {
 	if len(hours) != 1 {
 		t.Fatalf("hours after first flush = %v", hours)
 	}
-	rows, _ := store.ReadHours(hours[0], hours[0]+3600, "")
+	rows, _ := store.ReadHours(hours[0], hours[0]+3600, "", "")
 	var total RollupRow
 	for _, r := range rows {
 		if r.Dim == "total" {
@@ -383,7 +383,7 @@ func TestCollectorStartClose(t *testing.T) {
 	c.Close()
 	c.Close() // idempotent
 	// The shutdown flush wrote the running hour.
-	rows, _ := store.ReadHours(0, now.Unix()+3600, "www")
+	rows, _ := store.ReadHours(0, now.Unix()+3600, "www", "")
 	var n int64
 	for _, r := range rows {
 		if r.Dim == "total" {
@@ -444,5 +444,129 @@ func TestLongRangeServesRunningHourFromMemory(t *testing.T) {
 	r7, _ := c2.Report(Query{Range: "7d"})
 	if r24.Totals.Requests != 15 || r7.Totals.Requests != 15 {
 		t.Errorf("after restart within the hour: 24h=%d 7d=%d, want 15/15", r24.Totals.Requests, r7.Totals.Requests)
+	}
+}
+
+func TestCollectorSourceFilter(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenRollup(filepath.Join(dir, "a.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 10, 26, 9, 10, 0, 0, time.UTC)
+	c := testCollector(t, &now, store)
+	c.Apply(Settings{Enabled: true, RetentionDays: 30, ClientsMode: "persist", InternalNetworks: []string{"198.51.100.0/24", "bogus"}})
+	ev := func(host, ip string, deny string) {
+		c.ingest(Event{Time: now, Host: host, Method: "GET", Status: 200, DurMs: 10, Client: net.ParseIP(ip), Deny: deny, Path: "/", UserAgent: "Mozilla/5.0"})
+	}
+	for i := 0; i < 6; i++ {
+		ev("www", "10.0.0.1", "") // private: internal
+	}
+	for i := 0; i < 3; i++ {
+		ev("www", "198.51.100.7", "") // configured network: internal
+	}
+	for i := 0; i < 4; i++ {
+		ev("www", "203.0.113.9", "geo") // public: external
+	}
+	ev("api", "::ffff:192.168.1.5", "")                                                                      // mapped v4 private: internal
+	ev("api", "2001:db8::1", "")                                                                             // documentation range: external
+	c.ingest(Event{Time: now, Host: "api", Method: "GET", Status: 200, Path: "/", UserAgent: "Mozilla/5.0"}) // no client address: external
+
+	all, _ := c.Report(Query{Range: "1h"})
+	in, _ := c.Report(Query{Range: "1h", Scope: SourceInternal})
+	ex, _ := c.Report(Query{Range: "1h", Scope: SourceExternal})
+	if all.Totals.Requests != 16 || in.Totals.Requests != 10 || ex.Totals.Requests != 6 {
+		t.Fatalf("requests all/in/ex = %d/%d/%d", all.Totals.Requests, in.Totals.Requests, ex.Totals.Requests)
+	}
+	if in.Totals.Denied != 0 || ex.Totals.Denied != 4 || in.Scope != SourceInternal || all.Scope != "" {
+		t.Errorf("denied in/ex = %d/%d scope %q/%q", in.Totals.Denied, ex.Totals.Denied, in.Scope, all.Scope)
+	}
+	hosts := func(r Report) map[string]int64 {
+		m := map[string]int64{}
+		for _, h := range r.Hosts {
+			m[h.Name] = h.Requests
+		}
+		return m
+	}
+	if h := hosts(in); h["www"] != 9 || h["api"] != 1 {
+		t.Errorf("internal hosts = %+v", in.Hosts)
+	}
+	if h := hosts(ex); h["www"] != 4 || h["api"] != 2 {
+		t.Errorf("external hosts = %+v", ex.Hosts)
+	}
+	// A configured network keeps its country; the private ranges have none.
+	cc := map[string]int64{}
+	for _, x := range in.Countries {
+		cc[x.Code] = x.Requests
+	}
+	if len(cc) != 2 || cc[unknownCountry] != 7 || cc["US"] != 3 || len(in.Denials) != 0 || in.Totals.Threats != 0 {
+		t.Errorf("internal countries/denials = %+v %+v threats %d", in.Countries, in.Denials, in.Totals.Threats)
+	}
+	for _, cl := range ex.Clients {
+		if cl.IP == "10.0.0.1" || cl.IP == "198.51.100.7" {
+			t.Errorf("internal address in external clients: %+v", ex.Clients)
+		}
+	}
+	if _, err := c.Report(Query{Range: "1h", Scope: "lan"}); err == nil {
+		t.Error("unknown scope must error")
+	}
+	// Host filter and scope compose.
+	hv, _ := c.Report(Query{Range: "6h", Host: "api", Scope: SourceExternal})
+	if hv.Totals.Requests != 2 || len(hv.Hosts) != 0 {
+		t.Errorf("api external = %+v", hv.Totals)
+	}
+
+	// The source survives the rollups: flush, read back filtered, replay, long range.
+	now = time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	c.maybeFlush(false)
+	rows, _ := store.ReadHours(0, now.Unix(), "", SourceInternal)
+	var total int64
+	for _, r := range rows {
+		if r.Src != SourceInternal {
+			t.Fatalf("filtered read returned src %q", r.Src)
+		}
+		if r.Dim == "total" {
+			total += r.N
+		}
+	}
+	if total != 10 {
+		t.Errorf("stored internal total = %d (rows %d)", total, len(rows))
+	}
+	c2 := testCollector(t, &now, store)
+	c2.Apply(Settings{Enabled: true, RetentionDays: 30, ClientsMode: "persist"})
+	c2.replay()
+	if r, _ := c2.Report(Query{Range: "24h", Scope: SourceInternal}); r.Totals.Requests != 10 {
+		t.Errorf("replayed internal 24h = %+v", r.Totals)
+	}
+	if r, _ := c2.Report(Query{Range: "7d", Scope: SourceExternal}); r.Totals.Requests != 6 || r.Totals.Denied != 4 {
+		t.Errorf("external 7d = %+v", r.Totals)
+	}
+	if r, _ := c2.Report(Query{Range: "7d"}); r.Totals.Requests != 16 {
+		t.Errorf("all 7d = %+v", r.Totals)
+	}
+}
+
+func TestIsInternalIP(t *testing.T) {
+	extra, bad := ParseNetworks([]string{"198.51.100.0/24", "203.0.113.5", "nope", "2001:db8:1::/48", "::ffff:192.0.2.0/120"})
+	if len(extra) != 4 || len(bad) != 1 || bad[0] != "nope" {
+		t.Fatalf("ParseNetworks = %v bad %v", extra, bad)
+	}
+	if extra[3].String() != "192.0.2.0/24" {
+		t.Errorf("4-in-6 prefix = %s, want 192.0.2.0/24", extra[3])
+	}
+	cases := map[string]bool{
+		"10.1.2.3": true, "172.16.0.9": true, "192.168.0.1": true, "127.0.0.1": true, "169.254.1.1": true,
+		"::1": true, "fd12::1": true, "fe80::1": true, "::ffff:10.0.0.1": true, "0.0.0.0": true,
+		"198.51.100.33": true, "203.0.113.5": true, "2001:db8:1::9": true, "192.0.2.77": true, "::ffff:192.0.2.78": true,
+		"203.0.113.6": false, "2001:db8:2::1": false, "198.51.99.1": false,
+	}
+	for ip, want := range cases {
+		if got := IsInternalIP(net.ParseIP(ip), extra); got != want {
+			t.Errorf("IsInternalIP(%s) = %v, want %v", ip, got, want)
+		}
+	}
+	if IsInternalIP(nil, extra) {
+		t.Error("nil address must not be internal")
 	}
 }

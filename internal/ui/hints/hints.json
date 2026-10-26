@@ -1323,6 +1323,10 @@
     "text": "All hosts is the fleet view with the Hosts table; one host narrows every number to that proxy host and makes the page linkable as #/analytics/<name>.",
     "doc": "reference/analytics.md#host-filter"
   },
+  "analytics.scope": {
+    "text": "All traffic, or only requests from external (public) or internal addresses. Internal is private, loopback and link-local ranges plus the networks listed under Settings, General, Analytics.",
+    "doc": "reference/analytics.md#source-filter"
+  },
   "analytics.auto": {
     "text": "Re-reads the report on a timer. Stops while the tab is hidden and when you leave the view.",
     "doc": "reference/analytics.md#auto-refresh"
@@ -1338,6 +1342,10 @@
   "settings.analytics.topClients": {
     "text": "Whether the per-address table exists: persist keeps a bounded top list in memory and in the rollups, memory keeps it for 24 h only, off never records client addresses.",
     "doc": "reference/config/settings/analytics.md#settings-analytics-top-clients"
+  },
+  "settings.analytics.internalNetworks": {
+    "text": "Extra CIDRs (or single addresses) whose clients count as internal traffic in the Analytics Source filter, on top of the private, loopback and link-local ranges. Classified as each request is aggregated; earlier data keeps its source.",
+    "doc": "reference/config/settings/analytics.md#settings-analytics-internal-networks"
   },
   "middleware.guard.triggers.name": {
     "text": "Optional label for this trigger. A denial it causes shows in Analytics as the signature guard:<name>; unnamed triggers count under the guard denial reason only.",

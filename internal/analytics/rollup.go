@@ -16,6 +16,7 @@ package analytics
 // schedule to drop hours older than its retention window.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -29,8 +30,13 @@ const (
 	rollupMaxHostLen = 253 // a proxy host name may be a full DNS name
 	rollupMaxKeyLen  = 128
 	rollupMaxRows    = 400000 // a sanity cap; the collector budgets well below it
-	rollupSchemaVer  = "1"
+	rollupSchemaVer  = "2"
 )
+
+// rollupSrcs is the closed vocabulary for RollupRow.Src: the request's
+// network source, or "" for rows written before the column existed (counted
+// in the unfiltered report only).
+var rollupSrcs = map[string]bool{"": true, SourceExternal: true, SourceInternal: true}
 
 // rollupDims is the closed vocabulary for RollupRow.Dim.
 var rollupDims = map[string]bool{
@@ -38,8 +44,9 @@ var rollupDims = map[string]bool{
 	"sig": true, "client": true, "dur": true,
 }
 
-// RollupRow is one aggregate for one hour, one proxy host and one dimension
-// key. Dim is a short closed vocabulary ("total", "status", "country",
+// RollupRow is one aggregate for one hour, one proxy host, one network source
+// and one dimension key. Src is SourceExternal or SourceInternal (see
+// IsInternalIP), "" for rows written by schema 1. Dim is a short closed vocabulary ("total", "status", "country",
 // "deny", "sig", "client", "dur"); Key is the value inside that dimension
 // ("" for total, "2xx" for status, "US" for country, "bouncer" for deny, a
 // signature label for sig, an address for client, a histogram upper bound in
@@ -50,6 +57,7 @@ var rollupDims = map[string]bool{
 type RollupRow struct {
 	Hour int64  // unix seconds, truncated to the hour, UTC
 	Host string // proxy host NAME or "-" (requests that matched no host)
+	Src  string // SourceExternal, SourceInternal, or "" (schema 1 rows)
 	Dim  string
 	Key  string
 	N    int64
@@ -100,24 +108,30 @@ func OpenRollup(path string) (*Rollup, error) {
 		}
 	}
 
-	const migration = `
+	const create = `
 CREATE TABLE IF NOT EXISTS rollup (
 	hour INTEGER NOT NULL,
 	host TEXT    NOT NULL,
+	src  TEXT    NOT NULL,
 	dim  TEXT    NOT NULL,
 	key  TEXT    NOT NULL,
 	n    INTEGER NOT NULL,
 	d    INTEGER NOT NULL,
 	t    INTEGER NOT NULL,
 	b    INTEGER NOT NULL,
-	PRIMARY KEY (hour, host, dim, key)
+	PRIMARY KEY (hour, host, src, dim, key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_rollup_hour ON rollup(hour);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-INSERT OR IGNORE INTO meta (k, v) VALUES ('schema_version', '1');`
-	if _, err := db.Exec(migration); err != nil {
+INSERT OR IGNORE INTO meta (k, v) VALUES ('schema_version', '2');`
+	if _, err := db.Exec(create); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("rollup: migrate: %w", err)
+	}
+
+	if err := upgradeRollupSchema1(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	var ver string
@@ -131,6 +145,58 @@ INSERT OR IGNORE INTO meta (k, v) VALUES ('schema_version', '1');`
 	}
 
 	return &Rollup{db: db}, nil
+}
+
+// upgradeRollupSchema1 rebuilds a schema 1 table (no src column) around the
+// schema 2 primary key, keeping every row with src "" (the report counts those
+// in the unfiltered view only). The decision is made on the table itself, not
+// on the meta row, inside one immediate (write-locked) transaction, so a
+// second process opening the same file at the same time finds the work done
+// and a file whose meta row went missing is still recognised.
+func upgradeRollupSchema1(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("rollup: upgrade: conn: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("rollup: upgrade: begin: %w", err)
+	}
+	var hasSrc int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('rollup') WHERE name = 'src'`).Scan(&hasSrc); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return fmt.Errorf("rollup: upgrade: inspect table: %w", err)
+	}
+	if hasSrc == 1 {
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		return err
+	}
+	const upgrade = `
+ALTER TABLE rollup RENAME TO rollup_v1;
+CREATE TABLE rollup (
+	hour INTEGER NOT NULL,
+	host TEXT    NOT NULL,
+	src  TEXT    NOT NULL,
+	dim  TEXT    NOT NULL,
+	key  TEXT    NOT NULL,
+	n    INTEGER NOT NULL,
+	d    INTEGER NOT NULL,
+	t    INTEGER NOT NULL,
+	b    INTEGER NOT NULL,
+	PRIMARY KEY (hour, host, src, dim, key)
+) WITHOUT ROWID;
+INSERT INTO rollup (hour, host, src, dim, key, n, d, t, b)
+	SELECT hour, host, '', dim, key, n, d, t, b FROM rollup_v1;
+DROP TABLE rollup_v1;
+CREATE INDEX IF NOT EXISTS idx_rollup_hour ON rollup(hour);
+INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '2');
+COMMIT;`
+	if _, err := conn.ExecContext(ctx, upgrade); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return fmt.Errorf("rollup: upgrade schema 1 to 2: %w", err)
+	}
+	return nil
 }
 
 // validateRollupRows checks the write contract and cardinality guards for one hour.
@@ -150,6 +216,8 @@ func validateRollupRows(hour int64, rows []RollupRow) error {
 			return fmt.Errorf("rollup: row %d has empty host", i)
 		case len(r.Host) > rollupMaxHostLen:
 			return fmt.Errorf("rollup: row %d host longer than %d bytes", i, rollupMaxHostLen)
+		case !rollupSrcs[r.Src]:
+			return fmt.Errorf("rollup: row %d unknown src %q", i, r.Src)
 		case !rollupDims[r.Dim]:
 			return fmt.Errorf("rollup: row %d unknown dim %q", i, r.Dim)
 		case len(r.Key) > rollupMaxKeyLen:
@@ -183,14 +251,14 @@ func (r *Rollup) WriteHour(hour int64, rows []RollupRow) (err error) {
 	}
 	if len(rows) > 0 {
 		var stmt *sql.Stmt
-		stmt, err = tx.Prepare(`INSERT INTO rollup (hour, host, dim, key, n, d, t, b) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		stmt, err = tx.Prepare(`INSERT INTO rollup (hour, host, src, dim, key, n, d, t, b) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return fmt.Errorf("rollup: prepare insert: %w", err)
 		}
 		defer stmt.Close()
 		for i := range rows {
 			row := &rows[i]
-			if _, err = stmt.Exec(row.Hour, row.Host, row.Dim, row.Key, row.N, row.D, row.T, row.B); err != nil {
+			if _, err = stmt.Exec(row.Hour, row.Host, row.Src, row.Dim, row.Key, row.N, row.D, row.T, row.B); err != nil {
 				return fmt.Errorf("rollup: insert row %d: %w", i, err)
 			}
 		}
@@ -202,12 +270,13 @@ func (r *Rollup) WriteHour(hour int64, rows []RollupRow) (err error) {
 }
 
 // ReadHours returns every row with from <= Hour < to, ordered by Hour, Host,
-// Dim, Key. host "" means every host; otherwise only that host's rows.
-func (r *Rollup) ReadHours(from, to int64, host string) ([]RollupRow, error) {
-	const q = `SELECT hour, host, dim, key, n, d, t, b FROM rollup
-		WHERE hour >= ? AND hour < ? AND (? = '' OR host = ?)
-		ORDER BY hour, host, dim, key`
-	rs, err := r.db.Query(q, from, to, host, host)
+// Src, Dim, Key. host "" means every host; src "" means every source (schema 1
+// rows included), otherwise only rows of that source.
+func (r *Rollup) ReadHours(from, to int64, host, src string) ([]RollupRow, error) {
+	const q = `SELECT hour, host, src, dim, key, n, d, t, b FROM rollup
+		WHERE hour >= ? AND hour < ? AND (? = '' OR host = ?) AND (? = '' OR src = ?)
+		ORDER BY hour, host, src, dim, key`
+	rs, err := r.db.Query(q, from, to, host, host, src, src)
 	if err != nil {
 		return nil, fmt.Errorf("rollup: query: %w", err)
 	}
@@ -216,7 +285,7 @@ func (r *Rollup) ReadHours(from, to int64, host string) ([]RollupRow, error) {
 	var out []RollupRow
 	for rs.Next() {
 		var row RollupRow
-		if err := rs.Scan(&row.Hour, &row.Host, &row.Dim, &row.Key, &row.N, &row.D, &row.T, &row.B); err != nil {
+		if err := rs.Scan(&row.Hour, &row.Host, &row.Src, &row.Dim, &row.Key, &row.N, &row.D, &row.T, &row.B); err != nil {
 			return nil, fmt.Errorf("rollup: scan: %w", err)
 		}
 		out = append(out, row)

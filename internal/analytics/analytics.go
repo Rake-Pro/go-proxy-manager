@@ -23,6 +23,9 @@ type Query struct {
 	Range string
 	// Host narrows the report to one proxy host name; empty means every host.
 	Host string
+	// Scope narrows the report to one network source, SourceExternal or
+	// SourceInternal (see IsInternalIP); empty means both.
+	Scope string
 }
 
 type rangeSpec struct {
@@ -56,6 +59,7 @@ type Report struct {
 	Range         string    `json:"range"`
 	BucketSeconds int       `json:"bucketSeconds"`
 	Host          string    `json:"host"`
+	Scope         string    `json:"scope"`
 	GeneratedAt   time.Time `json:"generatedAt"`
 	Totals        Totals    `json:"totals"`
 	Previous      Totals    `json:"previous"`
@@ -181,6 +185,12 @@ var demoClients = []Client{
 	{"192.0.2.44", "US", 0, 0, 0, time.Time{}},
 }
 
+// Private addresses for the internal-source seed view (RFC 1918 / ULA).
+var demoInternalClients = []Client{
+	{"10.0.0.12", "--", 0, 0, 0, time.Time{}}, {"10.0.0.40", "--", 0, 0, 0, time.Time{}},
+	{"10.0.1.7", "--", 0, 0, 0, time.Time{}}, {"fd00::1a", "--", 0, 0, 0, time.Time{}},
+}
+
 // DefaultDemoHosts is used when the config has no proxy hosts to name.
 var DefaultDemoHosts = []string{"www", "api", "app", "docs", "git", "media"}
 
@@ -194,6 +204,9 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 	dur, bucket, ok := ParseRange(q.Range)
 	if !ok {
 		return Report{}, fmt.Errorf("unknown range %q (want one of %v)", q.Range, rangeOrder)
+	}
+	if !ValidScope(q.Scope) {
+		return Report{}, fmt.Errorf("unknown scope %q (want one of %v)", q.Scope, Scopes())
 	}
 	if len(hosts) == 0 {
 		hosts = DefaultDemoHosts
@@ -223,6 +236,25 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 	}
 	total := sumf(weights)
 	perBucketBase := 240.0 * (bucket.Minutes() / 30) // ~240 req per 30 min fleet-wide
+	// Source mix: about a third of the seed traffic comes from private
+	// addresses and carries no denials or threats; almost none of it lands on
+	// "no host".
+	internal := q.Scope == SourceInternal
+	scopeScale, noHostScale := 1.0, 0.18
+	switch q.Scope {
+	case SourceExternal:
+		scopeScale = 0.68
+	case SourceInternal:
+		scopeScale, noHostScale = 0.32, 0.01
+	}
+	scrub := func(b []Bucket) []Bucket {
+		if internal {
+			for i := range b {
+				b[i].Denied, b[i].Threats = 0, 0
+			}
+		}
+		return b
+	}
 	burst := n * 2 / 3
 	gen := func(seed int64, scale float64) []Bucket {
 		rng := rand.New(rand.NewSource(seed))
@@ -257,12 +289,12 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 		return t
 	}
 
-	rep := Report{Enabled: true, Demo: true, GeoIP: true, Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, GeneratedAt: now, Ranges: Ranges()}
+	rep := Report{Enabled: true, Demo: true, GeoIP: true, Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, Scope: q.Scope, GeneratedAt: now, Ranges: Ranges()}
 	rng := rand.New(rand.NewSource(base))
 	if q.Host != "" {
 		for i, h := range hosts {
 			if h == q.Host {
-				rep.Series = gen(base+hashSeed(h), weights[i]/total*0.82)
+				rep.Series = scrub(gen(base+hashSeed(h), weights[i]/total*0.82*scopeScale))
 			}
 		}
 		rep.Totals = sum(rep.Series)
@@ -285,20 +317,21 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 			}
 		}
 		for i, h := range hosts {
-			b := gen(base+hashSeed(h), weights[i]/total*0.82)
+			b := scrub(gen(base+hashSeed(h), weights[i]/total*0.82*scopeScale))
 			t := sum(b)
 			rep.Hosts = append(rep.Hosts, HostRow{Name: h, Requests: t.Requests, Status4xx: t.Status4xx, Status5xx: t.Status5xx,
 				Denied: t.Denied, Threats: t.Threats, P95ms: p95Of(h)})
 			add(b)
 		}
 		// Requests that matched nothing: most of the scanning lands here.
-		nb := gen(base+hashSeed(NoHost), 0.18)
+		nb := gen(base+hashSeed(NoHost), noHostScale)
 		for i := range nb {
 			nb[i].Denied = nb[i].Requests * 9 / 10
 			nb[i].Threats = nb[i].Requests * 7 / 10
 			nb[i].Status5xx = 0
 			nb[i].P95ms = 3
 		}
+		nb = scrub(nb)
 		nt := sum(nb)
 		rep.Hosts = append(rep.Hosts, HostRow{Name: NoHost, Requests: nt.Requests, Status4xx: nt.Requests, Denied: nt.Denied, Threats: nt.Threats, P95ms: 3})
 		add(nb)
@@ -312,8 +345,22 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 		Status4xx: int64(float64(rep.Totals.Status4xx) * 0.8), P50ms: rep.Totals.P50ms + 2, P95ms: rep.Totals.P95ms + 12,
 		BytesOut: int64(float64(rep.Totals.BytesOut) * 0.96),
 	}
+	rep.Denials, rep.Signatures, rep.Clients = []Denial{}, []Sig{}, []Client{}
+	if internal {
+		// Private sources have no country, no refusals and no scanner hits.
+		rep.Countries = []Country{{Code: unknownCountry, Name: countryName(unknownCountry), Requests: rep.Totals.Requests}}
+		for i, c := range demoInternalClients {
+			c.Requests = int64(float64(rep.Totals.Requests) * (0.35 - 0.08*float64(i)))
+			c.LastSeen = now.Add(-time.Duration(1+i*4) * time.Minute)
+			rep.Clients = append(rep.Clients, c)
+		}
+		return rep, nil
+	}
 	for i, c := range demoCountries {
 		m := demoCountryMix[i]
+		if q.Scope == SourceExternal && c.Code == unknownCountry {
+			continue // the private share is not in the external view
+		}
 		c.Requests = int64(float64(rep.Totals.Requests) * m[0])
 		c.Denied = minInt(int64(float64(rep.Totals.Denied)*m[1]), c.Requests)
 		c.Threats = minInt(int64(float64(rep.Totals.Threats)*m[2]), c.Denied+c.Requests/50)

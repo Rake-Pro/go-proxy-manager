@@ -104,4 +104,6 @@ Other views with no config object behind them:
 
 **Analytics**: the traffic view (volume, countries, denial reasons, threat-signature
 labels, hosts, top clients) fed by the in-process collector; signature labels count
-requests that look like scanning and never block anything.
+requests that look like scanning and never block anything. Its **source** filter splits
+traffic into internal (private, loopback, link-local and configured networks) and
+external (everything else).

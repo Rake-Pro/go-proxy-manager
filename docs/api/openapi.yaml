@@ -107,6 +107,7 @@ components:
         range: { type: string, enum: [1h, 6h, 24h, 7d, 30d] }
         bucketSeconds: { type: integer }
         host: { type: string, description: The host filter applied, empty for the global view. }
+        scope: { type: string, enum: ['', external, internal], description: The source filter applied, empty for every request. }
         generatedAt: { type: string, format: date-time }
         ranges: { type: array, items: { type: string }, description: Range keys this instance can serve (7d and 30d need rollups and enough retention). }
         dropped: { type: integer, description: Events dropped since start because the collector queue was full. }
@@ -2100,6 +2101,11 @@ components:
             enabled: { type: boolean }
             retentionDays: { type: integer, minimum: 0, maximum: 365 }
             topClients: { type: string, enum: [persist, memory, off] }
+            internalNetworks:
+              type: array
+              maxItems: 64
+              items: { type: string }
+              description: Extra CIDRs (or single addresses) reported as internal traffic besides the private, loopback and link-local ranges.
         schemaVersion:
           type: integer
         appName:
@@ -3552,6 +3558,14 @@ paths:
         description: Proxy host NAME to narrow the report to; omitted means every host.
         schema:
           type: string
+      - name: scope
+        in: query
+        required: false
+        description: Narrow the report to requests from external (public) or internal (private, loopback,
+          link-local and settings.analytics.internalNetworks) client addresses; omitted means both.
+        schema:
+          type: string
+          enum: [external, internal]
       responses:
         '200':
           description: OK

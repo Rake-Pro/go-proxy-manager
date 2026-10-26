@@ -272,7 +272,7 @@ func main() {
 			return false
 		},
 	})
-	collector.Apply(settings.Analytics.Enabled, settings.Analytics.Retention(), settings.Analytics.ClientsMode())
+	collector.Apply(analyticsSettings(settings.Analytics))
 	dataplane.SetAnalyticsSink(collector)
 	collector.Start()
 	defer collector.Close()
@@ -469,7 +469,7 @@ func main() {
 		}
 		// Analytics follows settings live: the collector's switch, retention and
 		// top-clients mode, then the listeners re-pick the observed chain.
-		collector.Apply(st2.Analytics.Enabled, st2.Analytics.Retention(), st2.Analytics.ClientsMode())
+		collector.Apply(analyticsSettings(st2.Analytics))
 		dp.RefreshObserve()
 		authn.Configure(c, st2)
 		// Every config change funnels through here, so this is the one place the
@@ -765,18 +765,18 @@ func main() {
 	// data (internal/analytics.Demo) so the Analytics view can be reviewed before
 	// the collector exists; the API marks every response demo:true. Unset leaves
 	// GET /analytics answering 501.
-	analyticsFn := func(rng, host string) (any, error) {
-		return collector.Report(analytics.Query{Range: rng, Host: host})
+	analyticsFn := func(rng, host, scope string) (any, error) {
+		return collector.Report(analytics.Query{Range: rng, Host: host, Scope: scope})
 	}
 	if os.Getenv("GPM_ANALYTICS_DEMO") == "1" {
-		analyticsFn = func(rng, host string) (any, error) {
+		analyticsFn = func(rng, host, scope string) (any, error) {
 			var names []string
 			if cfg, _, err := st.Load(ctx); err == nil {
 				for _, h := range cfg.ProxyHosts {
 					names = append(names, h.Name)
 				}
 			}
-			rep, err := analytics.Demo(names, time.Now(), analytics.Query{Range: rng, Host: host})
+			rep, err := analytics.Demo(names, time.Now(), analytics.Query{Range: rng, Host: host, Scope: scope})
 			if err != nil {
 				return nil, err
 			}
@@ -1060,6 +1060,11 @@ func certExpiryDigest(ctx context.Context, st *store.Store, acmeMgr *acme.Manage
 			run()
 		}
 	}
+}
+
+// analyticsSettings maps the settings block onto the collector's settings.
+func analyticsSettings(a model.AnalyticsSettings) analytics.Settings {
+	return analytics.Settings{Enabled: a.Enabled, RetentionDays: a.Retention(), ClientsMode: a.ClientsMode(), InternalNetworks: a.InternalNetworks}
 }
 
 func envOr(key, def string) string {

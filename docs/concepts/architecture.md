@@ -923,8 +923,10 @@ interoperability with iOS and Android keychains would have been the larger risk.
 The data plane's observe wrapper hands every finished request to it with one
 non-blocking queue send; a single worker goroutine resolves the client's country, runs
 the observe-only signature classifier over path, query and User-Agent, and increments
-bounded in-memory aggregates (24 h of per-host minute counters, 25 hourly slots of
-countries, denial reasons, signature labels and top client addresses). Closed hours are
+bounded in-memory aggregates (24 h of minute counters and 25 hourly slots of countries,
+denial reasons, signature labels and top client addresses, each kept per proxy host and
+per network source: internal for private, loopback, link-local and configured
+`settings.analytics.internalNetworks` clients, external otherwise). Closed hours are
 rolled up into `analytics.db` (SQLite, same hardening as the session store) and pruned
 past `settings.analytics.retentionDays`; the long ranges are served from there. Every
 aggregate key is bounded by configuration or a fixed vocabulary, nothing per-request is

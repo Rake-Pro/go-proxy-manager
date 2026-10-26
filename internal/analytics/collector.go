@@ -3,7 +3,9 @@ package analytics
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -60,6 +62,75 @@ type Options struct {
 	Now func() time.Time
 }
 
+// Settings are the operator settings the collector follows (the analytics
+// block of settings.yaml); Apply installs them.
+type Settings struct {
+	Enabled       bool
+	RetentionDays int    // 0 selects the 7 day default
+	ClientsMode   string // "persist" (default when empty), "memory" or "off"
+	// InternalNetworks are extra CIDRs (or single addresses) counted as
+	// internal traffic besides the private, loopback and link-local ranges.
+	InternalNetworks []string
+}
+
+// Network sources: every aggregate is kept per source so a report can show
+// the traffic the internet sent, the traffic the LAN sent, or both.
+const (
+	SourceExternal = "external"
+	SourceInternal = "internal"
+)
+
+// Scopes lists the Query.Scope values that narrow a report to one source.
+func Scopes() []string { return []string{SourceExternal, SourceInternal} }
+
+// ValidScope reports whether s is "" (every source) or one of Scopes().
+func ValidScope(s string) bool { return s == "" || s == SourceExternal || s == SourceInternal }
+
+// IsInternalIP reports whether ip is a private (RFC 1918, ULA), loopback,
+// link-local or unspecified address, or falls inside one of extra. An IPv4
+// address mapped into IPv6 is unmapped first. nil is not internal.
+func IsInternalIP(ip net.IP, extra []netip.Prefix) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	if a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsUnspecified() {
+		return true
+	}
+	for _, p := range extra {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseNetworks parses CIDRs into prefixes; a bare address is a single-host
+// network and an IPv4 prefix written in IPv4-mapped IPv6 form is converted to
+// IPv4 (IsInternalIP compares unmapped addresses). Entries that do not parse
+// are dropped (settings validation rejects them before they get here) and
+// reported in the second result.
+func ParseNetworks(list []string) ([]netip.Prefix, []string) {
+	var out []netip.Prefix
+	var bad []string
+	for _, s := range list {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			if p.Addr().Is4In6() && p.Bits() >= 96 {
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		if a, err := netip.ParseAddr(s); err == nil {
+			out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+			continue
+		}
+		bad = append(bad, s)
+	}
+	return out, bad
+}
+
 // Bounds on the in-memory aggregates. Every one of them is a cap on a key set
 // a remote client can influence, so the collector's memory stays fixed no
 // matter what traffic looks like.
@@ -94,9 +165,15 @@ type hostMinute struct {
 	dur                    [durBucketCount]int64
 }
 
+// aggKey is what every in-memory aggregate is kept under: a proxy host name
+// and the request's network source.
+type aggKey struct {
+	host, src string
+}
+
 type minuteSlot struct {
 	minute int64 // unix minutes
-	hosts  map[string]*hostMinute
+	hosts  map[aggKey]*hostMinute
 }
 
 type dimCounts struct{ n, d, t int64 }
@@ -122,7 +199,7 @@ func newHostHour() *hostHour {
 
 type hourSlot struct {
 	hour  int64 // unix hours
-	hosts map[string]*hostHour
+	hosts map[aggKey]*hostHour
 }
 
 // Collector aggregates Events into bounded in-memory tables and serves
@@ -133,6 +210,7 @@ type Collector struct {
 	enabled     atomic.Bool
 	clients     atomic.Value // string mode
 	retDays     atomic.Int32
+	internal    atomic.Pointer[[]netip.Prefix] // configured internal networks
 	dropped     atomic.Int64
 	lastDropLog atomic.Int64
 	lastErrLog  atomic.Int64
@@ -172,22 +250,30 @@ func NewCollector(o Options) *Collector {
 	return c
 }
 
-// Apply installs the settings: the on/off switch, the rollup retention and
-// the top-clients mode. Safe to call on every config reload. Switching the
-// clients mode to "off" forgets every address already held, in memory and in
-// the rollups.
-func (c *Collector) Apply(enabled bool, retentionDays int, clientsMode string) {
+// Apply installs the settings: the on/off switch, the rollup retention, the
+// top-clients mode and the internal networks. Safe to call on every config
+// reload. Switching the clients mode to "off" forgets every address already
+// held, in memory and in the rollups. A changed internal-networks list applies
+// to requests from then on; what was already aggregated keeps its source.
+func (c *Collector) Apply(s Settings) {
+	enabled, retentionDays, clientsMode := s.Enabled, s.RetentionDays, s.ClientsMode
 	if retentionDays <= 0 {
 		retentionDays = 7
 	}
 	if clientsMode == "" {
 		clientsMode = "persist"
 	}
+	nets, bad := ParseNetworks(s.InternalNetworks)
+	if len(bad) > 0 {
+		log.Warn().Strs("ignored", bad).Msg("analytics: internalNetworks entries that do not parse were ignored")
+	}
+	prevNets := c.internal.Swap(&nets)
+	netsChanged := prevNets == nil || !slices.Equal(*prevNets, nets)
 	was := c.enabled.Swap(enabled)
 	prevRet := c.retDays.Swap(int32(retentionDays))
 	prevMode, _ := c.clients.Swap(clientsMode).(string)
-	if was != enabled || prevMode != clientsMode || prevRet != int32(retentionDays) {
-		log.Info().Bool("enabled", enabled).Int("retentionDays", retentionDays).Str("topClients", clientsMode).Msg("analytics collector")
+	if was != enabled || prevMode != clientsMode || prevRet != int32(retentionDays) || netsChanged {
+		log.Info().Bool("enabled", enabled).Int("retentionDays", retentionDays).Str("topClients", clientsMode).Int("internalNetworks", len(nets)).Msg("analytics collector")
 	}
 	if clientsMode == "off" && prevMode != "off" {
 		c.forgetClients()
@@ -210,6 +296,18 @@ func (c *Collector) forgetClients() {
 			log.Info().Int64("rows", n).Msg("analytics: persisted client rows deleted (topClients off)")
 		}
 	}
+}
+
+// source classifies a client address for the aggregates.
+func (c *Collector) source(ip net.IP) string {
+	var extra []netip.Prefix
+	if p := c.internal.Load(); p != nil {
+		extra = *p
+	}
+	if IsInternalIP(ip, extra) {
+		return SourceInternal
+	}
+	return SourceExternal
 }
 
 // Active reports whether events are being collected (the data plane uses it
@@ -343,6 +441,7 @@ func (c *Collector) ingest(ev Event) {
 	threat := sig != ""
 	denied := ev.Deny != ""
 	mode, _ := c.clients.Load().(string)
+	src := c.source(ev.Client)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -353,6 +452,7 @@ func (c *Collector) ingest(ev Event) {
 			c.hostSet[host] = struct{}{}
 		}
 	}
+	key := aggKey{host, src}
 	// Minute counters. A slot holding a newer minute is never reset by an
 	// older event (the stamp clamp above makes that rare; this makes it safe).
 	min := ev.Time.Unix() / 60
@@ -362,12 +462,12 @@ func (c *Collector) ingest(ev Event) {
 			return
 		}
 		ms.minute = min
-		ms.hosts = map[string]*hostMinute{}
+		ms.hosts = map[aggKey]*hostMinute{}
 	}
-	hm := ms.hosts[host]
+	hm := ms.hosts[key]
 	if hm == nil {
 		hm = &hostMinute{}
-		ms.hosts[host] = hm
+		ms.hosts[key] = hm
 	}
 	hm.req++
 	hm.bytes += ev.BytesOut
@@ -399,12 +499,12 @@ func (c *Collector) ingest(ev Event) {
 			return
 		}
 		hs.hour = hr
-		hs.hosts = map[string]*hostHour{}
+		hs.hosts = map[aggKey]*hostHour{}
 	}
-	hh := hs.hosts[host]
+	hh := hs.hosts[key]
 	if hh == nil {
 		hh = newHostHour()
-		hs.hosts[host] = hh
+		hs.hosts[key] = hh
 	}
 	cc := hh.country[country]
 	if cc == nil {
@@ -537,17 +637,17 @@ func (c *Collector) rowsForHourLocked(h int64) []RollupRow {
 	hs := &c.hours[h%hourSlots]
 	hour := h * 3600
 	persistClients := c.clients.Load().(string) == "persist"
-	totals := map[string]*hostMinute{}
+	totals := map[aggKey]*hostMinute{}
 	for m := h * 60; m < (h+1)*60; m++ {
 		ms := &c.minutes[m%minuteSlots]
 		if ms.minute != m {
 			continue
 		}
-		for host, hm := range ms.hosts {
-			t := totals[host]
+		for k, hm := range ms.hosts {
+			t := totals[k]
 			if t == nil {
 				t = &hostMinute{}
-				totals[host] = t
+				totals[k] = t
 			}
 			t.req += hm.req
 			t.den += hm.den
@@ -564,34 +664,36 @@ func (c *Collector) rowsForHourLocked(h int64) []RollupRow {
 		}
 	}
 	var tier0, tier1, tier2, tier3, tier4 []RollupRow
-	for host, t := range totals {
-		tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Dim: "total", Key: "", N: t.req, D: t.den, T: t.thr, B: t.bytes})
+	for k, t := range totals {
+		host, src := k.host, k.src
+		tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Src: src, Dim: "total", Key: "", N: t.req, D: t.den, T: t.thr, B: t.bytes})
 		for _, kv := range []struct {
 			k string
 			v int64
 		}{{"2xx", t.s2}, {"3xx", t.s3}, {"4xx", t.s4}, {"5xx", t.s5}, {"other", t.sOther}} {
 			if kv.v > 0 {
-				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Dim: "status", Key: kv.k, N: kv.v})
+				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Src: src, Dim: "status", Key: kv.k, N: kv.v})
 			}
 		}
 		for i, v := range t.dur {
 			if v > 0 {
-				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Dim: "dur", Key: durKey(i), N: v})
+				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Src: src, Dim: "dur", Key: durKey(i), N: v})
 			}
 		}
 	}
 	if hs.hour == h {
-		for host, hh := range hs.hosts {
+		for ak, hh := range hs.hosts {
+			host, src := ak.host, ak.src
 			for k, v := range hh.deny {
-				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Dim: "deny", Key: k, N: v})
+				tier0 = append(tier0, RollupRow{Hour: hour, Host: host, Src: src, Dim: "deny", Key: k, N: v})
 			}
 			for k, v := range hh.country {
-				tier1 = append(tier1, RollupRow{Hour: hour, Host: host, Dim: "country", Key: k, N: v.n, D: v.d, T: v.t})
+				tier1 = append(tier1, RollupRow{Hour: hour, Host: host, Src: src, Dim: "country", Key: k, N: v.n, D: v.d, T: v.t})
 			}
 			for k, v := range hh.sig {
-				tier2 = append(tier2, RollupRow{Hour: hour, Host: host, Dim: "sig", Key: k, N: v.n})
+				tier2 = append(tier2, RollupRow{Hour: hour, Host: host, Src: src, Dim: "sig", Key: k, N: v.n})
 				for _, cc := range topKeys(hh.sigCountry[k], 3) {
-					tier3 = append(tier3, RollupRow{Hour: hour, Host: host, Dim: "sig", Key: k + "|" + cc, N: hh.sigCountry[k][cc]})
+					tier3 = append(tier3, RollupRow{Hour: hour, Host: host, Src: src, Dim: "sig", Key: k + "|" + cc, N: hh.sigCountry[k][cc]})
 				}
 			}
 			if persistClients {
@@ -610,7 +712,7 @@ func (c *Collector) rowsForHourLocked(h int64) []RollupRow {
 					list = list[:persistedClients]
 				}
 				for _, e := range list {
-					tier4 = append(tier4, RollupRow{Hour: hour, Host: host, Dim: "client", Key: e.k + "|" + e.v.country, N: e.v.n, D: e.v.d, T: e.v.t, B: e.v.lastSeen})
+					tier4 = append(tier4, RollupRow{Hour: hour, Host: host, Src: src, Dim: "client", Key: e.k + "|" + e.v.country, N: e.v.n, D: e.v.d, T: e.v.t, B: e.v.lastSeen})
 				}
 			}
 		}
@@ -675,7 +777,7 @@ func topKeys(m map[string]int64, n int) []string {
 func (c *Collector) replay() {
 	now := c.opts.Now()
 	nowHour := now.Unix() / 3600
-	rows, err := c.opts.Store.ReadHours((nowHour-24)*3600, (nowHour+1)*3600, "")
+	rows, err := c.opts.Store.ReadHours((nowHour-24)*3600, (nowHour+1)*3600, "", "")
 	if err != nil {
 		log.Error().Err(err).Msg("analytics: rollup replay failed")
 		return
@@ -696,12 +798,13 @@ func (c *Collector) applyRowLocked(r RollupRow, nowMin int64) {
 	hs := &c.hours[h%hourSlots]
 	if hs.hour != h {
 		hs.hour = h
-		hs.hosts = map[string]*hostHour{}
+		hs.hosts = map[aggKey]*hostHour{}
 	}
-	hh := hs.hosts[r.Host]
+	key := aggKey{r.Host, r.Src}
+	hh := hs.hosts[key]
 	if hh == nil {
 		hh = newHostHour()
-		hs.hosts[r.Host] = hh
+		hs.hosts[key] = hh
 	}
 	if len(c.hostSet) < maxHostsTracked {
 		c.hostSet[r.Host] = struct{}{}
@@ -722,12 +825,12 @@ func (c *Collector) applyRowLocked(r RollupRow, nowMin int64) {
 			ms := &c.minutes[m%minuteSlots]
 			if ms.minute != m {
 				ms.minute = m
-				ms.hosts = map[string]*hostMinute{}
+				ms.hosts = map[aggKey]*hostMinute{}
 			}
-			hm := ms.hosts[r.Host]
+			hm := ms.hosts[key]
 			if hm == nil {
 				hm = &hostMinute{}
-				ms.hosts[r.Host] = hm
+				ms.hosts[key] = hm
 			}
 			share := func(v int64) int64 {
 				q := v / span

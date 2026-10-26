@@ -15,8 +15,11 @@ func (c *Collector) Report(q Query) (Report, error) {
 	if !ok {
 		return Report{}, fmt.Errorf("unknown range %q", q.Range)
 	}
+	if !ValidScope(q.Scope) {
+		return Report{}, fmt.Errorf("unknown scope %q", q.Scope)
+	}
 	now := c.opts.Now()
-	rep := Report{Enabled: c.enabled.Load(), Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, GeneratedAt: now, Ranges: c.Ranges()}
+	rep := Report{Enabled: c.enabled.Load(), Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, Scope: q.Scope, GeneratedAt: now, Ranges: c.Ranges()}
 	if c.opts.GeoLoaded != nil {
 		rep.GeoIP = c.opts.GeoLoaded()
 	}
@@ -32,7 +35,7 @@ func (c *Collector) Report(q Query) (Report, error) {
 		return Report{}, fmt.Errorf("%w %q", ErrUnknownHost, q.Host)
 	}
 	long := dur > 24*time.Hour
-	key := q.Range + "|" + q.Host
+	key := q.Range + "|" + q.Host + "|" + q.Scope
 	if long {
 		c.cacheMu.Lock()
 		if e, ok := c.cache[key]; ok && now.Sub(e.at) < longReportCacheTTL {
@@ -49,21 +52,21 @@ func (c *Collector) Report(q Query) (Report, error) {
 	var err error
 	if !long {
 		c.mu.Lock()
-		agg = c.memoryWindow(start, end, bucket, q.Host)
-		prev = c.memoryWindow(start.Add(-dur), start, bucket, q.Host)
+		agg = c.memoryWindow(start, end, bucket, q.Host, q.Scope)
+		prev = c.memoryWindow(start.Add(-dur), start, bucket, q.Host, q.Scope)
 		c.mu.Unlock()
 		if dur == 24*time.Hour && c.opts.Store != nil {
 			// The previous day is not in memory; read it from the rollups.
-			if pw, perr := c.storeWindow(start.Add(-dur), start, bucket, q.Host); perr == nil {
+			if pw, perr := c.storeWindow(start.Add(-dur), start, bucket, q.Host, q.Scope); perr == nil {
 				prev = pw
 			}
 		}
 	} else {
-		agg, err = c.storeWindow(start, end, bucket, q.Host)
+		agg, err = c.storeWindow(start, end, bucket, q.Host, q.Scope)
 		if err != nil {
 			return Report{}, err
 		}
-		prev, err = c.storeWindow(start.Add(-dur), start, bucket, q.Host)
+		prev, err = c.storeWindow(start.Add(-dur), start, bucket, q.Host, q.Scope)
 		if err != nil {
 			prev = newWindow(start.Add(-dur), start, bucket)
 		}
@@ -295,16 +298,18 @@ func (w *window) addRow(r RollupRow) {
 }
 
 // memoryWindow aggregates the minute and hour slots overlapping [start,end).
-// Caller holds c.mu. host "" means every host.
-func (c *Collector) memoryWindow(start, end time.Time, bucket time.Duration, host string) *window {
+// Caller holds c.mu. host "" means every host; src "" means every source.
+func (c *Collector) memoryWindow(start, end time.Time, bucket time.Duration, host, src string) *window {
 	w := newWindow(start, end, bucket)
-	c.addMemoryLocked(w, start, end, host, nil)
+	c.addMemoryLocked(w, start, end, host, src, nil)
 	return w
 }
 
 // addMemoryLocked folds the memory slots within [start,end) into w, skipping
 // hours present in skipHours (those came from the store). Caller holds c.mu.
-func (c *Collector) addMemoryLocked(w *window, start, end time.Time, host string, skipHours map[int64]struct{}) {
+// A src filter leaves out schema 1 rows replayed under src "" (their source
+// is unknown); the unfiltered view counts them.
+func (c *Collector) addMemoryLocked(w *window, start, end time.Time, host, src string, skipHours map[int64]struct{}) {
 	for m := start.Unix() / 60; m < end.Unix()/60; m++ {
 		if _, skip := skipHours[m/60]; skip {
 			continue
@@ -314,11 +319,11 @@ func (c *Collector) addMemoryLocked(w *window, start, end time.Time, host string
 			continue
 		}
 		at := time.Unix(m*60, 0)
-		for h, hm := range ms.hosts {
-			if host != "" && h != host {
+		for k, hm := range ms.hosts {
+			if (host != "" && k.host != host) || (src != "" && k.src != src) {
 				continue
 			}
-			w.addMinute(h, at, hm)
+			w.addMinute(k.host, at, hm)
 		}
 	}
 	for hr := start.Unix() / 3600; hr < (end.Unix()+3599)/3600; hr++ {
@@ -329,11 +334,11 @@ func (c *Collector) addMemoryLocked(w *window, start, end time.Time, host string
 		if hs.hour != hr {
 			continue
 		}
-		for h, hh := range hs.hosts {
-			if host != "" && h != host {
+		for k, hh := range hs.hosts {
+			if (host != "" && k.host != host) || (src != "" && k.src != src) {
 				continue
 			}
-			w.addHour(h, hh)
+			w.addHour(k.host, hh)
 		}
 	}
 }
@@ -341,11 +346,11 @@ func (c *Collector) addMemoryLocked(w *window, start, end time.Time, host string
 // storeWindow aggregates rollup rows for [start,end) plus the memory slots
 // for hours the store does not hold (the running hour, anything unflushed).
 // The store is read WITHOUT the collector lock; only the memory pass locks.
-func (c *Collector) storeWindow(start, end time.Time, bucket time.Duration, host string) (*window, error) {
+func (c *Collector) storeWindow(start, end time.Time, bucket time.Duration, host, src string) (*window, error) {
 	w := newWindow(start, end, bucket)
 	stored := map[int64]struct{}{}
 	if c.opts.Store != nil {
-		rows, err := c.opts.Store.ReadHours(start.Unix(), end.Unix(), host)
+		rows, err := c.opts.Store.ReadHours(start.Unix(), end.Unix(), host, src)
 		if err != nil {
 			return nil, err
 		}
@@ -363,7 +368,7 @@ func (c *Collector) storeWindow(start, end time.Time, bucket time.Duration, host
 		}
 	}
 	c.mu.Lock()
-	c.addMemoryLocked(w, start, end, host, stored)
+	c.addMemoryLocked(w, start, end, host, src, stored)
 	c.mu.Unlock()
 	return w, nil
 }

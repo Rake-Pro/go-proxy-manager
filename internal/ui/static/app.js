@@ -10427,6 +10427,9 @@ async function viewSettings(c, tab) {
             <div class="hint">Whether the per-address table exists at all, and whether it survives a restart.</div>
           </div>
         </div>
+        <div class="field-group" style="margin-top:10px"><label>Internal networks</label><div class="chip-input" id="set-an-nets" data-hint="settings.analytics.internalNetworks" data-path="analytics.internalNetworks"></div>
+          <div class="hint">Extra CIDRs counted as internal by the Source filter on the Analytics page. Private (RFC 1918, ULA), loopback and link-local addresses always are; add a VPN or overlay range here. Applies to requests from now on.</div>
+        </div>
       </div>
       ${settingsSaveBar('set-save')}
     </div>
@@ -10561,6 +10564,7 @@ async function viewSettings(c, tab) {
     refreshAdminEdge();
   });
   const ppCtl = makeChipInput($('#set-pp-cidrs'), arr(pp.trustedCIDRs), 'add CIDR...');
+  const anNetsCtl = makeChipInput($('#set-an-nets'), arr(an.internalNetworks), 'add CIDR...');
   const trustedCtl = makeChipInput($('#set-trustedproxies'), trusted, '10.0.0.0/8 or 192.0.2.10', (list) => {
     $('#set-trustedproxies-warn').hidden = !hasWildcardProxy(list);
   });
@@ -10739,6 +10743,13 @@ async function viewSettings(c, tab) {
     if (anRet > 0 && anRet !== 7) analytics.retentionDays = anRet;
     const anClients = $('#set-an-clients').value;
     if (anClients && anClients !== 'persist') analytics.topClients = anClients;
+    const anNets = anNetsCtl.get();
+    const badNet = anNets.find((n) => !/^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(n));
+    if (badNet) {
+      showInvalid('Not a network', `"${badNet}" is not a CIDR or an IP address.`, $('#set-an-nets'));
+      return;
+    }
+    if (anNets.length) analytics.internalNetworks = anNets;
     if (Object.keys(analytics).length) body.analytics = analytics;
 
     const ppCidrs = ppCtl.get();
@@ -11702,7 +11713,10 @@ document.addEventListener('click', async (e) => {
 // wired and the view says so.
 const AN_RANGE_KEY = 'gpm.analytics.range';
 const AN_AUTO_KEY = 'gpm.analytics.auto';
+const AN_SCOPE_KEY = 'gpm.analytics.scope';
 const AN_RANGES = ['1h', '6h', '24h', '7d', '30d'];
+// Source filter: '' is every request, else the network the client was on.
+const AN_SCOPES = [['', 'All traffic'], ['external', 'External only'], ['internal', 'Internal only']];
 // Series colours: existing tokens (brand, cyan, err), validated as a set in
 // both themes for CVD and normal-vision separation; the same hex in dark mode
 // on purpose (the dark text variants fail the lightness band for marks).
@@ -11899,8 +11913,11 @@ async function viewAnalytics(c, sub) {
   if (!AN_RANGES.includes(range)) range = '24h';
   let auto = 0;
   try { auto = Number(localStorage.getItem(AN_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
+  let scope = '';
+  try { scope = localStorage.getItem(AN_SCOPE_KEY) || ''; } catch (e) { /* ignore */ }
+  if (!AN_SCOPES.some(([v]) => v === scope)) scope = '';
   const host = sub || '';
-  const q = `/api/analytics?range=${encodeURIComponent(range)}${host ? '&host=' + encodeURIComponent(host) : ''}`;
+  const q = `/api/analytics?range=${encodeURIComponent(range)}${host ? '&host=' + encodeURIComponent(host) : ''}${scope ? '&scope=' + encodeURIComponent(scope) : ''}`;
   // View state that survives an in-place refresh (auto-refresh and the Refresh
   // button re-fetch and repaint without going through route(), so the page
   // keeps its scroll position and the Table toggle).
@@ -11926,14 +11943,14 @@ async function viewAnalytics(c, sub) {
     }
     throw e;
   }
-  await renderAnalytics(c, rep, { host, range, q, st });
+  await renderAnalytics(c, rep, { host, range, scope, q, st });
 }
 
 // renderAnalytics paints a report into c. Called by viewAnalytics on first
 // load and by refresh() afterwards, so a refresh keeps the view's state (st)
 // and never swaps in the loading screen.
 async function renderAnalytics(c, rep, ctx) {
-  const { host, range, q, st } = ctx;
+  const { host, range, scope, q, st } = ctx;
   let auto = st.auto;
   if (rep.enabled === false) {
     c.innerHTML = pageHead('Analytics', 'Traffic through the edge: volume, origin, refusals and scanner activity.')
@@ -11950,7 +11967,8 @@ async function renderAnalytics(c, rep, ctx) {
   const bs = rep.bucketSeconds || 1800;
   const bucketText = bs >= 3600 ? (bs / 3600) + ' h' : (bs / 60) + ' min';
   const title = host ? `Analytics: ${host}` : 'Analytics';
-  const subLine = host ? `Traffic for proxy host ${host} over the last ${range}.` : `Traffic through the edge over the last ${range}: volume, origin, refusals and scanner activity.`;
+  const scopeText = scope === 'internal' ? 'Internal traffic (private, loopback, link-local and configured internal networks)' : scope === 'external' ? 'External traffic' : 'Traffic';
+  const subLine = host ? `${scopeText} for proxy host ${host} over the last ${range}.` : `${scopeText} through the edge over the last ${range}: volume, origin, refusals and scanner activity.`;
   const crumb = host ? `<a href="#/analytics">Analytics</a> &rsaquo; ${esc(host)}` : '';
   const labels = (rep.demo ? '<span class="chip warn" title="GPM_ANALYTICS_DEMO=1: these numbers are seed data, not observed traffic">Seed data</span>' : '')
     + (host ? `<a class="btn sm" href="#/hosts/${encodeURIComponent(host)}">Open host</a>` : '');
@@ -11965,6 +11983,7 @@ async function renderAnalytics(c, rep, ctx) {
     <div class="toolbar vz-filters">
       <label class="auto-refresh" for="anRange"><span>Range</span><select class="field" id="anRange" data-hint="analytics.range" aria-label="Time range">${AN_RANGES.filter((r) => !rep.ranges || rep.ranges.includes(r) || r === range).map((r) => `<option value="${r}"${r === range ? ' selected' : ''}>Last ${r}</option>`).join('')}</select></label>
       <label class="auto-refresh" for="anHost"><span>Host</span><select class="field" id="anHost" data-hint="analytics.host" aria-label="Host filter"><option value=""${host ? '' : ' selected'}>All hosts</option>${hostsList.map((n) => `<option value="${esc(n)}"${n === host ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="anScope"><span>Source</span><select class="field" id="anScope" data-hint="analytics.scope" aria-label="Traffic source filter">${AN_SCOPES.map(([v, l]) => `<option value="${v}"${v === scope ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="auto-refresh" for="anAuto"><span>Auto-refresh</span><select class="field" id="anAuto" data-hint="analytics.auto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <div class="toolbar-actions">${rep.dropped ? `<span class="chip warn" title="Events dropped because the collector queue was full since start; the counts below undercount by this many">${esc(anCompact(rep.dropped))} dropped</span>` : ''}<span class="muted" id="anUpdated">updated ${esc(new Date(rep.generatedAt || Date.now()).toLocaleTimeString())}</span><button class="btn" id="anRefresh" type="button">${ICON.history}Refresh</button></div>
     </div>
@@ -12059,6 +12078,10 @@ async function renderAnalytics(c, rep, ctx) {
   $('#anHost').addEventListener('change', () => {
     const v = $('#anHost').value;
     location.hash = v ? '#/analytics/' + encodeURIComponent(v) : '#/analytics';
+  });
+  $('#anScope').addEventListener('change', () => {
+    try { localStorage.setItem(AN_SCOPE_KEY, $('#anScope').value); } catch (e) { /* ignore */ }
+    route();
   });
   $('#anAuto').addEventListener('change', () => {
     auto = Number($('#anAuto').value) || 0;

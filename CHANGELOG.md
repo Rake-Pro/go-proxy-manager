@@ -18,6 +18,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
   Analytics view now serve observed traffic; the 7d and 30d ranges appear when
   retention covers them. `topClients` chooses whether client addresses are
   kept, kept in memory only, or never recorded.
+- Analytics source filter: every aggregate is kept per network source, and the
+  page's `Source` select (and `GET /api/analytics?scope=external|internal`)
+  shows all traffic, only requests from public addresses, or only requests
+  from private, loopback and link-local addresses plus
+  `settings.analytics.internalNetworks` (extra CIDRs, Settings, General,
+  Analytics). The rollup database is schema 2; a file written by a pre-release
+  dev build (schema 1) is rebuilt on first open and its rows, having no source,
+  count in the unfiltered view only.
 - Guard triggers accept an optional `name` (object-name characters, at most
   64), reported to analytics as the signature `guard:<name>`; CrowdSec bouncer
   denials carry the decision scenario as `crowdsec:<scenario>`.

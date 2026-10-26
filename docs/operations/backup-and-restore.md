@@ -85,4 +85,6 @@ way an untested backup anywhere else is a hope, not a backup.
 traffic rollups behind the Analytics view's 7d and 30d ranges. It is runtime data, not
 config: it is not part of `GET /api/backup`, and losing it costs history only (the
 collector starts a fresh file). Copy it with the data directory if the history matters;
-stop gpm first or copy the `-wal` and `-shm` files with it.
+stop gpm first or copy the `-wal` and `-shm` files with it. A release can rebuild the
+file's schema on first start (the [upgrade notes](upgrading.md) say when); a copy taken
+before the upgrade is the only way back to the previous release with history intact.

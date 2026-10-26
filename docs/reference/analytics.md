@@ -8,6 +8,7 @@ no third-party script is loaded.
 
 | Block | Content |
 |---|---|
+| Filters | **Range**, **Host** and **Source** (all traffic, external only, internal only) apply to every block below; **Auto-refresh** re-reads on a timer |
 | Tiles | Requests, denied, threat hits, 5xx, p95 latency, bytes out; each with a delta against the previous period of the same length and a sparkline |
 | Traffic | One column per bucket: allowed on the bottom, denied stacked on top; threat hits as a line on the same count axis. Hover for the bucket's numbers; **Table** shows them as rows |
 | Small charts | Requests, denied and threat hits, each on its own scale |
@@ -27,6 +28,25 @@ no third-party script is loaded.
 - `All hosts` is the fleet view and includes the Hosts table.
 - One host narrows every number to that proxy host; the URL becomes
   `#/analytics/<name>`, so the view can be bookmarked. The Hosts table rows link there.
+
+## Source filter
+
+- `All traffic`, `External only` or `Internal only`; the choice is remembered in the browser
+  and applies to every tile, chart and table.
+- Internal is a client address in a private (RFC 1918, IPv6 ULA), loopback, link-local
+  or unspecified range, or in a network listed under
+  [`settings.analytics.internalNetworks`](config/settings/analytics.md#settings-analytics-internal-networks)
+  (a VPN or overlay range, for example). Everything else, including a request with no
+  resolvable client address, is external.
+- The source is decided once, when the request is aggregated, with the client address the
+  host's trusted-proxy settings resolve. Changing the internal networks applies from then
+  on; data already collected keeps its source. A host whose trusted proxies include
+  addresses that are not your own proxies lets an outside client assert a private
+  `X-Forwarded-For` and land in the internal view, so keep `trustedProxies` tight.
+- Use it to keep LAN chatter (a home automation server polling an upstream, for example)
+  out of the picture when reading internet-facing traffic, or to look at the LAN alone.
+- Rollups written by a pre-release build from before the source existed carry no source:
+  they count in `All traffic` only.
 
 ## Auto-refresh
 
@@ -53,10 +73,11 @@ guard, rate limits and the bouncer.
 
 ## API
 
-- `GET /api/analytics?range=24h&host=<name>` (scope `*:read`). Schema `AnalyticsReport`
-  in the [OpenAPI document](../reference/api.md).
-- Collector off: `200` with `enabled: false`. Bad range, unknown host or a range the
-  retention does not cover: `400`. No analytics endpoint at all (older server): `501`.
+- `GET /api/analytics?range=24h&host=<name>&scope=external` (scope `*:read`); `scope` is
+  `external`, `internal`, or omitted for both. Schema `AnalyticsReport` in the
+  [OpenAPI document](../reference/api.md).
+- Collector off: `200` with `enabled: false`. Bad range, unknown host, bad scope or a range
+  the retention does not cover: `400`. No analytics endpoint at all (older server): `501`.
 
 ## Where the numbers come from
 

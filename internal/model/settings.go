@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -1107,7 +1108,16 @@ type AnalyticsSettings struct {
 	// "memory" keeps it for the in-memory window only, "off" never records
 	// client addresses in analytics at all.
 	TopClients string `json:"topClients,omitempty" yaml:"topClients,omitempty"`
+	// InternalNetworks are CIDRs (a bare address counts as one host) whose
+	// clients are reported as internal traffic in addition to the private
+	// (RFC 1918, ULA), loopback and link-local ranges, which always are. The
+	// Analytics view filters on the result (all, external or internal); the
+	// classification is made once per request as it is aggregated.
+	InternalNetworks []string `json:"internalNetworks,omitempty" yaml:"internalNetworks,omitempty"`
 }
+
+// MaxAnalyticsInternalNetworks bounds analytics.internalNetworks.
+const MaxAnalyticsInternalNetworks = 64
 
 // DefaultAnalyticsRetentionDays is the rollup retention when unset.
 const DefaultAnalyticsRetentionDays = 7
@@ -1143,6 +1153,17 @@ func (a AnalyticsSettings) validate() error {
 	case "", AnalyticsClientsPersist, AnalyticsClientsMemory, AnalyticsClientsOff:
 	default:
 		return fmt.Errorf("analytics.topClients: must be %q, %q or %q, got %q", AnalyticsClientsPersist, AnalyticsClientsMemory, AnalyticsClientsOff, a.TopClients)
+	}
+	if len(a.InternalNetworks) > MaxAnalyticsInternalNetworks {
+		return fmt.Errorf("analytics.internalNetworks: at most %d entries, got %d", MaxAnalyticsInternalNetworks, len(a.InternalNetworks))
+	}
+	for i, n := range a.InternalNetworks {
+		if _, err := netip.ParsePrefix(n); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(n); err != nil {
+			return fmt.Errorf("analytics.internalNetworks[%d]: %q is not a CIDR or an IP address", i, n)
+		}
 	}
 	return nil
 }

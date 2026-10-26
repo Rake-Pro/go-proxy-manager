@@ -144,3 +144,15 @@ below map each row's wording to its cause and fix.
 | A scrape token gets `403` on `/metrics` | The token lacks `metrics:read` | Mint a token with exactly that scope |
 | `go tool pprof` against a remote URL fails | It sends no session cookie and its symbolization step is a mutating request | Download the profile with the cookie and analyse the local file ([pprof](pprof.md)) |
 | A resource-scoped token gets `403` on `/debug/pprof/` | Those endpoints need the `admin` scope | Use an admin-scope token or an admin browser session |
+
+## Analytics
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The Analytics page says it is off | `settings.analytics.enabled` is false (the default) | Switch it on under Settings, General, **Analytics**; the page fills in from that moment ([Settings: analytics](../reference/config/settings/analytics.md)) |
+| The `7d` or `30d` range is missing from the Range select | Retention does not cover it, or `analytics.db` could not be opened | Set `analytics.retentionDays` to 7 or 30 and check the start log for `rollup store unavailable` (path from `GPM_ANALYTICS_DB`, directory must be writable) |
+| Every country is `--` | No GeoIP database is loaded, or the traffic is from private addresses | Set `GPM_GEOIP_DB` ([Environment and flags](../reference/env-vars-and-flags.md)); switch the Source filter to `External only` to leave LAN clients out |
+| LAN traffic dominates the numbers | Clients on the LAN reach the proxy directly (split DNS, `lanDirect`) | Set the Source filter to `External only`; add VPN or overlay ranges to `analytics.internalNetworks` so they count as internal too |
+| A `dropped` chip shows on the page | The collector queue overflowed; the counts undercount by that many | A burst that outran one worker. The chip is informational; if it keeps growing, raise the issue with the traffic profile |
+| Numbers differ between the 24h view and the 7d view for the same day | 24h is served from minute counters in memory, 7d from hourly rollups: the running hour and the clients list have different resolution and caps | Expected; see [Where the numbers come from](../reference/analytics.md#where-the-numbers-come-from) |
+| The Access Logs page has no **Country** column | Country needs a GeoIP database | Same `GPM_GEOIP_DB` setting; the column, the `country` filter and the CSV column appear once it loads |

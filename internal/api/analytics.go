@@ -12,8 +12,9 @@ import (
 )
 
 // handleAnalytics is GET /analytics: the traffic analytics report for the
-// Analytics view. Query: range (one of analytics.Ranges(), default 24h) and an
-// optional host (proxy host NAME). Unwired (no collector, no seed provider)
+// Analytics view. Query: range (one of analytics.Ranges(), default 24h), an
+// optional host (proxy host NAME) and an optional scope (external or internal
+// traffic; omitted means both). Unwired (no collector, no seed provider)
 // responds 501 so the UI can show its "analytics is off" state.
 func (d Deps) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if d.Analytics == nil {
@@ -40,7 +41,12 @@ func (d Deps) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("invalid host name"))
 		return
 	}
-	rep, err := d.Analytics(rng, host)
+	scope := qs.Get("scope")
+	if !analytics.ValidScope(scope) {
+		writeErr(w, http.StatusBadRequest, errors.New("scope must be external or internal"))
+		return
+	}
+	rep, err := d.Analytics(rng, host, scope)
 	if err != nil {
 		// Only the one caller error is reflected; a collector's internal
 		// failure is logged and answered generically, never with its text.
@@ -52,7 +58,7 @@ func (d Deps) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, errors.New("range not available on this instance (needs rollups and enough retention)"))
 			return
 		}
-		log.Error().Err(err).Str("range", rng).Str("host", host).Msg("analytics report failed")
+		log.Error().Err(err).Str("range", rng).Str("host", host).Str("scope", scope).Msg("analytics report failed")
 		writeErr(w, http.StatusInternalServerError, errors.New("analytics report unavailable"))
 		return
 	}

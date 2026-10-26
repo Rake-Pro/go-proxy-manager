@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,7 +34,7 @@ func mustWrite(t *testing.T, r *Rollup, hour int64, rows []RollupRow) {
 
 func mustRead(t *testing.T, r *Rollup, from, to int64, host string) []RollupRow {
 	t.Helper()
-	rows, err := r.ReadHours(from, to, host)
+	rows, err := r.ReadHours(from, to, host, "")
 	if err != nil {
 		t.Fatalf("ReadHours: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestRollupReopenIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reopen %d: %v", i, err)
 		}
-		got, err := r2.ReadHours(rollupH0, rollupH0+3600, "")
+		got, err := r2.ReadHours(rollupH0, rollupH0+3600, "", "")
 		r2.Close()
 		if err != nil {
 			t.Fatal(err)
@@ -322,7 +323,7 @@ func TestRollupConcurrent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			if _, err := r.ReadHours(rollupH0, rollupH0+writers*3600, ""); err != nil {
+			if _, err := r.ReadHours(rollupH0, rollupH0+writers*3600, "", ""); err != nil {
 				errs <- err
 			}
 		}
@@ -348,5 +349,97 @@ func BenchmarkRollupWriteHour5000(b *testing.B) {
 		if err := r.WriteHour(rollupH0, rows); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// A schema 1 file (no src column) is rebuilt in place: every row comes back
+// under src "", counted by an unfiltered read and left out of a filtered one.
+func TestRollupUpgradesSchema1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const v1 = `
+CREATE TABLE rollup (hour INTEGER NOT NULL, host TEXT NOT NULL, dim TEXT NOT NULL, key TEXT NOT NULL,
+	n INTEGER NOT NULL, d INTEGER NOT NULL, t INTEGER NOT NULL, b INTEGER NOT NULL,
+	PRIMARY KEY (hour, host, dim, key)) WITHOUT ROWID;
+CREATE INDEX idx_rollup_hour ON rollup(hour);
+CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
+INSERT INTO meta (k, v) VALUES ('schema_version', '1');`
+	if _, err := db.Exec(v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO rollup VALUES (?, 'www', 'total', '', 5, 1, 0, 100), (?, 'www', 'country', 'US', 5, 1, 0, 0)`, rollupH0, rollupH0); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	r, err := OpenRollup(path)
+	if err != nil {
+		t.Fatalf("OpenRollup on a schema 1 file: %v", err)
+	}
+	defer r.Close()
+	var ver string
+	if err := r.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&ver); err != nil || ver != "2" {
+		t.Fatalf("schema version after upgrade = %q, %v", ver, err)
+	}
+	got := mustRead(t, r, rollupH0, rollupH0+3600, "")
+	if len(got) != 2 || got[0].Src != "" || got[1].Src != "" || got[1].N != 5 {
+		t.Fatalf("migrated rows = %+v", got)
+	}
+	if rows, err := r.ReadHours(rollupH0, rollupH0+3600, "", SourceExternal); err != nil || len(rows) != 0 {
+		t.Fatalf("filtered read of legacy rows = %d rows, %v", len(rows), err)
+	}
+	// New rows coexist with the legacy ones under their own source.
+	mustWrite(t, r, rollupH0+3600, []RollupRow{
+		{Hour: rollupH0 + 3600, Host: "www", Src: SourceExternal, Dim: "total", N: 1},
+		{Hour: rollupH0 + 3600, Host: "www", Src: SourceInternal, Dim: "total", N: 2},
+	})
+	if rows, _ := r.ReadHours(rollupH0, rollupH0+7200, "", SourceInternal); len(rows) != 1 || rows[0].N != 2 {
+		t.Fatalf("internal rows = %+v", rows)
+	}
+	// Reopening an upgraded file is a no-op.
+	r2, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Close()
+}
+
+// A schema 1 table whose meta row is missing (or wrong) is still recognised
+// by its columns and upgraded rather than read with the schema 2 queries.
+func TestRollupUpgradesSchema1WithoutMeta(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const v1 = `
+CREATE TABLE rollup (hour INTEGER NOT NULL, host TEXT NOT NULL, dim TEXT NOT NULL, key TEXT NOT NULL,
+	n INTEGER NOT NULL, d INTEGER NOT NULL, t INTEGER NOT NULL, b INTEGER NOT NULL,
+	PRIMARY KEY (hour, host, dim, key)) WITHOUT ROWID;`
+	if _, err := db.Exec(v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO rollup VALUES (?, 'www', 'total', '', 3, 0, 0, 0)`, rollupH0); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	r, err := OpenRollup(path)
+	if err != nil {
+		t.Fatalf("OpenRollup: %v", err)
+	}
+	defer r.Close()
+	if got := mustRead(t, r, rollupH0, rollupH0+3600, ""); len(got) != 1 || got[0].N != 3 || got[0].Src != "" {
+		t.Fatalf("rows = %+v", got)
+	}
+}
+
+func TestRollupRejectsUnknownSrc(t *testing.T) {
+	r, _ := openTestRollup(t)
+	err := r.WriteHour(rollupH0, []RollupRow{{Hour: rollupH0, Host: "www", Src: "lan", Dim: "total", N: 1}})
+	if err == nil || !strings.Contains(err.Error(), "unknown src") {
+		t.Fatalf("err = %v", err)
 	}
 }
