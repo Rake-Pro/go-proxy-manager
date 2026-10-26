@@ -14,6 +14,7 @@ has its own reference page; the complete example at the end shows them together.
 | Security headers | `securityHeaders`, `stripResponseHeaders` | [Security headers](security-headers.md) |
 | Error pages | `errorPages` | [Error pages](error-pages.md) |
 | Maintenance | `maintenance` | [Maintenance mode](maintenance.md) |
+| Analytics | `analytics` | [Analytics](analytics.md) |
 | Admin front door | `adminEdge` | [Admin front door](admin-edge.md) |
 | DNS sync | `dnsSync` | [DNS sync](dns-sync.md) |
 | Ingress discovery | `ingressDiscovery` | [Kubernetes Ingress discovery](ingress-discovery.md) |

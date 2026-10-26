@@ -11,6 +11,7 @@ data directory.
 
 | Version | Action required | Detail |
 |---|---|---|
+| Unreleased | **Only if you alert on `gpm_denials_total{reason="access-list"}`:** denials decided by a country rule now carry `reason="geo"`. Add `geo` to the alert, or alert on the sum over reasons. No config change. | [Metrics](../reference/metrics.md), [Analytics](../reference/analytics.md) |
 | 1.0.0 | **Rename `config/dead-hosts` to `config/parked-hosts`** before starting the new binary. The API path becomes `/api/parked-hosts`, the token-scope subject becomes `parked-hosts`, and the whole-config key becomes `parkedHosts`. | Below, and [ParkedHost](../reference/config/parked-host.md) |
 | 1.0.0 | **Replace each stream host's `forwardHost`/`forwardPort` with a single `target: {host, port}`.** A file still using the old keys is rejected at load. | Below, and [StreamHost](../reference/config/stream-host.md) |
 | 1.0.0 | **Only if you relied on `forwardAuth.trustedProxies` for client-IP resolution:** copy the same CIDRs into `settings.trustedProxies`. It no longer doubles as `X-Forwarded-For` trust. gpm logs a `WARN` naming the exact block to paste. | [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers) |

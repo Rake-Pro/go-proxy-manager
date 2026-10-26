@@ -78,3 +78,11 @@ Verify a backup is actually restorable periodically, not just that the cron
 job exits `0`: a `GET`/`POST /api/restore` round trip against a disposable
 test instance is the only thing that proves the archive is usable, the same
 way an untested backup anywhere else is a hope, not a backup.
+
+## Analytics rollups
+
+`analytics.db` (`GPM_ANALYTICS_DB`, default `/data/analytics.db`) holds the hourly
+traffic rollups behind the Analytics view's 7d and 30d ranges. It is runtime data, not
+config: it is not part of `GET /api/backup`, and losing it costs history only (the
+collector starts a fresh file). Copy it with the data directory if the history matters;
+stop gpm first or copy the `-wal` and `-shm` files with it.

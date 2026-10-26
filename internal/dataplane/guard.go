@@ -22,6 +22,7 @@ type guard struct {
 }
 
 type guardTrigger struct {
+	name        string              // optional label, reported as "guard:<name>"
 	paths       map[string]struct{} // nil = any path
 	methods     map[string]struct{} // nil = any method
 	queryEquals map[string]string
@@ -38,7 +39,7 @@ func compileGuard(g model.GuardMiddleware) guard {
 		}
 	}
 	for _, t := range g.Triggers {
-		gt := guardTrigger{queryEquals: t.QueryEquals}
+		gt := guardTrigger{name: t.Name, queryEquals: t.QueryEquals}
 		if len(t.QueryEquals) > 0 {
 			c.hasQueryEquals = true
 		}
@@ -114,14 +115,18 @@ func guardHandler(c guard, ipOf func(*http.Request) net.IP, host string, ep *com
 			return
 		}
 		matched := false
+		var hit guardTrigger
 		for _, t := range c.triggers {
 			if t.matches(r) {
-				matched = true
+				matched, hit = true, t
 				break
 			}
 		}
 		if matched && !ipInNets(ipOf(r), c.allowNets) {
 			countDenial(r, "guard")
+			if hit.name != "" {
+				noteSignature(r, "guard:"+hit.name)
+			}
 			serveErrorPage(w, c.denyStatus, ep, host, func() {
 				http.Error(w, http.StatusText(c.denyStatus), c.denyStatus)
 			})

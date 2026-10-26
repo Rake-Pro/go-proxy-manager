@@ -64,6 +64,7 @@ func main() {
 		httpsAddr     = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
 		httpAddr      = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
 		sessionDB     = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
+		analyticsDB   = flag.String("analytics-db", envOr("GPM_ANALYTICS_DB", "/data/analytics.db"), "analytics hourly rollup database path (used when settings.analytics.enabled)")
 		localUser     = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username")
 		cookieSecure  = cookieSecureFlag("cookie-secure", envOr("GPM_COOKIE_SECURE", "auto"), "Secure flag on admin cookies: auto (per request: TLS, trusted-proxy https, or an https externalBaseURL), 1 (always) or 0 (never)")
 		logLevel      = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
@@ -238,6 +239,44 @@ func main() {
 		}
 		go geoResolver.Watch(ctx, *geoDBPath, geoip.DefaultWatchInterval)
 	}
+
+	// Traffic analytics: a collector fed by the observe wrapper (one queue send
+	// per request while settings.analytics.enabled), aggregating on its own
+	// goroutine and rolling closed hours into a small SQLite file. Built always
+	// (it is a few maps) and switched by settings, so a reload turns it on or
+	// off without a restart. A rollup store that fails to open degrades to the
+	// 24 h memory window rather than refusing to start.
+	var rollup *analytics.Rollup
+	if rl, err := analytics.OpenRollup(*analyticsDB); err != nil {
+		log.Error().Err(err).Str("path", *analyticsDB).Msg("analytics: rollup store unavailable; keeping the 24 h memory window only")
+	} else {
+		rollup = rl
+		defer rollup.Close()
+	}
+	collector := analytics.NewCollector(analytics.Options{
+		Country:   geoResolver.Country,
+		GeoLoaded: geoResolver.Loaded,
+		Store:     rollup,
+		// The host filter accepts any proxy host in the live config, traffic or
+		// not, so a host page's Analytics link never says "no such host".
+		KnownHost: func(name string) bool {
+			cfg, _, err := st.Load(ctx)
+			if err != nil {
+				return false
+			}
+			for _, h := range cfg.ProxyHosts {
+				if h.Name == name {
+					return true
+				}
+			}
+			return false
+		},
+	})
+	collector.Apply(settings.Analytics.Enabled, settings.Analytics.Retention(), settings.Analytics.ClientsMode())
+	dataplane.SetAnalyticsSink(collector)
+	collector.Start()
+	defer collector.Close()
+
 	dataplane.SetGeoDB(geoResolver)
 	// Reject-at-write: the store refuses to commit an AccessList with geo rules
 	// while no GeoIP database is loaded, so such a rule never lands in git. The
@@ -428,6 +467,10 @@ func main() {
 			log.Error().Err(err).Msg("reload: failed to reload data plane")
 			return err
 		}
+		// Analytics follows settings live: the collector's switch, retention and
+		// top-clients mode, then the listeners re-pick the observed chain.
+		collector.Apply(st2.Analytics.Enabled, st2.Analytics.Retention(), st2.Analytics.ClientsMode())
+		dp.RefreshObserve()
 		authn.Configure(c, st2)
 		// Every config change funnels through here, so this is the one place the
 		// cached API-token set has to be dropped.
@@ -722,7 +765,9 @@ func main() {
 	// data (internal/analytics.Demo) so the Analytics view can be reviewed before
 	// the collector exists; the API marks every response demo:true. Unset leaves
 	// GET /analytics answering 501.
-	var analyticsFn func(rng, host string) (any, error)
+	analyticsFn := func(rng, host string) (any, error) {
+		return collector.Report(analytics.Query{Range: rng, Host: host})
+	}
 	if os.Getenv("GPM_ANALYTICS_DEMO") == "1" {
 		analyticsFn = func(rng, host string) (any, error) {
 			var names []string

@@ -101,3 +101,7 @@ Other views with no config object behind them:
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |
 | **Access Logs** | The in-memory log of proxy-listener requests, its runtime toggle (`PUT /api/logs`) and its clear action (`DELETE /api/logs`). Not stored config. |
+
+**Analytics**: the traffic view (volume, countries, denial reasons, threat-signature
+labels, hosts, top clients) fed by the in-process collector; signature labels count
+requests that look like scanning and never block anything.

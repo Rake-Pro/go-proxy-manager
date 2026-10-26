@@ -5525,7 +5525,7 @@ ${body}      </div></div>`;
     ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit this proxy host.',
       `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
       statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
-      isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger-soft sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
+      isNew ? '' : `<a class="btn ghost sm" href="#/analytics/${encodeURIComponent(h.name)}" title="Traffic analytics for this host">Analytics</a>${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger-soft sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
       hostTabsHtml)}
 
     <div class="edit-grid">
@@ -8438,6 +8438,8 @@ async function middlewareEditor(c, name) {
   function trigRow(t) {
     t = t || {}; const d = document.createElement('div'); d.className = 'sub-block';
     d.innerHTML = `<div class="row-between" style="margin-bottom:8px"><span class="ci-ty">trigger</span><button class="icon-btn trig-del" type="button" aria-label="Remove trigger">${ICON.x}</button></div>
+      <div class="field-group"><label>Name</label><input class="field mono trig-name" data-hint="middleware.guard.triggers.name" value="${esc(t.name || '')}" placeholder="optional, e.g. xmlrpc" />
+        <div class="hint">Optional. A denial by a named trigger shows in Analytics as the signature <span class="mono">guard:&lt;name&gt;</span>.</div></div>
       <div class="field-group"><label>Paths</label><div class="chip-input trig-paths" data-hint="middleware.guard.triggers.paths"></div></div>
       <div class="field-group"><label>Methods</label><div class="chip-input trig-methods" data-hint="middleware.guard.triggers.methods"></div></div>
       <div class="field-group"><label>Query equals</label><div class="trig-query" data-hint="middleware.guard.triggers.queryEquals"></div><button class="btn ghost sm trig-addq" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>`;
@@ -8446,7 +8448,7 @@ async function middlewareEditor(c, name) {
     const methodsCtl = makeChipInput(d.querySelector('.trig-methods'), arr(t.methods), 'add method...');
     const queryCtl = makeKVRows(d.querySelector('.trig-query'), t.queryEquals || {}, 'arg', 'value', false);
     d.querySelector('.trig-addq').addEventListener('click', () => queryCtl.addRow('', ''));
-    const ctl = { pathsCtl, methodsCtl, queryCtl };
+    const ctl = { pathsCtl, methodsCtl, queryCtl, nameEl: d.querySelector('.trig-name') };
     d.querySelector('.trig-del').addEventListener('click', () => { d.remove(); const i = trigCtls.indexOf(ctl); if (i >= 0) trigCtls.splice(i, 1); });
     trigCtls.push(ctl);
   }
@@ -8476,6 +8478,8 @@ async function middlewareEditor(c, name) {
       const triggers = [];
       trigCtls.forEach((ctl) => {
         const tr = {}; const p = ctl.pathsCtl.get(); const m = ctl.methodsCtl.get(); const q = ctl.queryCtl.get();
+        const nm = ctl.nameEl ? ctl.nameEl.value.trim() : '';
+        if (nm) tr.name = nm;
         if (p.length) tr.paths = p;
         if (m.length) tr.methods = m;
         if (Object.keys(q).length) tr.queryEquals = q;
@@ -10332,6 +10336,7 @@ async function viewSettings(c, tab) {
   const idc = s.ingressDiscovery || {};
   const trusted = arr(s.trustedProxies);
   const stls = s.tls || {};
+  const an = s.analytics || {};
 
   c.innerHTML = `
     ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound systems are under <a href="#/integrations">Integrations</a>.', '', '', '', '',
@@ -10403,6 +10408,24 @@ async function viewSettings(c, tab) {
           </select>
           <div class="hint">Applies to every host that does not pin its own. A proxy host's <span class="mono">Minimum TLS version</span> overrides this either way, so one legacy host can stay on 1.2 under a 1.3 fleet floor.</div>
           <div class="hint">1.3 only refuses the handshake for any client that cannot negotiate it: there is no fallback and no error page. Raise it once every client of every unpinned host supports 1.3.</div>
+        </div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">Analytics</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">The traffic collector behind <a href="#/analytics">Analytics</a>: every finished request is handed to a background worker (one queue send on the request path), which resolves the client's country, labels scanner patterns and keeps bounded hourly aggregates. Closed hours are rolled up into <span class="mono">analytics.db</span> next to the session database.</p>
+        <div class="toggle-line"><div class="tl-text"><div class="nm">Collect traffic analytics</div><div class="ds">Off costs nothing per request; the Analytics page says it is off</div></div>${switchHtml('set-an-on', !!an.enabled, 'Collect traffic analytics', 'settings.analytics.enabled')}</div>
+        <div class="grid-2" style="margin-top:10px">
+          <div class="field-group"><label>Rollup retention (days)</label><input class="field mono" id="set-an-ret" data-hint="settings.analytics.retentionDays" data-path="analytics.retentionDays" value="${an.retentionDays ? esc(String(an.retentionDays)) : ''}" placeholder="7" inputmode="numeric" />
+            <div class="hint">Blank = 7. The 7d range needs at least 7, the 30d range at least 30. The in-memory 24 h window is unaffected.</div>
+          </div>
+          <div class="field-group"><label>Top clients</label>
+            <select class="field" id="set-an-clients" data-hint="settings.analytics.topClients" data-path="analytics.topClients">
+              <option value="persist"${(an.topClients || 'persist') === 'persist' ? ' selected' : ''}>Keep and persist (default)</option>
+              <option value="memory"${an.topClients === 'memory' ? ' selected' : ''}>Memory only (24 h)</option>
+              <option value="off"${an.topClients === 'off' ? ' selected' : ''}>Do not record client addresses</option>
+            </select>
+            <div class="hint">Whether the per-address table exists at all, and whether it survives a restart.</div>
+          </div>
         </div>
       </div>
       ${settingsSaveBar('set-save')}
@@ -10702,6 +10725,21 @@ async function viewSettings(c, tab) {
     if (isOn('set-ae-robots')) adminEdge.robotsNoIndex = true;
     if (isOn('set-ae-dns-lan') || isOn('set-ae-dns-pub')) adminEdge.dns = { lanDirect: isOn('set-ae-dns-lan'), publicCname: isOn('set-ae-dns-pub') };
     if (Object.keys(adminEdge).length) body.adminEdge = adminEdge;
+
+    // Analytics. Off with defaults leaves the key off the body entirely, so an
+    // untouched settings.yaml round-trips without gaining an `analytics: {}`.
+    const anRetRaw = $('#set-an-ret').value.trim();
+    const anRet = anRetRaw ? Number(anRetRaw) : 0;
+    if (anRetRaw && (!Number.isInteger(anRet) || anRet < 1 || anRet > 365)) {
+      showInvalid('Retention out of range', 'Rollup retention must be 1 to 365 days. Leave it blank for the 7 day default.', $('#set-an-ret'));
+      return;
+    }
+    const analytics = {};
+    if (isOn('set-an-on')) analytics.enabled = true;
+    if (anRet > 0 && anRet !== 7) analytics.retentionDays = anRet;
+    const anClients = $('#set-an-clients').value;
+    if (anClients && anClients !== 'persist') analytics.topClients = anClients;
+    if (Object.keys(analytics).length) body.analytics = analytics;
 
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();
@@ -11873,8 +11911,14 @@ async function viewAnalytics(c, sub) {
   } catch (e) {
     if (e && e.status === 501) {
       c.innerHTML = pageHead('Analytics', 'Traffic through the edge: volume, origin, refusals and scanner activity.')
-        + emptyState('Analytics is not enabled on this instance', 'No traffic collector is wired, so there is nothing to report yet. See the Analytics reference for what the view shows and how it is fed.');
+        + emptyState('Analytics is not available on this instance', 'This server has no analytics endpoint.');
       return;
+    }
+    if (e && e.status === 400 && range !== '24h' && !/host/i.test(String(e.message || ''))) {
+      // A remembered range the instance cannot serve any more (retention was
+      // lowered): fall back to 24h once rather than render an error.
+      try { localStorage.setItem(AN_RANGE_KEY, '24h'); } catch (e2) { /* ignore */ }
+      return viewAnalytics(c, sub);
     }
     if (e && e.status === 400 && host) {
       c.innerHTML = pageHead('Analytics', '') + emptyState('No such host', `No proxy host is named "${host}".`) + '<p class="list-empty"><a href="#/analytics">Back to all hosts</a></p>';
@@ -11891,6 +11935,11 @@ async function viewAnalytics(c, sub) {
 async function renderAnalytics(c, rep, ctx) {
   const { host, range, q, st } = ctx;
   let auto = st.auto;
+  if (rep.enabled === false) {
+    c.innerHTML = pageHead('Analytics', 'Traffic through the edge: volume, origin, refusals and scanner activity.')
+      + emptyState('Analytics is off', 'Turn on the collector under Settings, General, Analytics. It aggregates on a background worker and never slows a request; the page fills in from the moment it is on.', isRoleReadOnly() ? '' : 'Open Settings', '#/settings');
+    return;
+  }
   const hostsList = arr(rep.hosts).map((h) => h.name).filter((n) => n && n !== '-');
   if (host && !hostsList.length) {
     // The host view carries no hosts table; the select still needs the names.
@@ -11914,10 +11963,10 @@ async function renderAnalytics(c, rep, ctx) {
   c.innerHTML = `
     ${pageHead(esc(title), esc(subLine), crumb, '', labels)}
     <div class="toolbar vz-filters">
-      <label class="auto-refresh" for="anRange"><span>Range</span><select class="field" id="anRange" data-hint="analytics.range" aria-label="Time range">${AN_RANGES.map((r) => `<option value="${r}"${r === range ? ' selected' : ''}>Last ${r}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="anRange"><span>Range</span><select class="field" id="anRange" data-hint="analytics.range" aria-label="Time range">${AN_RANGES.filter((r) => !rep.ranges || rep.ranges.includes(r) || r === range).map((r) => `<option value="${r}"${r === range ? ' selected' : ''}>Last ${r}</option>`).join('')}</select></label>
       <label class="auto-refresh" for="anHost"><span>Host</span><select class="field" id="anHost" data-hint="analytics.host" aria-label="Host filter"><option value=""${host ? '' : ' selected'}>All hosts</option>${hostsList.map((n) => `<option value="${esc(n)}"${n === host ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
       <label class="auto-refresh" for="anAuto"><span>Auto-refresh</span><select class="field" id="anAuto" data-hint="analytics.auto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
-      <div class="toolbar-actions"><span class="muted" id="anUpdated">updated ${esc(new Date(rep.generatedAt || Date.now()).toLocaleTimeString())}</span><button class="btn" id="anRefresh" type="button">${ICON.history}Refresh</button></div>
+      <div class="toolbar-actions">${rep.dropped ? `<span class="chip warn" title="Events dropped because the collector queue was full since start; the counts below undercount by this many">${esc(anCompact(rep.dropped))} dropped</span>` : ''}<span class="muted" id="anUpdated">updated ${esc(new Date(rep.generatedAt || Date.now()).toLocaleTimeString())}</span><button class="btn" id="anRefresh" type="button">${ICON.history}Refresh</button></div>
     </div>
     ${rep.geoip === false ? `<div class="feed-row attn" style="margin-bottom:16px"><span class="feed-tick warn"></span><div class="feed-body"><div class="feed-msg">GeoIP database not configured</div><div class="feed-meta">Country columns show "--" until GPM_GEOIP_DB points at a country .mmdb. Lookups are local; nothing is sent anywhere.</div></div><a class="btn ghost sm" href="${esc(docHref('reference/env-vars-and-flags.md'))}" target="_blank" rel="noopener">How to enable</a></div>` : ''}
     <div class="stat-row-grid">

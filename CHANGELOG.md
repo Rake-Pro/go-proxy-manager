@@ -7,6 +7,20 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Analytics collector (`settings.analytics`): switched on in Settings, every
+  finished request is queued to a background worker that resolves the client's
+  country, labels scanner patterns with an observe-only signature catalogue
+  (`wp-probe`, `secret-probe`, `admin-probe`, `webshell`, `iot-rce`,
+  `traversal`, `injection`, `scanner-ua`, `proto-abuse`) and keeps bounded
+  aggregates: 24 h of minute counters in memory, hourly rollups in
+  `analytics.db` (`-analytics-db` / `GPM_ANALYTICS_DB`) with configurable
+  retention (default 7 days), replayed at start. `GET /api/analytics` and the
+  Analytics view now serve observed traffic; the 7d and 30d ranges appear when
+  retention covers them. `topClients` chooses whether client addresses are
+  kept, kept in memory only, or never recorded.
+- Guard triggers accept an optional `name` (object-name characters, at most
+  64), reported to analytics as the signature `guard:<name>`; CrowdSec bouncer
+  denials carry the decision scenario as `crowdsec:<scenario>`.
 - Analytics view (sidebar, Overview group) and `GET /api/analytics`: traffic
   through the edge for a range, fleet-wide or per proxy host - request volume,
   denied and threat-signature counts, countries, denial reasons, hosts and top
@@ -91,6 +105,14 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   link-local guard refuses zoned addresses; the release workflow only
   runs from `main` and only builds a tag that sits on `main`, and the docs
   workflow grants Pages permissions per job. (#51)
+
+### Changed
+
+- `gpm_denials_total{reason}` and the analytics denial reasons now count an
+  access-list denial decided by a **country rule** under `geo` (before: under
+  `access-list`, indistinguishable from a CIDR deny). A dashboard or alert
+  that sums `access-list` sees those move to `geo`; `geo` still also covers
+  "geo rules configured but no database loaded".
 
 ## [2.5.0] - 2026-10-20
 

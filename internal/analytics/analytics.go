@@ -65,6 +65,11 @@ type Report struct {
 	Signatures    []Sig     `json:"signatures"`
 	Hosts         []HostRow `json:"hosts,omitempty"`
 	Clients       []Client  `json:"clients"`
+	// Ranges lists the range keys this instance can serve (the long ranges
+	// need rollups and enough retention); Dropped counts events lost to a full
+	// queue since start.
+	Ranges  []string `json:"ranges,omitempty"`
+	Dropped int64    `json:"dropped,omitempty"`
 }
 
 // Totals are the headline figures for a window.
@@ -252,7 +257,7 @@ func Demo(hosts []string, now time.Time, q Query) (Report, error) {
 		return t
 	}
 
-	rep := Report{Enabled: true, Demo: true, GeoIP: true, Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, GeneratedAt: now}
+	rep := Report{Enabled: true, Demo: true, GeoIP: true, Range: q.Range, BucketSeconds: int(bucket.Seconds()), Host: q.Host, GeneratedAt: now, Ranges: Ranges()}
 	rng := rand.New(rand.NewSource(base))
 	if q.Host != "" {
 		for i, h := range hosts {
@@ -362,4 +367,18 @@ func minInt(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// isoNames gives display names for the country codes most traffic carries;
+// anything else is shown as its code.
+var isoNames = map[string]string{
+	"US": "United States", "CA": "Canada", "MX": "Mexico", "BR": "Brazil", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+	"GB": "United Kingdom", "IE": "Ireland", "FR": "France", "DE": "Germany", "NL": "Netherlands", "BE": "Belgium", "LU": "Luxembourg",
+	"CH": "Switzerland", "AT": "Austria", "IT": "Italy", "ES": "Spain", "PT": "Portugal", "SE": "Sweden", "NO": "Norway", "DK": "Denmark",
+	"FI": "Finland", "IS": "Iceland", "PL": "Poland", "CZ": "Czechia", "SK": "Slovakia", "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria",
+	"GR": "Greece", "TR": "Turkey", "UA": "Ukraine", "RU": "Russia", "BY": "Belarus", "LT": "Lithuania", "LV": "Latvia", "EE": "Estonia",
+	"RS": "Serbia", "HR": "Croatia", "SI": "Slovenia", "MD": "Moldova", "IL": "Israel", "AE": "United Arab Emirates", "SA": "Saudi Arabia",
+	"IR": "Iran", "IQ": "Iraq", "EG": "Egypt", "ZA": "South Africa", "NG": "Nigeria", "KE": "Kenya", "MA": "Morocco",
+	"IN": "India", "PK": "Pakistan", "BD": "Bangladesh", "CN": "China", "HK": "Hong Kong", "TW": "Taiwan", "JP": "Japan", "KR": "South Korea",
+	"SG": "Singapore", "MY": "Malaysia", "ID": "Indonesia", "TH": "Thailand", "VN": "Vietnam", "PH": "Philippines", "AU": "Australia", "NZ": "New Zealand",
 }

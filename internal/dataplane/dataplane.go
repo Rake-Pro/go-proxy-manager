@@ -241,11 +241,24 @@ func (s *Server) SetAccessLog(enabled bool) {
 	log.Info().Bool("enabled", enabled).Msg("access logging toggled")
 }
 
+// RefreshObserve re-evaluates which chain the listeners serve after an
+// observability input changed outside this package (the analytics collector
+// was switched on or off by a settings reload).
+func (s *Server) RefreshObserve() {
+	active := s.observeActive()
+	if s.httpSwitch != nil {
+		s.httpSwitch.set(active)
+	}
+	if s.httpsSwitch != nil {
+		s.httpsSwitch.set(active)
+	}
+}
+
 // observeActive reports whether requests must run through the observed chain
 // right now: the live access-log toggle, or any startup toggle that always
 // needs the wrapper.
 func (s *Server) observeActive() bool {
-	return s.accessLog.Load() || s.slowThreshold > 0 || s.debugHeaders || metricsHook() != nil
+	return s.accessLog.Load() || s.slowThreshold > 0 || s.debugHeaders || metricsHook() != nil || analyticsActive()
 }
 
 // UpstreamHealth returns the live health of every upstream group's upstreams,

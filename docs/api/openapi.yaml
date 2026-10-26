@@ -108,6 +108,8 @@ components:
         bucketSeconds: { type: integer }
         host: { type: string, description: The host filter applied, empty for the global view. }
         generatedAt: { type: string, format: date-time }
+        ranges: { type: array, items: { type: string }, description: Range keys this instance can serve (7d and 30d need rollups and enough retention). }
+        dropped: { type: integer, description: Events dropped since start because the collector queue was full. }
         totals: { $ref: '#/components/schemas/AnalyticsTotals' }
         previous: { $ref: '#/components/schemas/AnalyticsTotals' }
         series:
@@ -1553,6 +1555,9 @@ components:
     GuardTrigger:
       type: object
       properties:
+        name:
+          type: string
+          description: Optional label; a denial by this trigger is reported to analytics as the signature guard:<name>.
         paths:
           type: array
           items:
@@ -2088,6 +2093,13 @@ components:
     Settings:
       type: object
       properties:
+        analytics:
+          type: object
+          description: Traffic analytics collector (see reference/config/settings/analytics.md).
+          properties:
+            enabled: { type: boolean }
+            retentionDays: { type: integer, minimum: 0, maximum: 365 }
+            topClients: { type: string, enum: [persist, memory, off] }
         schemaVersion:
           type: integer
         appName:

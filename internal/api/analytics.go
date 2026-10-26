@@ -48,6 +48,10 @@ func (d Deps) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, errors.New("unknown host"))
 			return
 		}
+		if errors.Is(err, analytics.ErrRangeUnavailable) {
+			writeErr(w, http.StatusBadRequest, errors.New("range not available on this instance (needs rollups and enough retention)"))
+			return
+		}
 		log.Error().Err(err).Str("range", rng).Str("host", host).Msg("analytics report failed")
 		writeErr(w, http.StatusInternalServerError, errors.New("analytics report unavailable"))
 		return

@@ -64,7 +64,8 @@ object. With nothing to report it says so and shows the live counts.
   chart has focus; **Table** swaps the chart for the same numbers as rows.
 - Country code, client address and signature cells copy on hover (the small
   copy button that appears on the row).
-- Until a collector is wired the page says analytics is not enabled; see the
+- Off by default: switch it on under Settings, General, **Analytics** (retention
+  and the top-clients mode live there too); see the
   [Analytics reference](../reference/analytics.md).
 
 ## Proxy hosts

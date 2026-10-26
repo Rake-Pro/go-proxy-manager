@@ -137,6 +137,7 @@ At least one of the four must be set.
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
+| <span id="middleware-guard-triggers-name"></span>  `name` | string | none | no | Optional label (object-name characters, at most 64). A denial by this trigger is reported to Analytics as the signature `guard:<name>`; unnamed triggers count under the `guard` denial reason only. |
 | <span id="middleware-guard-triggers-paths"></span>  `paths` | []string | none | no | Exact request paths this trigger covers. Matching is exact, see [the four path mechanisms](../../concepts/which-mechanism.md#four-path-aware-mechanisms). |
 | <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | Upper-case HTTP methods this trigger covers. |
 | <span id="middleware-guard-triggers-query-equals"></span>  `queryEquals` | map[string]string | none | no | Query parameters that must equal these values for the trigger to fire. See the `;` note below. |

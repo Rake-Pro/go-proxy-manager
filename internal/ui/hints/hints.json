@@ -1326,5 +1326,21 @@
   "analytics.auto": {
     "text": "Re-reads the report on a timer. Stops while the tab is hidden and when you leave the view.",
     "doc": "reference/analytics.md#auto-refresh"
+  },
+  "settings.analytics.enabled": {
+    "text": "Switches the traffic collector on. Every finished request is queued to a background worker; off costs nothing per request and the Analytics page says it is off.",
+    "doc": "reference/config/settings/analytics.md#settings-analytics-enabled"
+  },
+  "settings.analytics.retentionDays": {
+    "text": "Days of hourly rollups kept in analytics.db (1-365, blank = 7). The 7d range needs 7 or more, the 30d range 30 or more.",
+    "doc": "reference/config/settings/analytics.md#settings-analytics-retention-days"
+  },
+  "settings.analytics.topClients": {
+    "text": "Whether the per-address table exists: persist keeps a bounded top list in memory and in the rollups, memory keeps it for 24 h only, off never records client addresses.",
+    "doc": "reference/config/settings/analytics.md#settings-analytics-top-clients"
+  },
+  "middleware.guard.triggers.name": {
+    "text": "Optional label for this trigger. A denial it causes shows in Analytics as the signature guard:<name>; unnamed triggers count under the guard denial reason only.",
+    "doc": "reference/config/middleware.md#middleware-guard-triggers-name"
   }
 }

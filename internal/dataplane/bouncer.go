@@ -41,9 +41,10 @@ const (
 // Scope is "Ip" or "Range" (CrowdSec capitalizes them, but compare
 // case-insensitively - other origins are not consistent about it).
 type crowdsecDecision struct {
-	Type  string `json:"type"`
-	Scope string `json:"scope"`
-	Value string `json:"value"`
+	Type     string `json:"type"`
+	Scope    string `json:"scope"`
+	Value    string `json:"value"`
+	Scenario string `json:"scenario"` // kept only as the analytics label "crowdsec:<scenario>"
 }
 
 // isDeny reports whether a decision means "do not let this client through".
@@ -73,9 +74,10 @@ type verdictCache struct {
 }
 
 type verdictEntry struct {
-	key     string
-	deny    bool
-	expires time.Time
+	key      string
+	deny     bool
+	scenario string
+	expires  time.Time
 }
 
 func newVerdictCache(max int) *verdictCache {
@@ -84,26 +86,26 @@ func newVerdictCache(max int) *verdictCache {
 
 // get returns a cached verdict for key. An expired entry is dropped and
 // reported as a miss.
-func (c *verdictCache) get(key string) (deny bool, ok bool) {
+func (c *verdictCache) get(key string) (deny bool, scenario string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el := c.entries[key]
 	if el == nil {
-		return false, false
+		return false, "", false
 	}
 	e := el.Value.(*verdictEntry)
 	if !c.now().Before(e.expires) {
 		c.order.Remove(el)
 		delete(c.entries, key)
-		return false, false
+		return false, "", false
 	}
 	c.order.MoveToBack(el)
-	return e.deny, true
+	return e.deny, e.scenario, true
 }
 
 // put stores a verdict for ttl, evicting the least-recently-used entry when the
 // cache is at its bound. A non-positive ttl is not cached at all.
-func (c *verdictCache) put(key string, deny bool, ttl time.Duration) {
+func (c *verdictCache) put(key string, deny bool, scenario string, ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}
@@ -112,7 +114,7 @@ func (c *verdictCache) put(key string, deny bool, ttl time.Duration) {
 	expires := c.now().Add(ttl)
 	if el := c.entries[key]; el != nil {
 		e := el.Value.(*verdictEntry)
-		e.deny, e.expires = deny, expires
+		e.deny, e.scenario, e.expires = deny, scenario, expires
 		c.order.MoveToBack(el)
 		return
 	}
@@ -122,7 +124,7 @@ func (c *verdictCache) put(key string, deny bool, ttl time.Duration) {
 			delete(c.entries, front.Value.(*verdictEntry).key)
 		}
 	}
-	c.entries[key] = c.order.PushBack(&verdictEntry{key: key, deny: deny, expires: expires})
+	c.entries[key] = c.order.PushBack(&verdictEntry{key: key, deny: deny, scenario: scenario, expires: expires})
 }
 
 func (c *verdictCache) len() int {
@@ -143,6 +145,7 @@ func (c *verdictCache) len() int {
 type streamState struct {
 	mu       sync.RWMutex
 	ips      map[string]struct{}
+	scen     map[string]string // decision value -> scenario, for the analytics label
 	nets     []*net.IPNet
 	ready    bool      // a startup pull has succeeded at least once
 	next     time.Time // when the next delta pull is due
@@ -152,22 +155,24 @@ type streamState struct {
 }
 
 func newStreamState() *streamState {
-	return &streamState{ips: map[string]struct{}{}}
+	return &streamState{ips: map[string]struct{}{}, scen: map[string]string{}}
 }
 
-// lookup reports whether ip is in the current decision set.
-func (s *streamState) lookup(ip net.IP) bool {
+// lookup reports whether ip is in the current decision set, and the scenario
+// of the decision that matched (for the analytics label; "" when unknown).
+func (s *streamState) lookup(ip net.IP) (bool, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if _, ok := s.ips[ip.String()]; ok {
-		return true
+	key := ip.String()
+	if _, ok := s.ips[key]; ok {
+		return true, s.scen[key]
 	}
 	for _, n := range s.nets {
 		if n.Contains(ip) {
-			return true
+			return true, s.scen[n.String()]
 		}
 	}
-	return false
+	return false, ""
 }
 
 // apply folds one stream response into the set. On a startup pull the previous
@@ -179,10 +184,15 @@ func (s *streamState) apply(resp crowdsecStream, startup bool, ttl time.Duration
 	if startup {
 		s.ips = map[string]struct{}{}
 		s.nets = nil
+		s.scen = map[string]string{}
 	}
 	for _, d := range resp.Deleted {
 		if v := strings.TrimSpace(d.Value); v != "" {
 			delete(s.ips, v)
+			delete(s.scen, v)
+			if n := parseNet(v); n != nil {
+				delete(s.scen, n.String())
+			}
 			s.nets = removeNet(s.nets, v)
 		}
 	}
@@ -194,14 +204,21 @@ func (s *streamState) apply(resp crowdsecStream, startup bool, ttl time.Duration
 		if v == "" {
 			continue
 		}
+		scen := scenarioLabel(d.Scenario)
 		if strings.EqualFold(d.Scope, "range") || strings.Contains(v, "/") {
 			if n := parseNet(v); n != nil {
 				s.nets = removeNet(s.nets, v)
 				s.nets = append(s.nets, n)
+				if scen != "" {
+					s.scen[n.String()] = scen
+				}
 			}
 			continue
 		}
 		s.ips[v] = struct{}{}
+		if scen != "" {
+			s.scen[v] = scen
+		}
 	}
 	s.ready = true
 	s.next = time.Now().Add(ttl)
@@ -314,19 +331,36 @@ func (b *bouncer) errCacheTTL() time.Duration {
 // verdict asks the bouncer about ip and returns whether to deny. A non-nil
 // error means no usable answer was obtained; the caller applies the onError
 // policy. In stream mode the answer comes from the local decision set.
-func (b *bouncer) verdict(r *http.Request, ip net.IP) (deny bool, err error) {
+func (b *bouncer) verdict(r *http.Request, ip net.IP) (deny bool, scenario string, err error) {
 	if b.apiKeyErr != nil {
-		return false, b.apiKeyErr
+		return false, "", b.apiKeyErr
 	}
 	if b.stream != nil {
 		return b.streamVerdict(r.Context(), ip)
 	}
 	switch b.provider {
 	case model.BouncerProviderHTTP:
-		return b.httpVerdict(r, ip)
+		deny, err = b.httpVerdict(r, ip)
+		return deny, "", err
 	default:
 		return b.crowdsecVerdict(r.Context(), ip)
 	}
+}
+
+// scenarioLabel bounds a CrowdSec scenario name before it becomes an
+// aggregate key: lower-cased, trimmed, at most 64 bytes, printable ASCII only.
+func scenarioLabel(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	for i := 0; i < len(s); i++ {
+		// Printable ASCII, and never '|': the analytics rollup key is "label|CC".
+		if s[i] < 0x21 || s[i] > 0x7e || s[i] == '|' {
+			return ""
+		}
+	}
+	return strings.Clone(s)
 }
 
 // crowdsecVerdict performs a live LAPI bouncer lookup:
@@ -336,52 +370,52 @@ func (b *bouncer) verdict(r *http.Request, ip net.IP) (deny bool, err error) {
 // The LAPI answers with a JSON array of decisions, or the literal "null" (and
 // some versions an empty body) when the IP is clean. It resolves range
 // decisions itself, so a single ip= query covers CIDR bans too.
-func (b *bouncer) crowdsecVerdict(ctx context.Context, ip net.IP) (bool, error) {
+func (b *bouncer) crowdsecVerdict(ctx context.Context, ip net.IP) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
 	u := b.baseURL + "/v1/decisions?ip=" + url.QueryEscape(ip.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	req.Header.Set("X-Api-Key", b.apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("crowdsec lapi: unexpected status %d", resp.StatusCode)
+		return false, "", fmt.Errorf("crowdsec lapi: unexpected status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBouncerBody))
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	trimmed := strings.TrimSpace(string(body))
 	// "null" and an empty body both mean "no decisions for this IP".
 	if trimmed == "" || trimmed == "null" {
-		return false, nil
+		return false, "", nil
 	}
 	var decisions []crowdsecDecision
 	if err := json.Unmarshal(body, &decisions); err != nil {
-		return false, fmt.Errorf("crowdsec lapi: decode decisions: %w", err)
+		return false, "", fmt.Errorf("crowdsec lapi: decode decisions: %w", err)
 	}
 	for _, d := range decisions {
 		if d.isDeny() {
-			return true, nil
+			return true, scenarioLabel(d.Scenario), nil
 		}
 	}
-	return false, nil
+	return false, "", nil
 }
 
 // streamVerdict answers from the local decision set, pulling it if needed. The
 // first call blocks on the startup pull (there is nothing to answer from yet);
 // afterwards a stale set is refreshed in the background while the current one
 // keeps serving, so no request ever waits on a delta.
-func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, error) {
+func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, string, error) {
 	s := b.stream
 	s.mu.RLock()
 	ready, due, inFlight := s.ready, !time.Now().Before(s.next), s.inFlight
@@ -396,12 +430,13 @@ func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, error) {
 			err := b.pullStream(ctx, true)
 			s.startupMu.Unlock()
 			if err != nil {
-				return false, err
+				return false, "", err
 			}
 		} else {
 			s.startupMu.Unlock()
 		}
-		return s.lookup(ip), nil
+		d, sc := s.lookup(ip)
+		return d, sc, nil
 	}
 
 	if due && !inFlight {
@@ -434,7 +469,8 @@ func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, error) {
 			}()
 		}
 	}
-	return s.lookup(ip), nil
+	d, sc := s.lookup(ip)
+	return d, sc, nil
 }
 
 // pullStream fetches the decision stream and folds it into the local set.
@@ -547,20 +583,23 @@ func bouncerHandler(b *bouncer, hostName string, ipOf func(*http.Request) net.IP
 		}
 
 		key := ip.String()
-		deny, cached := b.cache.get(key)
+		deny, scenario, cached := b.cache.get(key)
 		if !cached {
 			var err error
-			deny, err = b.verdict(r, ip)
+			deny, scenario, err = b.verdict(r, ip)
 			ttl := b.ttl
 			if err != nil {
-				deny = !b.failOpen
+				deny, scenario = !b.failOpen, ""
 				ttl = b.errCacheTTL()
 				log.Warn().Str("middleware", b.name).Str("host", hostName).Str("client", key).
 					Bool("failOpen", b.failOpen).Err(err).Msg("bouncer: verdict unavailable, applying onError policy")
 			}
-			b.cache.put(key, deny, ttl)
+			b.cache.put(key, deny, scenario, ttl)
 		}
 		if deny {
+			if scenario != "" {
+				noteSignature(r, "crowdsec:"+scenario)
+			}
 			b.deny(w, r, hostName, ep)
 			return
 		}

@@ -35,6 +35,10 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 
 **Certificates**
 
+- **Traffic analytics.** An in-process collector (off by default) feeds an
+  Analytics view: requests, denied and threat-signature counts, countries,
+  denial reasons, hosts and top clients for 1 h to 30 d, with hourly SQLite
+  rollups. Observe-only labels, bounded keys, nothing per-request stored.
 - **ACME issuance and renewal.** HTTP-01 or DNS-01 against any ACME CA, including
   EAB-gated ones, with four named DNS providers plus the generic RFC2136 and
   acme-dns solvers, and renewal 30 days before expiry.

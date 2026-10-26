@@ -55,11 +55,24 @@ guard, rate limits and the bouncer.
 
 - `GET /api/analytics?range=24h&host=<name>` (scope `*:read`). Schema `AnalyticsReport`
   in the [OpenAPI document](../reference/api.md).
-- Unwired instance: `501`. Bad range or host name: `400`.
+- Collector off: `200` with `enabled: false`. Bad range, unknown host or a range the
+  retention does not cover: `400`. No analytics endpoint at all (older server): `501`.
+
+## Where the numbers come from
+
+- The collector is switched on with [`settings.analytics.enabled`](config/settings/analytics.md);
+  off, the page says so and the API answers `enabled: false`.
+- Tiles and the chart are minute resolution; the countries, reasons, signatures and
+  clients tables are hourly resolution (a `1h` view includes the whole running hour and
+  the previous one).
+- `7d` and `30d` are served from the hourly rollups and appear only when
+  `analytics.retentionDays` covers them.
+- A `dropped` chip appears when the collector queue overflowed since start; the counts
+  then undercount by that many.
 
 ## Seed data
 
-- No traffic collector ships yet: a normal instance answers `501` and the view says so.
 - `GPM_ANALYTICS_DEMO=1` serves deterministic seed data (documentation-range addresses,
-  generic host names) so the view can be reviewed. The API marks it `demo: true` and
-  the page shows a `Seed data` chip; only the `geoip` flag reflects the real instance.
+  generic host names) instead of the collector, so the view can be reviewed. The API marks
+  it `demo: true` and the page shows a `Seed data` chip; only the `geoip` flag reflects the
+  real instance.

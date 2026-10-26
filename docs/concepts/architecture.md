@@ -916,3 +916,18 @@ requirement is `golang.org/x/crypto`, which is already a direct dependency here)
 it adds no transitive tree, and it is the maintained fork of the frozen `x/crypto`
 package. Hand-rolling the ASN.1 for a format whose whole point is
 interoperability with iOS and Android keychains would have been the larger risk.
+
+## Traffic analytics
+
+`internal/analytics` is the collector behind the Analytics view and `GET /api/analytics`.
+The data plane's observe wrapper hands every finished request to it with one
+non-blocking queue send; a single worker goroutine resolves the client's country, runs
+the observe-only signature classifier over path, query and User-Agent, and increments
+bounded in-memory aggregates (24 h of per-host minute counters, 25 hourly slots of
+countries, denial reasons, signature labels and top client addresses). Closed hours are
+rolled up into `analytics.db` (SQLite, same hardening as the session store) and pruned
+past `settings.analytics.retentionDays`; the long ranges are served from there. Every
+aggregate key is bounded by configuration or a fixed vocabulary, nothing per-request is
+stored, and the collector is off unless `settings.analytics.enabled` says otherwise, in
+which case the listeners switch to the observed chain exactly as they do for the access
+log.

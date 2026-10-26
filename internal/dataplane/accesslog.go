@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 )
 
 // AccessEntry is one captured request line, surfaced by the admin /api/logs
@@ -214,7 +216,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		// The matched proxy host, resolved once: the debug headers and the metric
 		// labels want the same answer, and lookup is a map hit.
 		hostName := ""
-		if s.debugHeaders || mh != nil {
+		if s.debugHeaders || mh != nil || analyticsActive() {
 			if rt := s.current(); rt != nil {
 				if hh, ok := rt.lookup(r.Host); ok {
 					hostName = hh.host
@@ -247,6 +249,21 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				r.Body = body
 			}
 		}
+		// The analytics note: one small allocation per observed request, only
+		// while a collector is switched on. The tiers write the denial reason and
+		// signature into it; the event below is built after the handler returns.
+		sink := analyticsSink()
+		var meta *reqMeta
+		var origPath, origQuery string
+		if sink != nil && sink.Active() {
+			meta = &reqMeta{}
+			r = withReqMeta(r, meta)
+			// The classifier must see what the client sent, not what a rewrite or
+			// strip-prefix middleware turned it into.
+			origPath, origQuery = r.URL.Path, r.URL.RawQuery
+		} else {
+			sink = nil
+		}
 
 		obs := &responseObserver{ResponseWriter: w}
 		next.ServeHTTP(obs, r)
@@ -274,16 +291,46 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 
 		slow := s.slowThreshold > 0 && dur >= s.slowThreshold
-		if !accessLog && !slow {
+		if sink == nil && !accessLog && !slow {
 			return
 		}
 		status := obs.status
 		if status == 0 {
 			status = http.StatusOK // handler wrote nothing / hijacked
 		}
+		// Derived once for the analytics event and the log line alike.
+		clientIP := s.clientIPOf(r)
+
+		if sink != nil {
+			evHost := hostName
+			if evHost == "" {
+				evHost = unknownHostLabel
+			}
+			// Record never blocks: the collector queues the event (or drops it).
+			// The event is stamped with the completion time, so a long-lived
+			// connection counts in the minute it ended, never in a slot the
+			// collector has already rolled past.
+			sink.Record(analytics.Event{
+				Time:      time.Now(),
+				Host:      evHost,
+				Method:    r.Method,
+				Status:    status,
+				BytesOut:  obs.bytes,
+				DurMs:     dur.Milliseconds(),
+				Client:    clientIP,
+				Deny:      meta.deny,
+				Signature: meta.sig,
+				Path:      origPath,
+				RawQuery:  origQuery,
+				UserAgent: r.UserAgent(),
+			})
+		}
+		if !accessLog && !slow {
+			return
+		}
 
 		var clientStr, country string
-		if ip := s.clientIPOf(r); ip != nil {
+		if ip := clientIP; ip != nil {
 			clientStr = ip.String()
 			// Country for the log viewer and the log line, only while a GeoIP
 			// database is loaded. The lookup is an in-memory mmdb walk (about a

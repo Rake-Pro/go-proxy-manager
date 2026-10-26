@@ -67,6 +67,7 @@ var wins for container deployments).
 | `GPM_METRICS`<br>`-metrics` | `false` | Expose a Prometheus text exposition on the admin server at `/metrics` (admin role **and** `metrics:read` scope gated) | Yes |
 | `GPM_GEOIP_DB`<br>`-geoip-db` | (none) | Path to an operator-supplied GeoLite2/GeoIP2 `.mmdb` file for AccessList geo rules; unset disables geo rules, no database is bundled | Yes |
 | `GPM_ANALYTICS_DEMO` | (unset) | `1` makes `GET /api/analytics` serve deterministic seed data (flagged `demo: true`) so the Analytics view can be reviewed before a collector exists; unset answers 501. Logged as a warning at start | No |
+| `GPM_ANALYTICS_DB`<br>`-analytics-db` | `/data/analytics.db` | Hourly rollup database for the analytics collector (`settings.analytics.enabled`); created 0600 with WAL, next to the session database. Unopenable: the collector keeps the 24 h memory window only and logs an error | Yes |
 
 **Admin password** is not a flag. Provide a bcrypt hash via, in order of
 preference:
