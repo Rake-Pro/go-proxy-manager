@@ -523,6 +523,51 @@ func TestAccessLogToggle(t *testing.T) {
 	}
 }
 
+// PUT /logs with "capacity" resizes the wired buffer; a rejected value is a
+// 400 and, when combined with "enabled", stops the toggle from being applied.
+func TestAccessLogCapacity(t *testing.T) {
+	dir := t.TempDir()
+	st := store.New(dir, store.NewExecGit(dir))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	var capacity int
+	var toggles int
+	h := api.New(api.Deps{Store: st,
+		SetAccessLog: func(bool) { toggles++ },
+		SetAccessLogCapacity: func(n int) error {
+			if n < 100 {
+				return errors.New("too small")
+			}
+			capacity = n
+			return nil
+		},
+	})
+
+	w := do(t, h, "PUT", "/logs", `{"capacity":2000}`)
+	if w.Code != http.StatusOK || capacity != 2000 {
+		t.Fatalf("resize want 200/2000 got %d/%d: %s", w.Code, capacity, w.Body.String())
+	}
+	var resp struct {
+		Capacity int   `json:"capacity"`
+		Enabled  *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Capacity != 2000 || resp.Enabled != nil {
+		t.Fatalf("body = %s, want capacity 2000 only", w.Body.String())
+	}
+	if w := do(t, h, "PUT", "/logs", `{"capacity":5,"enabled":true}`); w.Code != http.StatusBadRequest || toggles != 0 || capacity != 2000 {
+		t.Fatalf("bad capacity want 400 and no toggle, got %d toggles=%d capacity=%d", w.Code, toggles, capacity)
+	}
+	if w := do(t, h, "PUT", "/logs", `{"capacity":3000,"enabled":true}`); w.Code != http.StatusOK || toggles != 1 || capacity != 3000 {
+		t.Fatalf("combined want 200, toggle once, 3000: got %d toggles=%d capacity=%d", w.Code, toggles, capacity)
+	}
+	// Toggle-only deployments: capacity is 501, enabled still works.
+	toggleOnly := api.New(api.Deps{Store: st, SetAccessLog: func(bool) {}})
+	if w := do(t, toggleOnly, "PUT", "/logs", `{"capacity":2000}`); w.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired capacity want 501 got %d", w.Code)
+	}
+}
+
 func TestLogsClear(t *testing.T) {
 	dir := t.TempDir()
 	st := store.New(dir, store.NewExecGit(dir))

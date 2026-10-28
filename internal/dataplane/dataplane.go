@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -139,8 +140,9 @@ type Config struct {
 	// host, upstream) so routing can be inspected from the client side.
 	DebugHeaders bool
 	// AccessLogBufferSize is the number of recent access entries retained in memory
-	// for the admin /api/logs viewer (0 selects a default). Only filled while
-	// AccessLog is enabled.
+	// for the admin /api/logs viewer (0 selects DefaultAccessLogCapacity; other
+	// values are clamped to [MinAccessLogCapacity, MaxAccessLogCapacity]). Only
+	// filled while AccessLog is enabled; SetAccessLogCapacity changes it live.
 	AccessLogBufferSize int
 	// UpstreamResponseHeaderTimeout caps time-to-first-byte from an upstream
 	// (0 = unbounded). Tunes the shared upstream transport.
@@ -153,7 +155,11 @@ func New(c Config) *Server {
 	configureUpstreamTransport(c.UpstreamResponseHeaderTimeout)
 	bufSize := c.AccessLogBufferSize
 	if bufSize <= 0 {
-		bufSize = 1000
+		bufSize = DefaultAccessLogCapacity
+	} else if bufSize < MinAccessLogCapacity {
+		bufSize = MinAccessLogCapacity
+	} else if bufSize > MaxAccessLogCapacity {
+		bufSize = MaxAccessLogCapacity
 	}
 	s := &Server{
 		httpsAddr:     c.HTTPSAddr,
@@ -182,13 +188,36 @@ func (s *Server) ClearLogs() {
 	log.Info().Msg("access-log buffer cleared")
 }
 
+// Bounds for the access-log ring: a few hundred bytes per entry, so the
+// maximum is tens of MB at worst.
+const (
+	DefaultAccessLogCapacity = 5000
+	MinAccessLogCapacity     = 100
+	MaxAccessLogCapacity     = 100000
+)
+
 // AccessLogCapacity is the number of entries the ring retains before the
 // oldest is overwritten.
 func (s *Server) AccessLogCapacity() int {
 	if s.logBuf == nil {
 		return 0
 	}
-	return s.logBuf.cap
+	return s.logBuf.capacity()
+}
+
+// SetAccessLogCapacity resizes the ring live (admin PUT /api/logs with
+// "capacity"), keeping the newest entries that fit. Runtime-only like the
+// toggle: the -access-log-buffer flag decides the size after a restart.
+func (s *Server) SetAccessLogCapacity(n int) error {
+	if n < MinAccessLogCapacity || n > MaxAccessLogCapacity {
+		return fmt.Errorf("capacity must be between %d and %d", MinAccessLogCapacity, MaxAccessLogCapacity)
+	}
+	if s.logBuf == nil {
+		return errors.New("access-log buffer is not wired")
+	}
+	s.logBuf.resize(n)
+	log.Info().Int("capacity", n).Msg("access-log buffer resized")
+	return nil
 }
 
 // AccessLogEnabled reports whether request capture is on. When false the /api/logs
@@ -212,11 +241,24 @@ func (s *Server) SetAccessLog(enabled bool) {
 	log.Info().Bool("enabled", enabled).Msg("access logging toggled")
 }
 
+// RefreshObserve re-evaluates which chain the listeners serve after an
+// observability input changed outside this package (the analytics collector
+// was switched on or off by a settings reload).
+func (s *Server) RefreshObserve() {
+	active := s.observeActive()
+	if s.httpSwitch != nil {
+		s.httpSwitch.set(active)
+	}
+	if s.httpsSwitch != nil {
+		s.httpsSwitch.set(active)
+	}
+}
+
 // observeActive reports whether requests must run through the observed chain
 // right now: the live access-log toggle, or any startup toggle that always
 // needs the wrapper.
 func (s *Server) observeActive() bool {
-	return s.accessLog.Load() || s.slowThreshold > 0 || s.debugHeaders || metricsHook() != nil
+	return s.accessLog.Load() || s.slowThreshold > 0 || s.debugHeaders || metricsHook() != nil || analyticsActive()
 }
 
 // UpstreamHealth returns the live health of every upstream group's upstreams,

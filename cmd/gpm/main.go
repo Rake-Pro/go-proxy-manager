@@ -22,6 +22,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
@@ -63,11 +64,13 @@ func main() {
 		httpsAddr     = flag.String("https-addr", envOr("GPM_HTTPS_ADDR", ":443"), "data plane HTTPS listen address")
 		httpAddr      = flag.String("http-addr", envOr("GPM_HTTP_ADDR", ":80"), "data plane HTTP listen address")
 		sessionDB     = flag.String("session-db", envOr("GPM_SESSION_DB", "/data/session.db"), "session database path")
+		analyticsDB   = flag.String("analytics-db", envOr("GPM_ANALYTICS_DB", "/data/analytics.db"), "analytics hourly rollup database path (used when settings.analytics.enabled)")
 		localUser     = flag.String("local-admin-user", os.Getenv("GPM_LOCAL_ADMIN_USER"), "local admin username")
 		cookieSecure  = cookieSecureFlag("cookie-secure", envOr("GPM_COOKIE_SECURE", "auto"), "Secure flag on admin cookies: auto (per request: TLS, trusted-proxy https, or an https externalBaseURL), 1 (always) or 0 (never)")
 		logLevel      = flag.String("log-level", envOr("GPM_LOG_LEVEL", "info"), "log level (trace|debug|info|warn|error)")
 		logConsole    = flag.Bool("log-console", os.Getenv("GPM_LOG_CONSOLE") == "1", "human-friendly console logging")
 		accessLog     = flag.Bool("access-log", os.Getenv("GPM_ACCESS_LOG") == "1", "log every data-plane request (method, host, path, status, bytes, duration)")
+		accessLogBuf  = flag.Int("access-log-buffer", envInt("GPM_ACCESS_LOG_BUFFER", dataplane.DefaultAccessLogCapacity), "access-log entries kept in memory for the Access Logs page (100-100000); the page resizes it live, a restart reverts to this value")
 		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
@@ -198,6 +201,7 @@ func main() {
 		HTTPAddr:                      *httpAddr,
 		CertDir:                       *certDir,
 		AccessLog:                     *accessLog,
+		AccessLogBufferSize:           *accessLogBuf,
 		SlowRequestThreshold:          time.Duration(*slowReqMS) * time.Millisecond,
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
@@ -235,6 +239,45 @@ func main() {
 		}
 		go geoResolver.Watch(ctx, *geoDBPath, geoip.DefaultWatchInterval)
 	}
+
+	// Traffic analytics: a collector fed by the observe wrapper (one queue send
+	// per request while settings.analytics.enabled), aggregating on its own
+	// goroutine and rolling closed hours into a small SQLite file. Built always
+	// (it is a few maps) and switched by settings, so a reload turns it on or
+	// off without a restart. A rollup store that fails to open degrades to the
+	// 24 h memory window rather than refusing to start.
+	var rollup *analytics.Rollup
+	if rl, err := analytics.OpenRollup(*analyticsDB); err != nil {
+		log.Error().Err(err).Str("path", *analyticsDB).Msg("analytics: rollup store unavailable; keeping the 24 h memory window only")
+	} else {
+		rollup = rl
+		defer rollup.Close()
+	}
+	collector := analytics.NewCollector(analytics.Options{
+		Country:   geoResolver.Country,
+		GeoLoaded: geoResolver.Loaded,
+		Store:     rollup,
+		// The host filter accepts any proxy host in the live config, traffic or
+		// not, so a host page's Analytics link never says "no such host".
+		KnownHost: func(name string) bool {
+			cfg, _, err := st.Load(ctx)
+			if err != nil {
+				return false
+			}
+			for _, h := range cfg.ProxyHosts {
+				if h.Name == name {
+					return true
+				}
+			}
+			return false
+		},
+	})
+	collector.Apply(analyticsSettings(settings.Analytics))
+	dataplane.SetInternalNetworks(settings.Analytics.InternalNetworks)
+	dataplane.SetAnalyticsSink(collector)
+	collector.Start()
+	defer collector.Close()
+
 	dataplane.SetGeoDB(geoResolver)
 	// Reject-at-write: the store refuses to commit an AccessList with geo rules
 	// while no GeoIP database is loaded, so such a rule never lands in git. The
@@ -425,6 +468,11 @@ func main() {
 			log.Error().Err(err).Msg("reload: failed to reload data plane")
 			return err
 		}
+		// Analytics follows settings live: the collector's switch, retention and
+		// top-clients mode, then the listeners re-pick the observed chain.
+		collector.Apply(analyticsSettings(st2.Analytics))
+		dataplane.SetInternalNetworks(st2.Analytics.InternalNetworks)
+		dp.RefreshObserve()
 		authn.Configure(c, st2)
 		// Every config change funnels through here, so this is the one place the
 		// cached API-token set has to be dropped.
@@ -715,6 +763,30 @@ func main() {
 
 	// REST CRUD API: writes go through the git-backed store; commits are authored
 	// by the requesting admin principal; OnChange reloads the running state.
+	// Analytics seed provider. GPM_ANALYTICS_DEMO=1 serves deterministic seed
+	// data (internal/analytics.Demo) so the Analytics view can be reviewed before
+	// the collector exists; the API marks every response demo:true. Unset leaves
+	// GET /analytics answering 501.
+	analyticsFn := func(rng, host, scope string) (any, error) {
+		return collector.Report(analytics.Query{Range: rng, Host: host, Scope: scope})
+	}
+	if os.Getenv("GPM_ANALYTICS_DEMO") == "1" {
+		analyticsFn = func(rng, host, scope string) (any, error) {
+			var names []string
+			if cfg, _, err := st.Load(ctx); err == nil {
+				for _, h := range cfg.ProxyHosts {
+					names = append(names, h.Name)
+				}
+			}
+			rep, err := analytics.Demo(names, time.Now(), analytics.Query{Range: rng, Host: host, Scope: scope})
+			if err != nil {
+				return nil, err
+			}
+			rep.GeoIP = geoResolver.Loaded() // the one real fact in a seed report
+			return rep, nil
+		}
+		log.Warn().Msg("GPM_ANALYTICS_DEMO=1: GET /analytics serves seed data, not observed traffic")
+	}
 	apiHandler := api.New(api.Deps{
 		Store:    st,
 		OnChange: reload,
@@ -754,13 +826,15 @@ func main() {
 			}
 		},
 		RecentLogs: func() any {
-			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity()}
+			return map[string]any{"enabled": dp.AccessLogEnabled(), "entries": dp.RecentLogs(), "capacity": dp.AccessLogCapacity(), "geoip": geoResolver.Loaded()}
 		},
-		ClearLogs:         dp.ClearLogs,
-		SetAccessLog:      dp.SetAccessLog,
-		GeoDBLoaded:       geoResolver.Loaded,
-		MaintenanceGlobal: dataplane.MaintenanceGlobalEnabled,
-		MaintenanceExempt: dataplane.MaintenanceExemptDomains,
+		ClearLogs:            dp.ClearLogs,
+		Analytics:            analyticsFn,
+		SetAccessLog:         dp.SetAccessLog,
+		SetAccessLogCapacity: dp.SetAccessLogCapacity,
+		GeoDBLoaded:          geoResolver.Loaded,
+		MaintenanceGlobal:    dataplane.MaintenanceGlobalEnabled,
+		MaintenanceExempt:    dataplane.MaintenanceExemptDomains,
 		UpstreamHealth: func() any {
 			return dp.UpstreamHealth()
 		},
@@ -988,6 +1062,11 @@ func certExpiryDigest(ctx context.Context, st *store.Store, acmeMgr *acme.Manage
 			run()
 		}
 	}
+}
+
+// analyticsSettings maps the settings block onto the collector's settings.
+func analyticsSettings(a model.AnalyticsSettings) analytics.Settings {
+	return analytics.Settings{Enabled: a.Enabled, RetentionDays: a.Retention(), ClientsMode: a.ClientsMode(), InternalNetworks: a.InternalNetworks}
 }
 
 func envOr(key, def string) string {

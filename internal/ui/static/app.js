@@ -41,6 +41,7 @@ const ICON = {
   caret: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
   sun: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
   moon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg>',
+  copy: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg>',
   check: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>',
 };
 
@@ -55,6 +56,7 @@ const NAV_GROUPS = [
   {
     label: '', items: [
       { id: 'overview', label: 'Overview', icon: ICON.grid },
+      { id: 'analytics', label: 'Analytics', icon: ICON.gauge },
     ],
   },
   {
@@ -97,7 +99,7 @@ const NAV_GROUPS = [
 const NAV = NAV_GROUPS.reduce((acc, g) => acc.concat(g.items), []);
 
 const TITLES = {
-  overview: 'Overview', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
+  overview: 'Overview', analytics: 'Analytics', hosts: 'Proxy Hosts', redirects: 'Redirects', streams: 'Streams',
   parked: 'Parked Hosts', certs: 'Certificates', clientcas: 'Client CAs', identity: 'Identity Providers', access: 'Access Lists',
   middleware: 'Middleware', upstreams: 'Upstream Groups', dns: 'DNS Providers',
   errorpages: 'Error Pages', integrations: 'Integrations',
@@ -1933,7 +1935,7 @@ const RO_WRITE_CONTROLS = [
   '.btn.primary', '.btn.danger', '.btn.danger-soft', '[data-revert]', '[data-revert-obj]',
   '.tok-rotate', '.tok-toggle', '#restoreBtn', '#backupBtn', '#set-save', '.set-save', '#errp-save',
   '#set-sso-revoke', '#set-dns-run', '#set-id-run', '#set-dkr-run', '#int-als-run',
-  '#ed-src-reconcile', '#logsToggle', '#logsClear', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
+  '#ed-src-reconcile', '#logsToggle', '#logsClear', '#logsCap', '.wh-test', '.ntf-test', '.ct-renew', '#ed-renew',
   '.al-migrate', '#set-metrics-link',
   // Saving or deleting a named filter writes settings.
   '.fsaved-save', '.fsaved-del',
@@ -3263,6 +3265,7 @@ async function route() {
   try {
     switch (section) {
       case 'overview': await viewOverview(c); break;
+      case 'analytics': await viewAnalytics(c, sub); break;
       case 'hosts':
         if (sub === '_new') await hostEditor(c, null);
         else if (sub) await hostEditor(c, sub);
@@ -5522,7 +5525,7 @@ ${body}      </div></div>`;
     ${pageHead(esc(isNew ? 'New proxy host' : (arr(h.domains)[0] || h.name)), isNew ? 'Add a proxy host.' : 'Edit this proxy host.',
       `<a href="#/hosts">Proxy Hosts</a>${ICON.chevron}<span>${isNew ? 'new' : esc(h.name)}</span>`, isNew ? '' : (arr(h.domains).join(', ') || h.name),
       statusChip + (h.updatedAt ? `<span class="head-meta">last change ${esc(fmtTime(h.updatedAt))}</span>` : ''),
-      isNew ? '' : `${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger-soft sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
+      isNew ? '' : `<a class="btn ghost sm" href="#/analytics/${encodeURIComponent(h.name)}" title="Traffic analytics for this host">Analytics</a>${isRoleReadOnly() ? '' : '<button class="btn ghost sm" id="hostYamlBtn" type="button">YAML</button>'}<button class="btn ghost sm" id="hostCloneBtn" type="button">Clone</button><button class="btn danger-soft sm" id="deleteBtn" type="button">${ICON.trash}Delete</button>`,
       hostTabsHtml)}
 
     <div class="edit-grid">
@@ -8435,6 +8438,8 @@ async function middlewareEditor(c, name) {
   function trigRow(t) {
     t = t || {}; const d = document.createElement('div'); d.className = 'sub-block';
     d.innerHTML = `<div class="row-between" style="margin-bottom:8px"><span class="ci-ty">trigger</span><button class="icon-btn trig-del" type="button" aria-label="Remove trigger">${ICON.x}</button></div>
+      <div class="field-group"><label>Name</label><input class="field mono trig-name" data-hint="middleware.guard.triggers.name" value="${esc(t.name || '')}" placeholder="optional, e.g. xmlrpc" />
+        <div class="hint">Optional. A denial by a named trigger shows in Analytics as the signature <span class="mono">guard:&lt;name&gt;</span>.</div></div>
       <div class="field-group"><label>Paths</label><div class="chip-input trig-paths" data-hint="middleware.guard.triggers.paths"></div></div>
       <div class="field-group"><label>Methods</label><div class="chip-input trig-methods" data-hint="middleware.guard.triggers.methods"></div></div>
       <div class="field-group"><label>Query equals</label><div class="trig-query" data-hint="middleware.guard.triggers.queryEquals"></div><button class="btn ghost sm trig-addq" type="button" style="margin-top:6px">${ICON.plus}Add</button></div>`;
@@ -8443,7 +8448,7 @@ async function middlewareEditor(c, name) {
     const methodsCtl = makeChipInput(d.querySelector('.trig-methods'), arr(t.methods), 'add method...');
     const queryCtl = makeKVRows(d.querySelector('.trig-query'), t.queryEquals || {}, 'arg', 'value', false);
     d.querySelector('.trig-addq').addEventListener('click', () => queryCtl.addRow('', ''));
-    const ctl = { pathsCtl, methodsCtl, queryCtl };
+    const ctl = { pathsCtl, methodsCtl, queryCtl, nameEl: d.querySelector('.trig-name') };
     d.querySelector('.trig-del').addEventListener('click', () => { d.remove(); const i = trigCtls.indexOf(ctl); if (i >= 0) trigCtls.splice(i, 1); });
     trigCtls.push(ctl);
   }
@@ -8473,6 +8478,8 @@ async function middlewareEditor(c, name) {
       const triggers = [];
       trigCtls.forEach((ctl) => {
         const tr = {}; const p = ctl.pathsCtl.get(); const m = ctl.methodsCtl.get(); const q = ctl.queryCtl.get();
+        const nm = ctl.nameEl ? ctl.nameEl.value.trim() : '';
+        if (nm) tr.name = nm;
         if (p.length) tr.paths = p;
         if (m.length) tr.methods = m;
         if (Object.keys(q).length) tr.queryEquals = q;
@@ -9701,6 +9708,8 @@ const LOGS_SORT_KEY = 'gpm.logs.sort';
 const LOG_FIELDS = {
   method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
   client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
+  country: 'an ISO country code such as US (needs a GeoIP database)',
+  source: 'internal (private, loopback, link-local or a configured internal network) or external',
 };
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
@@ -9717,10 +9726,11 @@ function clientHit(client, alt, nets) {
 function logRec(e, nets) {
   const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
   return {
-    blob: [e.method, e.host, e.path, e.status, cls, e.client].join(' ').toLowerCase(),
+    blob: [e.method, e.host, e.path, e.status, cls, e.client, e.country].join(' ').toLowerCase(),
     f: {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
-      client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'),
+      client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'), country: fvals(e.country || ''),
+      source: fvals(e.source || ''),
     },
     m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
@@ -9739,17 +9749,22 @@ async function accessListNets() {
   });
   return nets;
 }
+// Whether the current log payload carries countries (a GeoIP database is
+// loaded); the Country column is hidden otherwise so the table does not show
+// an empty column on every install without a database.
+let logsGeo = false;
 function logRowHtml(e, i) {
   const statusClass = e.status >= 500 ? 'err' : (e.status >= 400 ? 'warn' : 'ok');
   return `<tr data-i="${i}">
       <td class="mono faint col-time" data-v="${esc(e.time || '')}" title="${esc(fmtTime(e.time, true))}">${esc(fmtClock(e.time))}</td>
       <td class="mono col-method">${esc(e.method || '')}</td>
-      <td class="mono col-host"><span class="trunc" title="${esc(e.host || '')}">${esc(e.host || '')}</span></td>
-      <td class="mono col-path"><span class="trunc" title="${esc(e.path || '')}">${esc(e.path || '')}</span></td>
+      <td class="mono col-host"><span class="cp"><span class="trunc cp-text" title="${esc(e.host || '')}">${esc(e.host || '')}</span>${cpBtn(e.host, 'host')}</span></td>
+      <td class="mono col-path"><span class="cp"><span class="trunc cp-text" title="${esc(e.path || '')}">${esc(e.path || '')}</span>${cpBtn(e.path, 'path')}</span></td>
       <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span></td>
       <td class="mono col-num" data-v="${esc(e.durMs)}">${esc(e.durMs)}ms</td>
       <td class="mono col-num" data-v="${esc(e.bytes || 0)}">${esc(fmtBytes(e.bytes || 0))}</td>
-      <td class="mono faint col-client"><span class="trunc" title="${esc(e.client || '')}">${esc(e.client || '')}</span></td>
+      <td class="mono faint col-client"><span class="cp"><span class="trunc cp-text" title="${esc(e.client || '')}">${esc(e.client || '')}</span>${cpBtn(e.client, 'client address')}</span></td>
+      <td class="mono col-country"${logsGeo ? '' : ' hidden'} data-v="${esc(e.country || '')}">${copyable(e.country, 'country code')}</td>
     </tr>`;
 }
 function fmtBytes(n) {
@@ -9760,6 +9775,7 @@ function fmtBytes(n) {
 async function viewLogs(c) {
   const data = (await api('/api/logs')).data || {};
   const enabled = !!data.enabled;
+  logsGeo = !!data.geoip;
   const nets = await accessListNets();
   let entries = arr(data.entries);
   let recs = entries.map((e) => logRec(e, nets));
@@ -9767,11 +9783,17 @@ async function viewLogs(c) {
   let auto = 0;
   try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
   const AUTO = [[0, 'Off'], [2, 'Every 2s'], [5, 'Every 5s'], [15, 'Every 15s'], [60, 'Every minute']];
+  // Buffer sizes offered for the live resize; the running size is always listed
+  // so a value set by flag or API shows as selected rather than as a blank.
+  const CAPS = [1000, 2000, 5000, 10000, 20000, 50000, 100000];
+  if (capacity && !CAPS.includes(capacity)) CAPS.push(capacity);
+  CAPS.sort((a, b) => a - b);
 
   c.innerHTML = `
     ${pageHead('Access Logs', 'Most recent proxied requests, newest first (in-memory buffer).')}
     <div class="view-head">
       <label class="auto-refresh" for="logsAuto"><span>Auto-refresh</span><select class="field" id="logsAuto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="logsCap" title="Requests kept in memory; the oldest drop off when it is full. Runtime only: a restart goes back to -access-log-buffer."><span>Buffer</span><select class="field" id="logsCap" aria-label="Access-log buffer size"${capacity ? '' : ' disabled'}>${CAPS.map((v) => `<option value="${v}"${v === capacity ? ' selected' : ''}>${v.toLocaleString()}</option>`).join('')}</select></label>
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
       <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
       <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
@@ -9786,7 +9808,7 @@ async function viewLogs(c) {
     </div>
     <div class="table-wrap" id="logsWrap"${entries.length ? '' : ' hidden'}>
       <table id="logsTable">
-        <thead><tr><th class="col-time" data-sort="time">Time</th><th data-sort="method">Method</th><th data-sort="host">Host</th><th data-sort="path">Path</th><th data-sort="status" data-type="num">Status</th><th class="col-num" data-sort="dur" data-type="num">Duration</th><th class="col-num" data-sort="bytes" data-type="num">Bytes</th><th data-sort="client">Client</th></tr></thead>
+        <thead><tr><th class="col-time" data-sort="time">Time</th><th data-sort="method">Method</th><th data-sort="host">Host</th><th data-sort="path">Path</th><th data-sort="status" data-type="num">Status</th><th class="col-num" data-sort="dur" data-type="num">Duration</th><th class="col-num" data-sort="bytes" data-type="num">Bytes</th><th data-sort="client">Client</th><th data-sort="country" class="col-country"${data.geoip ? '' : ' hidden'}>Country</th></tr></thead>
         <tbody id="logRows"></tbody>
       </table>
     </div>
@@ -9829,7 +9851,7 @@ async function viewLogs(c) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     let text, type;
     if (fmt === 'csv') {
-      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'];
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source']);
       text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
       type = 'text/csv';
     } else {
@@ -9868,6 +9890,8 @@ async function viewLogs(c) {
     let d;
     try { d = (await api('/api/logs')).data || {}; } catch (e) { toastErr(e, 'Could not refresh the access log'); return; }
     if (!!d.enabled !== enabled) { if (c.isConnected) await route(); return; }
+    logsGeo = !!d.geoip;
+    $$('.col-country', c).forEach((el) => { el.hidden = !logsGeo; });
     entries = arr(d.entries);
     recs = entries.map((e) => logRec(e, nets));
     paint();
@@ -9892,6 +9916,18 @@ async function viewLogs(c) {
     schedule();
   });
   $('#logsRefresh').addEventListener('click', refresh);
+  // Resize keeps the newest entries that fit, so shrinking drops the oldest
+  // rows at once; route() re-reads the capacity the server settled on.
+  $('#logsCap').addEventListener('change', async () => {
+    const sel = $('#logsCap');
+    const next = Number(sel.value) || 0;
+    sel.disabled = true;
+    try {
+      await api('/api/logs', { method: 'PUT', body: { capacity: next } });
+      toast('Buffer resized', `Keeps the newest ${next.toLocaleString()} requests. Runtime only: a restart goes back to -access-log-buffer.`, 'ok');
+      if (c.isConnected) await route();
+    } catch (e) { toastErr(e, 'Could not resize the buffer'); sel.value = String(capacity); sel.disabled = false; }
+  });
   $('#logsClear').addEventListener('click', async () => {
     const ok = await confirmModal({
       title: 'Clear the access log?',
@@ -10302,6 +10338,7 @@ async function viewSettings(c, tab) {
   const idc = s.ingressDiscovery || {};
   const trusted = arr(s.trustedProxies);
   const stls = s.tls || {};
+  const an = s.analytics || {};
 
   c.innerHTML = `
     ${pageHead('Settings', 'What this instance is, who may administer it, and how it answers. Outbound systems are under <a href="#/integrations">Integrations</a>.', '', '', '', '',
@@ -10373,6 +10410,27 @@ async function viewSettings(c, tab) {
           </select>
           <div class="hint">Applies to every host that does not pin its own. A proxy host's <span class="mono">Minimum TLS version</span> overrides this either way, so one legacy host can stay on 1.2 under a 1.3 fleet floor.</div>
           <div class="hint">1.3 only refuses the handshake for any client that cannot negotiate it: there is no fallback and no error page. Raise it once every client of every unpinned host supports 1.3.</div>
+        </div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">Analytics</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">The traffic collector behind <a href="#/analytics">Analytics</a>: every finished request is handed to a background worker (one queue send on the request path), which resolves the client's country, labels scanner patterns and keeps bounded hourly aggregates. Closed hours are rolled up into <span class="mono">analytics.db</span> next to the session database.</p>
+        <div class="toggle-line"><div class="tl-text"><div class="nm">Collect traffic analytics</div><div class="ds">Off costs nothing per request; the Analytics page says it is off</div></div>${switchHtml('set-an-on', !!an.enabled, 'Collect traffic analytics', 'settings.analytics.enabled')}</div>
+        <div class="grid-2" style="margin-top:10px">
+          <div class="field-group"><label>Rollup retention (days)</label><input class="field mono" id="set-an-ret" data-hint="settings.analytics.retentionDays" data-path="analytics.retentionDays" value="${an.retentionDays ? esc(String(an.retentionDays)) : ''}" placeholder="7" inputmode="numeric" />
+            <div class="hint">Blank = 7. The 7d range needs at least 7, the 30d range at least 30. The in-memory 24 h window is unaffected.</div>
+          </div>
+          <div class="field-group"><label>Top clients</label>
+            <select class="field" id="set-an-clients" data-hint="settings.analytics.topClients" data-path="analytics.topClients">
+              <option value="persist"${(an.topClients || 'persist') === 'persist' ? ' selected' : ''}>Keep and persist (default)</option>
+              <option value="memory"${an.topClients === 'memory' ? ' selected' : ''}>Memory only (24 h)</option>
+              <option value="off"${an.topClients === 'off' ? ' selected' : ''}>Do not record client addresses</option>
+            </select>
+            <div class="hint">Whether the per-address table exists at all, and whether it survives a restart.</div>
+          </div>
+        </div>
+        <div class="field-group" style="margin-top:10px"><label>Internal networks</label><div class="chip-input" id="set-an-nets" data-hint="settings.analytics.internalNetworks" data-path="analytics.internalNetworks"></div>
+          <div class="hint">Extra CIDRs counted as internal by the Source filter on the Analytics page. Private (RFC 1918, ULA), loopback and link-local addresses always are; add a VPN or overlay range here. Applies to requests from now on.</div>
         </div>
       </div>
       ${settingsSaveBar('set-save')}
@@ -10508,6 +10566,7 @@ async function viewSettings(c, tab) {
     refreshAdminEdge();
   });
   const ppCtl = makeChipInput($('#set-pp-cidrs'), arr(pp.trustedCIDRs), 'add CIDR...');
+  const anNetsCtl = makeChipInput($('#set-an-nets'), arr(an.internalNetworks), 'add CIDR...');
   const trustedCtl = makeChipInput($('#set-trustedproxies'), trusted, '10.0.0.0/8 or 192.0.2.10', (list) => {
     $('#set-trustedproxies-warn').hidden = !hasWildcardProxy(list);
   });
@@ -10672,6 +10731,28 @@ async function viewSettings(c, tab) {
     if (isOn('set-ae-robots')) adminEdge.robotsNoIndex = true;
     if (isOn('set-ae-dns-lan') || isOn('set-ae-dns-pub')) adminEdge.dns = { lanDirect: isOn('set-ae-dns-lan'), publicCname: isOn('set-ae-dns-pub') };
     if (Object.keys(adminEdge).length) body.adminEdge = adminEdge;
+
+    // Analytics. Off with defaults leaves the key off the body entirely, so an
+    // untouched settings.yaml round-trips without gaining an `analytics: {}`.
+    const anRetRaw = $('#set-an-ret').value.trim();
+    const anRet = anRetRaw ? Number(anRetRaw) : 0;
+    if (anRetRaw && (!Number.isInteger(anRet) || anRet < 1 || anRet > 365)) {
+      showInvalid('Retention out of range', 'Rollup retention must be 1 to 365 days. Leave it blank for the 7 day default.', $('#set-an-ret'));
+      return;
+    }
+    const analytics = {};
+    if (isOn('set-an-on')) analytics.enabled = true;
+    if (anRet > 0 && anRet !== 7) analytics.retentionDays = anRet;
+    const anClients = $('#set-an-clients').value;
+    if (anClients && anClients !== 'persist') analytics.topClients = anClients;
+    const anNets = anNetsCtl.get();
+    const badNet = anNets.find((n) => !/^[0-9a-fA-F.:]+(\/\d{1,3})?$/.test(n));
+    if (badNet) {
+      showInvalid('Not a network', `"${badNet}" is not a CIDR or an IP address.`, $('#set-an-nets'));
+      return;
+    }
+    if (anNets.length) analytics.internalNetworks = anNets;
+    if (Object.keys(analytics).length) body.analytics = analytics;
 
     const ppCidrs = ppCtl.get();
     const ppTimeout = $('#set-pp-timeout').value.trim();
@@ -11579,3 +11660,478 @@ async function boot() {
   await route();
 }
 boot();
+
+
+// ---------- hover-to-copy ----------
+// Values worth lifting off a table row (a client address, a host, a path, a
+// country code, a signature label) render as a .cp span: the text plus a small
+// copy button that appears when the row (or the span) is hovered or focused.
+// One delegated click handler serves every table, so a view only renders the
+// markup. The button is a real <button>, so it is tabbable and Enter works.
+// A value with control or bidi characters (a decoded request path can carry
+// a newline or an RTL override) is copied percent-encoded, so a paste into a
+// terminal cannot run a hidden second line.
+const CP_UNSAFE = /[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/;
+function cpValue(v) {
+  const t = v == null ? '' : String(v);
+  return CP_UNSAFE.test(t) ? encodeURI(t) : t;
+}
+function cpBtn(v, label) {
+  const t = v == null ? '' : String(v);
+  if (!t) return '';
+  return `<button type="button" class="cp-btn" data-copy="${esc(cpValue(t))}" aria-label="Copy ${esc(label || 'value')}" title="Copy">${ICON.copy}</button>`;
+}
+function copyable(text, label) {
+  const t = text == null ? '' : String(text);
+  if (!t) return '';
+  return `<span class="cp"><span class="cp-text">${esc(t)}</span>${cpBtn(t, label)}</span>`;
+}
+// Capture phase, so a copy inside a clickable row (tr.clickable) is handled
+// before the row's own listener and never also navigates.
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('.cp-btn');
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const v = b.dataset.copy || '';
+  try {
+    await navigator.clipboard.writeText(v);
+    b.classList.add('done');
+    setTimeout(() => b.classList.remove('done'), 1200);
+    toast('Copied', v, 'ok');
+  } catch (err) {
+    toast('Could not copy', v, 'err');
+  }
+}, true);
+
+// ---------- ANALYTICS ----------
+// Traffic through the edge for one range, fleet-wide or for one proxy host:
+// KPI tiles, a column chart (allowed + denied stacked) with the threat line
+// and a hover readout, three small multiples, then countries, denial reasons,
+// threat signatures, hosts and top clients as tables with inline bars.
+// Everything is plain HTML and inline SVG drawn at the container's measured
+// pixel width (never stretched: a stretched viewBox distorts text and bars),
+// redrawn on resize. Data is GET /api/analytics; 501 means no collector is
+// wired and the view says so.
+const AN_RANGE_KEY = 'gpm.analytics.range';
+const AN_AUTO_KEY = 'gpm.analytics.auto';
+const AN_SCOPE_KEY = 'gpm.analytics.scope';
+const AN_RANGES = ['1h', '6h', '24h', '7d', '30d'];
+// Source filter: '' is every request, else the network the client was on.
+const AN_SCOPES = [['', 'All traffic'], ['external', 'External only'], ['internal', 'Internal only']];
+// Series colours: existing tokens (brand, cyan, err), validated as a set in
+// both themes for CVD and normal-vision separation; the same hex in dark mode
+// on purpose (the dark text variants fail the lightness band for marks).
+const AN_C = { allowed: 'var(--vz-1)', denied: 'var(--vz-2)', threats: 'var(--vz-3)' };
+
+function anCompact(n) {
+  n = Number(n) || 0;
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'K';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function anBytes(n) {
+  n = Number(n) || 0;
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+function anPct(n, d) { return d ? (n / d * 100).toFixed(n / d < 0.1 ? 1 : 0) + '%' : '0%'; }
+function anDelta(cur, prev, goodUp) {
+  if (!prev) return '';
+  const pct = Math.round((cur - prev) / prev * 100);
+  const good = (pct >= 0) === goodUp;
+  return `<span class="stat-delta ${good ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct}%</span>`;
+}
+// Clean axis top: 4 ticks of a round step.
+function anTop(mx) {
+  if (mx <= 0) return 4;
+  const step = Math.pow(10, Math.floor(Math.log10(mx)));
+  const unit = step / 2;
+  return Math.ceil(mx / unit / 4) * unit * 4;
+}
+function anTimeLabel(unix, bucketSec, long) {
+  const d = new Date(unix * 1000);
+  if (long) return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  if (bucketSec >= 3 * 3600) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+function anN(v) { return (Number(v) || 0).toLocaleString(); }
+function anSpark(vals, w, h) {
+  w = w || 96; h = h || 28;
+  vals = arr(vals).map((v) => Number(v) || 0);
+  if (!vals.length) return '';
+  const mx = Math.max.apply(null, vals.concat([1]));
+  const pts = vals.map((v, i) => `${(i * (w - 4) / Math.max(1, vals.length - 1) + 2).toFixed(1)},${(h - 2 - (v / mx) * (h - 6)).toFixed(1)}`);
+  const last = pts[pts.length - 1].split(',');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${pts.join(' ')}" fill="none" stroke="var(--vz-dim)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${last[0]}" cy="${last[1]}" r="3" fill="${AN_C.allowed}" stroke="var(--panel)" stroke-width="2"/></svg>`;
+}
+function anTile(label, value, delta, vals, sub) {
+  return `<div class="stat"><div class="stat-label">${esc(label)}</div><div class="stat-row"><div class="stat-value">${esc(value)}</div>${anSpark(vals)}</div><div class="stat-foot">${delta}${delta ? ' <span class="muted">vs previous period</span>' : ''}${sub ? ` <span class="faint">&middot; ${esc(sub)}</span>` : ''}</div></div>`;
+}
+// Axis frame shared by the big chart and the small multiples: hairline grid,
+// compact y ticks, 5 time labels. Returns the plot geometry for the marks.
+function anFrame(w, h, top, series, bucketSec, pl, pr) {
+  pl = pl || 48; pr = pr || 16;
+  const n = series.length;
+  const pt = 14, pb = 30, W = w - pl - pr, H = h - pt - pb, tick = top / 4;
+  let g = '';
+  for (let k = 0; k <= 4; k++) {
+    const y = pt + H - (k * tick / top) * H;
+    g += `<line x1="${pl}" x2="${w - pr}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--vz-grid)" stroke-width="1"/><text x="${pl - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" class="ax">${anCompact(Math.round(k * tick))}</text>`;
+  }
+  const slot = W / n;
+  const labels = Math.max(2, Math.min(6, Math.floor(W / 110)));
+  for (let i = 0; i <= labels; i++) {
+    const idx = Math.round(i * (n - 1) / labels);
+    const x = pl + idx * slot + slot / 2;
+    const t = i === labels ? 'now' : anTimeLabel(series[idx].t, bucketSec);
+    g += `<text x="${x.toFixed(1)}" y="${h - 9}" text-anchor="${i === labels ? 'end' : (i === 0 ? 'start' : 'middle')}" class="ax">${esc(t)}</text>`;
+  }
+  return { g, pl, pt, W, H, slot, w, h };
+}
+function anPts(vals, top, f) {
+  return vals.map((v, i) => [f.pl + i * f.slot + f.slot / 2, f.pt + f.H - (v / top) * f.H]);
+}
+function anLine(vals, top, f, color, width, markers) {
+  const pts = anPts(vals, top, f);
+  let s = `<polyline points="${pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width || 2}" stroke-linejoin="round" stroke-linecap="round"/>`;
+  if (markers) {
+    // Markers only when there is room for them (>= 10px per bucket), always on
+    // the last point; a 2px panel ring keeps them legible over the columns.
+    const every = f.slot >= 10 ? 1 : (f.slot >= 5 ? 2 : 0);
+    pts.forEach((p, i) => {
+      if (i === pts.length - 1 || (every && i % every === 0 && vals[i] > 0)) {
+        s += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${i === pts.length - 1 ? 4 : 3}" fill="${color}" stroke="var(--panel)" stroke-width="2"/>`;
+      }
+    });
+  }
+  return s;
+}
+function anArea(vals, top, f, color) {
+  const pts = anPts(vals, top, f);
+  const base = f.pt + f.H;
+  return `<polygon points="${pts[0][0].toFixed(1)},${base} ${pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')} ${pts[pts.length - 1][0].toFixed(1)},${base}" fill="${color}" opacity=".10"/>`;
+}
+// Columns stack allowed (brand) and denied (cyan) to the bucket's requests;
+// threat hits ride the same count axis as a red line with markers. One axis,
+// legend in the card head, one direct label on the busiest threat bucket, the
+// rest in the hover readout and the Table toggle.
+function anStacked(series, bucketSec, w) {
+  const h = 320, n = series.length;
+  const top = anTop(Math.max.apply(null, series.map((b) => b.requests).concat([1])));
+  const f = anFrame(w, h, top, series, bucketSec);
+  const bw = Math.max(2, Math.min(28, f.slot * 0.72));
+  let bars = '';
+  let peak = 0;
+  series.forEach((b, i) => {
+    if (b.threats > series[peak].threats) peak = i;
+    const x = f.pl + i * f.slot + (f.slot - bw) / 2;
+    const allowed = Math.max(0, b.requests - b.denied);
+    const ha = (allowed / top) * f.H, ya = f.pt + f.H - ha;
+    const hd = (b.denied / top) * f.H, yd = ya - hd - (hd > 0 ? 2 : 0);
+    bars += `<rect x="${x.toFixed(1)}" y="${ya.toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}" fill="${AN_C.allowed}" opacity=".85"/>`;
+    if (hd >= 5 && bw >= 8) {
+      bars += `<path d="M${x.toFixed(1)},${(yd + hd).toFixed(1)} v${(-(hd - 4)).toFixed(1)} a4,4 0 0 1 4,-4 h${(bw - 8).toFixed(1)} a4,4 0 0 1 4,4 v${(hd - 4).toFixed(1)} z" fill="${AN_C.denied}"/>`;
+    } else if (hd > 0) {
+      bars += `<rect x="${x.toFixed(1)}" y="${yd.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1.5, hd).toFixed(1)}" fill="${AN_C.denied}"/>`;
+    }
+  });
+  const thr = series.map((b) => b.threats);
+  let label = '';
+  if (series[peak] && series[peak].threats > 0) {
+    const px = f.pl + peak * f.slot + f.slot / 2, py = f.pt + f.H - (series[peak].threats / top) * f.H;
+    const anchor = peak > n * 0.75 ? 'end' : 'start';
+    const dx = anchor === 'end' ? -10 : 10;
+    label = `<text x="${(px + dx).toFixed(1)}" y="${(py - 9).toFixed(1)}" text-anchor="${anchor}" class="lbl">${anN(series[peak].threats)} threat hits</text>`;
+  }
+  // The crosshair and hit layer are addressed by the hover handler.
+  return `<svg class="viz" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="Requests per bucket: allowed and denied stacked, threat hits as a line" data-pl="${f.pl}" data-slot="${f.slot}" data-pt="${f.pt}" data-ph="${f.H}">${f.g}${bars}${anLine(thr, top, f, AN_C.threats, 2.5, true)}${label}<line class="vz-xhair" x1="0" x2="0" y1="${f.pt}" y2="${f.pt + f.H}" stroke="var(--border-2)" stroke-width="1" visibility="hidden"/></svg>`;
+}
+function anSmall(series, bucketSec, key, color, title, total, w) {
+  const h = 170, vals = series.map((b) => b[key]);
+  const top = anTop(Math.max.apply(null, vals.concat([1])));
+  const f = anFrame(w, h, top, series, bucketSec, 44, 10);
+  return `<div class="sm-head"><span class="legend"><span><i class="sw" style="background:${color}"></i>${esc(title)}</span></span><b>${esc(anCompact(total))}</b></div><svg class="viz small" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc(title)} per bucket">${f.g}${anArea(vals, top, f, color)}${anLine(vals, top, f, color, 2, false)}</svg>`;
+}
+function anBar(n, mx, color) {
+  return `<span class="ibar"><i style="width:${mx ? (n / mx * 100).toFixed(1) : 0}%;background:${color}"></i></span><span class="num">${Number(n).toLocaleString()}</span>`;
+}
+function anSeriesTable(series, bucketSec) {
+  return `<div class="table-wrap flat"><table class="compact"><thead><tr><th>Bucket</th><th class="col-num">Requests</th><th class="col-num">Allowed</th><th class="col-num">Denied</th><th class="col-num">Threat hits</th><th class="col-num">5xx</th><th class="col-num">p95</th></tr></thead><tbody>${series.map((b) => `<tr><td class="mono">${esc(anTimeLabel(b.t, bucketSec, true))}</td><td class="col-num">${anN(b.requests)}</td><td class="col-num">${anN(Math.max(0, b.requests - b.denied))}</td><td class="col-num">${anN(b.denied)}</td><td class="col-num">${anN(b.threats)}</td><td class="col-num">${anN(b.status5xx)}</td><td class="col-num">${anN(b.p95ms)} ms</td></tr>`).join('')}</tbody></table></div>`;
+}
+// Hover readout for the stacked chart: a crosshair snaps to the bucket under
+// the pointer and one tooltip lists every series for it (values first, names
+// second). Keyboard: the chart wrapper is focusable and arrow keys move the
+// bucket. The table view carries the same numbers without hovering.
+function anWireHover(wrap, series, bucketSec) {
+  const svg = wrap.querySelector('svg.viz');
+  const tip = wrap.querySelector('.vz-tip');
+  if (!svg || !tip) return null;
+  const pl = Number(svg.dataset.pl), slot = Number(svg.dataset.slot);
+  const xhair = svg.querySelector('.vz-xhair');
+  let cur = -1;
+  function show(i, clientX) {
+    if (i < 0 || i >= series.length) { hide(); return; }
+    cur = i;
+    const b = series[i];
+    const x = pl + i * slot + slot / 2;
+    xhair.setAttribute('x1', x); xhair.setAttribute('x2', x); xhair.setAttribute('visibility', 'visible');
+    tip.innerHTML = '';
+    const h = document.createElement('div'); h.className = 'vz-tip-head'; h.textContent = anTimeLabel(b.t, bucketSec, true); tip.appendChild(h);
+    [['Requests', b.requests, null], ['Allowed', Math.max(0, b.requests - b.denied), AN_C.allowed], ['Denied', b.denied, AN_C.denied], ['Threat hits', b.threats, AN_C.threats], ['5xx', b.status5xx, null], ['p95', b.p95ms + ' ms', null]].forEach(([name, val, color]) => {
+      const row = document.createElement('div'); row.className = 'vz-tip-row';
+      const key = document.createElement('i'); key.className = 'vz-tip-key'; if (color) key.style.background = color; else key.style.visibility = 'hidden';
+      const v = document.createElement('b'); v.textContent = typeof val === 'number' ? val.toLocaleString() : String(val);
+      const nm = document.createElement('span'); nm.textContent = name;
+      row.appendChild(key); row.appendChild(v); row.appendChild(nm); tip.appendChild(row);
+    });
+    tip.hidden = false;
+    const wr = wrap.getBoundingClientRect();
+    const px = (clientX != null ? clientX - wr.left : (x / svg.viewBox.baseVal.width) * wr.width);
+    const left = px + 16 + tip.offsetWidth > wr.width ? px - tip.offsetWidth - 12 : px + 12;
+    tip.style.left = Math.max(0, left) + 'px';
+    tip.style.top = '8px';
+  }
+  function hide() { cur = -1; tip.hidden = true; xhair.setAttribute('visibility', 'hidden'); }
+  svg.addEventListener('pointermove', (e) => {
+    const r = svg.getBoundingClientRect();
+    const sx = (e.clientX - r.left) * (svg.viewBox.baseVal.width / r.width);
+    show(Math.floor((sx - pl) / slot), e.clientX);
+  });
+  svg.addEventListener('pointerleave', hide);
+  return {
+    step(dir) { show(cur < 0 ? series.length - 1 : Math.max(0, Math.min(series.length - 1, cur + dir))); },
+    hide,
+  };
+}
+
+async function viewAnalytics(c, sub) {
+  let range = '24h';
+  try { range = localStorage.getItem(AN_RANGE_KEY) || '24h'; } catch (e) { /* ignore */ }
+  if (!AN_RANGES.includes(range)) range = '24h';
+  let auto = 0;
+  try { auto = Number(localStorage.getItem(AN_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
+  let scope = '';
+  try { scope = localStorage.getItem(AN_SCOPE_KEY) || ''; } catch (e) { /* ignore */ }
+  if (!AN_SCOPES.some(([v]) => v === scope)) scope = '';
+  const host = sub || '';
+  const q = `/api/analytics?range=${encodeURIComponent(range)}${host ? '&host=' + encodeURIComponent(host) : ''}${scope ? '&scope=' + encodeURIComponent(scope) : ''}`;
+  // View state that survives an in-place refresh (auto-refresh and the Refresh
+  // button re-fetch and repaint without going through route(), so the page
+  // keeps its scroll position and the Table toggle).
+  const st = { tableOn: false, auto, hover: null };
+  let rep;
+  try {
+    rep = (await api(q)).data || {};
+  } catch (e) {
+    if (e && e.status === 501) {
+      c.innerHTML = pageHead('Analytics', 'Traffic through the edge: volume, origin, refusals and scanner activity.')
+        + emptyState('Analytics is not available on this instance', 'This server has no analytics endpoint.');
+      return;
+    }
+    if (e && e.status === 400 && range !== '24h' && !/host/i.test(String(e.message || ''))) {
+      // A remembered range the instance cannot serve any more (retention was
+      // lowered): fall back to 24h once rather than render an error.
+      try { localStorage.setItem(AN_RANGE_KEY, '24h'); } catch (e2) { /* ignore */ }
+      return viewAnalytics(c, sub);
+    }
+    if (e && e.status === 400 && host) {
+      c.innerHTML = pageHead('Analytics', '') + emptyState('No such host', `No proxy host is named "${host}".`) + '<p class="list-empty"><a href="#/analytics">Back to all hosts</a></p>';
+      return;
+    }
+    throw e;
+  }
+  await renderAnalytics(c, rep, { host, range, scope, q, st });
+}
+
+// renderAnalytics paints a report into c. Called by viewAnalytics on first
+// load and by refresh() afterwards, so a refresh keeps the view's state (st)
+// and never swaps in the loading screen.
+async function renderAnalytics(c, rep, ctx) {
+  const { host, range, scope, q, st } = ctx;
+  let auto = st.auto;
+  if (rep.enabled === false) {
+    c.innerHTML = pageHead('Analytics', 'Traffic through the edge: volume, origin, refusals and scanner activity.')
+      + emptyState('Analytics is off', 'Turn on the collector under Settings, General, Analytics. It aggregates on a background worker and never slows a request; the page fills in from the moment it is on.', isRoleReadOnly() ? '' : 'Open Settings', '#/settings');
+    return;
+  }
+  const hostsList = arr(rep.hosts).map((h) => h.name).filter((n) => n && n !== '-');
+  if (host && !hostsList.length) {
+    // The host view carries no hosts table; the select still needs the names.
+    try { arr((await memoGet('/api/proxy-hosts')).data).forEach((h) => hostsList.push(h.name)); } catch (e) { /* ignore */ }
+  }
+  const t = rep.totals || {}, p = rep.previous || {};
+  const series = arr(rep.series);
+  const bs = rep.bucketSeconds || 1800;
+  const bucketText = bs >= 3600 ? (bs / 3600) + ' h' : (bs / 60) + ' min';
+  const title = host ? `Analytics: ${host}` : 'Analytics';
+  const scopeText = scope === 'internal' ? 'Internal traffic (private, loopback, link-local and configured internal networks)' : scope === 'external' ? 'External traffic' : 'Traffic';
+  const subLine = host ? `${scopeText} for proxy host ${host} over the last ${range}.` : `${scopeText} through the edge over the last ${range}: volume, origin, refusals and scanner activity.`;
+  const crumb = host ? `<a href="#/analytics">Analytics</a> &rsaquo; ${esc(host)}` : '';
+  const labels = (rep.demo ? '<span class="chip warn" title="GPM_ANALYTICS_DEMO=1: these numbers are seed data, not observed traffic">Seed data</span>' : '')
+    + (host ? `<a class="btn sm" href="#/hosts/${encodeURIComponent(host)}">Open host</a>` : '');
+  const AUTO = [[0, 'Off'], [15, 'Every 15s'], [60, 'Every minute']];
+  const cmax = arr(rep.countries).reduce((m, x) => Math.max(m, x.requests), 0);
+  const dmax = arr(rep.denials).reduce((m, x) => Math.max(m, x.n), 0);
+  const smax = arr(rep.signatures).reduce((m, x) => Math.max(m, x.n), 0);
+  const hmax = arr(rep.hosts).reduce((m, x) => Math.max(m, x.requests), 0);
+
+  c.innerHTML = `
+    ${pageHead(esc(title), esc(subLine), crumb, '', labels)}
+    <div class="toolbar vz-filters">
+      <label class="auto-refresh" for="anRange"><span>Range</span><select class="field" id="anRange" data-hint="analytics.range" aria-label="Time range">${AN_RANGES.filter((r) => !rep.ranges || rep.ranges.includes(r) || r === range).map((r) => `<option value="${r}"${r === range ? ' selected' : ''}>Last ${r}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="anHost"><span>Host</span><select class="field" id="anHost" data-hint="analytics.host" aria-label="Host filter"><option value=""${host ? '' : ' selected'}>All hosts</option>${hostsList.map((n) => `<option value="${esc(n)}"${n === host ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="anScope"><span>Source</span><select class="field" id="anScope" data-hint="analytics.scope" aria-label="Traffic source filter">${AN_SCOPES.map(([v, l]) => `<option value="${v}"${v === scope ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="auto-refresh" for="anAuto"><span>Auto-refresh</span><select class="field" id="anAuto" data-hint="analytics.auto" aria-label="Auto-refresh interval">${AUTO.map(([v, l]) => `<option value="${v}"${v === auto ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <div class="toolbar-actions">${rep.dropped ? `<span class="chip warn" title="Events dropped because the collector queue was full since start; the counts below undercount by this many">${esc(anCompact(rep.dropped))} dropped</span>` : ''}<span class="muted" id="anUpdated">updated ${esc(new Date(rep.generatedAt || Date.now()).toLocaleTimeString())}</span><button class="btn" id="anRefresh" type="button">${ICON.history}Refresh</button></div>
+    </div>
+    ${rep.geoip === false ? `<div class="feed-row attn" style="margin-bottom:16px"><span class="feed-tick warn"></span><div class="feed-body"><div class="feed-msg">GeoIP database not configured</div><div class="feed-meta">Country columns show "--" until GPM_GEOIP_DB points at a country .mmdb. Lookups are local; nothing is sent anywhere.</div></div><a class="btn ghost sm" href="${esc(docHref('reference/env-vars-and-flags.md'))}" target="_blank" rel="noopener">How to enable</a></div>` : ''}
+    <div class="stat-row-grid">
+      ${anTile('Requests', anCompact(t.requests), anDelta(t.requests, p.requests, true), series.map((b) => b.requests))}
+      ${anTile('Denied', anCompact(t.denied), anDelta(t.denied, p.denied, false), series.map((b) => b.denied), anPct(t.denied, t.requests) + ' of requests')}
+      ${anTile('Threat hits', anCompact(t.threats), anDelta(t.threats, p.threats, false), series.map((b) => b.threats), arr(rep.signatures).filter((s) => s.n > 0).length + ' signatures')}
+      ${anTile('5xx', anCompact(t.status5xx), anDelta(t.status5xx, p.status5xx, false), series.map((b) => b.status5xx), anPct(t.status5xx, t.requests))}
+      ${anTile('p95 latency', (t.p95ms || 0) + ' ms', anDelta(t.p95ms, p.p95ms, false), series.map((b) => b.p95ms))}
+      ${anTile('Bytes out', anBytes(t.bytesOut), anDelta(t.bytesOut, p.bytesOut, true), series.map((b) => b.bytesOut))}
+    </div>
+    <div class="card vz-card">
+      <div class="card-head"><div><h3>Traffic</h3><div class="muted">Requests per ${bucketText}. Each column is one bucket: allowed on the bottom, denied stacked on top; the red line is requests that matched a threat signature. Hover for the numbers.</div></div>
+        <div class="card-actions"><div class="legend"><span><i class="sw" style="background:${AN_C.allowed}"></i>Allowed</span><span><i class="sw" style="background:${AN_C.denied}"></i>Denied</span><span><i class="sw line" style="background:${AN_C.threats}"></i>Threat hits</span></div><button class="btn sm" id="anTable" type="button" aria-pressed="false">Table</button></div></div>
+      <div class="vz-chart-wrap" id="anChart" tabindex="0" aria-describedby="anTipNote"><div class="vz-tip" hidden></div></div>
+      <div class="faint vz-note-sm" id="anTipNote">Arrow keys step through the buckets; the Table button shows the same numbers as rows.</div>
+      ${series.length ? `<div class="sm-grid"><div class="sm" data-key="requests"></div><div class="sm" data-key="denied"></div><div class="sm" data-key="threats"></div></div>` : ''}
+    </div>
+    <div class="grid-2 vz-grid">
+      <div class="card vz-card"><div class="card-head"><div><h3>Countries</h3><div class="muted">Where requests came from. Threat share tells you whether a country is mostly scanners.</div></div></div>
+        <div class="table-wrap flat"><table class="compact"><thead><tr><th>Code</th><th>Country</th><th class="col-bar">Requests</th><th class="col-num">Denied</th><th class="col-num">Threats</th><th class="col-num">Threat share</th></tr></thead><tbody>
+        ${arr(rep.countries).map((x) => `<tr><td class="mono">${x.code && x.code !== '--' ? copyable(x.code, 'country code') : esc(x.code)}</td><td>${esc(x.name || '')}</td><td class="col-bar">${anBar(x.requests, cmax, AN_C.allowed)}</td><td class="col-num">${anN(x.denied)}</td><td class="col-num">${anN(x.threats)}</td><td class="col-num">${anPct(x.threats, x.requests)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No data.</td></tr>'}
+        </tbody></table></div></div>
+      <div class="card vz-card"><div class="card-head"><div><h3>Denials by reason</h3><div class="muted">Which tier refused the request. A denied request is counted once, by the first tier that refused it.</div></div></div>
+        <div class="table-wrap flat"><table class="compact"><thead><tr><th>Reason</th><th class="col-bar">Denied</th></tr></thead><tbody>
+        ${arr(rep.denials).map((x) => `<tr><td class="mono">${esc(x.reason)}</td><td class="col-bar">${anBar(x.n, dmax, AN_C.denied)}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">No denials.</td></tr>'}
+        </tbody></table></div></div>
+    </div>
+    <div class="grid-2 vz-grid">
+      <div class="card vz-card"><div class="card-head"><div><h3>Threat signatures</h3><div class="muted">Observe-only labels from the built-in catalogue, CrowdSec scenarios and named guard triggers. Nothing here blocks on its own.</div></div></div>
+        <div class="table-wrap flat"><table class="compact"><thead><tr><th>Signature</th><th class="col-bar">Hits</th><th>Top countries</th><th class="col-num">Hosts</th></tr></thead><tbody>
+        ${arr(rep.signatures).map((x) => `<tr><td class="mono">${copyable(x.label, 'signature')}</td><td class="col-bar">${anBar(x.n, smax, AN_C.threats)}</td><td>${arr(x.countries).map((cc) => `<span class="chip">${esc(cc)}</span>`).join(' ')}</td><td class="col-num">${anN(x.hosts)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No signature hits.</td></tr>'}
+        </tbody></table></div></div>
+      <div class="card vz-card"><div class="card-head"><div><h3>Top clients</h3><div class="muted">Most active client addresses in the range.</div></div></div>
+        <div class="table-wrap flat"><table class="compact"><thead><tr><th>Client</th><th>CC</th><th class="col-num">Requests</th><th class="col-num">Denied</th><th class="col-num">Threats</th><th>Last seen</th></tr></thead><tbody>
+        ${arr(rep.clients).map((x) => `<tr><td class="mono">${copyable(x.ip, 'address')}</td><td class="mono">${esc(x.country || '--')}</td><td class="col-num">${anN(x.requests)}</td><td class="col-num">${anN(x.denied)}</td><td class="col-num">${anN(x.threats)}</td><td class="muted">${esc(relTime(x.lastSeen))}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No clients recorded.</td></tr>'}
+        </tbody></table></div></div>
+    </div>
+    ${host ? '' : `<div class="card vz-card"><div class="card-head"><div><h3>Hosts</h3><div class="muted">Per proxy host. Click a row for that host's view. "no host" is traffic that matched nothing: bare-IP scans and unknown Host headers.</div></div></div>
+      <div class="table-wrap flat"><table class="compact"><thead><tr><th>Host</th><th class="col-bar">Requests</th><th class="col-num">4xx</th><th class="col-num">5xx</th><th class="col-num">Denied</th><th class="col-num">Threats</th><th class="col-num">p95</th></tr></thead><tbody>
+      ${arr(rep.hosts).map((x) => `<tr${x.name !== '-' ? ` class="clickable" data-host="${esc(x.name)}"` : ''}><td>${x.name === '-' ? '<span class="muted" title="Requests that matched no proxy host (unknown Host header, bare IP)">no host (-)</span>' : `<a href="#/analytics/${encodeURIComponent(x.name)}">${esc(x.name)}</a>`}</td><td class="col-bar">${anBar(x.requests, hmax, AN_C.allowed)}</td><td class="col-num">${anN(x.status4xx)}</td><td class="col-num">${anN(x.status5xx)}</td><td class="col-num">${anN(x.denied)}</td><td class="col-num">${anN(x.threats)}</td><td class="col-num">${anN(x.p95ms)} ms</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No hosts.</td></tr>'}
+      </tbody></table></div></div>`}`;
+
+  // Draw at the measured width; redraw when the card changes width (sidebar
+  // collapse, window resize). Height is fixed per chart so a redraw never
+  // moves the page.
+  const chartWrap = $('#anChart');
+  const tipEl = chartWrap.querySelector('.vz-tip');
+  let lastW = 0;
+  // Keyboard access is bound once to the persistent wrapper; each redraw only
+  // swaps the controller the handlers talk to, so handlers never pile up.
+  chartWrap.addEventListener('keydown', (e) => {
+    if (!st.hover) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); st.hover.step(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); st.hover.step(-1); }
+    else if (e.key === 'Escape') st.hover.hide();
+  });
+  chartWrap.addEventListener('blur', () => { if (st.hover) st.hover.hide(); });
+  function draw(force) {
+    const w = Math.max(320, Math.floor(chartWrap.clientWidth || 0));
+    if (!force && w === lastW) return;
+    lastW = w;
+    if (!series.length) { chartWrap.innerHTML = '<div class="list-empty">No requests in this range.</div>'; return; }
+    chartWrap.innerHTML = st.tableOn ? anSeriesTable(series, bs) : anStacked(series, bs, w);
+    chartWrap.appendChild(tipEl);
+    tipEl.hidden = true;
+    st.hover = st.tableOn ? null : anWireHover(chartWrap, series, bs);
+    $$('.sm-grid .sm', c).forEach((el) => {
+      const key = el.dataset.key;
+      const color = key === 'requests' ? AN_C.allowed : (key === 'denied' ? AN_C.denied : AN_C.threats);
+      const title = key === 'requests' ? 'Requests' : (key === 'denied' ? 'Denied' : 'Threat hits');
+      el.innerHTML = anSmall(series, bs, key, color, title, t[key], Math.max(200, Math.floor(el.clientWidth || 0)));
+    });
+  }
+  draw(true);
+  if (typeof ResizeObserver !== 'undefined') {
+    if (st.ro) st.ro.disconnect();
+    const mySeqRO = routeSeq;
+    const ro = new ResizeObserver(() => {
+      if (mySeqRO !== routeSeq || !c.isConnected) { ro.disconnect(); return; }
+      draw(false);
+    });
+    ro.observe(chartWrap);
+    st.ro = ro;
+  }
+
+  $('#anRange').addEventListener('change', () => {
+    try { localStorage.setItem(AN_RANGE_KEY, $('#anRange').value); } catch (e) { /* ignore */ }
+    route();
+  });
+  $('#anHost').addEventListener('change', () => {
+    const v = $('#anHost').value;
+    location.hash = v ? '#/analytics/' + encodeURIComponent(v) : '#/analytics';
+  });
+  $('#anScope').addEventListener('change', () => {
+    try { localStorage.setItem(AN_SCOPE_KEY, $('#anScope').value); } catch (e) { /* ignore */ }
+    route();
+  });
+  $('#anAuto').addEventListener('change', () => {
+    auto = Number($('#anAuto').value) || 0;
+    st.auto = auto;
+    try { localStorage.setItem(AN_AUTO_KEY, String(auto)); } catch (e) { /* ignore */ }
+    schedule();
+  });
+  // In-place refresh: re-fetch, dim the current render while waiting, repaint
+  // with the same state. Scroll position is untouched because the content
+  // element is reused, not replaced.
+  const mySeq = routeSeq;
+  async function refresh() {
+    if (mySeq !== routeSeq || !c.isConnected) return;
+    c.classList.add('vz-refreshing');
+    let next;
+    try { next = (await api(q)).data || {}; } catch (e) { c.classList.remove('vz-refreshing'); toastErr(e, 'Could not refresh analytics'); return; }
+    if (mySeq !== routeSeq || !c.isConnected) return;
+    const y = $('#main') ? $('#main').scrollTop : 0;
+    c.classList.remove('vz-refreshing');
+    await renderAnalytics(c, next, ctx);
+    if ($('#main')) $('#main').scrollTop = y;
+  }
+  $('#anRefresh').addEventListener('click', refresh);
+  $('#anTable').setAttribute('aria-pressed', String(st.tableOn));
+  $('#anTable').textContent = st.tableOn ? 'Chart' : 'Table';
+  $('#anTable').addEventListener('click', () => {
+    st.tableOn = !st.tableOn;
+    $('#anTable').setAttribute('aria-pressed', String(st.tableOn));
+    $('#anTable').textContent = st.tableOn ? 'Chart' : 'Table';
+    draw(true);
+  });
+  $$('tr.clickable[data-host]', c).forEach((tr) => tr.addEventListener('click', (ev) => {
+    if (ev.target.closest('a, button')) return;
+    location.hash = '#/analytics/' + encodeURIComponent(tr.dataset.host);
+  }));
+  // Refresh on a timer that belongs to this render (same pattern as Access Logs):
+  // it stops when the route moves on or the tab is hidden, and never stacks.
+  // A repaint replaces this render's controls, so the previous timer is
+  // cleared first (st.timer outlives one render).
+  if (st.timer) { clearInterval(st.timer); st.timer = null; }
+  function schedule() {
+    if (st.timer) { clearInterval(st.timer); st.timer = null; }
+    if (!auto) return;
+    st.timer = setInterval(() => {
+      if (mySeq !== routeSeq || !c.isConnected) { clearInterval(st.timer); st.timer = null; return; }
+      if (document.hidden) return;
+      refresh();
+    }, auto * 1000);
+  }
+  schedule();
+}

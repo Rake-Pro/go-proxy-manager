@@ -252,16 +252,16 @@ func TestVerdictCacheExpiry(t *testing.T) {
 	c := newVerdictCache(16)
 	c.now = func() time.Time { return now }
 
-	c.put("a", true, 30*time.Second)
-	if deny, ok := c.get("a"); !ok || !deny {
+	c.put("a", true, "", 30*time.Second)
+	if deny, _, ok := c.get("a"); !ok || !deny {
 		t.Fatalf("get(a) = (%v,%v), want (true,true)", deny, ok)
 	}
 	now = now.Add(29 * time.Second)
-	if _, ok := c.get("a"); !ok {
+	if _, _, ok := c.get("a"); !ok {
 		t.Error("entry expired early")
 	}
 	now = now.Add(2 * time.Second)
-	if _, ok := c.get("a"); ok {
+	if _, _, ok := c.get("a"); ok {
 		t.Error("expired entry was still served")
 	}
 	if c.len() != 0 {
@@ -274,15 +274,15 @@ func TestVerdictCacheExpiry(t *testing.T) {
 func TestVerdictCacheBounded(t *testing.T) {
 	c := newVerdictCache(4)
 	for i := 0; i < 100; i++ {
-		c.put(fmt.Sprintf("10.0.0.%d", i), true, time.Hour)
+		c.put(fmt.Sprintf("10.0.0.%d", i), true, "", time.Hour)
 	}
 	if c.len() != 4 {
 		t.Errorf("cache len = %d, want the 4-entry bound", c.len())
 	}
-	if _, ok := c.get("10.0.0.0"); ok {
+	if _, _, ok := c.get("10.0.0.0"); ok {
 		t.Error("the least-recently-used entry survived eviction")
 	}
-	if _, ok := c.get("10.0.0.99"); !ok {
+	if _, _, ok := c.get("10.0.0.99"); !ok {
 		t.Error("the most-recently-used entry was evicted")
 	}
 }
@@ -377,7 +377,7 @@ func TestCrowdSecStreamMode(t *testing.T) {
 		t.Fatalf("delta pulls = %d, want 1", got)
 	}
 	// The refresh goroutine publishes under the lock; wait for it to land.
-	for time.Now().Before(deadline) && !b.stream.lookup(mustIP("192.0.2.5")) {
+	for time.Now().Before(deadline) && !streamHas(b.stream, mustIP("192.0.2.5")) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -587,3 +587,8 @@ func TestBouncerChainOrder(t *testing.T) {
 }
 
 func mustIP(s string) net.IP { return net.ParseIP(s) }
+
+func streamHas(s *streamState, ip net.IP) bool {
+	ok, _ := s.lookup(ip)
+	return ok
+}

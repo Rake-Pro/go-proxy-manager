@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -838,6 +839,11 @@ type Settings struct {
 	// off: each proxy host is governed by its own maintenance flag alone.
 	Maintenance MaintenanceSettings `json:"maintenance,omitempty" yaml:"maintenance,omitempty"`
 
+	// Analytics configures the traffic analytics collector behind the Analytics
+	// view (see AnalyticsSettings). Off by default: nothing is aggregated and
+	// GET /api/analytics reports enabled:false.
+	Analytics AnalyticsSettings `json:"analytics,omitempty" yaml:"analytics,omitempty"`
+
 	// AdminEdge serves the admin panel at the edge on externalBaseURL's host
 	// (see AdminEdgeSettings): not a proxy host, never in fleet maintenance.
 	AdminEdge AdminEdgeSettings `json:"adminEdge,omitempty" yaml:"adminEdge,omitempty"`
@@ -997,6 +1003,9 @@ func (s Settings) Validate() error {
 	if err := ValidateSavedFilters(s.SavedFilters); err != nil {
 		return err
 	}
+	if err := s.Analytics.validate(); err != nil {
+		return err
+	}
 	if s.ExternalBaseURL != "" {
 		u, err := url.Parse(s.ExternalBaseURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
@@ -1078,4 +1087,83 @@ func DefaultSettings() Settings {
 		AppName:       "Go Proxy Manager",
 		AdminAuth:     AdminAuthSettings{LocalLoginEnabled: true},
 	}
+}
+
+// AnalyticsSettings switches the traffic analytics collector on and bounds
+// what it keeps. The collector hands every finished request to a background
+// worker (one non-blocking queue send on the request path) that resolves the
+// client's country, classifies the request against the observe-only signature
+// catalogue and increments bounded in-memory aggregates; closed hours are
+// rolled up into a small SQLite file next to the session database.
+type AnalyticsSettings struct {
+	// Enabled turns the collector on. Off (the default) costs nothing per
+	// request and GET /api/analytics answers enabled:false.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// RetentionDays is how many days of hourly rollups are kept on disk
+	// (1-365). 0 selects DefaultAnalyticsRetentionDays. The in-memory 24 h
+	// window is unaffected.
+	RetentionDays int `json:"retentionDays,omitempty" yaml:"retentionDays,omitempty"`
+	// TopClients controls the per-address table: "persist" (the default when
+	// empty) keeps a bounded top list in memory and in the hourly rollups,
+	// "memory" keeps it for the in-memory window only, "off" never records
+	// client addresses in analytics at all.
+	TopClients string `json:"topClients,omitempty" yaml:"topClients,omitempty"`
+	// InternalNetworks are CIDRs (a bare address counts as one host) whose
+	// clients are reported as internal traffic in addition to the private
+	// (RFC 1918, ULA), loopback and link-local ranges, which always are. The
+	// Analytics view filters on the result (all, external or internal); the
+	// classification is made once per request as it is aggregated.
+	InternalNetworks []string `json:"internalNetworks,omitempty" yaml:"internalNetworks,omitempty"`
+}
+
+// MaxAnalyticsInternalNetworks bounds analytics.internalNetworks.
+const MaxAnalyticsInternalNetworks = 64
+
+// DefaultAnalyticsRetentionDays is the rollup retention when unset.
+const DefaultAnalyticsRetentionDays = 7
+
+// Analytics top-clients modes.
+const (
+	AnalyticsClientsPersist = "persist"
+	AnalyticsClientsMemory  = "memory"
+	AnalyticsClientsOff     = "off"
+)
+
+// Retention returns the configured retention in days, or the default.
+func (a AnalyticsSettings) Retention() int {
+	if a.RetentionDays <= 0 {
+		return DefaultAnalyticsRetentionDays
+	}
+	return a.RetentionDays
+}
+
+// ClientsMode returns the top-clients mode, or the default.
+func (a AnalyticsSettings) ClientsMode() string {
+	if a.TopClients == "" {
+		return AnalyticsClientsPersist
+	}
+	return a.TopClients
+}
+
+func (a AnalyticsSettings) validate() error {
+	if a.RetentionDays < 0 || a.RetentionDays > 365 {
+		return fmt.Errorf("analytics.retentionDays: must be 1-365 (0 = default %d), got %d", DefaultAnalyticsRetentionDays, a.RetentionDays)
+	}
+	switch a.TopClients {
+	case "", AnalyticsClientsPersist, AnalyticsClientsMemory, AnalyticsClientsOff:
+	default:
+		return fmt.Errorf("analytics.topClients: must be %q, %q or %q, got %q", AnalyticsClientsPersist, AnalyticsClientsMemory, AnalyticsClientsOff, a.TopClients)
+	}
+	if len(a.InternalNetworks) > MaxAnalyticsInternalNetworks {
+		return fmt.Errorf("analytics.internalNetworks: at most %d entries, got %d", MaxAnalyticsInternalNetworks, len(a.InternalNetworks))
+	}
+	for i, n := range a.InternalNetworks {
+		if _, err := netip.ParsePrefix(n); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(n); err != nil {
+			return fmt.Errorf("analytics.internalNetworks[%d]: %q is not a CIDR or an IP address", i, n)
+		}
+	}
+	return nil
 }

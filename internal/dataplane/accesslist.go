@@ -188,8 +188,16 @@ func (c accessList) ipAllowed(ip net.IP, geoLookup func(net.IP) (string, bool), 
 // the request method. Passing an empty path means there is no request to scope
 // on - the raw-stream case - and path-scoped rules are then skipped entirely.
 func (c accessList) allowed(ip net.IP, path, method string, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) bool {
+	ok, _ := c.decide(ip, path, method, geoLookup, geoLoaded)
+	return ok
+}
+
+// decide is allowed plus whether the geo rules produced the verdict (as
+// opposed to an IP rule, the default action, a nil address or a missing
+// database), so a denial can be reported as "geo" rather than "access-list".
+func (c accessList) decide(ip net.IP, path, method string, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) (allow, byGeo bool) {
 	if ip == nil {
-		return false
+		return false, false
 	}
 	// Geo rules configured but no database currently loaded to evaluate them:
 	// fail CLOSED. This short-circuits before the explicit IP rules too, so a
@@ -198,11 +206,11 @@ func (c accessList) allowed(ip net.IP, path, method string, geoLookup func(net.I
 	// or onUnknown=allow. A nil geoLoaded is treated the same as "not loaded"
 	// (fail closed by default) rather than silently skipping the check.
 	if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
-		return false
+		return false, false
 	}
 	for _, r := range c.rules {
 		if r.matches(ip, path, method) {
-			return r.allow
+			return r.allow, false
 		}
 	}
 	if c.hasGeo {
@@ -212,20 +220,20 @@ func (c accessList) allowed(ip net.IP, path, method string, geoLookup func(net.I
 			country, found = geoLookup(ip)
 		}
 		if !found {
-			return c.geoOnUnknownAllow
+			return c.geoOnUnknownAllow, true
 		}
 		country = strings.ToUpper(country)
 		if c.geoCountryAllow != nil {
-			return c.geoCountryAllow[country]
+			return c.geoCountryAllow[country], true
 		}
 		if c.geoCountryDeny[country] {
-			return false
+			return false, true
 		}
 		// Known country, not on the deny list: geo has no verdict here, fall
 		// through to defaultAllow (deny-list mode only narrows, it does not
 		// itself grant access - see AccessListGeo's doc comment).
 	}
-	return c.defaultAllow
+	return c.defaultAllow, false
 }
 
 // dummyBcryptHash is a syntactically valid bcrypt hash used to equalize timing
@@ -363,17 +371,17 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 			next.ServeHTTP(w, r)
 			return
 		}
-		ipOK := true
+		ipOK, byGeo := true, false
 		if c.hasIP || c.hasGeo {
-			ipOK = c.allowed(ipOf(r), r.URL.Path, strings.ToUpper(r.Method), geoLookup, geoLoaded)
+			ipOK, byGeo = c.decide(ipOf(r), r.URL.Path, strings.ToUpper(r.Method), geoLookup, geoLoaded)
 		}
-		// A list with geo rules and no database loaded denies everything
-		// (ipAllowed fails closed). That is a distinct operational state from a
-		// CIDR rule doing its job, so it gets its own denial reason - an operator
-		// seeing every request refused should be able to tell "GeoIP database
+		// A denial the geo rules decided, and a list with geo rules and no
+		// database loaded (decide fails closed), both report as "geo": the first
+		// so the analytics can say where refused traffic comes from, the second
+		// so an operator seeing every request refused can tell "GeoIP database
 		// missing" from "the access list works".
 		denyReason := "access-list"
-		if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
+		if byGeo || (c.hasGeo && (geoLoaded == nil || !geoLoaded())) {
 			denyReason = "geo"
 		}
 

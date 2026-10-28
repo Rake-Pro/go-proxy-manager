@@ -211,6 +211,11 @@ type GuardMiddleware struct {
 // match: the path equals one of Paths (if any), the method is one of Methods (if
 // any), and every QueryEquals arg equals its value.
 type GuardTrigger struct {
+	// Name is an optional label for the trigger. A denial by a named trigger is
+	// reported to analytics as the signature "guard:<name>"; unnamed triggers
+	// count under the plain "guard" denial reason only. Same character rules as
+	// object names.
+	Name        string            `json:"name,omitempty" yaml:"name,omitempty"`
 	Paths       []string          `json:"paths,omitempty" yaml:"paths,omitempty"`
 	Methods     []string          `json:"methods,omitempty" yaml:"methods,omitempty"`
 	QueryEquals map[string]string `json:"queryEquals,omitempty" yaml:"queryEquals,omitempty"`
@@ -664,6 +669,20 @@ func (m Middleware) Validate() error {
 			return fmt.Errorf("middleware %q: headers: spec required", m.Name)
 		}
 	case MWTypeGuard:
+		if m.Guard != nil {
+			for i, t := range m.Guard.Triggers {
+				if t.Name != "" {
+					if err := ValidateName(t.Name); err != nil {
+						return fmt.Errorf("guard: triggers[%d].name: %w", i, err)
+					}
+					// The name becomes an analytics aggregate key ("guard:<name>");
+					// keep it short so the key stays bounded.
+					if len(t.Name) > 64 {
+						return fmt.Errorf("guard: triggers[%d].name: at most 64 characters", i)
+					}
+				}
+			}
+		}
 		if m.Guard == nil || len(m.Guard.Triggers) == 0 {
 			return fmt.Errorf("middleware %q: guard: requires at least one trigger", m.Name)
 		}

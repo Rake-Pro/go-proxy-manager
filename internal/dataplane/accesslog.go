@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 )
 
 // AccessEntry is one captured request line, surfaced by the admin /api/logs
@@ -27,6 +30,40 @@ type AccessEntry struct {
 	Bytes  int64     `json:"bytes"`
 	DurMs  int64     `json:"durMs"`
 	Client string    `json:"client"`
+	// Country is the ISO-3166-1 alpha-2 code of Client when a GeoIP database
+	// is loaded; empty otherwise (or for private/unknown addresses).
+	Country string `json:"country,omitempty"`
+	// Source is "internal" for a private, loopback, link-local or configured
+	// internal-network client (settings.analytics.internalNetworks), else
+	// "external"; empty when no client address was resolved.
+	Source string `json:"source,omitempty"`
+}
+
+// internalNets is the operator's extra internal networks, shared with the
+// analytics collector (SetInternalNetworks installs the same list).
+var internalNets atomic.Pointer[[]netip.Prefix]
+
+// SetInternalNetworks installs settings.analytics.internalNetworks for the
+// access log's source column. Entries that do not parse are ignored (settings
+// validation rejects them before they get here).
+func SetInternalNetworks(cidrs []string) {
+	nets, _ := analytics.ParseNetworks(cidrs)
+	internalNets.Store(&nets)
+}
+
+// sourceOf classifies a client address the way the analytics collector does.
+func sourceOf(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	var extra []netip.Prefix
+	if p := internalNets.Load(); p != nil {
+		extra = *p
+	}
+	if analytics.IsInternalIP(ip, extra) {
+		return analytics.SourceInternal
+	}
+	return analytics.SourceExternal
 }
 
 // logRing is a fixed-capacity, mutex-guarded ring buffer of recent access
@@ -59,6 +96,32 @@ func (r *logRing) clear() {
 	defer r.mu.Unlock()
 	r.buf = r.buf[:0]
 	r.n = 0
+}
+
+// capacity returns the ring's current size under the lock (resize may run
+// concurrently).
+func (r *logRing) capacity() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cap
+}
+
+// resize changes the capacity live, keeping the newest entries that still fit
+// (oldest first in the new backing slice, so the ring restarts unwrapped).
+func (r *logRing) resize(capacity int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := len(r.buf)
+	if keep > capacity {
+		keep = capacity
+	}
+	nb := make([]AccessEntry, 0, keep)
+	for i := keep - 1; i >= 0; i-- {
+		nb = append(nb, r.buf[(r.n-1-i)%r.cap])
+	}
+	r.buf = nb
+	r.n = keep
+	r.cap = capacity
 }
 
 // recent returns up to cap entries, newest first.
@@ -185,7 +248,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		// The matched proxy host, resolved once: the debug headers and the metric
 		// labels want the same answer, and lookup is a map hit.
 		hostName := ""
-		if s.debugHeaders || mh != nil {
+		if s.debugHeaders || mh != nil || analyticsActive() {
 			if rt := s.current(); rt != nil {
 				if hh, ok := rt.lookup(r.Host); ok {
 					hostName = hh.host
@@ -218,6 +281,21 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				r.Body = body
 			}
 		}
+		// The analytics note: one small allocation per observed request, only
+		// while a collector is switched on. The tiers write the denial reason and
+		// signature into it; the event below is built after the handler returns.
+		sink := analyticsSink()
+		var meta *reqMeta
+		var origPath, origQuery string
+		if sink != nil && sink.Active() {
+			meta = &reqMeta{}
+			r = withReqMeta(r, meta)
+			// The classifier must see what the client sent, not what a rewrite or
+			// strip-prefix middleware turned it into.
+			origPath, origQuery = r.URL.Path, r.URL.RawQuery
+		} else {
+			sink = nil
+		}
 
 		obs := &responseObserver{ResponseWriter: w}
 		next.ServeHTTP(obs, r)
@@ -245,31 +323,70 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 
 		slow := s.slowThreshold > 0 && dur >= s.slowThreshold
-		if !accessLog && !slow {
+		if sink == nil && !accessLog && !slow {
 			return
 		}
 		status := obs.status
 		if status == 0 {
 			status = http.StatusOK // handler wrote nothing / hijacked
 		}
+		// Derived once for the analytics event and the log line alike.
+		clientIP := s.clientIPOf(r)
 
-		var clientStr string
-		if ip := s.clientIPOf(r); ip != nil {
+		if sink != nil {
+			evHost := hostName
+			if evHost == "" {
+				evHost = unknownHostLabel
+			}
+			// Record never blocks: the collector queues the event (or drops it).
+			// The event is stamped with the completion time, so a long-lived
+			// connection counts in the minute it ended, never in a slot the
+			// collector has already rolled past.
+			sink.Record(analytics.Event{
+				Time:      time.Now(),
+				Host:      evHost,
+				Method:    r.Method,
+				Status:    status,
+				BytesOut:  obs.bytes,
+				DurMs:     dur.Milliseconds(),
+				Client:    clientIP,
+				Deny:      meta.deny,
+				Signature: meta.sig,
+				Path:      origPath,
+				RawQuery:  origQuery,
+				UserAgent: r.UserAgent(),
+			})
+		}
+		if !accessLog && !slow {
+			return
+		}
+
+		var clientStr, country, source string
+		if ip := clientIP; ip != nil {
 			clientStr = ip.String()
+			source = sourceOf(ip)
+			// Country for the log viewer and the log line, only while a GeoIP
+			// database is loaded. The lookup is an in-memory mmdb walk (about a
+			// microsecond) after the handler has finished writing.
+			if cc, ok := currentGeoDB().Country(ip); ok {
+				country = cc
+			}
 		}
 
 		// Capture into the in-memory ring for the /api/logs viewer. Only when access
 		// logging is on, so the default (off) path stays allocation-free.
 		if accessLog && s.logBuf != nil {
 			s.logBuf.add(AccessEntry{
-				Time:   start,
-				Method: r.Method,
-				Host:   hostOnly(r.Host),
-				Path:   r.URL.Path,
-				Status: status,
-				Bytes:  obs.bytes,
-				DurMs:  dur.Milliseconds(),
-				Client: clientStr,
+				Time:    start,
+				Method:  r.Method,
+				Host:    hostOnly(r.Host),
+				Path:    r.URL.Path,
+				Status:  status,
+				Bytes:   obs.bytes,
+				DurMs:   dur.Milliseconds(),
+				Client:  clientStr,
+				Country: country,
+				Source:  source,
 			})
 		}
 
@@ -287,6 +404,12 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			Str("peer", peerAddr(r))
 		if clientStr != "" {
 			ev = ev.Str("client", clientStr)
+		}
+		if country != "" {
+			ev = ev.Str("country", country)
+		}
+		if source != "" {
+			ev = ev.Str("source", source)
 		}
 		if rid != "" {
 			ev = ev.Str("rid", rid)

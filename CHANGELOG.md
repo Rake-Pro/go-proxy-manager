@@ -7,6 +7,46 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Analytics collector (`settings.analytics`): switched on in Settings, every
+  finished request is queued to a background worker that resolves the client's
+  country, labels scanner patterns with an observe-only signature catalogue
+  (`wp-probe`, `secret-probe`, `admin-probe`, `webshell`, `iot-rce`,
+  `traversal`, `injection`, `scanner-ua`, `proto-abuse`) and keeps bounded
+  aggregates: 24 h of minute counters in memory, hourly rollups in
+  `analytics.db` (`-analytics-db` / `GPM_ANALYTICS_DB`) with configurable
+  retention (default 7 days), replayed at start. `GET /api/analytics` and the
+  Analytics view now serve observed traffic; the 7d and 30d ranges appear when
+  retention covers them. `topClients` chooses whether client addresses are
+  kept, kept in memory only, or never recorded.
+- Analytics source filter: every aggregate is kept per network source, and the
+  page's `Source` select (and `GET /api/analytics?scope=external|internal`)
+  shows all traffic, only requests from public addresses, or only requests
+  from private, loopback and link-local addresses plus
+  `settings.analytics.internalNetworks` (extra CIDRs, Settings, General,
+  Analytics). Access Logs gain a `source:internal|external` filter term on the
+  same split (entries, exports and the access log line carry `source`). The
+  rollup database is schema 2; a file written by a pre-release
+  dev build (schema 1) is rebuilt on first open and its rows, having no source,
+  count in the unfiltered view only.
+- Guard triggers accept an optional `name` (object-name characters, at most
+  64), reported to analytics as the signature `guard:<name>`; CrowdSec bouncer
+  denials carry the decision scenario as `crowdsec:<scenario>`.
+- Analytics view (sidebar, Overview group) and `GET /api/analytics`: traffic
+  through the edge for a range, fleet-wide or per proxy host - request volume,
+  denied and threat-signature counts, countries, denial reasons, hosts and top
+  clients, drawn as plain HTML and inline SVG. The API answers 501 until a
+  collector is wired; `GPM_ANALYTICS_DEMO=1` serves seed data for review.
+- Access Logs: a Country column, `country:` filter term and CSV column, filled
+  from the GeoIP database when one is loaded (`GPM_GEOIP_DB`); the JSON log
+  line and `GET /api/logs` entries gain the same `country` field.
+- Hover-to-copy on Access Logs and Analytics rows: host, path, client address,
+  country code and signature label each get a copy button on row hover or
+  keyboard focus; values with control characters are copied percent-encoded.
+- Access Logs: the in-memory buffer is sizeable. `-access-log-buffer` /
+  `GPM_ACCESS_LOG_BUFFER` sets the startup size (default `5000`, was a fixed
+  `1000`), and the Buffer selector on the Access Logs page (or `PUT /api/logs`
+  with `{"capacity": n}`) resizes it live between 100 and 100000, keeping
+  the newest entries. Runtime-only, like the capture toggle.
 - Rate limit `blockBackoff` and `blockMax`: a client that trips the limit
   again after its block ended is blocked `blockBackoff` times longer each
   round (`2` doubles it), capped at `blockMax` (default `24h`). The streak is
@@ -75,6 +115,14 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   link-local guard refuses zoned addresses; the release workflow only
   runs from `main` and only builds a tag that sits on `main`, and the docs
   workflow grants Pages permissions per job. (#51)
+
+### Changed
+
+- `gpm_denials_total{reason}` and the analytics denial reasons now count an
+  access-list denial decided by a **country rule** under `geo` (before: under
+  `access-list`, indistinguishable from a CIDR deny). A dashboard or alert
+  that sums `access-list` sees those move to `geo`; `geo` still also covers
+  "geo rules configured but no database loaded".
 
 ## [2.5.0] - 2026-10-20
 

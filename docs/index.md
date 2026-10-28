@@ -23,6 +23,9 @@ proxy listeners and the admin panel.
   container becomes a managed proxy host from an operator-authored profile.
 - **Git-backed config, REST API and web UI.** Every change is a commit with
   per-object history and revert, over an embedded single-page app.
+- **Traffic analytics.** An opt-in, in-process collector behind an Analytics
+  view: volume, countries, denial reasons and observe-only threat signatures per
+  host and per internal or external source, with hourly rollups up to 30 days.
 
 ![Proxy hosts in the admin panel](assets/ui/proxy-hosts.png)
 

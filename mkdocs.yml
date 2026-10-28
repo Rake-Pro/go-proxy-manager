@@ -102,6 +102,7 @@ nav:
               - Security headers: reference/config/settings/security-headers.md
               - Error pages: reference/config/settings/error-pages.md
               - Maintenance mode: reference/config/settings/maintenance.md
+              - Analytics: reference/config/settings/analytics.md
               - Admin front door: reference/config/settings/admin-edge.md
               - DNS sync: reference/config/settings/dns-sync.md
               - Ingress discovery: reference/config/settings/ingress-discovery.md
@@ -114,6 +115,7 @@ nav:
       - Environment variables, flags and CLI: reference/env-vars-and-flags.md
       - REST API: reference/api.md
       - Prometheus metrics: reference/metrics.md
+      - Analytics: reference/analytics.md
   - Operations:
       - Backup and restore: operations/backup-and-restore.md
       - Upgrading and rolling back: operations/upgrading.md

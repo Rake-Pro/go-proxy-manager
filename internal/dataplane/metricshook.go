@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"context"
+	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -83,12 +84,82 @@ func hostNameOf(r *http.Request) string {
 	return unknownHostLabel
 }
 
-// countDenial records a request refused by an access-control tier. It is a
-// no-op (one atomic load) when metrics are off, which is the default.
+// reqMeta is the per-request note the access-control tiers leave for the
+// analytics collector: which tier refused the request (first one wins) and an
+// optional signature label (a named guard trigger, a CrowdSec scenario). The
+// observe wrapper allocates it only while something is observing, and reads
+// it after the handler returns; tiers reach it through the context pointer so
+// a derived request (a child context) still writes to the same note.
+type reqMeta struct {
+	deny string
+	sig  string
+}
+
+type reqMetaKey struct{}
+
+func withReqMeta(r *http.Request, m *reqMeta) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), reqMetaKey{}, m))
+}
+
+func reqMetaOf(r *http.Request) *reqMeta {
+	m, _ := r.Context().Value(reqMetaKey{}).(*reqMeta)
+	return m
+}
+
+// countDenial records a request refused by an access-control tier: the
+// Prometheus counter (when metrics are on) and the analytics note (when the
+// request is observed). Both are a single pointer load when off.
 func countDenial(r *http.Request, reason string) {
 	if h := metricsHook(); h != nil {
 		h.Denial(hostNameOf(r), reason)
 	}
+	if m := reqMetaOf(r); m != nil && m.deny == "" {
+		m.deny = reason
+	}
+}
+
+// noteSignature attaches a signature label (e.g. "guard:<name>",
+// "crowdsec:<scenario>") to the request for the analytics collector. The
+// first label wins; the built-in classifier only runs when none was noted.
+func noteSignature(r *http.Request, label string) {
+	if label == "" {
+		return
+	}
+	if m := reqMetaOf(r); m != nil && m.sig == "" {
+		m.sig = label
+	}
+}
+
+// AnalyticsSink receives one Event per observed request. Record must never
+// block (the collector hands it to a queue); Active reports whether events
+// are wanted at all, so the plain chain can serve while analytics is off.
+type AnalyticsSink interface {
+	Record(analytics.Event)
+	Active() bool
+}
+
+var analyticsSinkPtr atomic.Pointer[AnalyticsSink]
+
+// SetAnalyticsSink installs the collector. nil removes it.
+func SetAnalyticsSink(s AnalyticsSink) {
+	if s == nil {
+		analyticsSinkPtr.Store(nil)
+		return
+	}
+	analyticsSinkPtr.Store(&s)
+}
+
+func analyticsSink() AnalyticsSink {
+	if p := analyticsSinkPtr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// analyticsActive reports whether a sink is installed and switched on.
+func analyticsActive() bool {
+	s := analyticsSink()
+	return s != nil && s.Active()
 }
 
 // countingBody totals the bytes actually read from a request body, so a chunked

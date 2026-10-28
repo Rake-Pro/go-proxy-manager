@@ -169,6 +169,7 @@ The SSH account needs read access to the leader's `/data/config` only.
 | TCP/UDP stream sessions | **dropped, client reconnects**: listeners are already bound on both nodes, so the survivor accepts immediately; a UDP client's next packet opens a fresh backend session. Same semantics as a single-node restart |
 | Admin sessions | lost; an admin logs in again on the survivor |
 | Access-log ring | per-instance; the survivor shows only its own traffic |
+| Analytics aggregates and `analytics.db` | per-instance; the survivor's Analytics view shows only the traffic it served. The follower aggregates nothing while it has no traffic |
 | Rate-limit buckets | per-instance; in active/standby only one node serves, so limits stay correct |
 | Login lockout / OIDC-login throttle counters | per-instance, reset |
 
