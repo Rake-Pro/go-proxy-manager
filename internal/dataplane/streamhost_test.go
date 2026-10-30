@@ -33,7 +33,7 @@ func TestTCPForwarder(t *testing.T) {
 	backend, stop := tcpEcho(t)
 	defer stop()
 
-	f, err := startTCPForwarder(0, &streamRoutes{def: &streamTarget{name: "s", addr: backend}}, nil) // :0 = ephemeral
+	f, err := startTCPForwarder(0, &streamRoutes{def: &streamTarget{name: "s", addr: backend}}, nil, nil) // :0 = ephemeral
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -56,3 +56,16 @@ surfaces are redacted for any caller without the `admin` scope.
   same caller.
 
 Full table: [What a non-admin caller does not see](../reference/api.md#what-a-non-admin-caller-does-not-see).
+
+## Multipath TCP is off
+
+gpm listens with plain TCP. Go 1.24 and later open MPTCP-capable listeners by
+default wherever the kernel allows it (`net.mptcp.enabled=1`, the Linux
+default), so without an explicit opt-out every Go service is an MPTCP listener
+without anyone deciding that. Nothing gpm fronts needs MPTCP, and a listening
+MPTCP socket was the precondition of the published root exploit for the Linux
+kernel flaw CVE-2026-98432 (IPv4 TCP request-socket use-after-free, fixed
+upstream in 6.12.113 / 7.2.10 / 7.3). Since 2.6.0 every listener (data plane,
+stream hosts, admin) is opened with MPTCP disabled; `GPM_MPTCP=1` (`-mptcp`)
+re-enables it. This removes the exploit's foothold while distribution kernels
+catch up; it does not replace the kernel update.
