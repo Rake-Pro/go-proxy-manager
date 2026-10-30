@@ -73,6 +73,9 @@ type Server struct {
 	accessLog     atomic.Bool
 	slowThreshold time.Duration
 	debugHeaders  bool
+	// listen opens every TCP listener this plane owns (http, https, stream
+	// hosts) so the MPTCP decision is made in one place.
+	listen net.ListenConfig
 
 	// logBuf retains the most recent access entries for the admin /api/logs viewer.
 	// It is only written while accessLog is enabled.
@@ -147,6 +150,10 @@ type Config struct {
 	// UpstreamResponseHeaderTimeout caps time-to-first-byte from an upstream
 	// (0 = unbounded). Tunes the shared upstream transport.
 	UpstreamResponseHeaderTimeout time.Duration
+	// MPTCP allows Multipath TCP on the data-plane and stream listeners. Off by
+	// default: nothing gpm fronts needs it, and Go 1.24+ would otherwise open
+	// MPTCP-capable listeners wherever the kernel has net.mptcp.enabled=1.
+	MPTCP bool
 }
 
 // New constructs a data-plane Server. Reload must be called with a valid config
@@ -172,6 +179,8 @@ func New(c Config) *Server {
 		health:        newHealthManager(),
 	}
 	s.accessLog.Store(c.AccessLog)
+	s.listen.SetMultipathTCP(c.MPTCP)
+	s.streams.listen = &s.listen
 	// Stream listeners read the PROXY protocol config through this accessor, so a
 	// listener opened before the setting arrives (or while it is off) still picks
 	// the change up on its next connection instead of needing a rebind.
@@ -337,13 +346,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// inbound PROXY protocol wrapper can sit under them. A bare ":port" address
 	// binds the v6 wildcard with v4-mapped addresses enabled (Go's default
 	// dual-stack behaviour), so both families reach the same handlers and the
-	// client IP an access list sees is whichever family the client used.
-	httpLn, err := net.Listen("tcp", s.httpAddr)
+	// client IP an access list sees is whichever family the client used. Both
+	// go through s.listen so the MPTCP opt-out applies.
+	httpLn, err := s.listen.Listen(ctx, "tcp", s.httpAddr)
 	if err != nil {
 		return fmt.Errorf("http listener: %w", err)
 	}
 	s.httpListening.Store(true)
-	httpsLn, err := net.Listen("tcp", s.httpsAddr)
+	httpsLn, err := s.listen.Listen(ctx, "tcp", s.httpsAddr)
 	if err != nil {
 		_ = httpLn.Close()
 		s.httpListening.Store(false)

@@ -65,6 +65,7 @@ var wins for container deployments).
 | `GPM_HA_POLL_INTERVAL`<br>`-ha-poll-interval` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved | Yes |
 | `GPM_PPROF`<br>`-pprof` | `false` | Expose `net/http/pprof` on the admin server at `/debug/pprof/` (admin role **and** `admin` scope gated) | Yes |
 | `GPM_METRICS`<br>`-metrics` | `false` | Expose a Prometheus text exposition on the admin server at `/metrics` (admin role **and** `metrics:read` scope gated) | Yes |
+| `GPM_MPTCP`<br>`-mptcp` | `false` | Allow Multipath TCP on every listener (data plane `:80`/`:443`, stream hosts, admin). Off since 2.6.0: gpm never needs MPTCP, and Go 1.24+ would otherwise open MPTCP listeners wherever the kernel has `net.mptcp.enabled=1`, the precondition of the published exploit for the kernel flaw CVE-2026-98432 | Yes |
 | `GPM_GEOIP_DB`<br>`-geoip-db` | (none) | Path to an operator-supplied GeoLite2/GeoIP2 `.mmdb` file for AccessList geo rules; unset disables geo rules, no database is bundled | Yes |
 | `GPM_ANALYTICS_DEMO` | (unset) | `1` makes `GET /api/analytics` serve deterministic seed data (flagged `demo: true`) so the Analytics view can be reviewed before a collector exists; unset answers 501. Logged as a warning at start | No |
 | `GPM_ANALYTICS_DB`<br>`-analytics-db` | `/data/analytics.db` | Hourly rollup database for the analytics collector (`settings.analytics.enabled`); created 0600 with WAL, next to the session database. Unopenable: the collector keeps the 24 h memory window only and logs an error | Yes |

@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -36,6 +37,9 @@ type streamManager struct {
 	// client rather than against the balancer. Read once per accept; nil (the
 	// default) leaves the listener untouched.
 	proxyProto func() *proxyProtoConfig
+	// listen is the data plane's shared listener config (MPTCP opt-out); nil
+	// falls back to the Go defaults, which only tests rely on.
+	listen *net.ListenConfig
 }
 
 func newStreamManager() *streamManager {
@@ -68,7 +72,7 @@ func (m *streamManager) reload(cfg model.Config, certs *certResolver) {
 			f.setRoutes(routes)
 			continue
 		}
-		f, err := startTCPForwarder(port, routes, m.proxyProto)
+		f, err := startTCPForwarder(port, routes, m.proxyProto, m.listen)
 		if err != nil {
 			log.Error().Int("port", port).Err(err).Msg("stream: failed to start tcp listener")
 			continue
@@ -337,8 +341,11 @@ type tcpForwarder struct {
 	routes atomic.Pointer[streamRoutes] // swappable on reload
 }
 
-func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyProtoConfig) (*tcpForwarder, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyProtoConfig, lc *net.ListenConfig) (*tcpForwarder, error) {
+	if lc == nil {
+		lc = &net.ListenConfig{}
+	}
+	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
 	}

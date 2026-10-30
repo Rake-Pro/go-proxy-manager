@@ -73,7 +73,7 @@ func TestStreamSNIRoutingTwoHostsOnOnePort(t *testing.T) {
 	if routes == nil || !routes.sni {
 		t.Fatalf("expected an SNI-routed table on port %d, got %+v", port, routes)
 	}
-	f, err := startTCPForwarder(0, routes, nil)
+	f, err := startTCPForwarder(0, routes, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestStreamTLSTerminate(t *testing.T) {
 	if routes == nil || routes.match("stream.example.com") == nil || routes.match("stream.example.com").tlsConf == nil {
 		t.Fatal("terminate mode must compile a server TLS config")
 	}
-	f, err := startTCPForwarder(0, routes, nil)
+	f, err := startTCPForwarder(0, routes, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestStreamAccessListDeniesBeforeDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	tcpRoutes, _ := buildStreamRoutes(cfg, nil)
-	f, err := startTCPForwarder(0, tcpRoutes[port], nil)
+	f, err := startTCPForwarder(0, tcpRoutes[port], nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestStreamAccessListAllowsLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 	tcpRoutes, _ := buildStreamRoutes(cfg, nil)
-	f, err := startTCPForwarder(0, tcpRoutes[port], nil)
+	f, err := startTCPForwarder(0, tcpRoutes[port], nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

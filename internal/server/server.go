@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"time"
@@ -19,10 +20,13 @@ import (
 
 // Server is the admin HTTP server.
 type Server struct {
-	addr  string
-	store *store.Store
-	authn *auth.Authenticator
-	http  *http.Server
+	addr string
+	// listen opens the admin listener; SetMultipathTCP decides whether it may be
+	// an MPTCP socket (off by default, see cmd/gpm -mptcp).
+	listen net.ListenConfig
+	store  *store.Store
+	authn  *auth.Authenticator
+	http   *http.Server
 }
 
 // New constructs the admin server bound to addr. apiHandler, if non-nil, is the
@@ -199,12 +203,21 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// SetMultipathTCP controls whether the admin listener may be a Multipath TCP
+// socket. Go 1.24+ enables MPTCP on listeners by default when the kernel allows
+// it; gpm turns it off unless the operator asks for it.
+func (s *Server) SetMultipathTCP(on bool) { s.listen.SetMultipathTCP(on) }
+
 // Start runs the server until ctx is cancelled, then shuts it down gracefully.
 func (s *Server) Start(ctx context.Context) error {
+	ln, err := s.listen.Listen(ctx, "tcp", s.addr)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info().Str("addr", s.addr).Msg("admin server listening")
-		if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.http.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

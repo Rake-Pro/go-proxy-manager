@@ -79,6 +79,7 @@ func main() {
 		haPollInt     = flag.Duration("ha-poll-interval", envDur("GPM_HA_POLL_INTERVAL", store.DefaultFollowInterval), "how often a follower fast-forwards the config repo from the leader remote")
 		pprofEnabled  = flag.Bool("pprof", os.Getenv("GPM_PPROF") == "1", "expose net/http/pprof profiling endpoints on the admin server at /debug/pprof/ (admin role + admin scope gated)")
 		metricsOn     = flag.Bool("metrics", os.Getenv("GPM_METRICS") == "1", "expose a Prometheus text exposition on the admin server at /metrics (admin role + metrics:read scope gated)")
+		mptcp         = flag.Bool("mptcp", os.Getenv("GPM_MPTCP") == "1", "allow Multipath TCP on every listener (data plane, stream hosts, admin); off by default because gpm has no use for it and Go would otherwise open MPTCP listeners wherever the kernel has net.mptcp.enabled=1")
 		showVer       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -205,6 +206,7 @@ func main() {
 		SlowRequestThreshold:          time.Duration(*slowReqMS) * time.Millisecond,
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
+		MPTCP:                         *mptcp,
 	})
 	// Persist the data-plane SSO signing key under the cert dir when the operator
 	// has not pinned one via GPM_SSO_SIGNING_KEY, so SSO sessions survive restarts.
@@ -952,6 +954,7 @@ func main() {
 		metricsHandler = mx.Handler()
 	}
 	admin := server.New(*adminAddr, st, authn, apiHandler, uiHandler, metricsHandler, *pprofEnabled)
+	admin.SetMultipathTCP(*mptcp)
 
 	errc := make(chan error, 2)
 	go func() { errc <- admin.Start(ctx) }()
