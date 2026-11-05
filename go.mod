@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.6
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/oschwald/maxminddb-golang/v2 v2.8.0
 	github.com/rs/zerolog v1.35.1
 	go.yaml.in/yaml/v3 v3.0.5
