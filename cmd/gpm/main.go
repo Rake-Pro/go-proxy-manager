@@ -1141,7 +1141,7 @@ func envDur(key string, def time.Duration) time.Duration {
 // shell/compose interpolation - out of the environment entirely.
 func secretFromEnv(key string) string {
 	if p := os.Getenv(key + "_FILE"); p != "" {
-		b, err := os.ReadFile(p)
+		b, err := os.ReadFile(p) //nolint:gosec // G304: path is the operator-set <KEY>_FILE env var (mounted secret) read at startup, not request input
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot read %s_FILE (%s): %v\n", key, p, err)
 			return ""

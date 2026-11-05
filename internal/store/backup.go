@@ -45,7 +45,7 @@ func (s *Store) Export(ctx context.Context) ([]byte, error) {
 	}
 
 	for _, files := range s.configFiles() {
-		b, err := os.ReadFile(filepath.Join(s.dir, files))
+		b, err := os.ReadFile(filepath.Join(s.dir, files)) //nolint:gosec // G304: names come from the store's own configFiles() listing under s.dir
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

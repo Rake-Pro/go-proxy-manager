@@ -217,7 +217,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 func clientTLS(cfg ClientConfig) (*tls.Config, error) {
 	out := &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.TLSCA != "" {
-		pem, err := os.ReadFile(cfg.TLSCA)
+		pem, err := os.ReadFile(cfg.TLSCA) //nolint:gosec // G304: tlsCA is an admin-set absolute path on the docker discovery provider, validated in model, not request input
 		if err != nil {
 			return nil, fmt.Errorf("docker: read tlsCA %q: %w", cfg.TLSCA, err)
 		}

@@ -267,7 +267,7 @@ func (s Secret) Resolve() (string, error) {
 				resErr = err
 				return match
 			}
-			b, err := os.ReadFile(ref)
+			b, err := os.ReadFile(ref) //nolint:gosec // G304: ref passed allowedSecretFile immediately above
 			if err != nil {
 				resErr = fmt.Errorf("secret file %q: %w", ref, err)
 				return match

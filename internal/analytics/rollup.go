@@ -83,7 +83,7 @@ func OpenRollup(path string) (*Rollup, error) {
 
 	// Client addresses live here. Pre-create the file 0600 so SQLite (and its
 	// -wal/-shm sidecars) inherit that mode, and tighten any existing file.
-	f, err := os.OpenFile(path, os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE, 0o600) //nolint:gosec // G304: database path is the operator-set analytics DB flag, not request input
 	if err != nil {
 		return nil, fmt.Errorf("rollup: create db file: %w", err)
 	}

@@ -46,7 +46,7 @@ func LoadIssuedMeta(certDir, name string) (*Meta, error) {
 
 // loadMeta reads the issued metadata; os.ErrNotExist means "never issued".
 func loadMeta(certDir, name string) (*Meta, error) {
-	b, err := os.ReadFile(metaPath(certDir, name))
+	b, err := os.ReadFile(metaPath(certDir, name)) //nolint:gosec // G304: path is certDir/acme/issued/<name>/meta.json; name passed model.ValidateName (one safe segment)
 	if err != nil {
 		return nil, err
 	}
