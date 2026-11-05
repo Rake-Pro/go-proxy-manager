@@ -52,7 +52,7 @@ func (c ClientCA) SigningKey(certDir string) (*x509.Certificate, crypto.Signer, 
 		if err := confinedStorePath("caKeyFile", c.CAKeyFile); err != nil {
 			return nil, nil, fmt.Errorf("client CA %q: %w", c.Name, err)
 		}
-		b, err := os.ReadFile(filepath.Join(certDir, filepath.Clean(c.CAKeyFile)))
+		b, err := os.ReadFile(filepath.Join(certDir, filepath.Clean(c.CAKeyFile))) //nolint:gosec // G304: confinedStorePath is re-checked immediately above; the join stays under certDir
 		if err != nil {
 			return nil, nil, fmt.Errorf("client CA %q: caKeyFile: %w", c.Name, err)
 		}

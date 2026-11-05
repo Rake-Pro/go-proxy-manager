@@ -199,7 +199,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("kubernetes: no tokenFile configured")
 	}
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(full.CAFile)
+	pem, err := os.ReadFile(full.CAFile) //nolint:gosec // G304: caFile is the in-cluster default or an admin-set path that passed allowedSecretFile in model validation
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes: read caFile %q: %w", full.CAFile, err)
 	}
@@ -257,7 +257,7 @@ func (c *Client) bearer() (string, error) {
 	if c.token != "" && time.Since(c.tokenAt) < tokenTTL {
 		return c.token, nil
 	}
-	b, err := os.ReadFile(c.tokenFile)
+	b, err := os.ReadFile(c.tokenFile) //nolint:gosec // G304: tokenFile is the in-cluster default or an admin-set path that passed allowedSecretFile in model validation
 	if err != nil {
 		c.token = ""
 		return "", fmt.Errorf("kubernetes: read tokenFile %q: %w", c.tokenFile, err)

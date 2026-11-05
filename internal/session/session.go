@@ -60,7 +60,7 @@ func Open(dbPath string) (*Store, error) {
 	// Session IDs and CSRF tokens must not be world-readable. Pre-create the
 	// file 0600 so SQLite (and its -wal/-shm sidecars) inherit that mode, and
 	// tighten any pre-existing file.
-	if f, err := os.OpenFile(dbPath, os.O_CREATE, 0o600); err != nil {
+	if f, err := os.OpenFile(dbPath, os.O_CREATE, 0o600); err != nil { //nolint:gosec // G304: database path is the operator-set session DB flag, not request input
 		return nil, fmt.Errorf("session: create db file: %w", err)
 	} else {
 		f.Close()

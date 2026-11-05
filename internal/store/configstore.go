@@ -317,7 +317,7 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	settings := model.DefaultSettings()
 	sp := filepath.Join(s.dir, settingsFile)
 	if _, statErr := os.Stat(sp); statErr == nil {
-		data, rerr := os.ReadFile(sp)
+		data, rerr := os.ReadFile(sp) //nolint:gosec // G304: s.dir plus the constant settingsFile
 		if rerr != nil {
 			return cfg, settings, fmt.Errorf("%s: %w", settingsFile, rerr)
 		}
@@ -680,7 +680,7 @@ type fileState struct {
 
 // snapshotFile captures a file's current contents (or its absence).
 func snapshotFile(path string) (fileState, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: callers pass paths built from s.dir, a kind dir and a validated object name
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fileState{path: path}, nil
@@ -1400,7 +1400,7 @@ func loadDir[T any](root, sub string) ([]T, map[string][]string, error) {
 			continue
 		}
 		rel := sub + "/" + e.Name()
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir of the store's own kind dir
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", rel, err)
 		}
@@ -1433,7 +1433,7 @@ func mergeUnknownKeyWarnings(dst, src map[string][]string) {
 // state right now, not what a caller's plan (built seconds or minutes
 // earlier) read. A missing or unreadable file has nothing to protect.
 func unknownKeysAtPath(path string, sample any) bool {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is built by the store from s.dir, a kind dir and a validated object name
 	if err != nil {
 		return false
 	}
@@ -1468,7 +1468,7 @@ func (s *Store) snapshotDirs(subs []string) (map[string][]byte, error) {
 			if e.IsDir() {
 				continue
 			}
-			b, err := os.ReadFile(filepath.Join(s.dir, sub, e.Name()))
+			b, err := os.ReadFile(filepath.Join(s.dir, sub, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir under s.dir
 			if err != nil {
 				return nil, err
 			}
@@ -1512,7 +1512,7 @@ func (s *Store) writeDirs(files map[string][]byte) error {
 }
 
 func readYAML(path string, v any) error {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: callers pass store-built paths under s.dir
 	if err != nil {
 		return err
 	}

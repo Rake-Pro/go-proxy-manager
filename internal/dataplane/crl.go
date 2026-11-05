@@ -131,7 +131,7 @@ func (a *clientCAAnchor) load(raw []byte) error {
 func (a *clientCAAnchor) reloadFile() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	raw, err := os.ReadFile(a.crlFile)
+	raw, err := os.ReadFile(a.crlFile) //nolint:gosec // G304: crlFile is the stored client CA's configured CRL path, resolved against certDir at config load
 	if err != nil {
 		return err
 	}
