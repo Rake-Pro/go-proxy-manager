@@ -4,13 +4,13 @@ go 1.27.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.6
-	github.com/oschwald/maxminddb-golang/v2 v2.8.0
+	github.com/go-jose/go-jose/v4 v4.1.7
+	github.com/oschwald/maxminddb-golang/v2 v2.9.0
 	github.com/rs/zerolog v1.35.1
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/crypto v0.58.0
 	golang.org/x/oauth2 v0.37.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 

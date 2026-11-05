@@ -84,7 +84,7 @@ func truncateLastError(msg string) string {
 // status fields. Shared by ACME-issued and custom certificates: both are a
 // plain PEM chain on disk, so there is one read+parse path for both.
 func readLeaf(path string) (acme.LeafInfo, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: path is built from certDir and a stored certificate object, never from the request
 	if err != nil {
 		return acme.LeafInfo{}, err
 	}

@@ -36,7 +36,7 @@ func accountKeyPath(certDir, directoryURL, eabKID string) string {
 
 func loadOrCreateAccountKey(certDir, directoryURL, eabKID string) (*ecdsa.PrivateKey, error) {
 	path := accountKeyPath(certDir, directoryURL, eabKID)
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: path is certDir/acme/accounts/<sha256 hex>.key, no caller-controlled segment
 		block, _ := pem.Decode(b)
 		if block == nil {
 			return nil, fmt.Errorf("account key %s: not PEM", path)

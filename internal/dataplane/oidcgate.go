@@ -98,7 +98,7 @@ var ssoSigningKey = sync.OnceValue(func() []byte {
 // inside a 0700 dir, mirroring internal/acme/store.go's key handling.
 func loadOrCreateSSOKey(dir string) ([]byte, error) {
 	path := filepath.Join(dir, ssoKeyFile)
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: state dir plus the constant ssoKeyFile
 		k, derr := hex.DecodeString(strings.TrimSpace(string(b)))
 		if derr == nil && len(k) == 32 {
 			return k, nil
@@ -169,7 +169,7 @@ func ssoRevokedAt() int64 {
 		if d == nil || *d == "" {
 			return
 		}
-		b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile))
+		b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile)) //nolint:gosec // G304: state dir plus the constant ssoNotBeforeFile
 		if err != nil {
 			return // absent (or unreadable) = no revocation on record
 		}
@@ -217,7 +217,7 @@ func refreshSSOWatermark() {
 	if d == nil || *d == "" {
 		return
 	}
-	b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile))
+	b, err := os.ReadFile(filepath.Join(*d, ssoNotBeforeFile)) //nolint:gosec // G304: state dir plus the constant ssoNotBeforeFile
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Warn().Err(err).Msg("data-plane SSO: cannot re-read the revocation watermark")

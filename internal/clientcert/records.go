@@ -130,7 +130,7 @@ func (l *Ledger) load(ca string) ([]Record, error) {
 		}
 		return nil, err
 	}
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(p) //nolint:gosec // G304: path comes from Ledger.path, which re-validates the CA name and joins it under certDir/client-certs
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
