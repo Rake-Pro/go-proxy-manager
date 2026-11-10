@@ -117,14 +117,17 @@ discovery.
 | `lastRun` vs `lastSuccess` | Equal | Equal, a gap means the run froze |
 | `hosts[].action: "skipped"` | Each carries a `reason` | Same |
 
-**Ownership covers the domain, not just the name.** A derived host is skipped
-whenever any of its domains is already claimed by a host discovery does not own
-(including a *disabled* one), so an annotated Ingress cannot take over the
-hostname of your SSO or dashboard host by deriving a name that happens to sort
-after it. Two annotated Ingresses claiming the same hostname are resolved the
-same way: the first by derived name wins, the second is skipped with a reason.
-The rule is also enforced one layer down: the config validator rejects any two
-*enabled* hosts claiming the same domain, whatever wrote them.
+**Ownership covers the domain, not just the name.**
+
+- **Foreign hostnames.** A derived host is skipped whenever any of its domains is
+  already claimed by a host discovery does not own (including a *disabled* one),
+  so an annotated Ingress cannot take over the hostname of your SSO or dashboard
+  host by deriving a name that happens to sort after it.
+- **Two Ingresses, one hostname.** An existing derived host keeps or takes the
+  hostname ahead of a new one; otherwise the first by derived name wins, and the
+  other is skipped with a reason.
+- **Enforced twice.** The config validator rejects any two *enabled* hosts
+  claiming the same domain, whatever wrote them.
 
 **Freeze on failure is expected behaviour, not an outage.** If the API server is
 unreachable, returns an error, returns something that is not an `IngressList`, or

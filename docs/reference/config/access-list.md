@@ -117,6 +117,59 @@ rules:
 defaultAction: deny
 ```
 
+<span id="access-list-composing"></span>
+
+## Composing access lists
+
+A host or location that names several lists combines them with
+[`accessListsMode`](proxy-host.md#proxy-host-access-lists-mode). Each list is
+evaluated on its own, exactly as described above; the mode decides how the verdicts combine.
+
+| `accessListsMode` | The request passes when | Use it for |
+|---|---|---|
+| `all` (default, also when unset) | every list allows it | layering restrictions, for example a LAN list plus a country list |
+| `any` | at least one list allows it | widening a base list with an independently maintained one, for example a prober list scoped to health paths |
+
+Rules for `any`:
+
+- **`any` composes allow-lists only.** A member grants only what its own `action: allow` rules or `geo.countryAllow` name, so a list with `defaultAction: allow` or a `geo.countryDeny` deny-list is refused at validation: under `any` it would admit everyone it does not block, including every address the GeoIP database cannot place.
+- **A list allows only on its own full verdict.** Its rules, `geo` and `defaultAction` all count, and so does every fail-closed state: a list with `geo` rules and no database loaded does not allow.
+- **An unfetched source grants nothing.** A `source` rule whose feed has not been fetched yet matches nothing, so its list can allow only through its other rules.
+- **A deny rule does not veto.** Under `any`, an explicit `action: deny` in one list stops that list from allowing, but another list may still allow the same request.
+- **A list with nothing to match on never allows.** A list with no rules and no `geo` has nothing to grant under `any`. (Under `all` the same list passes every request, unless `defaultAction: deny` makes it deny-all.)
+- **A disabled list is skipped.** Setting `disabled: true` on a member revokes what it grants; a group whose members are all disabled denies everyone. Under `all`, a disabled list is still enforced, as before.
+- **Path scoping keeps its meaning.** A list whose allow rules carry `paths` widens only those paths.
+- **Refused at validation:** `any` with no lists, any value other than `all` or `any`, and a member with `defaultAction: allow`, with `geo.countryDeny`, or with the deprecated `basicAuth` users.
+- **Host and location are separate groups.** The host's lists are combined under the host's mode, a location's own lists under the location's mode, and both groups must pass.
+
+```yaml
+# access-lists/monitor.yaml: an uptime provider, health endpoints only
+name: monitor
+defaultAction: deny
+sources:
+  - {name: uptime, url: "https://uptime.example.com/ips.txt"}
+rules:
+  - {action: allow, source: uptime, paths: [/healthz, /api/health]}
+---
+# proxy-hosts/app.yaml: the LAN everywhere, the prober on the health paths
+name: app
+domains: [app.example.com]
+upstream: {scheme: http, host: 10.0.0.40, port: 8080}
+accessLists: [lan, monitor]
+accessListsMode: any
+```
+
+With `all` (the default) the same pair would refuse everyone: a LAN client
+fails `monitor` on every path, and the prober fails `lan`. Under `all`, the
+fallback is to copy the prober rules into the base list instead of attaching a
+second list.
+
+A `403` from an `any` group is counted in
+[`gpm_denials_total`](../metrics.md) and in the analytics denials as
+`reason="geo"` when a member has `geo` rules and no GeoIP database is loaded,
+otherwise as `reason="access-list-any"`. The host, mode and list names are
+logged at `debug` level.
+
 ## Deprecated fields
 
 Still parsed and still enforced, so existing YAML keeps working unchanged. They

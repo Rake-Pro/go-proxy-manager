@@ -374,7 +374,8 @@ func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([
 			lh.Upstream = model.Upstream{}
 		}
 		lh.Middlewares = append(append([]string{}, h.Middlewares...), loc.Middlewares...)
-		lh.AccessLists = append(append([]string{}, h.AccessLists...), loc.AccessLists...)
+		// The location's own access lists travel in locationInline as a
+		// separate group; lh keeps the host's lists and the host's mode.
 		lh.Locations = nil
 		proxy, upLabel, err := hostProxy(lh, reg, ep)
 		if err != nil {

@@ -310,10 +310,11 @@ func identityTrust(specs []model.AuthMiddleware, reg *registry) (headers []strin
 
 // unresolvedRefs returns a description of the first middleware/access-list name
 // on host that the registry cannot resolve, or "" when every reference lands.
-// buildLocations folds a location's own names into the host copy it passes to
-// buildChain, so checking the host here covers locations too.
-func unresolvedRefs(host model.ProxyHost, reg *registry) string {
-	for _, name := range host.AccessLists {
+// buildLocations folds a location's own middleware names into the host copy it
+// passes to buildChain and carries its access lists in inline, so checking both
+// covers locations too.
+func unresolvedRefs(host model.ProxyHost, inline inlineChain, reg *registry) string {
+	for _, name := range append(append([]string(nil), host.AccessLists...), inline.accessLists...) {
 		if _, ok := reg.accessLists[name]; !ok {
 			return "accessList " + name
 		}
@@ -371,6 +372,13 @@ type inlineChain struct {
 	// did not ask for it. It is carried here, not on the host copy, because it is
 	// a property of the ROUTE and there is no host-level equivalent.
 	stripPrefix string
+
+	// accessLists and accessListsMode are a location route's OWN access lists:
+	// a second group, composed under the location's mode, wrapped outside the
+	// host's group (host.AccessLists under host.AccessListsMode). Both groups
+	// must pass, so a mode on one level never opens the other.
+	accessLists     []string
+	accessListsMode string
 }
 
 // hostInline returns the inline blocks declared directly on a host.
@@ -386,8 +394,9 @@ func hostInline(h model.ProxyHost) inlineChain {
 }
 
 // locationInline stacks a location's inline blocks on top of its host's, exactly
-// as a location's middleware/access-list names are APPENDED to the host's rather
-// than replacing them: a location is always at least as restrictive as its host.
+// as a location's middleware names are APPENDED to the host's rather than
+// replacing them, and carries the location's own access lists as a second group
+// beside the host's: a location is always at least as restrictive as its host.
 func locationInline(h model.ProxyHost, loc model.Location) inlineChain {
 	in := hostInline(h)
 	if loc.Auth != nil {
@@ -399,6 +408,8 @@ func locationInline(h model.ProxyHost, loc model.Location) inlineChain {
 	if loc.StripPrefix {
 		in.stripPrefix = normalizeLocationPrefix(loc.Path)
 	}
+	in.accessLists = loc.AccessLists
+	in.accessListsMode = loc.AccessListsMode
 	return in
 }
 
@@ -422,7 +433,7 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 	// intent. The blast radius is deliberately ONE host (not the whole router
 	// build): a config that cannot pass validation anyway should not be able to
 	// take unrelated hosts down as a side effect of this defence in depth.
-	if missing := unresolvedRefs(host, reg); missing != "" {
+	if missing := unresolvedRefs(host, inline, reg); missing != "" {
 		log.Error().Str("host", host.Name).Str("unresolved", missing).
 			Msg("dataplane: host references a middleware or access list that does not exist; serving 503 rather than dropping the gate")
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -506,21 +517,40 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		h = bouncerHandler(compileBouncer(mw.Name, *mw.Bouncer), host.Name, clientIP, ep, h)
 	}
 
-	// Access lists (host-level), wrapped outside auth so an IP the list would
-	// deny is dropped before any auth work runs (no forward-auth subrequest to
-	// the IdP, no OIDC redirect/401 disclosing the auth flow).
-	for _, name := range host.AccessLists {
-		al, ok := reg.accessLists[name]
-		if !ok {
-			continue
+	// Access lists, wrapped outside auth so an IP the list would deny is
+	// dropped before any auth work runs (no forward-auth subrequest to the IdP,
+	// no OIDC redirect/401 disclosing the auth flow). The host's group first,
+	// then a location's own group outside it; with both modes "all" this is
+	// exactly one handler per list in host-then-location order, as before modes
+	// existed. Any mode other than "any" composes as "all", the stricter reading.
+	// Under "any" a disabled list is skipped, so disabling it revokes what it
+	// grants (a group whose members are all disabled denies everyone).
+	wrapAccessLists := func(names []string, mode string) {
+		if mode == model.AccessListsModeAny {
+			var lists []accessList
+			for _, name := range names {
+				if al, ok := reg.accessLists[name]; ok && !al.Disabled {
+					lists = append(lists, compileAccessList(al))
+				}
+			}
+			h = anyAccessListHandler(lists, names, clientIP, reg.geoCountry, reg.geoLoaded, host.Name, ep, h)
+			return
 		}
-		cal := compileAccessList(al)
-		// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
-		// here: accessListHandler/ipAllowed consult it live, at request time, so
-		// a database that (un)loads after this chain is built takes effect
-		// without a rebuild (see accessList.ipAllowed).
-		h = accessListHandler(cal, clientIP, reg.geoCountry, reg.geoLoaded, host.Name, ep, h)
+		for _, name := range names {
+			al, ok := reg.accessLists[name]
+			if !ok {
+				continue
+			}
+			cal := compileAccessList(al)
+			// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
+			// here: accessListHandler/ipAllowed consult it live, at request time,
+			// so a database that (un)loads after this chain is built takes effect
+			// without a rebuild (see accessList.ipAllowed).
+			h = accessListHandler(cal, clientIP, reg.geoCountry, reg.geoLoaded, host.Name, ep, h)
+		}
 	}
+	wrapAccessLists(host.AccessLists, host.AccessListsMode)
+	wrapAccessLists(inline.accessLists, inline.accessListsMode)
 
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
 	// flood is rejected (429) before it can drive an auth subrequest or any other

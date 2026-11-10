@@ -3604,7 +3604,7 @@ async function viewIntegrations(c, tab) {
           </div>
           <div>
             <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw" data-hint="settings.ingressDiscovery.template.middlewares"></div><div class="hint">Applied to every derived host, in order.</div></div>
-            <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-id-al" data-hint="settings.ingressDiscovery.template.accessLists"></div></div>
+            <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-id-al" data-hint="settings.ingressDiscovery.template.accessLists"></div>${alModeHtml('id="set-id-alm"', idt.accessListsMode, 'settings.ingressDiscovery.template.accessListsMode')}</div>
             <div class="field-group">
               <label>Upstream timeouts (seconds)</label>
               <div class="loc-row bare">
@@ -3700,7 +3700,7 @@ async function viewIntegrations(c, tab) {
             </div>
             <div>
               <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-dkr-mw" data-hint="settings.dockerDiscovery.template.middlewares"></div></div>
-              <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-dkr-al" data-hint="settings.dockerDiscovery.template.accessLists"></div></div>
+              <div class="field-group"><label>Access lists</label><div class="chip-input" id="set-dkr-al" data-hint="settings.dockerDiscovery.template.accessLists"></div>${alModeHtml('id="set-dkr-alm"', ddt.accessListsMode, 'settings.dockerDiscovery.template.accessListsMode')}</div>
               <div class="field-group"><label>Tags</label><div class="chip-input" id="set-dkr-tags" data-hint="settings.dockerDiscovery.template.tags"></div></div>
               <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input" id="set-dkr-suffixes-override" data-hint="settings.dockerDiscovery.template.allowedDomainSuffixes"></div><div class="hint">Must be a subset of the list above.</div></div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('set-dkr-dns-lan', !!ddt.defaultDNS.lanDirect, 'Default LAN direct', 'settings.dockerDiscovery.template.defaultDNS.lanDirect')}</div>
@@ -3836,6 +3836,7 @@ async function viewIntegrations(c, tab) {
   const idSuffixCtl = makeChipInput($('#set-id-suffixes'), arr(idc.allowedDomainSuffixes), 'add suffix...');
   const idMwCtl = makeChipInput($('#set-id-mw'), arr(idt.middlewares), 'add middleware...');
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
+  wireAlMode($('#set-id-alm').parentNode);
   const idTagCtl = makeChipInput($('#set-id-tags'), arr(idt.tags), 'add tag...');
   const idTemplateSuffixCtl = makeChipInput($('#set-id-suffixes-override'), arr(idt.allowedDomainSuffixes), 'add suffix...');
 
@@ -3899,7 +3900,7 @@ async function viewIntegrations(c, tab) {
         </div>
         <div>
           <div class="field-group"><label>Middlewares</label><div class="chip-input pf-mw" data-hint="settings.ingressDiscovery.template.middlewares"></div><div class="hint">Applied in order to every host that selects this profile.</div></div>
-          <div class="field-group"><label>Access lists</label><div class="chip-input pf-al" data-hint="settings.ingressDiscovery.template.accessLists"></div><div class="hint">Leave empty for a profile that is public on purpose.</div></div>
+          <div class="field-group"><label>Access lists</label><div class="chip-input pf-al" data-hint="settings.ingressDiscovery.template.accessLists"></div>${alModeHtml(`id="pf-alm-${i}"`, p.accessListsMode, 'settings.ingressDiscovery.template.accessListsMode')}<div class="hint">Leave empty for a profile that is public on purpose.</div></div>
           <div class="field-group">
             <label>Upstream timeouts (seconds)</label>
             <div class="loc-row bare">
@@ -3923,6 +3924,7 @@ async function viewIntegrations(c, tab) {
     pfWrap.appendChild(div);
     div._mw = makeChipInput(div.querySelector('.pf-mw'), arr(p.middlewares), 'add middleware...');
     div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
+    wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.pf-tags'), arr(p.tags), 'add tag...');
     div._suffixes = makeChipInput(div.querySelector('.pf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
@@ -4026,6 +4028,7 @@ async function viewIntegrations(c, tab) {
   const dkrSuffixCtl = makeChipInput($('#set-dkr-suffixes'), arr(dd.allowedDomainSuffixes), 'add suffix...');
   const dkrMwCtl = makeChipInput($('#set-dkr-mw'), arr(ddt.middlewares), 'add middleware...');
   const dkrAlCtl = makeChipInput($('#set-dkr-al'), arr(ddt.accessLists), 'add access list...');
+  wireAlMode($('#set-dkr-alm').parentNode);
   const dkrTagCtl = makeChipInput($('#set-dkr-tags'), arr(ddt.tags), 'add tag...');
   const dkrTemplateSuffixCtl = makeChipInput($('#set-dkr-suffixes-override'), arr(ddt.allowedDomainSuffixes), 'add suffix...');
 
@@ -4062,7 +4065,7 @@ async function viewIntegrations(c, tab) {
         </div>
         <div>
           <div class="field-group"><label>Middlewares</label><div class="chip-input dpf-mw" data-hint="settings.dockerDiscovery.template.middlewares"></div></div>
-          <div class="field-group"><label>Access lists</label><div class="chip-input dpf-al" data-hint="settings.dockerDiscovery.template.accessLists"></div></div>
+          <div class="field-group"><label>Access lists</label><div class="chip-input dpf-al" data-hint="settings.dockerDiscovery.template.accessLists"></div>${alModeHtml(`id="dpf-alm-${i}"`, p.accessListsMode, 'settings.dockerDiscovery.template.accessListsMode')}</div>
           <div class="field-group"><label>Tags</label><div class="chip-input dpf-tags" data-hint="settings.dockerDiscovery.template.tags"></div></div>
           <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input dpf-suffixes" data-hint="settings.dockerDiscovery.template.allowedDomainSuffixes"></div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('dpf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct', 'settings.dockerDiscovery.template.defaultDNS.lanDirect')}</div>
@@ -4075,6 +4078,7 @@ async function viewIntegrations(c, tab) {
     dpfWrap.appendChild(div);
     div._mw = makeChipInput(div.querySelector('.dpf-mw'), arr(p.middlewares), 'add middleware...');
     div._al = makeChipInput(div.querySelector('.dpf-al'), arr(p.accessLists), 'add access list...');
+    wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.dpf-tags'), arr(p.tags), 'add tag...');
     div._suffixes = makeChipInput(div.querySelector('.dpf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
@@ -4450,6 +4454,7 @@ async function viewIntegrations(c, tab) {
         timeouts: timeoutsPayload(idt.timeouts, $('#set-id-to-connect').value, $('#set-id-to-read').value),
         middlewares: idMwCtl.get(),
         accessLists: idAlCtl.get(),
+        accessListsMode: alModeValue($('#set-id-alm'), idt.accessListsMode),
         tags: idTagCtl.get(),
         // No control on this form yet, and this literal is a REBUILD - so the
         // loaded values have to be sent back or an unrelated settings save
@@ -4495,6 +4500,7 @@ async function viewIntegrations(c, tab) {
         timeouts: timeoutsPayload((row._orig || {}).timeouts, row.querySelector('.pf-to-connect').value, row.querySelector('.pf-to-read').value),
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
+        accessListsMode: alModeValue($('#pf-alm-' + uid), (row._orig || {}).accessListsMode),
         tags: row._tags.get(),
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
@@ -4576,6 +4582,7 @@ async function viewIntegrations(c, tab) {
         timeouts: timeoutsPayload(ddt.timeouts, $('#set-dkr-to-connect').value, $('#set-dkr-to-read').value),
         middlewares: dkrMwCtl.get(),
         accessLists: dkrAlCtl.get(),
+        accessListsMode: alModeValue($('#set-dkr-alm'), ddt.accessListsMode),
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
@@ -4606,6 +4613,7 @@ async function viewIntegrations(c, tab) {
         timeouts: timeoutsPayload((row._orig || {}).timeouts, row.querySelector('.dpf-to-connect').value, row.querySelector('.dpf-to-read').value),
         middlewares: row._mw.get(),
         accessLists: row._al.get(),
+        accessListsMode: alModeValue($('#dpf-alm-' + uid), (row._orig || {}).accessListsMode),
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
@@ -5334,7 +5342,8 @@ function renderRailChain(el, ctx) {
   const items = [];
   if (ctx.inlineRateLimit) items.push({ name: 'rate limit', kind: 'on this host' });
   items.push(...byType('rate-limit'));
-  ctx.alSelected.forEach((a) => items.push({ name: a, kind: 'access list' }));
+  if (ctx.alMode === 'any' && ctx.alSelected.length) items.push({ name: ctx.alSelected.join(' or '), kind: 'access lists, any' });
+  else ctx.alSelected.forEach((a) => items.push({ name: a, kind: 'access list' }));
   items.push(...byType('bouncer'));
   if (ctx.inlineAuth) items.push({ name: ctx.inlineAuth, kind: 'sign-in' });
   items.push(...byType('auth'));
@@ -5692,6 +5701,8 @@ ${panel('access', `        <div class="card form-section">
               <label class="check-item"><input type="checkbox" value="${esc(a.name)}"${selAl.indexOf(a.name) !== -1 ? ' checked' : ''}/>${esc(a.name)}<span class="ci-ty">access-list</span></label>
             `).join('') : '<div class="check-empty">No access lists defined yet.</div>')}
           </div>
+          ${alModeHtml('id="f-alm"', h.accessListsMode, 'proxyHost.accessListsMode')}
+          <div class="hint">All: every attached list must allow the request. Any: one allowing list is enough, and a deny rule in one list does not override another list's allow. Any takes allow-lists only, so a list with <span class="mono">defaultAction: allow</span> or a <span class="mono">countryDeny</span> geo rule is refused on save.</div>
           <div class="hint" id="f-inline-order"${(h.auth || h.rateLimit) ? '' : ' hidden'} style="margin-top:8px">Sign-in and rate limit set below each take the same place in the chain as a middleware of their kind, just before those middlewares. The Request chain in the rail shows the full order.</div>
         </div>
 
@@ -5895,7 +5906,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   const refreshSums = liveFoldSummaries(c.querySelector('.edit-main'), foldSums);
   function refreshAttached() {
     const mw = $('#f-mw-attached'); if (mw) mw.textContent = mwListOK ? (curMw().join(', ') || 'none') : mw.textContent;
-    const al = $('#f-al-attached'); if (al) al.textContent = alListOK ? (curAl().join(', ') || 'none') : al.textContent;
+    const al = $('#f-al-attached');
+    if (al && alListOK) { const l = curAl(); al.textContent = l.length ? l.join(', ') + (l.length > 1 ? ` (${alModeLabel(curAlMode())} must allow)` : '') : 'none'; }
   }
 
   // locations. A location is a whole host in miniature now - its own upstream
@@ -5941,7 +5953,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
           <select multiple class="field mono loc-mw" data-hint="proxyHost.locations.middlewares" size="4" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
         </div>
         <div class="field-group"><label>Access lists</label>
-          <select multiple class="field mono loc-al" data-hint="proxyHost.locations.accessLists" size="4" aria-label="Location access lists" title="Access lists for this path only (blank = host lists apply)">${accessLists.map((a) => `<option value="${esc(a.name)}"${arr(loc.accessLists).indexOf(a.name) !== -1 ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+          <select multiple class="field mono loc-al" data-hint="proxyHost.locations.accessLists" size="4" aria-label="Location access lists" title="Access lists for this path only, checked in addition to the host's lists">${accessLists.map((a) => `<option value="${esc(a.name)}"${arr(loc.accessLists).indexOf(a.name) !== -1 ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+          ${alModeHtml(`id="${p}-alm"`, loc.accessListsMode, 'proxyHost.locations.accessListsMode')}
         </div>
       </div>
       ${inlineFoldHtml(p + '-auth', 'Sign-in', 'Gate this path. The host\'s own sign-in still applies here.',
@@ -5957,6 +5970,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       rl: wireRateLimitBlock(p + '-rl', loc.rateLimit),
     };
     wireInlineFold(p + '-auth');
+    wireAlMode(div);
     wireInlineFold(p + '-rl');
     locCtls.push(ctl);
     foldSums[p + '-auth-card'] = () => authFoldSummary(isOn(p + '-auth-on') ? ctl.auth.peek() : null, { hostSignIn: hostHasSignIn() });
@@ -6067,6 +6081,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   // rail: the request chain follows the form as it is edited
   function curMw() { return $$('#f-mw input:checked').map((i) => i.value); }
   function curAl() { return $$('#f-al input:checked').map((i) => i.value); }
+  function curAlMode() { return alModeValue($('#f-alm'), h.accessListsMode); }
   function refreshFlow() {
     const uphost = $('#f-uphost').value.trim();
     const upport = $('#f-upport').value.trim();
@@ -6074,7 +6089,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     refreshSums();
     renderRailChain($('#railChain'), {
       upstreamStr: curGroup() ? `group:${curGroup()}` : ((uphost || upport) ? `${uphost || '?'}:${upport || '?'}` : 'upstream not set'),
-      mwSelected: curMw(), mwType, alSelected: curAl(),
+      mwSelected: curMw(), mwType, alSelected: curAl(), alMode: curAlMode(),
       inlineAuth: isOn('f-auth-on') ? (($('#f-auth-idp') && $('#f-auth-idp').value) || 'credentials') : '',
       inlineRateLimit: isOn('f-rl-on'),
     });
@@ -6113,6 +6128,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   const upGroupSel = $('#f-upgroup');
   if (upGroupSel) upGroupSel.addEventListener('change', () => { refreshUpstreamMode(); refreshFlow(); });
   $$('#f-mw input, #f-al input').forEach((i) => i.addEventListener('change', refreshFlow));
+  const almEl = $('#f-alm');
+  if (almEl) { wireAlMode(almEl.parentNode); almEl.addEventListener('switchchange', refreshFlow); }
 
   // save
   $('#saveBtn').addEventListener('click', async () => {
@@ -6289,6 +6306,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     if (mws.length) obj.middlewares = mws;
     const als = alListOK ? curAl() : arr(h.accessLists);
     if (als.length) obj.accessLists = als;
+    const alMode = curAlMode();
+    if (alMode) obj.accessListsMode = alMode;
 
     // trustedProxies: a host-level REPLACEMENT of settings.trustedProxies, with
     // three distinct outcomes. "Inherit" omits the key; "Trust nobody" sends an
@@ -6373,6 +6392,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       // carry the stored references through, as the host-level save does.
       loc.middlewares = mwListOK ? mwSel : arr((ctl._orig || {}).middlewares);
       loc.accessLists = alListOK ? alSel : arr((ctl._orig || {}).accessLists);
+      const locAlMode = alModeValue($('#' + ctl.p + '-alm'), (ctl._orig || {}).accessListsMode);
       if (isOn(ctl.p + '-strip') && path !== '/') loc.stripPrefix = true;
       if (isOn(ctl.p + '-auth-on')) {
         const la = ctl.auth.get('location ' + path);
@@ -6393,7 +6413,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       // fold-owned keys: an off fold must actually clear the stored block.
       const orig = Object.assign({}, ctl._orig);
       if (loc.upstreamGroupRef) delete orig.upstream; else if (loc.upstream) delete orig.upstreamGroupRef;
-      delete orig.auth; delete orig.rateLimit; delete orig.stripPrefix;
+      delete orig.auth; delete orig.rateLimit; delete orig.stripPrefix; delete orig.accessListsMode;
+      if (locAlMode) loc.accessListsMode = locAlMode;
       locs.push(Object.assign(orig, loc));
     }
     if (locAborted) return;
@@ -8608,6 +8629,33 @@ function segValue(group) {
   const on = $(`.seg-btn[data-seg="${group}"].on`);
   return on ? on.dataset.v : '';
 }
+// alModeHtml renders the accessListsMode picker that sits beside an
+// access-list picker: every list must allow (the default) or any one may.
+// attrs is the element's id or class attribute.
+function alModeHtml(attrs, mode, hint) {
+  const any = mode === 'any';
+  return `<div class="seg al-mode" ${attrs} data-hint="${esc(hint)}" role="group" aria-label="How the access lists combine" style="margin-top:8px">` +
+    `<button type="button" class="seg-btn${any ? '' : ' on'}" data-alm="all" aria-pressed="${!any}">All must allow</button>` +
+    `<button type="button" class="seg-btn${any ? ' on' : ''}" data-alm="any" aria-pressed="${any}">Any one may allow</button></div>`;
+}
+// wireAlMode makes every accessListsMode picker under root switch.
+function wireAlMode(root) {
+  root.querySelectorAll('.al-mode .seg-btn').forEach((b) => b.addEventListener('click', () => {
+    b.parentNode.querySelectorAll('.seg-btn').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+    b.dispatchEvent(new CustomEvent('switchchange', { bubbles: true }));
+  }));
+}
+// alModeValue is the accessListsMode to send for one picker: "any", else the
+// stored value ("all" stays "all", unset stays unset), so a save that does not
+// touch the picker writes nothing new.
+function alModeValue(el, stored) {
+  const on = el && el.querySelector('.seg-btn.on');
+  if (!on) return stored || undefined;
+  if (on.dataset.alm === 'any') return 'any';
+  return stored === 'all' ? 'all' : undefined;
+}
+// alModeLabel is the short form of a mode for summaries: "all" or "any".
+function alModeLabel(mode) { return mode === 'any' ? 'any' : 'all'; }
 // foldHtml is an optional section collapsed to a one-line summary of what it
 // holds. It opens automatically when it holds something, so a configured section
 // is never hidden from someone scanning the page.

@@ -646,6 +646,9 @@ func main() {
 			State:    "frozen",
 		})
 	})
+	// The planner must know which hosts ApplyBatch will refuse to rewrite, or a
+	// swap could hinge on a write the store drops.
+	ingressDisc.SetUnwritable(func(h model.ProxyHost) bool { return st.AutoWriteRefused(h) })
 	if mx != nil {
 		mx.RegisterIngressDiscovery(func() metrics.IngressStatus {
 			st := ingressDisc.Status()
@@ -708,6 +711,7 @@ func main() {
 			State:    "frozen",
 		})
 	})
+	dockerDisc.SetUnwritable(func(h model.ProxyHost) bool { return st.AutoWriteRefused(h) })
 
 	// Access-list source sync: keeps the remote IP feeds an AccessList references
 	// (rule.source) fetched into the committed ledger, so a path-scoped allow rule

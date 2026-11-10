@@ -41,6 +41,13 @@ The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
 
+The access-list step is one or two groups. The host's `accessLists` form one
+group under the host's `accessListsMode`, a location's own `accessLists` a
+second group under the location's mode, and both groups must pass. `all` (the
+default) needs every list in the group to allow; `any` needs one, and a list
+that fails closed never counts as allowing. See [Composing access
+lists](../reference/config/access-list.md#access-list-composing).
+
 The auth position takes every mode, including `basic` (HTTP basic auth against
 the middleware's own bcrypt hashes, `internal/dataplane/basicauth.go`), which is
 the supported home for username/password gating; `AccessList.basicAuth` is the

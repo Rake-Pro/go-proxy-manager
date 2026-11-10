@@ -329,11 +329,17 @@ func (m *Manager) RenewNow(ctx context.Context, cfg model.Config, name string) e
 	}
 	target := *cert
 	go func() {
-		defer m.mu.Unlock()
 		// A fresh, independent context: the HTTP request that accepted this order
 		// has already returned by the time a multi-minute DNS-01 propagation wait
 		// or a slow CA finishes, so it must not be the one that can cancel it.
-		if err := m.renewOne(context.Background(), providers, target); err == nil && m.onChange != nil {
+		// m.mu is released BEFORE onChange fires, so a caller that reacts to the
+		// change notification with another RenewNow never sees a stale
+		// ErrRenewInFlight from the order that just finished.
+		err := func() error {
+			defer m.mu.Unlock()
+			return m.renewOne(context.Background(), providers, target)
+		}()
+		if err == nil && m.onChange != nil {
 			m.onChange()
 		}
 	}()

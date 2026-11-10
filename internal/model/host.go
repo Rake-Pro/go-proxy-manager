@@ -258,6 +258,10 @@ type Location struct {
 	UpstreamGroupRef string    `json:"upstreamGroupRef,omitempty" yaml:"upstreamGroupRef,omitempty"`
 	Middlewares      []string  `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists      []string  `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+	// AccessListsMode composes this location's own AccessLists: "all" (default)
+	// or "any". The host's lists are a separate group under the host's mode, and
+	// both groups must pass.
+	AccessListsMode string `json:"accessListsMode,omitempty" yaml:"accessListsMode,omitempty"`
 
 	// StripPrefix removes this location's matched path prefix before the request
 	// is forwarded: with Path "/app", a request for "/app/foo" reaches the
@@ -379,9 +383,12 @@ type ProxyHost struct {
 	DNS *DNSSyncPolicy `json:"dns,omitempty" yaml:"dns,omitempty"`
 
 	// Middlewares/AccessLists apply host-wide (top-down), before any Location-scoped ones.
-	Middlewares []string   `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
-	AccessLists []string   `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
-	Locations   []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
+	Middlewares []string `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
+	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+	// AccessListsMode composes AccessLists: "all" (default, every list must
+	// allow) or "any" (at least one list must allow).
+	AccessListsMode string     `json:"accessListsMode,omitempty" yaml:"accessListsMode,omitempty"`
+	Locations       []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
 
 	// AdminEdge marks the host the admin front door compiles to (see
 	// AdminEdgeSettings.Host). Never serialized, so no stored or API-written
@@ -522,6 +529,9 @@ func (h ProxyHost) Validate() error {
 	if err := h.RateLimit.validateInline(fmt.Sprintf("proxy host %q", h.Name)); err != nil {
 		return err
 	}
+	if err := validateAccessListsMode(fmt.Sprintf("proxy host %q", h.Name), h.AccessListsMode, h.AccessLists); err != nil {
+		return err
+	}
 	return validateLocations(fmt.Sprintf("proxy host %q", h.Name), h.Locations)
 }
 
@@ -547,6 +557,9 @@ func validateLocations(owner string, locs []Location) error {
 			return err
 		}
 		if err := l.RateLimit.validateInline(lo); err != nil {
+			return err
+		}
+		if err := validateAccessListsMode(lo, l.AccessListsMode, l.AccessLists); err != nil {
 			return err
 		}
 	}

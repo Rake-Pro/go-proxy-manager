@@ -7,6 +7,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Access-list composition: `accessListsMode: any` on a proxy host or location
+  passes a request when at least one of its `accessLists` allows it. It
+  composes allow-lists only: it needs at least one list, refuses a list with
+  `defaultAction: allow`, `geo.countryDeny` or deprecated `basicAuth` users,
+  and skips a disabled list. `all` (the default) keeps the
+  every-list-must-allow behaviour and existing configs are unchanged. Ingress
+  and Docker discovery templates and profiles carry the mode onto derived
+  hosts. A refusal by an `any` group counts as `reason="access-list-any"` in
+  `gpm_denials_total` and analytics, or `reason="geo"` when a member's geo
+  rules have no database loaded; the host, mode and lists consulted are logged
+  at debug level (#73).
 - Analytics collector (`settings.analytics`): switched on in Settings, every
   finished request is queued to a background worker that resolves the client's
   country, labels scanner patterns with an observe-only signature catalogue
@@ -123,6 +134,26 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   `access-list`, indistinguishable from a CIDR deny). A dashboard or alert
   that sums `access-list` sees those move to `geo`; `geo` still also covers
   "geo rules configured but no database loaded".
+
+### Fixed
+
+- A batch save (import) whose objects are all unchanged no longer makes a
+  commit, and unchanged members of a mixed batch keep their file and
+  `updatedAt` (#58).
+- Renew now: the manager released its in-flight lock only after the change
+  notification, so a renew requested straight after one could be refused with
+  "an order is already in progress" (409). This was also the cause of the
+  flaky `TestRenewNowEndToEnd` (#59).
+- Discovery: managed hosts of one source that swap or rotate domains in a
+  single poll now converge in one reconcile commit instead of being skipped on
+  every poll. A host whose new domain is held by a hand-written, other-source,
+  redirect or parked host, by a discovered host that keeps it, or by a stored
+  host whose file has keys from a newer gpm is skipped, together with every
+  host whose move depends on it; a refusal that was only a lost contest is
+  revisited. A managed host that keeps one domain while gaining one held by a
+  foreign host is now skipped instead of failing validation of the whole
+  batch. Skip reasons name the holder's kind and say whether discovery manages
+  it (#74).
 
 ## [2.5.0] - 2026-10-20
 

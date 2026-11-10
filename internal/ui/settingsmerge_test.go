@@ -69,6 +69,8 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 		"robotsNoIndex: isOn('set-id-robots')",
 		"$('#set-id-tags')",
 		"tags: idTagCtl.get()",
+		"alModeHtml('id=\"set-id-alm\"', idt.accessListsMode,",
+		"accessListsMode: alModeValue($('#set-id-alm'), idt.accessListsMode),",
 		// stripResponseHeaders has no control on this form, so it is only
 		// carried forward - but the literal is a REBUILD, so leaving it out
 		// strips the template's list on every unrelated save and the next
@@ -80,6 +82,8 @@ func TestSettingsSaveSendsEveryFlatTemplateField(t *testing.T) {
 		"robotsNoIndex: isOn('pf-robots-' + uid)",
 		"div.querySelector('.pf-tags')",
 		"tags: row._tags.get()",
+		"alModeHtml(`id=\"pf-alm-${i}\"`, p.accessListsMode,",
+		"accessListsMode: alModeValue($('#pf-alm-' + uid), (row._orig || {}).accessListsMode),",
 		"stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,",
 		"securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,",
 	} {
@@ -311,7 +315,10 @@ func TestHostSaveMergesLocations(t *testing.T) {
 		"locs.push(Object.assign(orig, loc));",
 		// the fold-owned keys must be cleared from the original first, or an
 		// off fold could never actually remove a stored block
-		"delete orig.auth; delete orig.rateLimit; delete orig.stripPrefix;",
+		"delete orig.auth; delete orig.rateLimit; delete orig.stripPrefix; delete orig.accessListsMode;",
+		"if (locAlMode) loc.accessListsMode = locAlMode;",
+		// the host-level and per-location accessListsMode pickers are sent
+		"if (alMode) obj.accessListsMode = alMode;",
 		// per-location middleware/access-list pickers, round-tripped like the
 		// host-level ones
 		"loc-mw",
@@ -704,6 +711,8 @@ func TestIntegrationsSaveMergesDockerTemplate(t *testing.T) {
 		"switchHtml('dpf-robots-' + i",
 		"robotsNoIndex: isOn('dpf-robots-' + uid)",
 		"div.querySelector('.dpf-tags')",
+		"accessListsMode: alModeValue($('#set-dkr-alm'), ddt.accessListsMode),",
+		"accessListsMode: alModeValue($('#dpf-alm-' + uid), (row._orig || {}).accessListsMode),",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js no longer round-trips a docker discovery template field (%q not found); a settings save now clears it", want)

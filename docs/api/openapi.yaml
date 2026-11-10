@@ -368,6 +368,11 @@ components:
           type: array
           items:
             type: string
+        accessListsMode:
+          type: string
+          enum: [all, any]
+          description: How this location's own accessLists combine. Unset means all. The host's
+            lists are a separate group under the host's mode; both groups must pass.
         auth:
           allOf:
           - $ref: '#/components/schemas/AuthMiddleware'
@@ -444,6 +449,13 @@ components:
           type: array
           items:
             type: string
+        accessListsMode:
+          type: string
+          enum: [all, any]
+          description: How accessLists combine. all (default when unset) needs every list to allow;
+            any needs at least one. any composes allow-lists only - it requires a non-empty
+            accessLists, refuses a list with defaultAction allow, geo.countryDeny or basicAuth
+            users, and skips a disabled list.
         auth:
           allOf:
           - $ref: '#/components/schemas/AuthMiddleware'
@@ -1953,6 +1965,10 @@ components:
           type: array
           items:
             type: string
+        accessListsMode:
+          type: string
+          enum: [all, any]
+          description: Stamped onto every derived host as its accessListsMode. Unset means all.
         tags:
           type: array
           items:

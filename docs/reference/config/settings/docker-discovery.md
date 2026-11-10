@@ -60,7 +60,7 @@ sub-key is settable and applied verbatim:
 | `template.timeouts` | `HostTimeouts` | [ProxyHost: `timeouts`](../proxy-host.md#proxy-host-timeouts): `connectSeconds`, `readSeconds` |
 | `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
-Every other template key (`middlewares`, `accessLists`, `robotsNoIndex`, `tags`,
+Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`,
 `stripResponseHeaders`, `securityHeaders`, `allowedDomainSuffixes`) is documented on
 [Kubernetes Ingress discovery](ingress-discovery.md), which uses the identical
 type.
@@ -115,7 +115,16 @@ Two modes, one choice, decided by where gpm itself runs.
   with a warning, never overwritten.
 - Ownership covers the **domain** as well as the name: a derived host whose
   domains include one already claimed by a host this reconciler does not own is
-  skipped, with the owner named in the status `reason`.
+  skipped, with the owner and its kind named in the status `reason`.
+- A derived host can take a new domain in one reconcile when that domain is free
+  or is released by another derived host updated or deleted in the same commit,
+  which covers a swap or a longer cycle; a host that cannot move is skipped,
+  with every host whose move depends on it.
+- Existing derived hosts are placed before new ones, so a new container never
+  takes a domain an existing derived host keeps or takes.
+- A derived host whose file carries keys this gpm does not recognise (written by
+  a newer version) never moves: it keeps every domain it serves and nothing may
+  take one.
 - `disabled` and `maintenance` are operator-owned and carried forward across a
   reconcile, exactly as for Ingress discovery.
 - Two containers deriving the same name: first by derived name wins, the rest

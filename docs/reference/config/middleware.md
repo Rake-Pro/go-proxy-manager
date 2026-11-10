@@ -145,6 +145,15 @@ At least one of the four must be set.
 A trigger with no field set matches every request, which is a deny-all guard;
 that is legal and occasionally what you want behind an `allowFrom`.
 
+> **`paths` is byte-exact.** A trigger path is compared with the normalized
+> request path as is: case-sensitive, and a trailing slash is significant, so
+> `/admin` does not cover `/admin/` or `/Admin`. There is no folding option.
+>
+> - Backend treats `/admin/` like `/admin`: list both in `paths`.
+> - Backend ignores case in paths: an exact trigger cannot cover every spelling.
+>   Do not rely on a guard there; restrict the host with an access list or
+>   enforce the rule in the backend.
+
 > **`queryEquals` and `;`.** A guard carrying any `queryEquals` trigger rejects a
 > request whose raw query string contains a `;`, with **400** (before the
 > allow/deny decision, so `allowFrom` does not exempt it). gpm parses the query

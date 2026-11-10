@@ -75,4 +75,40 @@ func TestUnresolvableRefFailsClosed(t *testing.T) {
 			}
 		})
 	}
+
+	// A LOCATION's own access lists are carried beside the host copy, not
+	// folded into it, so the check has to cover them too: with the host's list
+	// resolving and the client allowed by it, a typo on the location must still
+	// fail that route closed, under either mode.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("backend")) }))
+	defer backend.Close()
+	for _, mode := range []string{"", model.AccessListsModeAny} {
+		t.Run("location access list that does not exist, mode "+mode, func(t *testing.T) {
+			cfg := model.Config{
+				AccessLists: []model.AccessList{{
+					ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+					DefaultAction: model.ActionDeny,
+					Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "10.0.0.0/8"}},
+				}},
+				ProxyHosts: []model.ProxyHost{{
+					ObjectMeta:  model.ObjectMeta{Name: "app"},
+					Domains:     []string{"app.example.com"},
+					Upstream:    upstreamOf(t, backend),
+					AccessLists: []string{"home-vpn"},
+					Locations:   []model.Location{{Path: "/api", AccessLists: []string{"home-vpn", "typo"}, AccessListsMode: mode}},
+				}},
+			}
+			rt, err := buildRouter(cfg, "", nil)
+			if err != nil {
+				t.Fatalf("buildRouter: %v", err)
+			}
+			req := httptest.NewRequest("GET", "http://app.example.com/api/x", nil)
+			req.RemoteAddr = "10.1.2.3:1234"
+			rec := httptest.NewRecorder()
+			rt.serveHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
 }

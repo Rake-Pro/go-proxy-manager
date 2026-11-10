@@ -220,8 +220,12 @@
     "doc": "reference/config/proxy-host.md#proxy-host-middlewares"
   },
   "proxyHost.accessLists": {
-    "text": "The access lists that decide which client IPs may reach this host. Every attached list must allow the request.",
+    "text": "The access lists that decide which client IPs may reach this host. By default every attached list must allow the request; the mode below can relax that to any one list.",
     "doc": "reference/config/proxy-host.md#proxy-host-access-lists"
+  },
+  "proxyHost.accessListsMode": {
+    "text": "How the attached access lists combine. All (default): every list must allow. Any: one allowing list is enough, and a deny rule in one list does not override another list's allow. Any takes allow-lists only: a list with defaultAction allow or a countryDeny geo rule is refused.",
+    "doc": "reference/config/proxy-host.md#proxy-host-access-lists-mode"
   },
   "proxyHost.auth": {
     "text": "A sign-in gate written directly on this host instead of as a shared middleware. Same handler, same position in the chain.",
@@ -260,8 +264,12 @@
     "doc": "reference/config/proxy-host.md#proxy-host-locations-middlewares"
   },
   "proxyHost.locations.accessLists": {
-    "text": "Access lists for this path only. Leave it empty and the host's lists apply here instead.",
+    "text": "Access lists for this path only, checked in addition to the host's lists. Leave it empty and only the host's lists apply here.",
     "doc": "reference/config/proxy-host.md#proxy-host-locations-access-lists"
+  },
+  "proxyHost.locations.accessListsMode": {
+    "text": "How this location's own access lists combine: all must allow (default) or any one may. The host's lists are checked separately under the host's mode, and both must pass.",
+    "doc": "reference/config/proxy-host.md#proxy-host-locations-access-lists-mode"
   },
   "proxyHost.locations.auth": {
     "text": "A sign-in gate for this path only. The host's own sign-in still applies on top of it.",
@@ -1111,6 +1119,10 @@
     "text": "Access lists applied to every derived host.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-access-lists"
   },
+  "settings.ingressDiscovery.template.accessListsMode": {
+    "text": "How the access lists combine on every derived host: all must allow (default) or any one may.",
+    "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-access-lists-mode"
+  },
   "settings.ingressDiscovery.template.timeouts": {
     "text": "Connect and read timeouts, in seconds, for derived hosts. Leave both blank for the shared pooled transport.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-timeouts"
@@ -1229,6 +1241,10 @@
   },
   "settings.dockerDiscovery.template.accessLists": {
     "text": "Access lists applied to every derived host.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
+  },
+  "settings.dockerDiscovery.template.accessListsMode": {
+    "text": "How the access lists combine on every derived host: all must allow (default) or any one may.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.tags": {

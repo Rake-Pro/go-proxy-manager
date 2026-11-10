@@ -1405,3 +1405,101 @@ func TestSaveNoOpMakesNoCommit(t *testing.T) {
 		})
 	}
 }
+
+func gitCount(t *testing.T, dir string) int {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return n
+}
+
+// A batch where every member is unchanged makes no commit; with some changed
+// members only those are rewritten and restamped.
+func TestSaveBatchNoOpMakesNoCommit(t *testing.T) {
+	changed := sampleHost("b")
+	changed.Upstream.Port = 9090
+	tests := []struct {
+		name       string
+		batch      []model.Object
+		wantCommit bool
+		wantStamp  map[string]bool // name -> updatedAt must move
+	}{
+		{"all unchanged", []model.Object{sampleHost("a"), sampleHost("b")}, false, map[string]bool{"a": false, "b": false}},
+		{"some changed", []model.Object{sampleHost("a"), changed}, true, map[string]bool{"a": false, "b": true}},
+		{"new member", []model.Object{sampleHost("a"), sampleHost("c")}, true, map[string]bool{"a": false, "c": true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			au := Author{Name: "admin", Email: "admin@example.com"}
+			if _, err := st.SaveBatch(ctx, []model.Object{sampleHost("a"), sampleHost("b")}, "seed", au); err != nil {
+				t.Fatal(err)
+			}
+			read := func(n string) []byte {
+				b, err := os.ReadFile(filepath.Join(st.dir, "proxy-hosts", n+".yaml"))
+				if err != nil {
+					return nil
+				}
+				return b
+			}
+			before := map[string][]byte{"a": read("a"), "b": read("b")}
+			n0 := gitCount(t, st.dir)
+
+			time.Sleep(10 * time.Millisecond)
+			sha, err := st.SaveBatch(ctx, tc.batch, "again", au)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (sha != "") != tc.wantCommit {
+				t.Fatalf("sha = %q, want commit = %v", sha, tc.wantCommit)
+			}
+			want := n0
+			if tc.wantCommit {
+				want++
+			}
+			if got := gitCount(t, st.dir); got != want {
+				t.Fatalf("commits = %d, want %d", got, want)
+			}
+			for n, moved := range tc.wantStamp {
+				if b, ok := before[n]; ok && bytes.Equal(b, read(n)) == moved {
+					t.Errorf("%s: bytes changed = %v, want %v", n, !bytes.Equal(b, read(n)), moved)
+				}
+			}
+		})
+	}
+}
+
+// A semantically identical object whose stored file is formatted differently
+// (key order, spacing, a comment) is still "no change".
+func TestSaveNoOpIgnoresFormatting(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	au := Author{Name: "admin", Email: "admin@example.com"}
+	if _, err := st.Save(ctx, sampleHost("app"), au); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(st.dir, "proxy-hosts", "app.yaml")
+	cur, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, append([]byte("# reformatted by hand\n\n"), cur...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", st.dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qam", "reformat").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	n0 := gitCount(t, st.dir)
+	time.Sleep(10 * time.Millisecond)
+	sha, err := st.Save(ctx, sampleHost("app"), au)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != "" || gitCount(t, st.dir) != n0 {
+		t.Fatalf("sha=%q commits=%d, want no commit over %d", sha, gitCount(t, st.dir), n0)
+	}
+}

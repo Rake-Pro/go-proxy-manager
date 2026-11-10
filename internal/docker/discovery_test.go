@@ -265,6 +265,26 @@ func TestDeriveInheritsResponseHeaderFields(t *testing.T) {
 	}
 }
 
+// accessListsMode travels from the template to the derived host, and the
+// derived host is seen as unchanged on the next plan.
+func TestDeriveCarriesAccessListsMode(t *testing.T) {
+	conf := testConf(func(s *model.Settings) {
+		s.DockerDiscovery.Template.AccessLists = []string{"lan", "monitor"}
+		s.DockerDiscovery.Template.AccessListsMode = model.AccessListsModeAny
+	})
+	_, host, _, err := derive(container("grafana", enabled(nil), nil), conf)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if host.AccessListsMode != model.AccessListsModeAny || strings.Join(host.AccessLists, ",") != "lan,monitor" {
+		t.Fatalf("accessLists = %v mode %q, want the template's", host.AccessLists, host.AccessListsMode)
+	}
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{host}}, conf, []Container{container("grafana", enabled(nil), nil)}, nil)
+	if len(p.Upserts) != 0 || len(p.Hosts) != 1 || p.Hosts[0].Action != ActionUnchanged {
+		t.Fatalf("plan %+v, want the derived host unchanged", p)
+	}
+}
+
 func TestDeriveDNSPolicy(t *testing.T) {
 	conf := testConf(func(s *model.Settings) {
 		s.DockerDiscovery.Template.DefaultDNS = &model.DNSSyncPolicy{LanDirect: true}
@@ -322,7 +342,7 @@ func TestPlanReconcile(t *testing.T) {
 	conf := testConf(nil)
 
 	t.Run("creates a host for a new container", func(t *testing.T) {
-		p := planReconcile(model.Config{}, conf, []Container{container("grafana", enabled(nil), nil)})
+		p := planReconcile(model.Config{}, conf, []Container{container("grafana", enabled(nil), nil)}, nil)
 		if p.Created != 1 || len(p.Upserts) != 1 {
 			t.Fatalf("plan %+v, want one create", p)
 		}
@@ -333,7 +353,7 @@ func TestPlanReconcile(t *testing.T) {
 
 	t.Run("steady state writes nothing", func(t *testing.T) {
 		cur := managedHostFixture("dkr-app", nil)
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{container("app", enabled(nil), nil)})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{container("app", enabled(nil), nil)}, nil)
 		if len(p.Upserts) != 0 || len(p.Deletes) != 0 {
 			t.Fatalf("plan %+v, want no writes", p)
 		}
@@ -350,7 +370,7 @@ func TestPlanReconcile(t *testing.T) {
 			Domains:    []string{"hand-written.example.com"},
 			Upstream:   model.Upstream{Scheme: "http", Host: "203.0.113.9", Port: 80},
 		}
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Container{container("app", enabled(nil), nil)})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Container{container("app", enabled(nil), nil)}, nil)
 		if len(p.Upserts) != 0 || len(p.Deletes) != 0 || p.Skipped != 1 {
 			t.Fatalf("plan %+v, want a single skip and no writes", p)
 		}
@@ -379,7 +399,7 @@ func TestPlanReconcile(t *testing.T) {
 			Upstream: model.Upstream{Scheme: "http", Host: "203.0.113.9", Port: 80},
 		}
 		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{ing, other}}, conf,
-			[]Container{container("app", enabled(nil), nil)})
+			[]Container{container("app", enabled(nil), nil)}, nil)
 		if len(p.Upserts) != 0 || len(p.Deletes) != 0 {
 			t.Fatalf("plan %+v, want no writes at all", p)
 		}
@@ -390,7 +410,7 @@ func TestPlanReconcile(t *testing.T) {
 
 	t.Run("deletes its own orphan", func(t *testing.T) {
 		orphan := managedHostFixture("dkr-gone", nil)
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{orphan}}, conf, nil)
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{orphan}}, conf, nil, nil)
 		if len(p.Deletes) != 1 || p.Deletes[0] != "dkr-gone" {
 			t.Fatalf("deletes %v, want [dkr-gone]", p.Deletes)
 		}
@@ -402,7 +422,7 @@ func TestPlanReconcile(t *testing.T) {
 			"gpm.rake.pro/enabled": "true",
 			"gpm.rake.pro/domains": "not a hostname",
 		}, nil)
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{broken})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{broken}, nil)
 		if len(p.Deletes) != 0 || len(p.Upserts) != 0 {
 			t.Fatalf("plan %+v, want the stored host left exactly as it is", p)
 		}
@@ -414,7 +434,7 @@ func TestPlanReconcile(t *testing.T) {
 	t.Run("an unresolvable profile disables the existing host", func(t *testing.T) {
 		cur := managedHostFixture("dkr-app", nil)
 		ct := container("app", enabled(map[string]string{"gpm.rake.pro/profile": "retired"}), nil)
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{ct})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{ct}, nil)
 		if len(p.Upserts) != 1 || !p.Upserts[0].Disabled {
 			t.Fatalf("plan %+v, want one disabling upsert", p)
 		}
@@ -433,7 +453,7 @@ func TestPlanReconcile(t *testing.T) {
 			h.Disabled = true
 			h.Upstream.Port = 9999 // stale, so the plan produces an update
 		})
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{container("app", enabled(nil), nil)})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{container("app", enabled(nil), nil)}, nil)
 		if len(p.Upserts) != 1 {
 			t.Fatalf("plan %+v, want one update", p)
 		}
@@ -452,7 +472,7 @@ func TestPlanReconcile(t *testing.T) {
 			Domains:    []string{"App.example.com"},
 			Upstream:   model.Upstream{Scheme: "http", Host: "203.0.113.9", Port: 80},
 		}
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Container{container("app", enabled(nil), nil)})
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Container{container("app", enabled(nil), nil)}, nil)
 		if len(p.Upserts) != 0 || p.Skipped != 1 {
 			t.Fatalf("plan %+v, want a skip", p)
 		}
@@ -464,7 +484,7 @@ func TestPlanReconcile(t *testing.T) {
 	t.Run("two containers deriving one name", func(t *testing.T) {
 		a := container("app", enabled(nil), nil)
 		b := container("APP", enabled(map[string]string{"gpm.rake.pro/domains": "other.example.com"}), nil)
-		p := planReconcile(model.Config{}, conf, []Container{a, b})
+		p := planReconcile(model.Config{}, conf, []Container{a, b}, nil)
 		if p.Created != 1 || p.Skipped != 1 {
 			t.Fatalf("plan %+v, want one create and one skip", p)
 		}
@@ -473,7 +493,7 @@ func TestPlanReconcile(t *testing.T) {
 	// A container the Engine returned without the opt-in label (a proxy that
 	// ignores filters) must stay invisible.
 	t.Run("unlabelled containers are invisible", func(t *testing.T) {
-		p := planReconcile(model.Config{}, conf, []Container{container("app", map[string]string{"gpm.rake.pro/domains": "app.example.com"}, nil)})
+		p := planReconcile(model.Config{}, conf, []Container{container("app", map[string]string{"gpm.rake.pro/domains": "app.example.com"}, nil)}, nil)
 		if p.Discovered != 0 || len(p.Upserts) != 0 {
 			t.Fatalf("plan %+v, want nothing discovered", p)
 		}

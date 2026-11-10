@@ -107,6 +107,10 @@ type Discoverer struct {
 	// discovery state itself.
 	onFreeze func(err error)
 
+	// unwritable, if set (via SetUnwritable), reports a stored host the store
+	// will refuse to rewrite; see discovery.Ownership.Unwritable.
+	unwritable func(model.ProxyHost) bool
+
 	// newClient is the client constructor, swapped by the tests. Production
 	// always uses NewClient.
 	newClient func(ClientConfig) (*Client, error)
@@ -148,6 +152,18 @@ func (d *Discoverer) SetOnFreeze(fn func(err error)) {
 	}
 	d.mu.Lock()
 	d.onFreeze = fn
+	d.mu.Unlock()
+}
+
+// SetUnwritable installs the store's "will refuse to rewrite this host" check,
+// so a plan never hands over a domain whose release the store would drop. nil
+// (the default) treats every host as writable. Safe to call at any time.
+func (d *Discoverer) SetUnwritable(fn func(model.ProxyHost) bool) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.unwritable = fn
 	d.mu.Unlock()
 }
 
@@ -300,7 +316,10 @@ func (d *Discoverer) Plan(ctx context.Context) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("ingress discovery: list ingresses: %w", err)
 	}
-	plan := planReconcile(cfg, conf, ingresses)
+	d.mu.Lock()
+	unwritable := d.unwritable
+	d.mu.Unlock()
+	plan := planReconcile(cfg, conf, ingresses, unwritable)
 	p.Discovered = plan.discovered
 	p.Managed = plan.managedAfter
 	p.Created = plan.created
@@ -368,7 +387,10 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 		return d.fail(now, true, fmt.Errorf("ingress discovery: list ingresses: %w", err))
 	}
 
-	plan := planReconcile(cfg, conf, ingresses)
+	d.mu.Lock()
+	unwritable := d.unwritable
+	d.mu.Unlock()
+	plan := planReconcile(cfg, conf, ingresses, unwritable)
 
 	commit := ""
 	if len(plan.upserts) > 0 || len(plan.deletes) > 0 {
@@ -474,7 +496,7 @@ func ownership(conf model.IngressDiscoverySettings) discovery.Ownership {
 // Kubernetes-specific: the opt-in annotation gate, the derived name, and what a
 // derive failure means. Everything below it is shared with Docker discovery, so
 // the rules with security consequences exist exactly once.
-func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingresses []Ingress) reconcilePlan {
+func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingresses []Ingress, unwritable func(model.ProxyHost) bool) reconcilePlan {
 	items := make([]discovery.Item, 0, len(ingresses))
 	for _, ing := range ingresses {
 		if ing.Metadata.Annotations[conf.AnnotationManaged()] != "true" {
@@ -491,7 +513,9 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 		})
 	}
 
-	res := discovery.Plan(cfg, ownership(conf), items)
+	own := ownership(conf)
+	own.Unwritable = unwritable
+	res := discovery.Plan(cfg, own, items)
 	p := reconcilePlan{
 		upserts:      res.Upserts,
 		deletes:      res.Deletes,
@@ -681,6 +705,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		Timeouts:          timeouts,
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
+		AccessListsMode:   tmpl.AccessListsMode,
 	}
 	// Set out of the literal (like the dns policy below) so an unset template
 	// leaves the field nil rather than widening every other field's alignment.

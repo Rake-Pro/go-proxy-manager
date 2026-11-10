@@ -16,6 +16,28 @@ const (
 	ActionDeny  = "deny"
 )
 
+// Access-list composition modes for ProxyHost.AccessListsMode and
+// Location.AccessListsMode. Empty means AccessListsModeAll.
+const (
+	AccessListsModeAll = "all"
+	AccessListsModeAny = "any"
+)
+
+// validateAccessListsMode checks one accessListsMode value against the list it
+// composes. owner prefixes the error, e.g. `proxy host "x"`.
+func validateAccessListsMode(owner, mode string, lists []string) error {
+	switch mode {
+	case "", AccessListsModeAll:
+		return nil
+	case AccessListsModeAny:
+		if len(lists) == 0 {
+			return fmt.Errorf("%s: accessListsMode: any needs at least one entry in accessLists", owner)
+		}
+		return nil
+	}
+	return fmt.Errorf("%s: accessListsMode: must be all|any, got %q", owner, mode)
+}
+
 // BasicAuthUser now lives in basicauth.go: it is shared with the auth
 // middleware's `mode: basic` block, which is where username/password gating
 // belongs (AccessList.BasicAuth below is deprecated).
