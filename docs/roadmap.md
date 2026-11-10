@@ -8,7 +8,8 @@ table below is the themes, the issues carry the detail and the state.
 
 | Theme | Why it matters | Where |
 |---|---|---|
-| Security hardening follow-ups | Findings of the 2026-10-18 project-wide review, remediation-level | [#49](https://github.com/Rake-Pro/go-proxy-manager/issues/49) (high), [#50](https://github.com/Rake-Pro/go-proxy-manager/issues/50) (medium), [#51](https://github.com/Rake-Pro/go-proxy-manager/issues/51) (low) |
+| Path block list | Deny requests by extension, file name or glob, fleet-wide with a per-host switch, so scanner paths (`/.env`, `*.php`) never reach an upstream | [#75](https://github.com/Rake-Pro/go-proxy-manager/issues/75) |
+| Discovery validation gaps | Template references are not re-checked on restore or revert, and a derived name equal to a redirect or parked host fails every poll; both fail closed | [#90](https://github.com/Rake-Pro/go-proxy-manager/issues/90) |
 | Admin UI: certificate wizard with CA presets, wizards for the other kinds, Overview panels | Finishes the 2026-10 redesign on the same `wizard()` primitive the proxy host uses | [#54](https://github.com/Rake-Pro/go-proxy-manager/issues/54), [#55](https://github.com/Rake-Pro/go-proxy-manager/issues/55), [#56](https://github.com/Rake-Pro/go-proxy-manager/issues/56) |
 | Certificate providers | ZeroSSL EAB provisioning and per-CA how-tos; more DNS-01 solvers (DuckDNS, Porkbun, Linode, Route53, generic webhook); ARI, ACME profiles, lifetime-relative renewal, IP certificates, Origin CA, private CA trust | [#60](https://github.com/Rake-Pro/go-proxy-manager/issues/60), [#61](https://github.com/Rake-Pro/go-proxy-manager/issues/61), [#62](https://github.com/Rake-Pro/go-proxy-manager/issues/62) |
 | Discovery template parity | Inline `auth` / `rateLimit`, `trustedProxies` (a three-state field: what "unset in the template" means is the open decision) and hand-added tags surviving a reconcile | [#53](https://github.com/Rake-Pro/go-proxy-manager/issues/53) |
@@ -34,6 +35,7 @@ table below is the themes, the issues carry the detail and the state.
 | MPTCP | Out of scope for now |
 | Anubis | Out of scope for now |
 | Scheduled maintenance windows | A window opens and closes when an operator flips the switch; a deploy pipeline does the rest with two API calls. A scheduler is a whole subsystem (timezones, overlap, hand-flips inside a window) |
+| Guard path folding (`pathMatch`) | Guard trigger `paths` stay byte-exact; a backend that folds case or trailing slashes is covered by an access list or by the backend itself, see [GuardTrigger](reference/config/middleware.md#guardtrigger-guardtriggers) |
 | `healthCheck.path` prefixed with a member's `upstream.path` | The probe path is configured in full on purpose |
 | Per-host ACME for discovered names outside the wildcard | Rate-limit budget on an externally driven object set, and permanent CT disclosure of internal service names |
 | Watch-based Ingress discovery | A full-state poll self-heals from a missed event; a watch means resourceVersion tracking and reconnect loops for convergence that is not latency-critical |
