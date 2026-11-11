@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Rake-Pro/go-proxy-manager/internal/discovery"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
@@ -313,5 +315,152 @@ func TestApplyBatchAllowsUpsertWhenNoUnknownKeys(t *testing.T) {
 	}
 	if !cfg.ProxyHosts[0].Disabled {
 		t.Fatal("expected the upsert's field change to apply when the file has no unknown keys")
+	}
+}
+
+// A discovery plan must never hinge on an upsert ApplyBatch will skip. When the
+// releasing side of a swap, or of a hand-over to a newcomer, has a file with
+// unknown keys, the store drops its write; a plan that still moved the other
+// side would leave a duplicate domain and fail the whole batch on every poll,
+// freezing the source (deletes included). With AutoWriteRefused wired in, the
+// handover is refused and the rest of the batch lands, poll after poll.
+func TestDiscoveryPlanNeverHingesOnASkippedUpsert(t *testing.T) {
+	own := discovery.Ownership{
+		Subsystem:     "ingress discovery",
+		SourceKind:    "Ingress",
+		ManagedByKey:  model.ManagedByLabel,
+		DisabledByKey: model.DisabledByLabel,
+		Value:         model.ManagedByIngressDiscovery,
+	}
+	withDomain := func(name, domain string) model.ProxyHost {
+		h := managedByFixture(name)
+		h.Domains = []string{domain}
+		return h
+	}
+	item := func(name, domain string) discovery.Item {
+		return discovery.Item{Ref: "ns/" + name, Name: name, Host: withDomain(name, domain)}
+	}
+	tests := []struct {
+		name  string
+		seed  []string // stored hosts, each on <name>.example.com; alpha's file gets an unknown key
+		items []discovery.Item
+		want  map[string]string // every proxy host after each poll, by name
+	}{
+		{
+			name:  "swap with an unwritable side, plus a create and a delete",
+			seed:  []string{"alpha", "beta", "delta"},
+			items: []discovery.Item{item("alpha", "beta.example.com"), item("beta", "alpha.example.com"), item("gamma", "gamma.example.com")},
+			want:  map[string]string{"alpha": "alpha.example.com", "beta": "beta.example.com", "gamma": "gamma.example.com"},
+		},
+		{
+			name:  "a newcomer wants the domain an unwritable host would release",
+			seed:  []string{"alpha", "delta"},
+			items: []discovery.Item{item("alpha", "alpha2.example.com"), item("gamma", "alpha.example.com"), item("eps", "eps.example.com")},
+			want:  map[string]string{"alpha": "alpha.example.com", "eps": "eps.example.com"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			author := Author{Name: "ingress-discovery", Email: "gpm@localhost"}
+			for _, name := range tc.seed {
+				if _, err := st.Save(ctx, withDomain(name, name+".example.com"), Author{Name: "admin", Email: "admin@example.com"}); err != nil {
+					t.Fatalf("seed %s: %v", name, err)
+				}
+			}
+			appendYAMLLine(t, filepath.Join(st.Dir(), "proxy-hosts", "alpha.yaml"), "futureField: true")
+
+			poll := func(o discovery.Ownership) (string, error) {
+				cfg, _, err := st.Load(ctx)
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				p := discovery.Plan(cfg, o, tc.items)
+				objs := make([]model.Object, 0, len(p.Upserts))
+				for _, h := range p.Upserts {
+					objs = append(objs, h)
+				}
+				refs := make([]ObjectRef, 0, len(p.Deletes))
+				for _, name := range p.Deletes {
+					refs = append(refs, ObjectRef{Kind: "ProxyHost", Name: name})
+				}
+				return st.ApplyBatch(ctx, objs, refs, "reconcile", author, ownedByDiscovery)
+			}
+
+			// Without the predicate, this is the stuck batch.
+			if _, err := poll(own); err == nil {
+				t.Fatal("control: a plan blind to the unknown-keys skip should fail the batch")
+			}
+
+			wired := own
+			wired.Unwritable = func(h model.ProxyHost) bool { return st.AutoWriteRefused(h) }
+			for i := 1; i <= 3; i++ {
+				sha, err := poll(wired)
+				if err != nil {
+					t.Fatalf("poll %d: %v", i, err)
+				}
+				if (i == 1) != (sha != "") {
+					t.Fatalf("poll %d: commit %q, want one commit on the first poll only", i, sha)
+				}
+				cfg, _, err := st.Load(ctx)
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				got := map[string]string{}
+				for _, h := range cfg.ProxyHosts {
+					got[h.Name] = strings.Join(h.Domains, ",")
+				}
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("poll %d: hosts = %v, want %v", i, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// Discovery hands two hosts' domains across in one plan (issue #74). That is
+// only safe because ApplyBatch validates the merged FINAL state once: the
+// whole swap commits, and half of it (a duplicate domain) commits nothing.
+func TestApplyBatchValidatesADomainSwapAsAWhole(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	author := Author{Name: "ingress-discovery", Email: "gpm@localhost"}
+	for _, name := range []string{"alpha", "beta"} {
+		if _, err := st.Save(ctx, managedByFixture(name), Author{Name: "admin", Email: "admin@example.com"}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	withDomain := func(name, domain string) model.ProxyHost {
+		h := managedByFixture(name)
+		h.Domains = []string{domain}
+		return h
+	}
+
+	head, _ := st.Head(ctx)
+	if _, err := st.ApplyBatch(ctx, []model.Object{withDomain("alpha", "beta.example.com")}, nil, "half", author, ownedByDiscovery); err == nil {
+		t.Fatal("half a swap leaves a duplicate domain and must fail the batch")
+	}
+	if now, _ := st.Head(ctx); now != head {
+		t.Fatal("a refused batch must not commit")
+	}
+
+	sha, err := st.ApplyBatch(ctx, []model.Object{
+		withDomain("alpha", "beta.example.com"),
+		withDomain("beta", "alpha.example.com"),
+	}, nil, "swap", author, ownedByDiscovery)
+	if err != nil || sha == "" {
+		t.Fatalf("the whole swap must commit once: sha=%q err=%v", sha, err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := map[string]string{}
+	for _, h := range cfg.ProxyHosts {
+		got[h.Name] = strings.Join(h.Domains, ",")
+	}
+	if got["alpha"] != "beta.example.com" || got["beta"] != "alpha.example.com" {
+		t.Fatalf("post-swap hosts = %v", got)
 	}
 }

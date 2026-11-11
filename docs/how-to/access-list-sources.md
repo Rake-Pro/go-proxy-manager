@@ -15,31 +15,70 @@ otherwise LAN/VPN-only.
 ## Steps
 
 The case this exists for: a host is LAN/VPN-only, but an external uptime monitor
-has to be able to probe it. Grant the provider's published prober addresses the
-health paths, and nothing else:
+has to be able to probe it. The prober list stays its own object, so the base
+list keeps meaning what its name says.
 
-```yaml
-name: home-vpn
-defaultAction: deny
-rules:
-  # Unchanged LAN/VPN rules: every path, every method.
-  - {action: allow, cidr: 10.0.0.0/8}
-  - {action: allow, cidr: 192.168.0.0/16}
-  # The monitor: health endpoints only, read-only methods only.
-  - action: allow
-    source: uptimerobot
-    paths: [/api/health, /v1/health, /-/healthy, /status.php]
-    methods: [GET, HEAD]
-sources:
-  - name: uptimerobot
-    url: https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt
-    interval: 24h
-```
+1. Create a prober list that grants the provider's published addresses the
+   health paths, and nothing else:
 
-A prober hitting `/api/health` gets through; the same prober hitting `/` or
-`POST`ing to `/api/health` gets a `403`, and so does anyone else off-LAN. The
-~200 IPv4/IPv6 entries are fetched and kept current automatically: you never
-paste them into this file.
+    ```yaml
+    name: monitor
+    defaultAction: deny
+    rules:
+      # Health endpoints only, read-only methods only.
+      - action: allow
+        source: uptimerobot
+        paths: [/api/health, /v1/health, /-/healthy, /status.php]
+        methods: [GET, HEAD]
+    sources:
+      - name: uptimerobot
+        url: https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt
+        interval: 24h
+    ```
+
+2. Attach it beside the base list and set
+   [`accessListsMode: any`](../reference/config/proxy-host.md#proxy-host-access-lists-mode),
+   so a request passes when either list allows it:
+
+    ```yaml
+    name: app
+    domains: [app.example.com]
+    upstream: {scheme: http, host: 10.0.0.40, port: 8080}
+    accessLists: [home-vpn, monitor]
+    accessListsMode: any
+    ```
+
+    A discovery template or profile takes the same two keys
+    (`accessLists`, `accessListsMode`), so every derived host gets the pair.
+    `any` composes allow-lists only: both lists need `defaultAction: deny`,
+    and a list with `geo.countryDeny` is refused.
+
+3. **Fallback, when the host must keep `accessListsMode: all`** (for example
+   because another attached list has to restrict everyone, or the base list is
+   a blocklist with `defaultAction: allow`): copy the prober
+   rule and its source into the base list instead of attaching `monitor`:
+
+    ```yaml
+    name: home-vpn
+    defaultAction: deny
+    rules:
+      # Unchanged LAN/VPN rules: every path, every method.
+      - {action: allow, cidr: 10.0.0.0/8}
+      - {action: allow, cidr: 192.168.0.0/16}
+      - action: allow
+        source: uptimerobot
+        paths: [/api/health, /v1/health, /-/healthy, /status.php]
+        methods: [GET, HEAD]
+    sources:
+      - name: uptimerobot
+        url: https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt
+        interval: 24h
+    ```
+
+Either way, a prober hitting `/api/health` gets through; the same prober hitting
+`/` or `POST`ing to `/api/health` gets a `403`, and so does anyone else off-LAN.
+The ~200 IPv4/IPv6 entries are fetched and kept current automatically: you never
+paste them into a file.
 
 **Pair every `source` rule with `paths`.** A `source` rule without them is an
 ordinary allow rule: it grants every address in a third party's feed full access
@@ -54,6 +93,7 @@ to the host, on every path and method.
 | `curl` a health path from an allowed address | `2xx` |
 | `curl` `/` from the same address | `403` |
 | `POST` to a health path from the same address | `403`: the rule defaults to `GET` and `HEAD` |
+| `curl` `/` from a LAN client | `2xx`: the base list still allows it on every path |
 | `config/access-list-sources.yaml` | One entry per source, with a `sha256` over its network set |
 
 ## How the fetcher behaves
@@ -156,3 +196,7 @@ list is being served from a set that is no longer being refreshed.
 | Config load fails on the source ledger | `config/access-list-sources.yaml` was hand-edited; each entry carries a `sha256` over its set | Never hand-edit it: revert the file and let the fetcher rewrite it |
 | The list is refused on a stream host | A stream host resolves no ledger and has no request path, so `sources` and `paths` rules are refused there | Use a plain CIDR list at L4 |
 | Nothing is ever fetched | `settings.accessListSync.enabled: false`, or this instance is an HA follower | Re-enable it; only the leader fetches, and a follower serves the replicated ledger |
+| LAN clients get `403` on every path after attaching `monitor` | The host combines its lists with `accessListsMode: all` (the default), so `monitor` must allow too, and it allows only the prober | Set `accessListsMode: any` on the host, or use the fallback in step 3 |
+| Config write refused: `... has defaultAction: allow` (or `geo.countryDeny`) `... under accessListsMode: any` | The base list is a blocklist; `any` composes allow-lists only | Give the base list `defaultAction: deny` with allow rules, or use the fallback in step 3 |
+| Config write refused: `accessListsMode: any needs at least one entry in accessLists` | `any` with an empty `accessLists` | Attach the lists, or drop the mode |
+| Config write refused: `... has basicAuth users, which cannot be combined under accessListsMode: any` | One list still carries the deprecated `basicAuth` users | [Migrate it](migrate-basic-auth.md) to an auth middleware, or keep `all` |

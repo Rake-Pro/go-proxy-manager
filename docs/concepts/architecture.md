@@ -576,6 +576,17 @@ longest-prefix-first and fall back to the host default; a location carries its o
 upstream and a middleware/access-list chain that is appended to the host's, so it
 is always at least as restrictive.
 
+**Access-list composition** (`internal/dataplane/chain.go`,
+`anyAccessListHandler` in `accesslist.go`). Under `accessListsMode: all` (the
+default) each referenced list compiles to its own handler and every one must
+allow, as before the mode existed. Under `any` the group compiles to one handler
+that passes the request when at least one list's own verdict allows it. `any`
+composes allow-lists only: validation refuses a member with `defaultAction:
+allow`, `geo.countryDeny` or deprecated `basicAuth` users, and the handler
+never counts such a member (or one with nothing to match on) as allowing. A
+disabled member is skipped. A location's own lists are a second group outside
+the host's, so both must pass.
+
 **Upstream groups** (`internal/dataplane/upstreamgroup.go`). A proxy host (or a
 single location) may reference an `UpstreamGroup` instead of one upstream: an
 ordered backend list with per-group health state. A health manager living on the

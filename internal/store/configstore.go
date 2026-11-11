@@ -575,14 +575,27 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	}
 
 	now := time.Now().UTC()
+	wrote := false
 	for i, o := range objs {
 		dir, ok := kindDir[o.Kind()]
 		if !ok {
 			return "", fmt.Errorf("unknown object kind %q", o.Kind())
 		}
 		path := filepath.Join(s.dir, dir, o.GetMeta().Name+".yaml")
-		if err := writeYAML(path, stampTimes(o, existingByIndex[i], now)); err != nil {
+		out := stampTimes(o, existingByIndex[i], now)
+		if existingByIndex[i] != nil && unchangedOnDisk(path, out) {
+			continue // leave the file and its updatedAt alone
+		}
+		wrote = true
+		if err := writeYAML(path, out); err != nil {
 			return "", err
+		}
+	}
+	// Every member unchanged: no commit, as in save. Only on a clean tree, so a
+	// dirty one (a failed earlier commit) is still swept in by the commit below.
+	if !wrote {
+		if clean, err := s.git.IsClean(ctx); err == nil && clean {
+			return "", nil
 		}
 	}
 	if message == "" {
@@ -771,8 +784,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		// an operator's explicit PUT on the object is exempt from this check and
 		// can still update it.
 		if existsOK {
-			path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
-			if unknownKeysAtPath(path, existing) {
+			if s.autoWriteRefusedLocked(existing) {
 				log.Warn().Str("kind", o.Kind()).Str("name", o.GetMeta().Name).
 					Msg("config store: batch upsert skipped, the file on disk has unknown keys from a newer gpm; an automatic writer must not risk dropping them (use an explicit API write instead)")
 				continue
@@ -1425,6 +1437,27 @@ func mergeUnknownKeyWarnings(dst, src map[string][]string) {
 	for path, keys := range src {
 		dst[path] = keys
 	}
+}
+
+// AutoWriteRefused reports whether ApplyBatch would skip an upsert of the
+// existing object: its file on disk has keys this gpm does not know, so an
+// automatic writer must not rewrite it. The discovery planners consult it so
+// they never plan a domain handover that depends on a write the store will
+// drop (one side of a swap landing alone is a duplicate domain that fails the
+// whole batch on every poll).
+func (s *Store) AutoWriteRefused(existing model.Object) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.autoWriteRefusedLocked(existing)
+}
+
+// autoWriteRefusedLocked is AutoWriteRefused for callers holding s.mu.
+func (s *Store) autoWriteRefusedLocked(existing model.Object) bool {
+	dir, ok := kindDir[existing.Kind()]
+	if !ok {
+		return false
+	}
+	return unknownKeysAtPath(filepath.Join(s.dir, dir, existing.GetMeta().Name+".yaml"), existing)
 }
 
 // unknownKeysAtPath reports whether the file CURRENTLY on disk at path has

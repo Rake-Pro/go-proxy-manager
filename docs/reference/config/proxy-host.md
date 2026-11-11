@@ -13,6 +13,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-dns"></span>  `dns` | DNSSyncPolicy | no | Opt this host's domains into DNS record management (below). |
 | <span id="proxy-host-middlewares"></span>  `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
 | <span id="proxy-host-access-lists"></span>  `accessLists` | []string | no | Host-wide access-list names. |
+| <span id="proxy-host-access-lists-mode"></span>  `accessListsMode` | string | no | How `accessLists` combine. `all` (default when unset): every list must allow the request. `any`: the request passes when at least one list allows it, and a deny rule in one list does not override another list's allow. `any` composes allow-lists only: it needs at least one list, refuses a list with `defaultAction: allow`, with `geo.countryDeny` or with the deprecated `basicAuth` users, and skips a `disabled` list. See [Composing access lists](access-list.md#access-list-composing). |
 | <span id="proxy-host-auth"></span>  `auth` | AuthMiddleware | no | Gate this host through an identity provider **without a Middleware object**. Same shape and same gate as a `type: auth` middleware. See [Inline auth and rate limit](#proxy-host-inline-auth-and-rate-limit). |
 | <span id="proxy-host-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | no | Throttle this host **without a Middleware object**. Same shape and same limiter as a `type: rate-limit` middleware. See [Inline auth and rate limit](#proxy-host-inline-auth-and-rate-limit). |
 | <span id="proxy-host-locations"></span>  `locations` | []Location | no | Path-scoped overrides (below). |
@@ -139,7 +140,8 @@ than replacing it, so a location is always at least as restrictive as its host.
 | <span id="proxy-host-locations-upstream-group-ref"></span>  `upstreamGroupRef` | string | host's backend | no | UpstreamGroup name for this path. Mutually exclusive with `upstream`. |
 | <span id="proxy-host-locations-strip-prefix"></span>  `stripPrefix` | bool | false | no | Remove this location's matched prefix before forwarding: `/app/foo` reaches the backend as `/foo`, and `/app` (or `/app/`) as `/`. A root location (`path: /`) strips nothing. |
 | <span id="proxy-host-locations-middlewares"></span>  `middlewares` | []string | none | no | Middleware names appended to the host's. |
-| <span id="proxy-host-locations-access-lists"></span>  `accessLists` | []string | none | no | Access-list names appended to the host's. |
+| <span id="proxy-host-locations-access-lists"></span>  `accessLists` | []string | none | no | Access-list names checked in addition to the host's. |
+| <span id="proxy-host-locations-access-lists-mode"></span>  `accessListsMode` | string | `all` | no | How this location's own `accessLists` combine: `all` or `any`, same rules as the host field. The host's lists stay a separate group under the host's mode and both groups must pass, so a mode on one level never opens the other. |
 | <span id="proxy-host-locations-auth"></span>  `auth` | AuthMiddleware | none | no | Inline auth gate for this path, stacked on top of the host's (below). |
 | <span id="proxy-host-locations-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | none | no | Inline rate limit for this path, stacked on top of the host's (below). |
 

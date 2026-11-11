@@ -29,6 +29,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-timeouts"></span> `template.timeouts` | HostTimeouts | Upstream `connectSeconds`/`readSeconds` override, applied to every derived host and validated by the **same rules as a proxy host's** (0-3600). Unset means the shared pooled transport. |
 | <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host, in order. |
 | <span id="settings-ingress-discovery-template-access-lists"></span> `template.accessLists` | []string | Applied to every derived host. |
+| <span id="settings-ingress-discovery-template-access-lists-mode"></span> `template.accessListsMode` | string | Stamped onto every derived host as its [`accessListsMode`](../proxy-host.md#proxy-host-access-lists-mode): `all` (default when unset, every list must allow) or `any` (one allowing list is enough). Validated by the same rules as a hand-written host: `any` needs at least one entry in `template.accessLists` and refuses a list with `defaultAction: allow`, with `geo.countryDeny` or with `basicAuth` users. A named profile takes the same key. |
 | <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. |
 | <span id="settings-ingress-discovery-template-locations"></span> `template.locations` | []Location | Path-scoped overrides stamped verbatim onto every derived host, the same shape as [ProxyHost: `locations`](../proxy-host.md) (own upstream or group, own middleware/access-list chain, `stripPrefix`, inline `auth`/`rateLimit`), validated by the same rules at settings-write time. **Operator-side only**: they live on the template or a named profile, never on the `Ingress`, so the annotation model is unchanged (a tenant can pick a profile that carries them, never name a path or chain). Meant for a profile written for one service whose upstream is not the cluster ingress controller (a hostPort pod with a sidecar under a path, say); on the default template they would apply to every derived host. |
 | <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
@@ -332,16 +333,34 @@ removed (the same rule the DNS backends apply to records they do not own). To
 adopt a discovered host permanently, remove the label: gpm then treats it as
 operator-authored and stops managing it.
 
-Ownership covers the **domain** as well as the name. A derived host whose domains
-include one already claimed by a host discovery does not own (proxy, redirect or
-dead, enabled *or* disabled) is skipped with that host named in the `reason`.
-Without that rule a tenant who can annotate an `Ingress` in their own namespace
-could claim `sso.example.com`, and because the router fills its per-domain maps
-in config load order, a derived name sorting after the operator's host would
-silently replace its whole middleware/access-list chain and its TLS pinning.
-`allowedDomainSuffixes` alone does not prevent this: an exact-match suffix makes
-even the apex claimable. Two annotated Ingresses claiming the same hostname are
-resolved the same way: first by derived name wins, the rest are skipped.
+Ownership covers the **domain** as well as the name:
+
+- **Foreign domains are off limits.** A derived host whose domains include one
+  already claimed by a host discovery does not own (proxy, redirect or parked,
+  enabled *or* disabled) is skipped, with that host and its kind named in the
+  `reason`.
+- **Why.** Without that rule a tenant who can annotate an `Ingress` in their own
+  namespace could claim `sso.example.com`, and because the router fills its
+  per-domain maps in config load order, a derived name sorting after the
+  operator's host would silently replace its whole middleware/access-list chain
+  and its TLS pinning; `allowedDomainSuffixes` alone does not prevent this, since
+  an exact-match suffix makes even the apex claimable.
+- **One claimant per hostname.** Existing derived hosts are placed before new
+  ones, so an existing derived host keeps or takes a hostname ahead of any new
+  Ingress; among existing hosts, or among new ones, the first by derived name
+  wins, and the rest are skipped.
+- **Moves between derived hosts.** A derived host can take a new hostname in one
+  reconcile when that hostname is free or is released by another derived host
+  updated or deleted in the same commit, which covers a swap or a longer cycle.
+  A host that cannot move (its new hostname is held by a host discovery does not
+  own, or by a derived host that keeps it) is skipped, and so is every host
+  whose move depends on it; a host further along that does not depend on it
+  still moves.
+- **Hosts the store will not rewrite.** A derived host whose file carries keys
+  this gpm does not recognise (written by a newer version, see
+  [Rollback](../../../operations/upgrading.md#rollback)) never moves: it keeps
+  every hostname it serves, nothing may take one, and a change to its other
+  fields is planned but skipped by the store.
 
 **What a derived host cannot express.** Cutting a hand-written host over to
 discovery (annotate the `Ingress`, let the derived host appear, delete the

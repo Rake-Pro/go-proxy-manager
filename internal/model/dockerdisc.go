@@ -420,6 +420,7 @@ func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
 	for _, o := range cfg.AccessLists {
 		als[o.Name] = true
 	}
+	anyRefused := anyModeRefusals(cfg.AccessLists)
 	ugs := map[string]bool{}
 	for _, o := range cfg.UpstreamGroups {
 		ugs[o.Name] = true
@@ -444,6 +445,10 @@ func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
 		}
 		for _, a := range t.AccessLists {
 			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
+		}
+		checkAnyModeMembers(&errs, "", owner, "", t.AccessListsMode, t.AccessLists, anyRefused)
+		for _, l := range t.Locations {
+			checkAnyModeMembers(&errs, "", owner, fmt.Sprintf("locations: location %q: ", l.Path), l.AccessListsMode, l.AccessLists, anyRefused)
 		}
 	}
 	check(DefaultProfileName, d.Template)

@@ -436,6 +436,63 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 	})
 }
 
+// anyAllows is the list's verdict as one member of an accessListsMode: any
+// group. "any" composes allow-lists only, so a member grants only what its own
+// allow rules or geo.countryAllow name, decided by the list's full verdict
+// (decide, with every fail-closed state in it). These members never allow;
+// validation refuses each of them under "any", and this is the runtime
+// backstop:
+//   - a list with the deprecated basicAuth users (its verdict is a challenge),
+//   - a list with defaultAction: allow (a blocklist would grant everyone it
+//     does not block),
+//   - a geo deny-list (countryDeny without countryAllow: it would grant every
+//     other country and every address the database cannot place), and
+//   - a list with no rules and no geo, which has nothing to grant.
+func (c accessList) anyAllows(ip net.IP, path, method string, geoLookup func(net.IP) (string, bool), geoLoaded func() bool) bool {
+	if c.hasAuth || c.defaultAllow || (c.hasGeo && c.geoCountryAllow == nil) {
+		return false
+	}
+	if !c.hasIP && !c.hasGeo {
+		return false
+	}
+	return c.allowed(ip, path, method, geoLookup, geoLoaded)
+}
+
+// anyAccessListHandler gates next behind a group of compiled lists composed
+// with accessListsMode: any. The request passes when at least one list allows
+// it (see accessList.anyAllows); an explicit deny in one list does not veto
+// another list's allow. names are the configured list names, logged on a
+// denial so a 403 can be traced to the group that refused it. The metric and
+// analytics reason is a fixed value, never the names: "geo" when a member has
+// geo rules and no GeoIP database is loaded (the same signal a single list
+// gives for that state, see accessListHandler), else "access-list-any".
+func anyAccessListHandler(lists []accessList, names []string, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := ipOf(r)
+		method := strings.ToUpper(r.Method)
+		for _, c := range lists {
+			if c.anyAllows(ip, r.URL.Path, method, geoLookup, geoLoaded) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		reason := "access-list-any"
+		for _, c := range lists {
+			if c.hasGeo && (geoLoaded == nil || !geoLoaded()) {
+				reason = "geo"
+				break
+			}
+		}
+		countDenial(r, reason)
+		log.Debug().Str("host", host).Str("accessListsMode", "any").Strs("accessLists", names).
+			Str("client", ip.String()).Str("path", r.URL.Path).
+			Msg("dataplane: no access list in the group allowed the request")
+		serveErrorPage(w, http.StatusForbidden, ep, host, func() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		})
+	})
+}
+
 // authGateKey is the basic-auth throttle key for a request: the access list's
 // own client-IP resolver, falling back to the connection peer. An IP that cannot
 // be parsed at all collapses to one shared key rather than to no key, so such

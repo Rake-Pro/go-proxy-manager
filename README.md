@@ -46,7 +46,8 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 
 - **Access control rooted in one client IP.** Access lists are ordered
   allow/deny CIDR rules with default-deny, optional GeoIP country rules, path
-  and method scoping and remote CIDR feeds, and they compare the same derived
+  and method scoping and remote CIDR feeds; several lists on a host combine as
+  all-must-allow or any-may-allow. They compare the same derived
   client IP as rate limits, `allowFrom` exemptions, logs and upstream headers:
   see [Client IP and the three trust
   tiers](docs/concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers).

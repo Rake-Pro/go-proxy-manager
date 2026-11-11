@@ -131,6 +131,10 @@ type Discoverer struct {
 	// discovery state itself.
 	onFreeze func(err error)
 
+	// unwritable, if set (via SetUnwritable), reports a stored host the store
+	// will refuse to rewrite; see discovery.Ownership.Unwritable.
+	unwritable func(model.ProxyHost) bool
+
 	// newClient is the client constructor, swapped by the tests. Production
 	// always uses NewClient.
 	newClient func(ClientConfig) (*Client, error)
@@ -169,6 +173,18 @@ func (d *Discoverer) SetOnFreeze(fn func(err error)) {
 	}
 	d.mu.Lock()
 	d.onFreeze = fn
+	d.mu.Unlock()
+}
+
+// SetUnwritable installs the store's "will refuse to rewrite this host" check,
+// so a plan never hands over a domain whose release the store would drop. nil
+// (the default) treats every host as writable. Safe to call at any time.
+func (d *Discoverer) SetUnwritable(fn func(model.ProxyHost) bool) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.unwritable = fn
 	d.mu.Unlock()
 }
 
@@ -386,7 +402,10 @@ func (d *Discoverer) Plan(ctx context.Context) (Plan, error) {
 	if err != nil {
 		return p, fmt.Errorf("docker discovery: list containers: %w", err)
 	}
-	res := planReconcile(cfg, conf, containers)
+	d.mu.Lock()
+	unwritable := d.unwritable
+	d.mu.Unlock()
+	res := planReconcile(cfg, conf, containers, unwritable)
 	p.Discovered = res.Discovered
 	p.Managed = res.ManagedAfter
 	p.Created = res.Created
@@ -457,7 +476,10 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 		return d.fail(now, true, false, endpoint, fmt.Errorf("docker discovery: list containers: %w", err))
 	}
 
-	res := planReconcile(cfg, conf, containers)
+	d.mu.Lock()
+	unwritable := d.unwritable
+	d.mu.Unlock()
+	res := planReconcile(cfg, conf, containers, unwritable)
 
 	commit := ""
 	if len(res.Upserts) > 0 || len(res.Deletes) > 0 {
@@ -556,7 +578,7 @@ func ownership(conf model.DockerDiscoverySettings) discovery.Ownership {
 // ownership, freeze and carry-forward rule. Everything above the handover is
 // Docker-specific; everything below it is shared with Ingress discovery, so the
 // rules with security consequences exist exactly once.
-func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, containers []Container) discovery.Result {
+func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, containers []Container, unwritable func(model.ProxyHost) bool) discovery.Result {
 	items := make([]discovery.Item, 0, len(containers))
 	for _, ct := range containers {
 		if strings.TrimSpace(ct.Labels[conf.LabelEnabled()]) != "true" {
@@ -575,7 +597,9 @@ func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, contain
 			UnknownProfile: isUnknownProfile(err),
 		})
 	}
-	return discovery.Plan(cfg, ownership(conf), items)
+	own := ownership(conf)
+	own.Unwritable = unwritable
+	return discovery.Plan(cfg, own, items)
 }
 
 // hostResults projects the shared planner's generic per-host decisions onto
@@ -701,6 +725,7 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 		Timeouts:          timeouts,
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
+		AccessListsMode:   tmpl.AccessListsMode,
 	}
 	if len(tmpl.StripResponseHeaders) > 0 {
 		host.StripResponseHeaders = append([]string(nil), tmpl.StripResponseHeaders...)

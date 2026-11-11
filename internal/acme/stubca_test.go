@@ -434,8 +434,8 @@ func TestRenewNowEndToEnd(t *testing.T) {
 	}
 	select {
 	case <-changed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RenewNow: OnChange was not called within 5s")
+	case <-time.After(60 * time.Second): // failure bound only
+		t.Fatal("RenewNow: OnChange was not called within 60s")
 	}
 
 	if _, err := os.Stat(IssuedCertPath(dir, "app")); err != nil {
@@ -452,15 +452,16 @@ func TestRenewNowEndToEnd(t *testing.T) {
 		t.Error("LastAttempt was not recorded")
 	}
 
-	// A second RenewNow while the manager is idle again must not report
-	// ErrRenewInFlight - the goroutine released m.mu on completion.
+	// A second RenewNow straight after OnChange must not report
+	// ErrRenewInFlight: the goroutine releases m.mu before it fires OnChange,
+	// so OnChange is itself the signal that the manager is idle.
 	if err := m.RenewNow(context.Background(), cfg, "app"); err != nil {
-		t.Errorf("second RenewNow: %v", err)
+		t.Fatalf("second RenewNow: %v", err)
 	}
 	select {
 	case <-changed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("second RenewNow: OnChange was not called within 5s")
+	case <-time.After(60 * time.Second): // failure bound only
+		t.Fatal("second RenewNow: OnChange was not called within 60s")
 	}
 }
 

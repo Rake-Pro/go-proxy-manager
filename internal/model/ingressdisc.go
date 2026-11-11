@@ -183,6 +183,9 @@ type IngressHostTemplate struct {
 	// Middlewares/AccessLists are applied to every derived host, in this order.
 	Middlewares []string `json:"middlewares,omitempty" yaml:"middlewares,omitempty"`
 	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+	// AccessListsMode is stamped onto every derived host with AccessLists:
+	// "all" (default) or "any", exactly as ProxyHost.AccessListsMode.
+	AccessListsMode string `json:"accessListsMode,omitempty" yaml:"accessListsMode,omitempty"`
 
 	// StripResponseHeaders is applied verbatim to every derived host, exactly as
 	// on a hand-written ProxyHost. Without it a per-host strip list on a
@@ -736,6 +739,7 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 	for _, o := range cfg.AccessLists {
 		als[o.Name] = true
 	}
+	anyRefused := anyModeRefusals(cfg.AccessLists)
 	ugs := map[string]bool{}
 	for _, o := range cfg.UpstreamGroups {
 		ugs[o.Name] = true
@@ -760,6 +764,10 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 		}
 		for _, a := range t.AccessLists {
 			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
+		}
+		checkAnyModeMembers(&errs, "", owner, "", t.AccessListsMode, t.AccessLists, anyRefused)
+		for _, l := range t.Locations {
+			checkAnyModeMembers(&errs, "", owner, fmt.Sprintf("locations: location %q: ", l.Path), l.AccessListsMode, l.AccessLists, anyRefused)
 		}
 	}
 	check(DefaultProfileName, d.Template)
@@ -853,6 +861,9 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 		if err := ValidateName(a); err != nil {
 			return fmt.Errorf("ingressDiscovery.%s.accessLists[%d]: %w", path, i, err)
 		}
+	}
+	if err := validateAccessListsMode("ingressDiscovery."+path, t.AccessListsMode, t.AccessLists); err != nil {
+		return err
 	}
 	// Same helper the ProxyHost and Settings paths use, for the same reason as
 	// Timeouts above: a template that would derive a host the config validator

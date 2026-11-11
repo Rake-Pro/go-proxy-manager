@@ -105,6 +105,8 @@ func (c Config) Validate() error {
 			checkRef(&errs, "middleware", o.Name, "rateLimit.allowFrom", "accessList", a, als)
 		}
 	}
+	basicAuthLists := basicAuthListNames(c.AccessLists)
+	anyRefused := anyModeRefusals(c.AccessLists)
 	seenHost := map[string]bool{}
 	for _, h := range c.ProxyHosts {
 		if err := h.Validate(); err != nil {
@@ -131,6 +133,7 @@ func (c Config) Validate() error {
 		for _, a := range h.AccessLists {
 			checkRef(&errs, "proxy host", h.Name, "accessLists", "accessList", a, als)
 		}
+		checkAnyModeMembers(&errs, "proxy host", h.Name, "", h.AccessListsMode, h.AccessLists, anyRefused)
 		checkInlineAuth(&errs, "proxy host", h.Name, "", h.Auth, idps, idpTypes)
 		if h.RateLimit != nil {
 			for _, a := range h.RateLimit.AccessListRefs() {
@@ -151,6 +154,7 @@ func (c Config) Validate() error {
 			for _, a := range l.AccessLists {
 				checkRef(&errs, "proxy host", h.Name, loc+"accessLists", "accessList", a, als)
 			}
+			checkAnyModeMembers(&errs, "proxy host", h.Name, loc, l.AccessListsMode, l.AccessLists, anyRefused)
 			checkInlineAuth(&errs, "proxy host", h.Name, loc, l.Auth, idps, idpTypes)
 		}
 	}
@@ -173,12 +177,8 @@ func (c Config) Validate() error {
 	// Stream hosts: per-object validation, then the two cross-object rules that
 	// need the whole config - what an access list actually contains, and who else
 	// is already on the listen port.
-	basicAuthLists := map[string]bool{}
 	requestScopedLists := map[string]bool{}
 	for _, a := range c.AccessLists {
-		if len(a.BasicAuth) > 0 {
-			basicAuthLists[a.Name] = true
-		}
 		if a.HasRequestScopedRules() {
 			requestScopedLists[a.Name] = true
 		}
@@ -392,6 +392,55 @@ func refPrefix(ownerKind, ownerName, field string) string {
 		return ownerName + "." + field + ": "
 	}
 	return fmt.Sprintf("%s %q: %s: ", ownerKind, ownerName, field)
+}
+
+// basicAuthListNames returns the access lists that still carry the deprecated
+// basicAuth users.
+func basicAuthListNames(lists []AccessList) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range lists {
+		if len(a.BasicAuth) > 0 {
+			out[a.Name] = true
+		}
+	}
+	return out
+}
+
+// anyModeRefusals maps every access list that may not be a member of an
+// accessListsMode: any group to the reason. any composes allow-lists only: a
+// member may grant only what its allow rules (or geo.countryAllow) name, so a
+// blocklist-style list (defaultAction: allow, or a geo.countryDeny deny-list)
+// cannot turn into a grant for everyone it does not block. A list with the
+// deprecated basicAuth users answers with a 401 challenge, not an IP verdict,
+// and OR-ing a credential prompt with other lists has no reading that is both
+// useful and never wider than the operator meant.
+func anyModeRefusals(lists []AccessList) map[string]string {
+	out := map[string]string{}
+	for _, a := range lists {
+		switch {
+		case len(a.BasicAuth) > 0:
+			out[a.Name] = "has basicAuth users, which cannot be combined under accessListsMode: any (migrate the list's basic auth to an auth middleware with mode: basic, or use accessListsMode: all)"
+		case a.DefaultAction == ActionAllow:
+			out[a.Name] = "has defaultAction: allow, which under accessListsMode: any would admit every client its rules do not deny (any composes allow-lists only: set defaultAction: deny, or use accessListsMode: all)"
+		case a.Geo != nil && len(a.Geo.CountryDeny) > 0:
+			out[a.Name] = "has geo.countryDeny, which under accessListsMode: any would admit every address outside those countries, including every address the GeoIP database cannot place (any composes allow-lists only: use geo.countryAllow, or accessListsMode: all)"
+		}
+	}
+	return out
+}
+
+// checkAnyModeMembers refuses, in an accessListsMode: any group, every list
+// anyModeRefusals names. prefix is the location prefix ("" for the host
+// level).
+func checkAnyModeMembers(errs *[]error, ownerKind, ownerName, prefix, mode string, names []string, refused map[string]string) {
+	if mode != AccessListsModeAny {
+		return
+	}
+	for _, a := range names {
+		if why, ok := refused[a]; ok {
+			*errs = append(*errs, fmt.Errorf("%s%q %s", refPrefix(ownerKind, ownerName, prefix+"accessLists"), a, why))
+		}
+	}
 }
 
 func checkRef(errs *[]error, ownerKind, ownerName, field, refKind, ref string, set map[string]bool) {

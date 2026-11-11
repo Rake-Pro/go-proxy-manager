@@ -551,7 +551,7 @@ func TestDerivedNaming(t *testing.T) {
 	full := conf
 	full.Enabled = true
 	full.Template.TLS.CertificateRef = "wildcard"
-	p := planReconcile(model.Config{}, full, dup)
+	p := planReconcile(model.Config{}, full, dup, nil)
 	if len(p.upserts) != 1 || p.skipped != 1 {
 		t.Fatalf("duplicate names: upserts=%d skipped=%d", len(p.upserts), p.skipped)
 	}
@@ -862,8 +862,9 @@ func TestDerivedHostCannotShadowAnOperatorDomain(t *testing.T) {
 			if st.Skipped != 1 || len(st.Hosts) != 1 || st.Hosts[0].Action != ActionSkipped {
 				t.Fatalf("status = %+v", st)
 			}
-			if !strings.Contains(st.Hosts[0].Reason, "already claimed by proxy host \"sso\"") {
-				t.Fatalf("skip reason must name the owning host, got %q", st.Hosts[0].Reason)
+			// The case name is the holder's kind, as the reason names it.
+			if want := "already claimed by " + strings.TrimPrefix(tc.name, "disabled ") + ` "sso"`; !strings.Contains(st.Hosts[0].Reason, want) {
+				t.Fatalf("skip reason must name the owning host and its kind (%q), got %q", want, st.Hosts[0].Reason)
 			}
 		})
 	}
@@ -967,6 +968,49 @@ func TestRenamedIngressHandsItsDomainOver(t *testing.T) {
 	}
 	if len(rec.deletes) != 1 || rec.deletes[0] != "ing-old.ns" {
 		t.Fatalf("deletes = %+v", rec.deletes)
+	}
+}
+
+// Two Ingresses swapping hostnames converge in one reconcile, written as one
+// batch, and the next reconcile writes nothing (issue #74).
+func TestSwappedIngressHostnamesConvergeInOneReconcile(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("ns", "alpha", map[string]string{model.AnnotationManaged: "true"}, "two.example.com"),
+			ingressJSON("ns", "beta", map[string]string{model.AnnotationManaged: "true"}, "one.example.com"),
+		}, "")
+	}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{
+		managedHostFixture("ing-alpha.ns", "one.example.com"),
+		managedHostFixture("ing-beta.ns", "two.example.com"),
+	}}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rec.calls != 1 || len(rec.upserts) != 2 || len(rec.deletes) != 0 {
+		t.Fatalf("calls=%d upserts=%+v deletes=%v, want both hosts in one batch", rec.calls, rec.upserts, rec.deletes)
+	}
+	if st := d.Status(); st.Updated != 2 || st.Skipped != 0 {
+		t.Fatalf("status = %+v", st)
+	}
+	got := map[string]string{}
+	for _, h := range rec.upserts {
+		got[h.Name] = strings.Join(h.Domains, ",")
+	}
+	if got["ing-alpha.ns"] != "two.example.com" || got["ing-beta.ns"] != "one.example.com" {
+		t.Fatalf("batch domains = %v, want the swap", got)
+	}
+	cfg.ProxyHosts = rec.upserts
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("the second reconcile must write nothing (calls=%d)", rec.calls)
 	}
 }
 
@@ -1476,7 +1520,7 @@ func TestUnresolvableProfileNeverDisablesAnUnownedHost(t *testing.T) {
 		Domains:    []string{"paste.example.com"},
 		Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.9", Port: 80},
 	}
-	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Ingress{ing})
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Ingress{ing}, nil)
 	if len(p.upserts) != 0 || len(p.deletes) != 0 {
 		t.Fatalf("plan = +%d -%d, want neither: the host is not one discovery owns", len(p.upserts), len(p.deletes))
 	}
@@ -1542,7 +1586,7 @@ func TestUndefinedProfileNamesAreAllRejected(t *testing.T) {
 				Host string `json:"host"`
 			}{{Host: "app.example.com"}}
 
-			p := planReconcile(model.Config{}, conf, []Ingress{ing})
+			p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil)
 			if tc.wantMW == "skip" {
 				if len(p.upserts) != 0 || p.skipped != 1 {
 					t.Fatalf("upserts=%d skipped=%d, want the Ingress skipped", len(p.upserts), p.skipped)
@@ -1842,7 +1886,7 @@ func TestUndefinedProfileReasonIsBounded(t *testing.T) {
 		Host string `json:"host"`
 	}{{Host: "app.example.com"}}
 
-	p := planReconcile(model.Config{}, conf, []Ingress{ing})
+	p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil)
 	if p.skipped != 1 || len(p.results) != 1 {
 		t.Fatalf("plan = %+v, want one skip", p.results)
 	}
@@ -1879,7 +1923,7 @@ func TestDerivedHostsDoNotShareTheClientAuthPointer(t *testing.T) {
 	}
 	p := planReconcile(model.Config{}, conf, []Ingress{
 		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
-	})
+	}, nil)
 	if len(p.upserts) != 2 {
 		t.Fatalf("upserts = %d, want 2", len(p.upserts))
 	}
@@ -2178,7 +2222,7 @@ func TestDerivedHostsDoNotShareTheTimeoutsOrTagsBacking(t *testing.T) {
 	}
 	p := planReconcile(model.Config{}, conf, []Ingress{
 		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
-	})
+	}, nil)
 	if len(p.upserts) != 2 {
 		t.Fatalf("upserts = %d, want 2", len(p.upserts))
 	}
@@ -2551,7 +2595,7 @@ func TestAnnotationPrefixMigrateRelabelsOnFailClosedDisable(t *testing.T) {
 		Host string `json:"host"`
 	}{{Host: "app.example.com"}}
 
-	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale}}, conf, []Ingress{ing})
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale}}, conf, []Ingress{ing}, nil)
 	if len(p.upserts) != 1 {
 		t.Fatalf("upserts=%d, want exactly the disabled+relabelled host", len(p.upserts))
 	}
@@ -2787,5 +2831,55 @@ func TestMaintenanceFlagIsSteadyState(t *testing.T) {
 	}
 	if st := d.Status(); len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUnchanged {
 		t.Fatalf("hosts = %+v, want unchanged", st.Hosts)
+	}
+}
+
+// accessListsMode travels from the template to the derived host, and a host
+// that already carries it is seen as unchanged on the next reconcile.
+func TestDerivedHostCarriesAccessListsMode(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := baseSettings(f)
+	s.Template.AccessLists = []string{"lan", "monitor"}
+	s.Template.AccessListsMode = model.AccessListsModeAny
+	settings := &model.Settings{IngressDiscovery: s}
+	cfg := &model.Config{}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
+	}
+	h := rec.upserts[0]
+	if h.AccessListsMode != model.AccessListsModeAny || strings.Join(h.AccessLists, ",") != "lan,monitor" {
+		t.Fatalf("accessLists = %v mode %q, want the template's", h.AccessLists, h.AccessListsMode)
+	}
+
+	cfg.ProxyHosts = []model.ProxyHost{h}
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("a steady-state reconcile must not write (calls=%d)", rec.calls)
+	}
+	if st := d.Status(); len(st.Hosts) != 1 || st.Hosts[0].Action != ActionUnchanged {
+		t.Fatalf("hosts = %+v, want the derived host unchanged", st.Hosts)
+	}
+
+	// Flipping the template back to the default is a real change.
+	s.Template.AccessListsMode = ""
+	settings.IngressDiscovery = s
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("third reconcile: %v", err)
+	}
+	if rec.calls != 2 || len(rec.upserts) != 1 || rec.upserts[0].AccessListsMode != "" {
+		t.Fatalf("calls=%d upserts=%+v, want one update clearing the mode", rec.calls, rec.upserts)
 	}
 }

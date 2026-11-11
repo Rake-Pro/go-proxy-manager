@@ -37,6 +37,7 @@ package discovery
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -88,6 +89,13 @@ type Ownership struct {
 	HasStaleManaged  func(map[string]string) bool
 	HasStaleDisabled func(map[string]string) bool
 	StripStale       func(map[string]string)
+
+	// Unwritable reports a stored host the store will refuse to rewrite (its
+	// file has keys from a newer gpm; see store.AutoWriteRefused). Such a host
+	// never changes domains and nothing may take a domain it holds, because a
+	// handover that depends on a write the store drops would leave a duplicate
+	// domain that fails the whole batch on every poll. nil means none is.
+	Unwritable func(model.ProxyHost) bool
 }
 
 // Item is one source object, already derived by the caller.
@@ -294,18 +302,8 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 	// without ever colliding on a name. Every domain already claimed by a host
 	// this reconcile is not rewriting is off limits; a derived host that wants
 	// one is skipped and reported, exactly like a name collision.
-	claimed := map[string]string{}
-	claim := func(owner string, domains []string) {
-		for _, dom := range domains {
-			key := DomainKey(dom)
-			if key == "" {
-				continue
-			}
-			if _, taken := claimed[key]; !taken {
-				claimed[key] = owner
-			}
-		}
-	}
+	claimed := map[string]claimant{}
+	claim := func(owner string, domains []string) { claimInto(claimed, proxyHost(owner), domains) }
 	for _, h := range cfg.ProxyHosts {
 		// A managed host that this run rewrites or removes releases its domains;
 		// everything else - every operator-authored host, every host owned by the
@@ -319,30 +317,112 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		claim(h.Name, h.Domains)
 	}
 	for _, h := range cfg.RedirectHosts {
-		claim(h.Name, h.Domains)
+		claimInto(claimed, claimant{"redirect host", h.Name}, h.Domains)
 	}
 	for _, h := range cfg.ParkedHosts {
-		claim(h.Name, h.Domains)
+		claimInto(claimed, claimant{"parked host", h.Name}, h.Domains)
 	}
 
-	// A managed host this run keeps (rewritten, not doomed) claims the domains
-	// it WANTS before any new claimant is placed. Placement runs in name order
-	// below, so without this a new source item whose name sorts before an
-	// existing managed host would take that host's domain first; the existing
-	// host would then be skipped (its stored object re-asserting the same
-	// domain) and the batch would carry a duplicate domain the validator
-	// rejects, on every poll, until the newcomer was renamed. An existing
-	// owner keeps its domain; the newcomer is the one that is skipped.
+	// The MOVERS: existing managed hosts this run rewrites. They are resolved
+	// before any new claimant is placed, so an existing owner keeps its domain
+	// ahead of a newcomer whose name sorts first (issue #50): otherwise the
+	// existing host would be skipped while its stored object kept the domain,
+	// and the batch would carry a duplicate the validator rejects on every poll.
+	//
+	// A mover moves only if every domain it wants is free once every host that
+	// does NOT move holds what it serves today. Resolving them together is what
+	// lets two movers swap domains, or a longer cycle rotate, in one poll
+	// (issue #74): each releases what the next one gains. A refused mover holds
+	// all of its current domains, which can refuse the mover before it in a
+	// chain, so the loop repeats until no new refusal appears. Refusals only
+	// grow, so it ends within len(movers)+1 rounds, and the final claims are
+	// conflict-free by construction. The plan lands as one ApplyBatch commit,
+	// validated whole, so no intermediate state ever exists on disk.
+	var movers []string
 	for _, name := range SortedKeys(desired) {
 		if cur, exists := current[name]; exists && own.Managed(cur) && !doomed[name] {
-			claim(name, cur.Domains) // what it serves today beats what anyone wants
+			movers = append(movers, name)
 		}
 	}
-	for _, name := range SortedKeys(desired) {
-		if cur, exists := current[name]; exists && own.Managed(cur) && !doomed[name] {
-			claim(name, desired[name].Domains) // then its move, if the domain is free
+	// A PINNED mover is one whose domains would change but whose file the store
+	// will not rewrite: it is refused up front and for good, so it holds every
+	// domain it serves today and no handover can depend on its write. A pinned
+	// host whose domains stay put still goes through as an update, which the
+	// store skips exactly as before.
+	pinned := map[string]bool{}
+	refused := map[string]bool{}
+	for _, name := range movers {
+		cur := current[name]
+		if own.Unwritable != nil && !maps.Equal(domainSet(cur.Domains), domainSet(desired[name].Domains)) && own.Unwritable(cur) {
+			pinned[name], refused[name] = true, true
 		}
 	}
+	var hold map[string]claimant
+	for {
+		hold = maps.Clone(claimed)
+		for _, name := range movers {
+			if refused[name] {
+				claimInto(hold, proxyHost(name), current[name].Domains)
+				continue
+			}
+			// A domain a mover serves today and still wants is its own either way.
+			wants := domainSet(desired[name].Domains)
+			for _, d := range current[name].Domains {
+				if wants[DomainKey(d)] {
+					claimInto(hold, proxyHost(name), []string{d})
+				}
+			}
+		}
+		grew := false
+		// First against what is certain, so no mover is refused over a domain
+		// another mover gains and might yet lose; then against each other, the
+		// first by name winning a domain two movers both want.
+		for _, place := range []bool{false, true} {
+			for _, name := range movers {
+				if refused[name] {
+					continue
+				}
+				if d, _ := firstClaimed(desired[name].Domains, hold, name); d != "" {
+					refused[name], grew = true, true
+				} else if place {
+					claimInto(hold, proxyHost(name), desired[name].Domains)
+				}
+			}
+			if grew {
+				break
+			}
+		}
+		if !grew {
+			break
+		}
+	}
+	// Revisit the refusals. One lost in a contest can outlive the winner (which
+	// a later round refused, so the contested domain is free again); a refused
+	// mover whose wanted domains are now all free moves after all, in name
+	// order, releasing what it no longer wants. Each pass moves at least one
+	// host or ends the loop, and every move keeps the claims conflict-free.
+	for changed := true; changed; {
+		changed = false
+		for _, name := range movers {
+			if !refused[name] || pinned[name] {
+				continue
+			}
+			if d, _ := firstClaimed(desired[name].Domains, hold, name); d != "" {
+				continue
+			}
+			wants := domainSet(desired[name].Domains)
+			for _, d := range current[name].Domains {
+				if key := DomainKey(d); !wants[key] && hold[key] == proxyHost(name) {
+					delete(hold, key)
+				}
+			}
+			claimInto(hold, proxyHost(name), desired[name].Domains)
+			delete(refused, name)
+			changed = true
+		}
+	}
+	claimed = hold
+
 	for _, name := range SortedKeys(desired) {
 		want := desired[name]
 		cur, exists := current[name]
@@ -358,10 +438,39 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 				claim(name, cur.Domains)
 			}
 		}
-		if conflict, owner := firstClaimed(want.Domains, claimed); conflict != "" && owner != name {
-			skip(fmt.Sprintf("domain %q is already claimed by proxy host %q, which %s does not own", conflict, owner, own.Subsystem))
+		if pinned[name] {
+			skip("the stored host's file has keys this gpm does not recognise (written by a newer gpm?), so " +
+				own.Subsystem + " will not rewrite it; it keeps its current domains")
 			log.Warn().Str("host", name).Str("source", source[name]).
-				Str("domain", conflict).Str("owner", owner).
+				Msg(own.Subsystem + ": the stored host has unknown keys; holding its domains rather than moving them")
+			continue
+		}
+		// Reasons are read off the FINAL claims, so the holder named is the host
+		// that holds the domain once this plan lands. A holder outside this
+		// source is named first when there is one: it is what blocks the chain,
+		// and naming only the next discovered host would make a blocked swap's
+		// two reasons point at each other.
+		mine := func(h claimant) bool {
+			_, isManaged := managed[h.name]
+			_, isDesired := desired[h.name]
+			_, isStored := current[h.name]
+			return h == proxyHost(h.name) && (isManaged || isDesired && !isStored)
+		}
+		conflict, holder := firstClaimed(want.Domains, claimed, name)
+		for _, d := range want.Domains {
+			if h, taken := claimed[DomainKey(d)]; taken && h != proxyHost(name) && !mine(h) {
+				conflict, holder = DomainKey(d), h
+				break
+			}
+		}
+		if conflict != "" {
+			reason := fmt.Sprintf("domain %q is already claimed by %s %q, which %s does not manage", conflict, holder.kind, holder.name, own.Subsystem)
+			if mine(holder) {
+				reason = fmt.Sprintf("domain %q is already claimed by proxy host %q, also managed by %s, which holds it after this reconcile", conflict, holder.name, own.Subsystem)
+			}
+			skip(reason)
+			log.Warn().Str("host", name).Str("source", source[name]).
+				Str("domain", conflict).Str("owner", holder.name).Str("ownerKind", holder.kind).
 				Msg(own.Subsystem + ": an existing host already serves this domain; refusing to shadow it")
 			continue
 		}
@@ -460,15 +569,45 @@ func cloneLabels(m map[string]string) map[string]string {
 // config validator and the router's per-domain maps use.
 func DomainKey(d string) string { return strings.ToLower(strings.TrimSpace(d)) }
 
-// firstClaimed returns the first of domains already claimed by another host, and
-// that host's name, or ("", "") when none is.
-func firstClaimed(domains []string, claimed map[string]string) (string, string) {
+// claimant is a domain's holder during planning: an object kind, as the config
+// validator names it, and an object name.
+type claimant struct{ kind, name string }
+
+func proxyHost(name string) claimant { return claimant{"proxy host", name} }
+
+// domainSet returns domains as a set of DomainKey values.
+func domainSet(domains []string) map[string]bool {
+	out := make(map[string]bool, len(domains))
 	for _, d := range domains {
-		if owner, taken := claimed[DomainKey(d)]; taken {
+		out[DomainKey(d)] = true
+	}
+	return out
+}
+
+// claimInto records owner as the holder of each domain not already held.
+func claimInto(claimed map[string]claimant, owner claimant, domains []string) {
+	for _, dom := range domains {
+		key := DomainKey(dom)
+		if key == "" {
+			continue
+		}
+		if _, taken := claimed[key]; !taken {
+			claimed[key] = owner
+		}
+	}
+}
+
+// firstClaimed returns the first of domains already claimed by anything other
+// than proxy host self, and its holder, or "" when none is. Domains self holds
+// are passed over, so a host keeping one domain cannot mask a conflict on
+// another it gains.
+func firstClaimed(domains []string, claimed map[string]claimant, self string) (string, claimant) {
+	for _, d := range domains {
+		if owner, taken := claimed[DomainKey(d)]; taken && owner != proxyHost(self) {
 			return DomainKey(d), owner
 		}
 	}
-	return "", ""
+	return "", claimant{}
 }
 
 // SortedKeys returns a map's keys in sorted order, so a plan does not depend on

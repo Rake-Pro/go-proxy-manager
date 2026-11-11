@@ -13,7 +13,7 @@ no third-party script is loaded.
 | Traffic | One column per bucket: allowed on the bottom, denied stacked on top; threat hits as a line on the same count axis. Hover for the bucket's numbers; **Table** shows them as rows |
 | Small charts | Requests, denied and threat hits, each on its own scale |
 | Countries | Requests, denied and threat hits per ISO country code; `--` is unknown or private |
-| Denials by reason | Which tier refused the request (`access-list`, `geo`, `bouncer`, `rate-limit`, `guard`, `auth-*`); counted once, by the first tier that refused |
+| Denials by reason | Which tier refused the request (`access-list`, `access-list-any`, `geo`, `bouncer`, `rate-limit`, `guard`, `auth-*`); counted once, by the first tier that refused. An `accessListsMode: any` group reports `geo` when a member has geo rules and no GeoIP database is loaded, else `access-list-any` |
 | Threat signatures | Observe-only labels (see below) with hits and top countries |
 | Hosts | Global view only: one row per proxy host plus `no host (-)` for requests that matched none |
 | Top clients | Most active client addresses in the range |

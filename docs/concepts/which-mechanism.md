@@ -29,12 +29,18 @@ access list attached, everything else still reaches the host.
 |---|---|---|
 | Send `/api` to a different backend | [`locations`](../reference/config/proxy-host.md) | Longest prefix |
 | Let one network reach only `/health` | Access-list rule `paths` | Exact, allow-only |
+| Let a second, separately kept list widen a host (a prober list beside the LAN list) | `accessListsMode: any` on the host, see [Composing access lists](../reference/config/access-list.md#access-list-composing) | Each list keeps its own rules, `paths` included |
 | Block `POST /login` except from the LAN | [`guard` middleware](../reference/config/middleware.md) | Exact |
 | Fix a path the client got wrong | [`rewrite` middleware](../reference/config/middleware.md) | Exact, prefix or regex, upstream-facing |
 
 Path-deny belongs to the guard and path-allow to the access list, deliberately:
 an exact match that misses fails **closed** for an allow rule and would fail
 **open** for a deny rule. Validation refuses `action: deny` alongside `paths`.
+
+Exact means byte-exact on the normalized path: case-sensitive, trailing slash
+significant. A guard only holds when the backend is as strict about the path as
+the trigger is; see the note under
+[GuardTrigger](../reference/config/middleware.md#guardtrigger-guardtriggers).
 
 ## Four ways to not serve a host
 
