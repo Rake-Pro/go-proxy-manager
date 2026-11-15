@@ -3,7 +3,9 @@ package dataplane
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"golang.org/x/crypto/bcrypt"
@@ -133,6 +135,59 @@ func TestBasicAuthModeLocksOutAfterRepeatedFailures(t *testing.T) {
 	}
 	if locked.Header().Get("WWW-Authenticate") == "" {
 		t.Fatal("locked out: expected the same challenge as a wrong password, got none")
+	}
+}
+
+// TestBasicAuthModeLockoutHoldsUnderConcurrentBurst checks in-flight checks
+// count against the budget: a burst of parallel guesses from one client gets no
+// more verifications than the lockout limit, so a correct password sent after
+// the budget is taken waits for those checks and is then refused.
+func TestBasicAuthModeLockoutHoldsUnderConcurrentBurst(t *testing.T) {
+	h := basicAuthGate(basicMW(t, "admin", "hunter2", ""), "app", ipFrom("203.0.113.9"), nil, "app", nil, okHandler())
+	attempt := func(pass string) int {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.SetBasicAuth("admin", pass)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	// Hold every bcrypt slot so the burst's verifications queue.
+	for range maxBcryptConcurrent {
+		bcryptSem <- struct{}{}
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			for range maxBcryptConcurrent {
+				<-bcryptSem
+			}
+		}
+	}
+	defer release()
+
+	var wg sync.WaitGroup
+	for range 4 * maxBasicAuthFails {
+		wg.Go(func() { attempt("wrong") })
+	}
+	time.Sleep(200 * time.Millisecond)
+	var good int
+	wg.Go(func() { good = attempt("hunter2") })
+	time.Sleep(200 * time.Millisecond)
+	release()
+	wg.Wait()
+	if good != http.StatusUnauthorized {
+		t.Fatalf("correct password after a burst that used the budget: got %d want 401", good)
+	}
+}
+
+// TestBasicAuthModeParallelCorrectCredentialsAllPass checks that parallel
+// requests with the correct password (a page load sending the cached
+// Authorization header on every sub-resource) are all admitted.
+func TestBasicAuthModeParallelCorrectCredentialsAllPass(t *testing.T) {
+	h := basicAuthGate(basicMW(t, "admin", "hunter2", ""), "app", ipFrom("203.0.113.9"), nil, "app", nil, okHandler())
+	if refused := parallelCorrectBurst(h, "admin", "hunter2", 20); refused != 0 {
+		t.Fatalf("%d of 20 parallel correct-password requests refused, want 0", refused)
 	}
 }
 

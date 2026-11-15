@@ -107,7 +107,8 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   about. A client-cert gate refuses a certificate verified under another
   host's SNI (so on a host without its own `tls.clientAuth`, which is warned
   about, it admits only its allowFrom exemptions) and re-checks revocation per
-  request, as does the host's own mTLS gate. Rate-limit buckets and the basic-auth lockout key IPv6 by /64.
+  request, as does the host's own mTLS gate. Rate-limit buckets key IPv6 by /64
+  (the basic-auth lockout by /56, see below).
   Discovery keeps an existing managed host's current domain ahead of any
   claimant instead of failing the batch. (#50)
 - Explicit discovery `tokenFile`/`caFile` paths are confined to the secret
@@ -166,6 +167,18 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   `PATCH`, `DELETE`, `OPTIONS`, `CONNECT` or `other`, so request methods sent
   by clients cannot use up the series budget. Any other method (including
   `TRACE` and non-upper-case spellings) is counted under `other`.
+- Data-plane basic auth (`mode: basic` and deprecated access-list `basicAuth`):
+  the failure map sweeps expired entries before it reports itself full, so a
+  past burst of distinct clients no longer locks every new client out until a
+  reload; it still fails closed while full of live entries. Password checks
+  in flight count against the 5-failure budget and further parallel requests
+  from the same client wait for one to finish, so a parallel burst gets no
+  more guesses than the limit while parallel correct-password requests (a page
+  load) all pass. IPv6 clients are counted per /56.
+- Access-list source feeds: an IPv4-mapped entry (`::ffff:a.b.c.d/k`) is judged
+  and stored as the IPv4 network it matches, so the `/8` IPv4 limit applies to
+  it, and an entry that overlaps a non-public range is refused even when its
+  network address is public (`172.0.0.0/8` covers `172.16.0.0/12`).
 
 ### Changed
 

@@ -1420,8 +1420,8 @@ components:
           type: string
           description: Absolute https URL of a plain-text feed - one IP or CIDR per line, "#" comments
             and blank lines ignored. http is not accepted, and no proxy is honoured. An entry that is
-            a default route, broader than /8 (IPv4) or /32 (IPv6), or in a non-public range refuses
-            the whole fetch.
+            a default route, broader than /8 (IPv4) or /32 (IPv6), or overlapping a non-public range
+            refuses the whole fetch; an IPv4-mapped entry is judged as the IPv4 network it matches.
         interval:
           type: string
           description: Go duration between re-fetches. Empty means 24h; below 1h is refused.

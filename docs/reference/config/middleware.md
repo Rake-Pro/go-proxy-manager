@@ -66,7 +66,10 @@ returned: only the hash reaches the git-backed config and the API response.
 The gate behaves exactly like the deprecated access-list basic auth it replaces:
 same `401` and `WWW-Authenticate` challenge, same per-client-IP lockout after 5
 failures for 15 minutes (answered identically to a wrong password, so the response
-is no oracle), same bounded bcrypt work. What it adds is the treatment every other
+is no oracle; an IPv6 client counts per /56; at most 5 password checks per
+client run at once, further parallel requests wait for one to finish, so a
+parallel burst of guesses shares the same 5 and a page load with many
+sub-resources is not refused), same bounded bcrypt work. What it adds is the treatment every other
 auth mode has: it sits at the auth position of the chain (so a rate limit, an
 access list and a bouncer all still run outside it), the host's custom error pages
 render the refusal, denials are counted, and `allowFrom` exempts trusted networks.
@@ -251,8 +254,8 @@ Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
 request is not proxied. The bucket is keyed on the derived client IP, with an
 IPv6 client keyed by its /64 (one subscriber holds a whole /64, so a per-address
-key would be a fresh bucket per address); the basic-auth lockout keys the same
-way (see
+key would be a fresh bucket per address); the basic-auth lockout keys IPv4 the
+same way and IPv6 by the wider /56 (see
 [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers));
 a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches

@@ -501,6 +501,16 @@ func TestReconcileNowRefusesAConcurrentRun(t *testing.T) {
 	}
 }
 
+// predicateRanges spells out what isNonPublic's net.IP predicates match, so
+// every network in it must start at an address isNonPublic refuses.
+func TestPredicateRangesAreNonPublic(t *testing.T) {
+	for _, r := range predicateRanges {
+		if !isNonPublic(r.IP) {
+			t.Errorf("%s is listed as non-public but isNonPublic(%s) is false", r, r.IP)
+		}
+	}
+}
+
 func TestParseEntries(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -546,6 +556,26 @@ func TestParseEntries(t *testing.T) {
 		{name: "NAT64", body: "64:ff9b::/96\n", max: 10, wantErr: "not a public address range"},
 		{name: "multicast", body: "224.0.0.1\n", max: 10, wantErr: "not a public address range"},
 		{name: "unspecified address", body: "0.0.0.0\n", max: 10, wantErr: "not a public address range"},
+		// An IPv4-mapped prefix matches IPv4 clients, so the IPv4 limits apply.
+		{name: "IPv4-mapped prefix broader than the IPv4 limit", body: "::ffff:128.0.0.0/97\n", max: 10, wantErr: "broader than the /8 limit"},
+		{name: "IPv4-mapped /2", body: "::ffff:64.0.0.0/98\n", max: 10, wantErr: "broader than the /8 limit"},
+		{name: "IPv4-mapped private prefix", body: "::ffff:10.0.0.0/104\n", max: 10, wantErr: "not a public address range"},
+		{
+			name: "IPv4-mapped prefix is stored as IPv4",
+			body: "::ffff:198.51.100.0/120\n",
+			max:  10,
+			want: []string{"198.51.100.0/24"},
+		},
+		// A network that starts at a public address but covers non-public space.
+		{name: "covers RFC1918", body: "172.0.0.0/8\n", max: 10, wantErr: "not a public address range"},
+		{name: "covers CGNAT", body: "100.0.0.0/8\n", max: 10, wantErr: "not a public address range"},
+		{name: "covers IETF protocol assignments", body: "192.0.0.0/16\n", max: 10, wantErr: "not a public address range"},
+		{
+			name: "a public /8 that overlaps nothing is still accepted",
+			body: "8.0.0.0/8\n",
+			max:  10,
+			want: []string{"8.0.0.0/8"},
+		},
 		{name: "empty", body: "\n\n# only comments\n", max: 10, wantErr: "no valid entries"},
 		{name: "over the cap", body: "203.0.113.1\n203.0.113.2\n", max: 1, wantErr: "more than maxEntries"},
 	}

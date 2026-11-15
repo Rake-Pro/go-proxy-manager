@@ -142,9 +142,10 @@ throughout.
 **What a feed may contain.** Individual entries are bounded as well as counted. A
 line is refused (and with it the whole fetch) when it is a default route
 (`0.0.0.0/0`, `::/0`), a prefix broader than `/8` for IPv4 or `/32` for IPv6, or
-any address in a range a public monitoring feed never legitimately carries
-(loopback, link-local, RFC1918, ULA, CGNAT `100.64.0.0/10`, multicast,
-`192.0.0.0/24`, `198.18.0.0/15`, `64:ff9b::/96`). Without this a single hijacked
+any network that overlaps a range a public monitoring feed never legitimately
+carries (loopback, link-local, RFC1918, ULA, CGNAT `100.64.0.0/10`, multicast,
+`192.0.0.0/24`, `198.18.0.0/15`, `64:ff9b::/96`). An IPv4-mapped entry
+(`::ffff:192.0.2.0/120`) is judged as the IPv4 network it matches. Without this a single hijacked
 or fat-fingered `0.0.0.0/0` would pass every other check (valid CIDR, HTTP 200,
 under `maxEntries`) and a source rule with no `paths` would then allow the
 entire internet.
