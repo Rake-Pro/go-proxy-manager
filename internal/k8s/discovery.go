@@ -614,7 +614,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 
 	// Profile selection, before anything else is derived. An unknown name is a
 	// SKIP, never a fall back to the default: an Ingress that asked for
-	// "public-ratelimited" and silently received the default's home-vpn access
+	// "public-ratelimited" and silently received the default's lan-vpn access
 	// list (or, the other way round, lost its rate limit) is a security-relevant
 	// regression that nobody would see. The name is returned so the caller
 	// protects any existing host for this Ingress from deletion - a typo in an

@@ -20,7 +20,7 @@ requests are served.
 savedFilters:
   - name: outside, errors only
     list: logs
-    query: -client:@home-only -client:@uptimerobot -status:2xx,3xx
+    query: -client:@lan-only -client:@uptimerobot -status:2xx,3xx
   - name: LAN hosts
     list: hosts
     query: tag:lan -status:disabled

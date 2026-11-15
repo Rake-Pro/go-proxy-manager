@@ -498,7 +498,7 @@ be able to:
 - produce a host **weaker** than something the operator explicitly sanctioned.
 
 Option A fails all three by construction. `gpm.rake.pro/access-lists: ""` on your
-own namespace's Ingress is a self-service removal of `home-vpn` from a hostname
+own namespace's Ingress is a self-service removal of `lan-vpn` from a hostname
 at the edge; `gpm.rake.pro/upstream: http://10.0.0.99:80` aims the edge at an
 address of the tenant's choosing. There is no validation that fixes this, because
 the vocabulary itself is the privilege: any middleware the operator has defined
@@ -543,7 +543,7 @@ The two rules that matter:
 
 **An unknown profile is a skip, never a fall back to the default.** Falling back
 is precisely the silent downgrade the feature exists to prevent: an Ingress that
-asked for `public-ratelimited` and received the default's `home-vpn`, or worse,
+asked for `public-ratelimited` and received the default's `lan-vpn`, or worse,
 one that asked for `sso-internal`, hit a typo, and got a chain with no `sso` in
 it. A skip is loud and visible in `GET /ingress-discovery/status`, and it never
 **creates** a host.

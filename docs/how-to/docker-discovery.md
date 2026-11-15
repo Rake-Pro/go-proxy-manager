@@ -70,7 +70,7 @@ services:
      allowedDomainSuffixes: [example.com]
      template:
        tls: { certificateRef: wildcard, forceSSL: true }
-       accessLists: [home-vpn]
+       accessLists: [lan-vpn]
        robotsNoIndex: true
        tags: [docker]
        defaultDNS: { lanDirect: true }

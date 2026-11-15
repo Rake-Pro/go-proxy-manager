@@ -452,14 +452,14 @@ rateLimit:
 ```
 ```yaml
 # Public site: repeat offenders are blocked twice as long each round, up to a day.
-# Everything the home-only access list allows (LAN, VPN, its fetched monitor
+# Everything the lan-only access list allows (LAN, VPN, its fetched monitor
 # feed) is never counted.
 name: public-site-limit
 type: rate-limit
 rateLimit:
   requests: 60
   window: 1m
-  allowFrom: ["@home-only"]
+  allowFrom: ["@lan-only"]
   blockFor: 1m
   blockBackoff: 2
   blockMax: 24h

@@ -64,10 +64,10 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"upstream port range", func(d *IngressDiscoverySettings) { d.Template.Upstream.Port = 70000 }, "template.upstream"},
 		{"upstreamGroupRef replaces upstream", func(d *IngressDiscoverySettings) {
 			d.Template.Upstream = Upstream{}
-			d.Template.UpstreamGroupRef = "k8s-nodes"
+			d.Template.UpstreamGroupRef = "cluster-nodes"
 		}, ""},
 		{"upstream and group are mutually exclusive", func(d *IngressDiscoverySettings) {
-			d.Template.UpstreamGroupRef = "k8s-nodes"
+			d.Template.UpstreamGroupRef = "cluster-nodes"
 		}, "mutually exclusive"},
 		{"upstreamGroupRef name shape", func(d *IngressDiscoverySettings) {
 			d.Template.Upstream = Upstream{}
@@ -144,7 +144,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"profile with both upstream and group", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream:         Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
-				UpstreamGroupRef: "k8s-nodes",
+				UpstreamGroupRef: "cluster-nodes",
 				TLS:              TLSSettings{CertificateRef: "wildcard"},
 			}}
 		}, `ingressDiscovery.profiles.sso-internal.upstream: upstream and upstreamGroupRef are mutually exclusive`},
@@ -335,7 +335,7 @@ func TestResolveProfile(t *testing.T) {
 		Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 		TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
 		Middlewares: []string{"sso"},
-		AccessLists: []string{"home-vpn"},
+		AccessLists: []string{"lan-vpn"},
 	}
 	def := IngressHostTemplate{
 		Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
@@ -513,13 +513,13 @@ func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
 			Middlewares: []string{"rate-limit"},
 		},
 		"sso-internal": {
-			UpstreamGroupRef:  "k8s-nodes",
+			UpstreamGroupRef:  "cluster-nodes",
 			TLS:               TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
 			WebsocketsUpgrade: true,
 			RobotsNoIndex:     true,
 			Timeouts:          &HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7},
 			Middlewares:       []string{"sso", "rate-limit"},
-			AccessLists:       []string{"home-vpn"},
+			AccessLists:       []string{"lan-vpn"},
 			Tags:              []string{"sso"},
 			DefaultDNS:        &DNSSyncPolicy{LanDirect: true},
 		},

@@ -21,7 +21,7 @@ func testConf(mutate func(*model.Settings)) model.DockerDiscoverySettings {
 			AllowedDomainSuffixes: []string{"example.com"},
 			Template: model.IngressHostTemplate{
 				TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
-				AccessLists: []string{"home-vpn"},
+				AccessLists: []string{"lan-vpn"},
 				Tags:        []string{"docker"},
 			},
 		},
@@ -241,7 +241,7 @@ func TestDerive(t *testing.T) {
 			if host.Labels["gpm.rake.pro/managed-by"] != model.ManagedByDockerDiscovery {
 				t.Fatalf("labels %v, want the docker managed-by marker", host.Labels)
 			}
-			if host.TLS.CertificateRef != "wildcard" || strings.Join(host.AccessLists, ",") != "home-vpn" {
+			if host.TLS.CertificateRef != "wildcard" || strings.Join(host.AccessLists, ",") != "lan-vpn" {
 				t.Fatalf("chain %+v/%v, want the template's verbatim", host.TLS, host.AccessLists)
 			}
 		})
@@ -360,7 +360,7 @@ func managedHostFixture(name string, mutate func(*model.ProxyHost)) model.ProxyH
 		Domains:     []string{"app.example.com"},
 		Upstream:    model.Upstream{Scheme: "http", Host: "192.0.2.10", Port: 8080},
 		TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
-		AccessLists: []string{"home-vpn"},
+		AccessLists: []string{"lan-vpn"},
 	}
 	if mutate != nil {
 		mutate(&h)
@@ -579,7 +579,7 @@ func enabledSettings(mutate func(*model.Settings)) model.Settings {
 			AllowedDomainSuffixes: []string{"example.com"},
 			Template: model.IngressHostTemplate{
 				TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
-				AccessLists: []string{"home-vpn"},
+				AccessLists: []string{"lan-vpn"},
 				Tags:        []string{"docker"},
 			},
 		},

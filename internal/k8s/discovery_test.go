@@ -1187,7 +1187,7 @@ func TestDerivedHostInheritsUpstreamGroup(t *testing.T) {
 	}
 	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
 	settings.IngressDiscovery.Template.Upstream = model.Upstream{}
-	settings.IngressDiscovery.Template.UpstreamGroupRef = "k8s-nodes"
+	settings.IngressDiscovery.Template.UpstreamGroupRef = "cluster-nodes"
 
 	rec := &recorder{}
 	cfg := &model.Config{}
@@ -1199,7 +1199,7 @@ func TestDerivedHostInheritsUpstreamGroup(t *testing.T) {
 		t.Fatalf("upserts = %d, want 1", len(rec.upserts))
 	}
 	h := rec.upserts[0]
-	if h.UpstreamGroupRef != "k8s-nodes" {
+	if h.UpstreamGroupRef != "cluster-nodes" {
 		t.Fatalf("upstreamGroupRef = %q, want the template's group", h.UpstreamGroupRef)
 	}
 	if h.Upstream != (model.Upstream{}) {
@@ -1226,11 +1226,11 @@ func profileSettings(f *fakeAPI) model.IngressDiscoverySettings {
 			Middlewares: []string{"rate-limit"},
 		},
 		"sso-internal": {
-			UpstreamGroupRef:  "k8s-nodes",
+			UpstreamGroupRef:  "cluster-nodes",
 			TLS:               model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true, MinTLSVersion: "1.3"},
 			WebsocketsUpgrade: true,
 			Middlewares:       []string{"sso", "rate-limit"},
-			AccessLists:       []string{"home-vpn"},
+			AccessLists:       []string{"lan-vpn"},
 			DefaultDNS:        &model.DNSSyncPolicy{LanDirect: true},
 		},
 	}
@@ -1257,7 +1257,7 @@ func TestReconcileWithoutProfileAnnotationUsesTheDefaultTemplate(t *testing.T) {
 	}
 	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
 	settings.IngressDiscovery.Template.Middlewares = []string{"rate-limit"}
-	settings.IngressDiscovery.Template.AccessLists = []string{"home-vpn"}
+	settings.IngressDiscovery.Template.AccessLists = []string{"lan-vpn"}
 	cfg := &model.Config{}
 	rec := &recorder{}
 	d := newDiscoverer(f, cfg, settings, rec)
@@ -1269,7 +1269,7 @@ func TestReconcileWithoutProfileAnnotationUsesTheDefaultTemplate(t *testing.T) {
 		t.Fatalf("upserts=%d deletes=%d, want all three derived from the default template", len(rec.upserts), len(rec.deletes))
 	}
 	for _, h := range rec.upserts {
-		if strings.Join(h.Middlewares, ",") != "rate-limit" || strings.Join(h.AccessLists, ",") != "home-vpn" {
+		if strings.Join(h.Middlewares, ",") != "rate-limit" || strings.Join(h.AccessLists, ",") != "lan-vpn" {
 			t.Fatalf("%s got mw=%v al=%v, want the DEFAULT template's chain", h.Name, h.Middlewares, h.AccessLists)
 		}
 		if h.Upstream != (model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
@@ -1314,13 +1314,13 @@ func TestReconcileAppliesTheNamedProfileVerbatim(t *testing.T) {
 	if strings.Join(h.Middlewares, ",") != "sso,rate-limit" {
 		t.Fatalf("middlewares = %v, want the profile's chain in order", h.Middlewares)
 	}
-	if strings.Join(h.AccessLists, ",") != "home-vpn" {
+	if strings.Join(h.AccessLists, ",") != "lan-vpn" {
 		t.Fatalf("accessLists = %v, want the profile's", h.AccessLists)
 	}
 	if h.TLS != want.TLS {
 		t.Fatalf("tls = %+v, want the profile's %+v", h.TLS, want.TLS)
 	}
-	if h.UpstreamGroupRef != "k8s-nodes" || h.Upstream != (model.Upstream{}) {
+	if h.UpstreamGroupRef != "cluster-nodes" || h.Upstream != (model.Upstream{}) {
 		t.Fatalf("upstream = %+v / group = %q, want the profile's group and no single upstream", h.Upstream, h.UpstreamGroupRef)
 	}
 	//lint:ignore SA1019 compat read of deprecated ProxyHost.WebsocketsUpgrade in test fixture
@@ -1574,7 +1574,7 @@ func TestUndefinedProfileNamesAreAllRejected(t *testing.T) {
 		Template: model.IngressHostTemplate{
 			Upstream:    model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 			TLS:         model.TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
-			AccessLists: []string{"home-vpn"},
+			AccessLists: []string{"lan-vpn"},
 		},
 		Profiles: map[string]model.IngressHostTemplate{
 			"public-ratelimited": {
@@ -1591,8 +1591,8 @@ func TestUndefinedProfileNamesAreAllRejected(t *testing.T) {
 		wantAL  string
 		profile string
 	}{
-		{"absent", "", "", "home-vpn", model.DefaultProfileName},
-		{"whitespace only", "  \t ", "", "home-vpn", model.DefaultProfileName},
+		{"absent", "", "", "lan-vpn", model.DefaultProfileName},
+		{"whitespace only", "  \t ", "", "lan-vpn", model.DefaultProfileName},
 		{"exact", "public-ratelimited", "rate-limit", "", "public-ratelimited"},
 		{"padded exact", " public-ratelimited ", "rate-limit", "", "public-ratelimited"},
 		{"unknown", "nope", "skip", "", ""},
@@ -1688,10 +1688,10 @@ func TestReconcileDerivesTwoProfilesInOneRun(t *testing.T) {
 		t.Fatalf("public host: mw=%v al=%v, want rate-limit and no access list", pub.Middlewares, pub.AccessLists)
 	}
 	sso := got["ing-radarr.media"]
-	if strings.Join(sso.Middlewares, ",") != "sso,rate-limit" || strings.Join(sso.AccessLists, ",") != "home-vpn" {
+	if strings.Join(sso.Middlewares, ",") != "sso,rate-limit" || strings.Join(sso.AccessLists, ",") != "lan-vpn" {
 		t.Fatalf("sso host: mw=%v al=%v", sso.Middlewares, sso.AccessLists)
 	}
-	if sso.UpstreamGroupRef != "k8s-nodes" {
+	if sso.UpstreamGroupRef != "cluster-nodes" {
 		t.Fatalf("sso host upstreamGroupRef = %q, want the profile's", sso.UpstreamGroupRef)
 	}
 	def := got["ing-grafana.monitoring"]

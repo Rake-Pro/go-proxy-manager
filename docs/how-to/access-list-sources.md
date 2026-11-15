@@ -44,7 +44,7 @@ list keeps meaning what its name says.
     name: app
     domains: [app.example.com]
     upstream: {scheme: http, host: 10.0.0.40, port: 8080}
-    accessLists: [home-vpn, monitor]
+    accessLists: [lan-vpn, monitor]
     accessListsMode: any
     ```
 
@@ -59,7 +59,7 @@ list keeps meaning what its name says.
    rule and its source into the base list instead of attaching `monitor`:
 
     ```yaml
-    name: home-vpn
+    name: lan-vpn
     defaultAction: deny
     rules:
       # Unchanged LAN/VPN rules: every path, every method.
@@ -169,7 +169,7 @@ for deny-by-path).
 # What each source last resolved to.
 curl -s https://<admin>/api/access-list-sources/status -H 'Authorization: Bearer gpm_...' | jq
 # {"enabled":true,"lastRun":"...","refused":0,"sources":[
-#   {"list":"home-vpn","name":"uptimerobot","url":"https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt",
+#   {"list":"lan-vpn","name":"uptimerobot","url":"https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt",
 #    "fetchedAt":"...","entryCount":206,"lastAttempt":"..."}]}
 
 # Fetch every due source now.

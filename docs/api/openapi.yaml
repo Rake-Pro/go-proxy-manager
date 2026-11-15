@@ -2110,7 +2110,7 @@ components:
             object list such as `access`. Lower-case letters, digits and hyphens.
         query:
           type: string
-          description: The filter text as typed in the box, e.g. `-client:@home-only -status:2xx`. At
+          description: The filter text as typed in the box, e.g. `-client:@lan-only -status:2xx`. At
             most 1024 characters, one line.
     Settings:
       type: object

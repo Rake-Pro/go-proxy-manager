@@ -119,7 +119,7 @@ create or edit an `Ingress`, and gpm sits at the edge in front of everything.
 There is deliberately **no** annotation that lets an Ingress name a middleware,
 an access list, a certificate or an upstream, because such an annotation is a
 self-service privilege grant: `access-lists: ""` on your own namespace's Ingress
-would remove `home-vpn` from a hostname at the edge. Every profile is written by
+would remove `lan-vpn` from a hostname at the edge. Every profile is written by
 you, here, in the config repo; a manifest chooses among them and can never invent
 one, so a derived host is always one of a set you authored and can audit.
 
@@ -266,7 +266,7 @@ it may be used for:
 ingressDiscovery:
   profiles:
     public-ratelimited:
-      upstreamGroupRef: k8s-nodes
+      upstreamGroupRef: cluster-nodes
       tls: { certificateRef: wildcard, forceSSL: true }
       middlewares: [rate-limit]
       allowedHostnames: [example.com, paste.example.com]
@@ -303,26 +303,26 @@ ingressDiscovery:
   # The default: no middleware, everything behind the VPN access list. Any
   # Ingress that names no profile gets this - unchanged from before profiles.
   template:
-    upstreamGroupRef: k8s-nodes
+    upstreamGroupRef: cluster-nodes
     tls: { certificateRef: wildcard, forceSSL: true }
-    accessLists: [home-vpn]
+    accessLists: [lan-vpn]
     robotsNoIndex: true          # internal by default: keep it out of search
     tags: [cluster]
     defaultDNS: { lanDirect: true }
   profiles:
     # Public on purpose - rate-limited, and NO access list.
     public-ratelimited:
-      upstreamGroupRef: k8s-nodes
+      upstreamGroupRef: cluster-nodes
       tls: { certificateRef: wildcard, forceSSL: true }
       middlewares: [rate-limit]
       tags: [cluster, public]
       defaultDNS: { lanDirect: true, publicCname: true }
     # SSO-gated and VPN-restricted, and slow to answer on a cold start.
     sso-internal:
-      upstreamGroupRef: k8s-nodes
+      upstreamGroupRef: cluster-nodes
       tls: { certificateRef: wildcard, forceSSL: true }
       middlewares: [sso, rate-limit]
-      accessLists: [home-vpn]
+      accessLists: [lan-vpn]
       robotsNoIndex: true
       timeouts: { connectSeconds: 5, readSeconds: 60 }
       tags: [cluster, sso]
@@ -336,7 +336,7 @@ metadata:
     gpm.rake.pro/managed: "true"
     gpm.rake.pro/profile: "public-ratelimited"
 ---
-# radarr.example.com: sso + home-vpn.
+# radarr.example.com: sso + lan-vpn.
 metadata:
   annotations:
     gpm.rake.pro/managed: "true"

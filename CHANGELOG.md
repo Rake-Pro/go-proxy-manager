@@ -77,7 +77,7 @@ All notable changes to go-proxy-manager are documented here. The format follows
   network, a bare IP matches exactly (an IPv4-mapped IPv6 client counts as
   IPv4), and `@name` stands for the networks an access list allows (its
   `cidr` rules plus what its named sources last fetched), so
-  `-client:@home-only` shows only what reached the proxy from outside your
+  `-client:@lan-only` shows only what reached the proxy from outside your
   own networks and `-client:@uptimerobot` hides a monitor fed by its
   published IP list. The `client:` suggestions offer the `@` lists first.
 - `GET /api/access-list-networks` (scope `access-lists:read`) returns the

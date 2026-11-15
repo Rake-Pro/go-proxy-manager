@@ -161,7 +161,7 @@ Every list has the same filter box.
 | `status:5xx` | Access Logs: a status class; `status:404` a code |
 | `status:4xx,5xx` | Alternatives: the term holds when any of them does |
 | `client:10.0.0.0/8` | Access Logs: the client address inside a network; an IP (`client:192.0.2.55`) matches exactly |
-| `-client:@home-only` | Access Logs: every client outside the networks the `home-only` access list allows |
+| `-client:@lan-only` | Access Logs: every client outside the networks the `lan-only` access list allows |
 | `country:RU` | Access Logs: the client's ISO country code, when a GeoIP database is loaded |
 
 - Typing suggests the field names, then the values present in the list; Enter
@@ -215,8 +215,8 @@ Every list has the same filter box.
   list fed by a monitoring provider's published IP list hides that monitor
   with `-client:@name`. Anything else is a substring of the logged address, so
   `client:192.0.2.` still works. To review what reached a host from outside
-  your own networks, exclude the list that names them: `-client:@home-only`,
-  or several at once with `-client:@home-only,@home-vpn`. The suggestions
+  your own networks, exclude the list that names them: `-client:@lan-only`,
+  or several at once with `-client:@lan-only,@lan-vpn`. The suggestions
   under `client:` offer the `@` lists first.
 
 ## Certificates

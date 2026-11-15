@@ -30,10 +30,10 @@ func sourceLedger(list, source string, entries ...string) model.AccessListSource
 // The headline case: a host that is otherwise LAN-only lets a monitoring feed
 // reach its health endpoints and nothing else.
 func TestAccessListPathScopedSourceRule(t *testing.T) {
-	installSources(t, sourceLedger("home-vpn", "uptimerobot", "203.0.113.0/24", "2001:db8::/32"))
+	installSources(t, sourceLedger("lan-vpn", "uptimerobot", "203.0.113.0/24", "2001:db8::/32"))
 
 	al := model.AccessList{
-		ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 		DefaultAction: model.ActionDeny,
 		Sources:       []model.AccessListSource{{Name: "uptimerobot", URL: "https://example.com/i.txt"}},
 		Rules: []model.IPRule{
@@ -159,10 +159,10 @@ func TestAccessListPathRulesAreAllowOnly(t *testing.T) {
 // listed path can be smuggled past - and, because path rules are allow-only,
 // that every near-miss falls through to defaultAction (deny), never past it.
 func TestAccessListPathMatchingIsOnTheNormalizedPath(t *testing.T) {
-	installSources(t, sourceLedger("home-vpn", "uptimerobot", "203.0.113.0/24"))
+	installSources(t, sourceLedger("lan-vpn", "uptimerobot", "203.0.113.0/24"))
 
 	al := model.AccessList{
-		ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 		DefaultAction: model.ActionDeny,
 		Sources:       []model.AccessListSource{{Name: "uptimerobot", URL: "https://example.com/i.txt"}},
 		Rules: []model.IPRule{
@@ -223,7 +223,7 @@ func TestAccessListUnresolvedSourceMatchesNothing(t *testing.T) {
 	installSources(t, model.AccessListSourceLedger{})
 
 	al := model.AccessList{
-		ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 		DefaultAction: model.ActionDeny,
 		Sources:       []model.AccessListSource{{Name: "uptimerobot", URL: "https://example.com/i.txt"}},
 		Rules: []model.IPRule{
@@ -248,7 +248,7 @@ func TestAccessListSourceIsScopedToItsList(t *testing.T) {
 	installSources(t, sourceLedger("other-list", "uptimerobot", "203.0.113.0/24"))
 
 	al := model.AccessList{
-		ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 		DefaultAction: model.ActionDeny,
 		Sources:       []model.AccessListSource{{Name: "uptimerobot", URL: "https://example.com/i.txt"}},
 		Rules:         []model.IPRule{{Action: model.ActionAllow, Source: "uptimerobot"}},
