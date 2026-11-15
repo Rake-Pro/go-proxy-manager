@@ -38,7 +38,10 @@ MFA the identity provider enforces.
    git-backed config, and neither can be resolved by a `${ENV:...}` reference.
 4. Restart the container. The startup log prints `local admin TOTP is enabled`.
    A secret that is not usable base32 is fatal: gpm refuses to start rather than
-   silently dropping the second factor.
+   silently dropping the second factor. A `_FILE` that is set but cannot be read
+   (missing mount, mode too strict for the non-root user) is not fatal, because
+   the same process serves the proxy: gpm logs an error and refuses every local
+   admin login until the file is readable and the container is restarted.
 5. Sign in. The password form now leads to a second page asking for the 6-digit
    code.
 
@@ -57,6 +60,7 @@ MFA the identity provider enforces.
 |---|---|---|
 | Every code is rejected | Server and phone clocks differ by more than 30 seconds; only one step either side is accepted | Fix time sync (NTP) on the host |
 | Every code is rejected, and the log says the secret is not usable base32 | gpm refuses to start with an unparseable secret, so this is a stale container | Regenerate with `gpm totp-secret` and restart |
+| Password is always refused, and the log says the local admin TOTP secret is unreadable | `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` points at a file the `gpm` user cannot read; local login is refused rather than falling back to the password alone | Fix the mount or the file mode and restart |
 | "Wrong code." on a code that just worked | Codes are single-use: the accepted step cannot be replayed | Wait for the next 30-second step |
 | "Too many attempts. Try again in N minutes." (HTTP 429) | Five failed attempts (wrong password **or** wrong code) from one client IP, or twenty against one username from any clients, within 15 minutes | Wait the minutes shown, or restart gpm: the lockout and the used-code ledger are in memory only |
 | Locked out with no authenticator (phone lost) | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*` and restart to sign in with the password alone, then enrol a new secret |

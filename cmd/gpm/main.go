@@ -25,6 +25,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/dnssync"
 	"github.com/Rake-Pro/go-proxy-manager/internal/docker"
@@ -89,18 +90,15 @@ func main() {
 		return
 	}
 
-	// The bcrypt admin hash is read only from the environment / _FILE secret,
-	// never a CLI flag (a flag value is visible in the process table).
-	localHash := secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH")
-
-	// Optional second factor for the local admin, read the same way as the hash
-	// (env or _FILE, never a flag). Its presence enables TOTP; a malformed value
-	// is fatal rather than silently disabling the factor an operator believes is
-	// protecting them. Generate one with: gpm totp-secret
-	localTOTP := secretFromEnv("GPM_LOCAL_ADMIN_TOTP_SECRET")
-
 	logging.Setup(*logLevel, *logConsole)
 	log.Info().Str("build", version.String()).Msg("starting go-proxy-manager")
+
+	// The bcrypt admin hash is read only from the environment / _FILE secret,
+	// never a CLI flag (a flag value is visible in the process table). The
+	// optional TOTP second factor is read the same way. Its presence enables
+	// TOTP; a malformed value is fatal rather than silently disabling the factor
+	// an operator believes is protecting them. Generate one with: gpm totp-secret
+	localHash, localTOTP := localAdminSecrets()
 
 	if localTOTP != "" {
 		if _, err := auth.NormalizeTOTPSecret(localTOTP); err != nil {
@@ -304,6 +302,9 @@ func main() {
 	// server's login and TOTP lockout buckets key on the same derivation, so an
 	// admin UI fronted by a gpm proxy host still throttles per real client.
 	dataplane.SetTrustedProxies(settings.TrustedProxies)
+	if adminEdgeHopUntrusted(settings, *adminAddr) {
+		log.Warn().Msg("settings.adminEdge is enabled but settings.trustedProxies does not cover the loopback hop to the admin listener: every request through the edge shares one client address for the local-login lockout; add 127.0.0.1/32 and ::1/128 to settings.trustedProxies")
+	}
 
 	// Settings-level custom error pages, compiled before the first Reload for
 	// the same reason as PROXY protocol above: it is consulted live by every
@@ -1142,17 +1143,35 @@ func envDur(key string, def time.Duration) time.Duration {
 // secretFromEnv reads a secret value, preferring <key>_FILE (a file path, e.g. a
 // mounted Docker secret) over the plain <key> env var. Reading from a file keeps
 // secrets like the bcrypt admin hash - whose $ signs are otherwise mangled by
-// shell/compose interpolation - out of the environment entirely.
-func secretFromEnv(key string) string {
+// shell/compose interpolation - out of the environment entirely. A <key>_FILE
+// that is set but cannot be read is an error, never an empty value.
+func secretFromEnv(key string) (string, error) {
 	if p := os.Getenv(key + "_FILE"); p != "" {
 		b, err := os.ReadFile(p) //nolint:gosec // G304: path is the operator-set <KEY>_FILE env var (mounted secret) read at startup, not request input
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot read %s_FILE (%s): %v\n", key, p, err)
-			return ""
+			return "", fmt.Errorf("%s_FILE: %w", key, err)
 		}
-		return strings.TrimSpace(string(b))
+		return strings.TrimSpace(string(b)), nil
 	}
-	return os.Getenv(key)
+	return os.Getenv(key), nil
+}
+
+// localAdminSecrets reads the local admin's bcrypt hash and TOTP secret. An
+// unreadable secret file fails closed without stopping the process, which also
+// serves the data plane: an unreadable hash leaves no usable local credential,
+// and an unreadable TOTP secret drops the hash too, so local login is refused
+// instead of falling back to the password alone.
+func localAdminSecrets() (hash, totp string) {
+	hash, err := secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH")
+	if err != nil {
+		log.Error().Err(err).Msg("local admin password hash is unreadable; local admin login is refused")
+	}
+	totp, err = secretFromEnv("GPM_LOCAL_ADMIN_TOTP_SECRET")
+	if err != nil {
+		log.Error().Err(err).Msg("local admin TOTP secret is unreadable; local admin login is refused")
+		return "", ""
+	}
+	return hash, totp
 }
 
 // dnsLedgerStore adapts the config store to the dnssync.Ledger interface. It
@@ -1200,6 +1219,18 @@ func (a accessLedgerStore) Save(ctx context.Context, l model.AccessListSourceLed
 // the admin edge: the listener's own host when it binds one, 127.0.0.1 for a
 // wildcard bind (":8081", "0.0.0.0:8081", "[::]:8081"). A port that does not
 // parse leaves the port 0, which LoadCompiled treats as "no admin edge".
+// adminEdgeHopUntrusted reports whether the admin edge is on while the address
+// it reaches the admin listener from is not a trusted proxy, so the admin
+// listener sees every edge request as coming from that one address. Read after
+// dataplane.SetTrustedProxies.
+func adminEdgeHopUntrusted(s model.Settings, adminAddr string) bool {
+	if !s.AdminEdge.Enabled {
+		return false
+	}
+	ip := net.ParseIP(adminLoopbackUpstream(adminAddr).Host)
+	return ip != nil && !clientip.InNets(ip, clientip.Trusted())
+}
+
 func adminLoopbackUpstream(addr string) model.Upstream {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {

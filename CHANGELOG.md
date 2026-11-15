@@ -180,6 +180,32 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   it, and an entry that overlaps a non-public range is refused even when its
   network address is public (`172.0.0.0/8` covers `172.16.0.0/12`).
 
+Admin plane:
+
+- Only the OIDC providers listed in `adminAuth.providers` can start or
+  complete an admin-panel login; any other configured provider is answered
+  as an unknown name.
+- An admin SSO login no longer keeps server-side state per login start: the
+  state, nonce, PKCE verifier and return path travel in the signed, HttpOnly
+  `gpm_oidc_state` cookie, cleared at the callback. The per-client and global
+  pending-login caps are gone, so login starts from one shared address (the
+  edge's loopback hop) can no longer refuse everyone else's. The signing key is
+  random per process: a login started before a restart or upgrade fails once
+  at its callback and is simply started again. With `adminEdge` enabled and
+  the loopback hop not in `settings.trustedProxies`, a warning is logged at
+  startup.
+- Admin sessions end 7 days after sign-in; sliding expiry no longer extends
+  them past that.
+- Webhook and notification delivery error text no longer repeats the receiver
+  URL (whose path is the credential for Discord, Slack and ntfy targets), so
+  the status routes and the test result no longer expose it.
+- A `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` that is set but unreadable is logged at
+  error level and refuses every local admin login instead of dropping to the
+  password alone; an unreadable `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` is now
+  logged at error level too. Neither stops the process.
+- The admin listener closes idle keep-alive connections after 120 s, and the
+  local login and TOTP form bodies are capped at 64 KiB.
+
 ### Changed
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an

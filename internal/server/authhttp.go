@@ -1,7 +1,7 @@
 package server
 
 import (
-	"crypto/subtle"
+	"errors"
 	"fmt"
 	"html/template"
 	"net"
@@ -167,17 +167,17 @@ var totpPage = template.Must(template.New("totp").Parse(`<!doctype html>
 </main>
 </body></html>`))
 
-// startLogin begins an OIDC flow: it sets the state-binding cookie and redirects
-// the browser to the IdP. The callback verifies the cookie against the returned
-// state to reject flows not started by this browser.
+// startLogin begins an OIDC flow: it sets the signed login-state cookie and
+// redirects the browser to the IdP. The callback verifies the cookie against
+// the returned state to reject flows not started by this browser.
 func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, idp, returnTo string) {
-	authURL, state, err := s.authn.BeginLogin(r.Context(), idp, returnTo, clientIPKey(r))
+	authURL, loginState, err := s.authn.BeginLogin(r.Context(), idp, returnTo)
 	if err != nil {
 		log.Warn().Str("idp", idp).Err(err).Msg("begin login failed")
 		s.renderLoginPage(w, http.StatusBadGateway, returnTo, "", msgSSOUnavailable)
 		return
 	}
-	s.authn.SetLoginStateCookie(w, r, state)
+	s.authn.SetLoginStateCookie(w, r, loginState)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -258,31 +258,29 @@ func (s *Server) lockoutMessage(key, username string) string {
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state, code := q.Get("state"), q.Get("code")
-	// The state cookie is single use whatever happens next, and a pending login
-	// behind a callback that cannot complete is dropped with it.
+	// The state cookie is single use whatever happens next.
 	cookieState := s.authn.LoginStateCookie(r)
 	s.authn.ClearLoginStateCookie(w, r)
 	// The IdP's error code goes to the log, trimmed, not to the page: it is
 	// attacker-supplied text on a URL anyone can send.
 	if e := q.Get("error"); e != "" {
 		log.Warn().Str("idp_error", idpErrorForLog(e)).Msg("oidc callback refused by the identity provider")
-		s.authn.AbandonLogin(state)
 		s.renderLoginPage(w, http.StatusUnauthorized, "/", "", msgSSOFailed)
 		return
 	}
 	if state == "" || code == "" {
-		s.authn.AbandonLogin(state)
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOIncomplete)
 		return
 	}
 	// Bind the flow to this browser: the state echoed by the IdP must match the
-	// cookie set at login start. This blocks login-CSRF / session-fixation where
-	// an attacker injects a callback URL carrying their own (server-valid) state.
-	if cookieState == "" || subtle.ConstantTimeCompare([]byte(cookieState), []byte(state)) != 1 {
+	// signed login state in the cookie set at login start. This blocks
+	// login-CSRF / session-fixation where an attacker injects a callback URL
+	// carrying the state of a login they started themselves.
+	sess, returnTo, err := s.authn.CompleteLogin(r.Context(), cookieState, state, code)
+	if errors.Is(err, auth.ErrLoginState) {
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgSSOWrongBrowser)
 		return
 	}
-	sess, returnTo, err := s.authn.CompleteLogin(r.Context(), state, code)
 	if err != nil {
 		log.Warn().Err(err).Msg("oidc callback failed")
 		s.renderLoginPage(w, http.StatusUnauthorized, "/", "", msgSSOFailed)
@@ -292,7 +290,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, sanitizeReturnTo(returnTo), http.StatusFound)
 }
 
+// maxLoginFormBytes caps the body of the unauthenticated login form posts; the
+// largest legitimate one is a username, a password and a return path.
+const maxLoginFormBytes = 64 << 10
+
 func (s *Server) handleLocalLogin(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginFormBytes)
 	if err := r.ParseForm(); err != nil {
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgBadForm)
 		return
@@ -349,6 +352,7 @@ func (s *Server) failureMessage(key, username, msg string) string {
 // exactly like guessing the password. The pending token is spent either way,
 // so every failure goes back to step one.
 func (s *Server) handleLocalTOTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginFormBytes)
 	if err := r.ParseForm(); err != nil {
 		s.renderLoginPage(w, http.StatusBadRequest, "/", "", msgBadForm)
 		return
@@ -394,9 +398,9 @@ func (s *Server) renderTOTPPage(w http.ResponseWriter, pending, returnTo, userna
 // exactly the way the proxy listeners derive it, from settings.trustedProxies (see
 // internal/clientip). RemoteAddr alone is wrong for the supported deployment in
 // which the admin listener is bound to loopback and fronted by a gpm proxy host
-// - every attempt then arrives from one address, so the login lockout, the TOTP
-// throttle and the pending-login cap all collapse into a single global bucket
-// and one attacker locks out every administrator.
+// - every attempt then arrives from one address, so the login lockout and the
+// TOTP throttle collapse into a single global bucket and one attacker locks out
+// every administrator.
 //
 // An untrusted peer's X-Forwarded-For is not read at all, so a direct client
 // cannot mint itself a fresh bucket per attempt. With no trusted proxies

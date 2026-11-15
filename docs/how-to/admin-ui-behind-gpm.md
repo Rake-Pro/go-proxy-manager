@@ -25,9 +25,9 @@ that needs something the setting cannot express (a path-scoped location, say).
 > **Set `settings.trustedProxies` before you proxy the admin panel.** It must
 > list the address the admin listener sees for gpm's own proxy listeners, for a
 > loopback bind, `127.0.0.1/32` and/or `::1/128`. Without it every admin login
-> attempt is attributed to that one address, and the login lockout, the TOTP
-> throttle and the pending-login cap all become a single global bucket: one
-> attacker can lock out every administrator. See
+> attempt is attributed to that one address, and the login lockout and the TOTP
+> throttle become a single global bucket: one attacker can lock out every
+> administrator. See
 > [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers).
 >
 > ```yaml

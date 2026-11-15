@@ -28,6 +28,12 @@ It is **not a proxy host**:
 The direct admin listener keeps working unchanged: this is a second door, not a
 replacement for the break-glass one.
 
+The hop to the admin listener comes from loopback, so add `127.0.0.1/32` and
+`::1/128` to [`settings.trustedProxies`](trusted-proxies.md); without them every
+request through the front door shares one client address for the local-login
+lockout, and gpm logs a warning at startup naming `settings.adminEdge` and
+`settings.trustedProxies`.
+
 | Field | Type | Notes |
 |-------|------|-------|
 | <span id="settings-admin-edge-enabled"></span> `adminEdge.enabled` | bool | Turn the front door on. Needs `externalBaseURL`, whose hostname is the one served. |

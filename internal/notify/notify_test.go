@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -568,5 +570,37 @@ func TestNilNotifierIsNoop(t *testing.T) {
 	}
 	if _, err := n.Test(context.Background(), "x"); !errors.Is(err, ErrUnknownTarget) {
 		t.Fatalf("nil Notifier Test() error = %v, want ErrUnknownTarget", err)
+	}
+}
+
+// A transport failure is reported by its cause only: net/http's *url.Error
+// text repeats the request URL, and an ntfy topic or Discord webhook path is
+// the credential.
+func TestTransportErrorOmitsReceiverURL(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	const topic = "private-topic-token"
+	n := New(func() []model.NotificationTarget {
+		return []model.NotificationTarget{{Name: "phone", Type: model.NotificationTypeNtfy, URL: "http://" + addr + "/" + topic}}
+	})
+	t.Cleanup(n.Close)
+	res, err := n.Test(context.Background(), "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || res.Error == "" {
+		t.Fatalf("a refused connection must be reported as a failure: %+v", res)
+	}
+	if strings.Contains(res.Error, topic) {
+		t.Fatalf("test result error repeats the receiver URL: %q", res.Error)
+	}
+	for _, dl := range n.Status() {
+		if strings.Contains(dl.Error, topic) {
+			t.Fatalf("status error repeats the receiver URL: %q", dl.Error)
+		}
 	}
 }

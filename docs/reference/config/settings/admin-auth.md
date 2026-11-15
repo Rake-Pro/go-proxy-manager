@@ -5,7 +5,7 @@ rules that keep at least one login method usable.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| <span id="settings-admin-auth-providers"></span> `adminAuth.providers` | []string | Identity-provider names allowed to log into the admin panel. Only an `oidc` provider renders a sign-in button; a `forward-auth` or `auth-request` provider gates proxy hosts through an auth middleware and shows nothing here. |
+| <span id="settings-admin-auth-providers"></span> `adminAuth.providers` | []string | Identity-provider names allowed to log into the admin panel. Only an `oidc` provider renders a sign-in button; a `forward-auth` or `auth-request` provider gates proxy hosts through an auth middleware and shows nothing here. An `oidc` provider that is not listed cannot start or complete a panel login (`/auth/login?idp=<name>` answers as for an unknown name). |
 | <span id="settings-admin-auth-local-login-enabled"></span> `adminAuth.localLoginEnabled` | bool | Keep username/password login available (anti-lockout). Default true. It only grants access when `GPM_LOCAL_ADMIN_USER` and a bcrypt hash are also set: see [Environment variables and flags](../../env-vars-and-flags.md). |
 | <span id="settings-admin-auth-sso-only"></span> `adminAuth.ssoOnly` | bool | Disable local login entirely. Recovery from an SSO outage is by redeploying with local login re-enabled. |
 

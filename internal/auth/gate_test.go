@@ -58,18 +58,3 @@ func TestLoginGateSweepsExpiredWhenSaturated(t *testing.T) {
 		t.Fatal("expired entries must be swept so a new client gets in")
 	}
 }
-
-func TestAbandonLoginDropsPending(t *testing.T) {
-	a := NewAuthenticator(Options{Store: testStore(t)})
-	a.pmu.Lock()
-	a.pending["st"] = pendingLogin{expires: time.Now().Add(time.Minute)}
-	a.pmu.Unlock()
-	a.AbandonLogin("st")
-	a.AbandonLogin("")
-	a.pmu.Lock()
-	_, ok := a.pending["st"]
-	a.pmu.Unlock()
-	if ok {
-		t.Fatal("an abandoned login must be gone")
-	}
-}
