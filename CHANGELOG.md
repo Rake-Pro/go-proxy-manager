@@ -126,6 +126,24 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   link-local guard refuses zoned addresses; the release workflow only
   runs from `main` and only builds a tag that sits on `main`, and the docs
   workflow grants Pages permissions per job. (#51)
+- A request target not in origin form is answered `400` before routing on
+  both listeners.
+- A proxied response write that makes no progress for 60 s (a client that
+  stopped reading) fails and frees its copy buffer and upstream request;
+  each write is bounded on its own, so idle server-sent-event streams, slow
+  but steady readers and trailers are unaffected. HTTP/2 connections get a
+  60 s write-byte timeout.
+- Underscore spellings of stripped request headers (`X_Forwarded_User`,
+  `Remote_User`, `X_Client_Cert_Subject`, ...) are removed under the same
+  trust tier as the hyphen form; other underscore headers pass. More
+  forwarded-family headers are stripped unless the peer is one of the host's
+  trusted proxies: forwarded scheme, port, prefix, server, path and host
+  (`X-Forwarded-Port`, `X-Forwarded-Prefix`, `X-Original-Host`, ...), more
+  client-address headers (`Fastly-Client-IP`, ...) and front-proxy
+  client-certificate headers (`X-Forwarded-Client-Cert`, `Ssl-Client-Cert`,
+  ...). A trusted proxy keeps forwarding them as before.
+- A `setRequest` header of a headers middleware can no longer be removed by
+  naming it in the client's `Connection` header.
 
 ### Changed
 

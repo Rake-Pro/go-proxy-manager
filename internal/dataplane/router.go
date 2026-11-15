@@ -542,12 +542,15 @@ func (hh *hostHandler) stripUntrustedIdentity(r *http.Request) {
 	for _, name := range baselineOverrideHeaders {
 		r.Header.Del(name)
 	}
-	if ip == nil || !ipInNets(ip, hh.trustedProxies) {
+	addressTrusted := ip != nil && ipInNets(ip, hh.trustedProxies)
+	if !addressTrusted {
 		for _, name := range clientAddressHeaders {
 			r.Header.Del(name)
 		}
 	}
-	if ip != nil && ipInNets(ip, hh.trustedNets) {
+	identityTrusted := ip != nil && ipInNets(ip, hh.trustedNets)
+	stripUnderscoreSpellings(r.Header, hh.identityHeaders, addressTrusted, identityTrusted)
+	if identityTrusted {
 		return // a proxy this host trusts may assert identity headers
 	}
 	stripIdentityHeaders(r.Header, hh.identityHeaders)
@@ -583,6 +586,10 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	if !validHostHeader(r.Host) {
 		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
+	if !originFormTarget(r) {
+		http.Error(w, "bad request target", http.StatusBadRequest)
 		return
 	}
 	name := hostKey(r.Host)
@@ -655,6 +662,14 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no such host", http.StatusNotFound)
 }
 
+// originFormTarget reports false for a request target not in origin form
+// (URL.Opaque set), which is refused before routing: routing and every
+// path-scoped tier read URL.Path, which is empty for it. Asterisk-form
+// ("OPTIONS *") and absolute-form targets leave URL.Opaque empty.
+func originFormTarget(r *http.Request) bool {
+	return r.URL.Opaque == ""
+}
+
 // validHostHeader accepts a Host header the router can route and forward
 // safely: a non-empty name, optionally with a numeric port in range. The
 // router routes on the name alone (hostKey), so without this a port part of
@@ -711,6 +726,10 @@ func validHostHeader(h string) bool {
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if !validHostHeader(r.Host) {
 		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
+	if !originFormTarget(r) {
+		http.Error(w, "bad request target", http.StatusBadRequest)
 		return
 	}
 	name := hostKey(r.Host)
