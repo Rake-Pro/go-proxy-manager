@@ -144,6 +144,28 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   ...). A trusted proxy keeps forwarding them as before.
 - A `setRequest` header of a headers middleware can no longer be removed by
   naming it in the client's `Connection` header.
+- A guard trigger's `methods` match the request method in any letter case
+  (`post` and `Post` fire a `POST` trigger), as the access-list tier already
+  did.
+- A host's `minTLSVersion` (or the fleet floor) is enforced for the host a
+  request is routed to, not only for the SNI of the handshake: a request whose
+  `Host` names a host with a higher floor than the connection negotiated gets
+  `421` with `Connection: close`, like the mTLS gate.
+- An mTLS host re-checks on an open connection that the client certificate's
+  verified chain still ends in the host's current client CA. After a reload
+  that re-points `caRef` or removes the CA certificate from `caPEM`, the next
+  request on a connection verified under the old CA gets `421` with
+  `Connection: close` (checked once per connection per reload).
+- UDP stream hosts: one source address (IPv6 by /64) may hold at most 64 of a
+  listener's 4096 sessions. A full table lets a new source replace the
+  session that was silent the longest only if it has had no client traffic for
+  30 s; otherwise the new source is dropped as before. TCP stream hosts in
+  `tls.mode: terminate` complete the TLS handshake within 10 s of the
+  ClientHello before the backend is dialled.
+- `gpm_http_requests_total{method}` carries only `GET`, `HEAD`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `OPTIONS`, `CONNECT` or `other`, so request methods sent
+  by clients cannot use up the series budget. Any other method (including
+  `TRACE` and non-upper-case spellings) is counted under `other`.
 
 ### Changed
 

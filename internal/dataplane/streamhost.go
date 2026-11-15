@@ -20,7 +20,26 @@ const (
 	streamDialTimeout = 10 * time.Second
 	udpSessionIdle    = 60 * time.Second
 	udpBufSize        = 64 * 1024
-	maxUDPSessions    = 4096 // per listener; bounds spoofed-source memory growth
+)
+
+// Stream limits. They are vars, not consts, only so tests can shrink them.
+//
+//   - streamTLSHandshakeTimeout bounds a terminate-mode TLS handshake after
+//     the ClientHello was peeked; the backend is dialled only once it is done.
+//   - maxUDPSessions bounds the table per listener (spoofed-source memory
+//     growth). When it is full, a new source may take the slot of the least
+//     recently active session only if that session has been silent for at
+//     least udpEvictIdle; otherwise the new source is dropped, so a flood from
+//     new (possibly spoofed) sources cannot close sessions that are in use.
+//   - udpEvictIdle is above common UDP keepalive intervals (25 s) and below
+//     the udpSessionIdle expiry.
+//   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /64)
+//     may hold inside it, so a single source cannot fill the table.
+var (
+	streamTLSHandshakeTimeout = 10 * time.Second
+	maxUDPSessions            = 4096
+	maxUDPSessionsPerSource   = 64
+	udpEvictIdle              = 30 * time.Second
 )
 
 // streamManager runs the raw TCP/UDP forwarders for StreamHosts. It lives on the
@@ -411,6 +430,26 @@ func (f *tcpForwarder) handle(client net.Conn) {
 		return
 	}
 
+	var front net.Conn = client
+	if len(prefix) > 0 {
+		front = &prefixConn{Conn: client, prefix: prefix}
+	}
+	if target.tlsMode == model.StreamTLSTerminate && target.tlsConf != nil {
+		// Terminate at gpm: the backend receives plaintext. The handshake is
+		// completed under a deadline before the backend is dialled, so a client
+		// that stalls mid-handshake holds no backend connection.
+		tc := tls.Server(front, target.tlsConf)
+		ctx, cancel := context.WithTimeout(context.Background(), streamTLSHandshakeTimeout)
+		err := tc.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			log.Debug().Int("port", f.port).Str("streamHost", target.name).Str("client", peerKey(clientIP)).Err(err).
+				Msg("stream: tls handshake failed")
+			return
+		}
+		front = tc
+	}
+
 	backend, err := net.DialTimeout("tcp", target.addr, streamDialTimeout)
 	if err != nil {
 		log.Warn().Int("port", f.port).Str("target", target.addr).Err(err).Msg("stream: tcp dial failed")
@@ -420,15 +459,6 @@ func (f *tcpForwarder) handle(client net.Conn) {
 	if mh := metricsHook(); mh != nil {
 		mh.StreamOpened(target.name)
 		defer mh.StreamClosed(target.name)
-	}
-	var front net.Conn = client
-	if len(prefix) > 0 {
-		front = &prefixConn{Conn: client, prefix: prefix}
-	}
-	if target.tlsMode == model.StreamTLSTerminate && target.tlsConf != nil {
-		// Terminate at gpm: the backend receives plaintext. The handshake runs
-		// lazily on the first copy below.
-		front = tls.Server(front, target.tlsConf)
 	}
 	// Bidirectional copy. When either side ends, the deferred Close on both conns
 	// unblocks the other io.Copy so the goroutine exits.
@@ -447,6 +477,8 @@ type udpForwarder struct {
 	closed   atomic.Bool
 	mu       sync.Mutex
 	sessions map[string]*udpSession // client addr -> backend session
+	// perSource counts the sessions of each source (ipBucketKey), guarded by mu.
+	perSource map[string]int
 }
 
 type udpSession struct {
@@ -456,6 +488,8 @@ type udpSession struct {
 	// active-connection gauge is decremented against the same label it was
 	// incremented against even if a reload re-points the port meanwhile.
 	host string
+	// src is the session's source key in udpForwarder.perSource.
+	src string
 	// done makes teardown idempotent. A session can be torn down from three
 	// places at once - the idle reaper, the backend read loop ending, and
 	// stop() - and the pre-existing double Close was harmless only because
@@ -469,7 +503,7 @@ func startUDPForwarder(port int, target streamTarget) (*udpForwarder, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &udpForwarder{port: port, pc: pc, sessions: map[string]*udpSession{}}
+	f := &udpForwarder{port: port, pc: pc, sessions: map[string]*udpSession{}, perSource: map[string]int{}}
 	f.target.Store(&target)
 	go f.readLoop()
 	go f.reapLoop()
@@ -492,13 +526,45 @@ func (f *udpForwarder) closeSession(s *udpSession) {
 	}
 }
 
+// dropLocked removes s from the table and releases its source slot. f.mu must
+// be held. A key that was meanwhile reused by another session is left alone.
+func (f *udpForwarder) dropLocked(key string, s *udpSession) {
+	if f.sessions[key] != s {
+		return
+	}
+	delete(f.sessions, key)
+	if f.perSource[s.src]--; f.perSource[s.src] <= 0 {
+		delete(f.perSource, s.src)
+	}
+}
+
+// evictOldestLocked closes the session whose client was silent the longest, to
+// make room for a new source when the table is full, provided it has been
+// silent for at least udpEvictIdle. It reports whether a slot was freed. f.mu
+// must be held.
+func (f *udpForwarder) evictOldestLocked() bool {
+	var oldKey string
+	var old *udpSession
+	for k, s := range f.sessions {
+		if old == nil || s.last.Load() < old.last.Load() {
+			oldKey, old = k, s
+		}
+	}
+	if old == nil || old.last.Load() > time.Now().Add(-udpEvictIdle).UnixNano() {
+		return false
+	}
+	f.dropLocked(oldKey, old)
+	f.closeSession(old)
+	return true
+}
+
 func (f *udpForwarder) stop() {
 	f.closed.Store(true)
 	_ = f.pc.Close()
 	f.mu.Lock()
 	for k, s := range f.sessions {
 		f.closeSession(s)
-		delete(f.sessions, k)
+		f.dropLocked(k, s)
 	}
 	f.mu.Unlock()
 }
@@ -530,9 +596,14 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 			}
 			return
 		}
-		if len(f.sessions) >= maxUDPSessions {
+		src := ipBucketKey(addrIP(clientAddr))
+		if f.perSource[src] >= maxUDPSessionsPerSource {
 			f.mu.Unlock()
-			return // session table full; drop (anti-amplification)
+			return // this source already holds its share of the table
+		}
+		if len(f.sessions) >= maxUDPSessions && !f.evictOldestLocked() {
+			f.mu.Unlock()
+			return // table full of active sessions; drop (anti-amplification)
 		}
 		backend, err := net.DialTimeout("udp", target.addr, streamDialTimeout)
 		if err != nil {
@@ -540,8 +611,11 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 			log.Warn().Int("port", f.port).Err(err).Msg("stream: udp dial failed")
 			return
 		}
-		s = &udpSession{backend: backend, host: target.name}
+		s = &udpSession{backend: backend, host: target.name, src: src}
+		// Stamped before it is visible, so eviction never sees a zero time.
+		s.last.Store(time.Now().UnixNano())
 		f.sessions[key] = s
+		f.perSource[src]++
 		if mh := metricsHook(); mh != nil {
 			mh.StreamOpened(s.host)
 		}
@@ -563,9 +637,7 @@ func (f *udpForwarder) backendToClient(clientAddr net.Addr, key string, s *udpSe
 		_, _ = f.pc.WriteTo(buf[:n], clientAddr)
 	}
 	f.mu.Lock()
-	if f.sessions[key] == s {
-		delete(f.sessions, key)
-	}
+	f.dropLocked(key, s)
 	f.mu.Unlock()
 	f.closeSession(s)
 }
@@ -587,7 +659,7 @@ func (f *udpForwarder) reapLoop() {
 		for k, s := range f.sessions {
 			if s.last.Load() < cutoff {
 				f.closeSession(s)
-				delete(f.sessions, k)
+				f.dropLocked(k, s)
 			}
 		}
 		f.mu.Unlock()

@@ -382,6 +382,47 @@ func (a *clientCAAnchor) chainRevoked(chains [][]*x509.Certificate) bool {
 	return false
 }
 
+// connAnchorKey keys the per-connection record of the anchor a connection's
+// verified client chain was last confirmed against (see anchorsConn).
+type connAnchorKey struct{}
+
+// withConnAnchorCache is the listener's ConnContext: it gives every connection
+// an empty anchor record.
+func withConnAnchorCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, connAnchorKey{}, new(atomic.Pointer[clientCAAnchor]))
+}
+
+// anchorsConn reports whether at least one verified chain ends in one of this
+// anchor's certificates. A chain is fixed at the handshake, while a reload may
+// re-point or edit the host's client CA, so a connection verified under a CA
+// the host no longer trusts must not keep its access. Anchors are rebuilt on
+// every reload, so the result is cached per connection (in ctx, when the
+// listener provided a record) keyed by the anchor pointer.
+func (a *clientCAAnchor) anchorsConn(ctx context.Context, chains [][]*x509.Certificate) bool {
+	if a == nil {
+		return false
+	}
+	seen, _ := ctx.Value(connAnchorKey{}).(*atomic.Pointer[clientCAAnchor])
+	if seen != nil && seen.Load() == a {
+		return true
+	}
+	for _, chain := range chains {
+		if len(chain) == 0 {
+			continue
+		}
+		root := chain[len(chain)-1].Raw
+		for _, iss := range a.issuers {
+			if bytes.Equal(root, iss.Raw) {
+				if seen != nil {
+					seen.Store(a)
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // watchCRLs polls every configured CRL file's mtime until ctx is cancelled,
 // reloading the ones that changed. Callers run it in its own goroutine.
 func watchCRLs(ctx context.Context, interval time.Duration) {

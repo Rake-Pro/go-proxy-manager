@@ -573,6 +573,11 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 	if req.requireChain && len(r.TLS.VerifiedChains) == 0 {
 		return false
 	}
+	// A chain verified before a reload changed the host's client CA must still
+	// end in the CURRENT anchor.
+	if len(r.TLS.VerifiedChains) > 0 && !req.anchor.anchorsConn(r.Context(), r.TLS.VerifiedChains) {
+		return false
+	}
 	// A certificate revoked after the handshake is refused on the next request
 	// of a long-lived connection, not only at the next handshake.
 	if req.anchor != nil && len(r.TLS.VerifiedChains) > 0 && req.anchor.chainRevoked(r.TLS.VerifiedChains) {
@@ -611,6 +616,14 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// is actually asked for. Without it a connection negotiated before the host
 		// turned mTLS on, or coalesced from a non-mTLS host under the same cert,
 		// keeps answering 421 for as long as the client keeps it busy.
+		w.Header().Set("Connection", "close")
+		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
+		return
+	}
+	// A host's minimum TLS version is applied by SNI at the handshake. A request
+	// whose Host names a host with a higher floor than this connection negotiated
+	// gets the same 421 + close, so the client re-handshakes under that name.
+	if c := rt.tlsConfigForSNI(name); c != nil && r.TLS != nil && r.TLS.Version < c.MinVersion {
 		w.Header().Set("Connection", "close")
 		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
 		return

@@ -58,6 +58,7 @@ func newListenerServer(addr string, h http.Handler) *http.Server {
 		// Closes an HTTP/2 connection that has data to send and makes no write
 		// progress; per-stream writes are bounded by progressWriter.
 		HTTP2: &http.HTTP2Config{WriteByteTimeout: responseWriteIdleTimeout},
+		ConnContext:       func(ctx context.Context, _ net.Conn) context.Context { return withConnAnchorCache(ctx) },
 	}
 }
 

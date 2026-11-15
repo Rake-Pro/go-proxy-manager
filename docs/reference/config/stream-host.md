@@ -67,8 +67,12 @@ Behind an L4 balancer, enable `settings.proxyProtocol`, otherwise every
 connection looks like it came from the balancer and the rules match the wrong
 address.
 
-The `maxUDPSessions` bound (4096 per listener) still caps spoofed-source UDP
-memory independently of any access list.
+UDP session limits apply independently of any access list:
+
+| Limit | Value | When reached |
+|-------|-------|--------------|
+| Sessions per listener | 4096 | A new source takes the slot of the session whose client was silent the longest, if that session has had no client traffic for at least 30 s; otherwise the new source is dropped. |
+| Sessions per source address (IPv6 by /64) | 64 | Datagrams that would open another session from that source are dropped until one of its sessions ends. |
 
 ## StreamTLS (`tls`)
 
@@ -88,8 +92,9 @@ terminate it.
   the backend terminates, end to end.
 - **`terminate`** completes the handshake at gpm with `certificateRef` from the
   normal certificate store (custom or ACME-issued) and forwards **plaintext** to
-  the backend. The floor is TLS 1.2 with the same AEAD cipher suites the HTTPS
-  listener uses, or TLS 1.3 when
+  the backend. The backend is dialled only after the handshake completes, and a
+  client has 10 s after its ClientHello to finish it. The floor is TLS 1.2
+  with the same AEAD cipher suites the HTTPS listener uses, or TLS 1.3 when
   [`settings.tls.minVersion`](settings/tls.md#settings-tls-min-version) raises it
   (a stream host has no per-host floor of its own). No ALPN is offered: what
   rides inside a stream is an arbitrary TCP protocol.

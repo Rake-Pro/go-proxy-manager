@@ -70,7 +70,9 @@ func (t guardTrigger) matches(r *http.Request) bool {
 		}
 	}
 	if t.methods != nil {
-		if _, ok := t.methods[r.Method]; !ok {
+		// Trigger methods are stored upper-cased; net/http passes the method
+		// token through as sent, so compare in the same case.
+		if _, ok := t.methods[strings.ToUpper(r.Method)]; !ok {
 			return false
 		}
 	}

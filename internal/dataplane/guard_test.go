@@ -166,3 +166,22 @@ func TestGuardFailsClosedOnRepeatedQueryKey(t *testing.T) {
 		})
 	}
 }
+
+// A method-scoped trigger matches the method in any letter case: net/http
+// passes the token through as sent and a backend may normalize it.
+func TestGuardMethodMatchIgnoresCase(t *testing.T) {
+	g := compileGuard(model.GuardMiddleware{
+		Triggers:  []model.GuardTrigger{{Paths: []string{"/login"}, Methods: []string{"POST"}}},
+		AllowFrom: []string{"192.0.2.0/24"},
+	})
+	h := guardHandler(g, peerIP, "", nil, okHandler())
+	for _, m := range []string{"POST", "post", "Post"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(m, "http://c/login", nil)
+		req.RemoteAddr = "198.18.0.9:1"
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("method %q: got %d, want %d", m, rec.Code, http.StatusForbidden)
+		}
+	}
+}

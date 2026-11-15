@@ -112,7 +112,7 @@ func TestClientCertGateAllowFromTrustedProxy(t *testing.T) {
 // passthrough only ever fires from a handshake-VERIFIED certificate, and an
 // exempt client has none, so a forged header is stripped and nothing replaces it.
 func TestClientCertGateAllowFromCarriesNoIdentity(t *testing.T) {
-	rt, got := certPassthroughRouter(t, &model.ClientCertHeaders{SAN: true, Serial: true, Fingerprint: true})
+	rt, got, _, _ := certPassthroughRouter(t, &model.ClientCertHeaders{SAN: true, Serial: true, Fingerprint: true})
 	r := httptest.NewRequest("GET", "https://m.example/", nil)
 	r.Host = "m.example"
 	r.RemoteAddr = "10.1.2.3:5000"
