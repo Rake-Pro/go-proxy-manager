@@ -158,8 +158,11 @@ that needs something the setting cannot express (a path-scoped location, say).
    - Keep `adminAuth.localLoginEnabled: true`, the anti-lockout path if the
      IdP is unreachable or misconfigured.
    - Flip `adminAuth.ssoOnly: true` only after a real SSO login has
-     succeeded. Recovery from `ssoOnly: true` during an SSO outage is a
-     redeploy, not a UI action.
+     succeeded, and set `localLoginEnabled: false` with it (`ssoOnly` turns
+     local login off either way). Recovery from `ssoOnly: true` during an SSO
+     outage is a settings-file edit of both flags and a restart, not a UI
+     action: see
+     [Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery).
    - The `admin-lan-only` access list from step 4 stays in effect underneath
      either login method: it is a network gate, not a substitute for one.
 

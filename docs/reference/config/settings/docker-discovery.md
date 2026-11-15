@@ -85,6 +85,22 @@ upstream address of its own: it selects a chain the operator wrote and names an
 address **within its own container**. That containment is the same one the
 Kubernetes annotation contract has, and for the same reason.
 
+**Every label on the container counts, whoever set it.** Discovery reads the
+container's label set as the Engine reports it, which includes `LABEL` lines
+baked into the image as well as labels from the compose file or `docker run`.
+An image that ships `gpm.rake.pro/enabled: "true"` (with `domains`, `port` or
+`profile`) is discovered like a container whose compose file says so.
+
+- Treat the image author as able to opt a container in and to pick any
+  `profiles` entry by name.
+- Bound what that can reach with `allowedDomainSuffixes` and with the chains
+  of the profiles you define; a profile without an access list is reachable by
+  any labelled container.
+- Check an image's labels before running it next to a discovering gpm:
+  `docker image inspect --format '{{json .Config.Labels}}' <image>`.
+- A label set on the container replaces an image label with the same key, so
+  `gpm.rake.pro/enabled: "false"` in the compose file keeps such an image out.
+
 ## Where a derived host forwards
 
 Two modes, one choice, decided by where gpm itself runs.

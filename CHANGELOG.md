@@ -213,6 +213,19 @@ Admin plane:
 - The admin listener closes idle keep-alive connections after 120 s, and the
   local login and TOTP form bodies are capped at 64 KiB.
 
+Follow-ups of the 2026-11-15 review:
+
+- Release workflow: only a `vX.Y.Z` tag name is released, on the computed
+  path and on the pushed-tag path, and the tag reaches the shell only through
+  quoted environment variables. Other `v*` tag names are ignored when the next
+  version is computed. A pushed tag must still sit on `main`.
+- Docs: secret files are created owned by the image's `gpm` user with mode
+  `0400` (was `chmod 644`), the admin password is fed to `gpm hashpw` on
+  stdin, and the backup cron reads its token from a header file and calls the
+  HTTPS admin hostname. The break-glass recovery under `ssoOnly` is
+  documented step by step (both flags, restart, repair, restore the settings
+  file, rotate the password).
+
 ### Changed
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an

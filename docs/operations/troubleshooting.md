@@ -29,10 +29,10 @@ below map each row's wording to its cause and fix.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Login page loads, password never works, no error shown | The bcrypt hash file is unreadable by the non-root container user | `chmod 644` the secret file and restart ([Install with Docker](../getting-started/install-docker.md)) |
+| Login page loads, password never works, no error shown | The bcrypt hash file is unreadable by the non-root container user | Give the file to the image's `gpm` user, mode `0400`, and restart ([Install with Docker](../getting-started/install-docker.md#secret-files)) |
 | Banner: no administrator login is configured | No usable local credential **and** no `oidc` provider in `adminAuth.providers` | Set `GPM_LOCAL_ADMIN_USER` plus a hash, or finish [admin OIDC](../how-to/admin-oidc-sso.md) |
 | Login page answers "Wrong username or password." every time | `GPM_LOCAL_ADMIN_USER` is set but the hash is missing or unreadable | Generate it with `gpm hashpw` and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
-| Login page has no buttons and no password form | `ssoOnly: true` with a provider name that does not resolve to an `oidc` provider | Recover by editing `config/settings.yaml` and redeploying ([Admin authentication](../reference/config/settings/admin-auth.md)) |
+| Login page has no buttons and no password form | `ssoOnly: true` with a provider name that does not resolve to an `oidc` provider | Recover by editing `config/settings.yaml` and restarting ([Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery)) |
 | Login "does nothing" over `http://127.0.0.1:8081` | `GPM_COOKIE_SECURE=1` forces `Secure`, and a browser refuses to store a `Secure` cookie received over plain HTTP: the POST succeeds and the next request is anonymous | Leave `GPM_COOKIE_SECURE` at its `auto` default, which issues the cookie without `Secure` on a plain-HTTP request and turns `Secure` on by itself under TLS ([Hardening](hardening.md)) |
 | The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin panel with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
 | Process exits at startup naming the config directory | The config dir is not writable by the `gpm` user | Fix ownership on the mounted volume |

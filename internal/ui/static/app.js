@@ -9766,7 +9766,7 @@ const LOG_FIELDS = {
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
 // {name: [cidr]}; an unknown name matches nothing), anything else as a
-// substring of the logged address, so `client:10.10.2.` still works.
+// substring of the logged address, so `client:192.0.2.` still works.
 function clientHit(client, alt, nets) {
   if (alt.charAt(0) === '@') {
     const list = (nets || {})[alt.slice(1)];
@@ -10426,7 +10426,7 @@ async function viewSettings(c, tab) {
           <div class="hint">Only OIDC providers can sign in to this panel. Define them under <a href="#/identity">Identity Providers</a>.</div>
         </div>
         <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Require SSO for admins</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'Require SSO for admins', 'settings.adminAuth.ssoOnly')}</div>
-        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local sign-in re-enabled.</div>
+        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means setting <span class="mono">ssoOnly: false</span> and <span class="mono">localLoginEnabled: true</span> in settings.yaml and restarting.</div>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Admin front door</p>
@@ -10641,7 +10641,7 @@ async function viewSettings(c, tab) {
       title: 'Require SSO for admins?',
       body: '<p>Local sign-in is <b>disabled</b> for this admin panel. Every operator signs in through one of the providers above.</p>'
         + '<p>There is deliberately no in-band break-glass door. If the identity provider is unreachable, its configuration drifts, or the provider entry is removed, '
-        + '<b>recovery is a redeploy</b> with local sign-in re-enabled - not a sign-in page.</p>',
+        + '<b>recovery is a settings.yaml edit and a restart</b> (ssoOnly: false and localLoginEnabled: true; local sign-in alone stays off) - not a sign-in page.</p>',
       confirmLabel: 'Require SSO',
     });
     if (!ok) $('#set-sso').setAttribute('aria-checked', 'false');

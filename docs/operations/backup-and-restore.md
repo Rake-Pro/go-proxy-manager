@@ -18,21 +18,33 @@ for this and nothing else, and treat it with the same care as the break-glass
 password:
 
 ```
+sudo install -m 0400 -o gpm -g gpm /dev/null /etc/gpm/backup_auth
 curl -s -X PUT https://<admin>/api/api-tokens/backup-cron \
   -b "<admin session cookie>" -H "X-CSRF-Token: <token from /api/me>" \
   -H 'Content-Type: application/json' \
-  -d '{"scopes":["admin"]}' | jq -r .token   # save this, it is shown once
+  -d '{"scopes":["admin"]}' \
+  | jq -r '"Authorization: Bearer " + .token' | sudo tee /etc/gpm/backup_auth >/dev/null
 ```
+
+The token is shown once; this writes it straight into an owner-only file as a
+ready-made header line, so it never passes through the terminal or a command
+line.
 
 **Cron:**
 
 ```
 # /etc/cron.d/gpm-backup - runs as the gpm user
-0 3 * * * gpm  curl -fsS -H "Authorization: Bearer $(cat /etc/gpm/backup_token)" \
-  https://127.0.0.1:8081/api/backup \
+0 3 * * * gpm  curl -fsS -H @/etc/gpm/backup_auth \
+  https://<admin>/api/backup \
   -o /var/backups/gpm/gpm-config-$(date +\%Y-\%m-\%dT\%H\%M\%S).tar.gz \
   && find /var/backups/gpm -name 'gpm-config-*.tar.gz' -mtime +30 -delete
 ```
+
+`-H @file` makes curl read the header from the file, so the token does not show
+up in the process list. `https://<admin>` is the admin panel's HTTPS hostname
+([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)): the
+admin listener on `:8081` is plain HTTP, so a token sent to it from another
+host crosses the network in clear text.
 
 (A `systemd` timer works the same way if you'd rather not use cron: a
 `Type=oneshot` service running the same `curl` line, triggered by an

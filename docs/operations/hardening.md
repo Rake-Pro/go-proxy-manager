@@ -2,6 +2,12 @@
 
 The settings to check before an instance faces the internet.
 
+- Treat the admin listener (`:8081`) as plain HTTP: no password, session
+  cookie or API token may cross a network to it. Bind or publish it on
+  loopback (`127.0.0.1:8081`) or a management address (`192.0.2.10:8081`),
+  not on every interface, and reach it from elsewhere through an SSH tunnel or
+  the HTTPS admin hostname
+  ([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
 - Keep `-pprof` off unless actively profiling; it is admin-role **and**
   admin-scope gated but still needless attack surface when idle.

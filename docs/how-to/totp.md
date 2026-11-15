@@ -18,8 +18,14 @@ MFA the identity provider enforces.
    stderr:
 
    ```
-   docker run --rm ghcr.io/rake-pro/go-proxy-manager totp-secret -account admin -issuer gpm > ./admin_totp
+   img=ghcr.io/rake-pro/go-proxy-manager
+   sudo install -m 0400 -o "$(docker run --rm --entrypoint id "$img" -u)" \
+     -g "$(docker run --rm --entrypoint id "$img" -g)" /dev/null ./admin_totp
+   docker run --rm "$img" totp-secret -account admin -issuer gpm | sudo tee ./admin_totp >/dev/null
    ```
+
+   The file is created owner-only for the image's `gpm` user first, see
+   [Secret files](../getting-started/install-docker.md#secret-files).
 
 2. Add it to the authenticator app. Either type the base32 secret in by hand, or
    render the printed `otpauth://totp/...` URI as a QR code with any QR tool and
