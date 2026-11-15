@@ -19,7 +19,8 @@
 //     forward across a reconcile rather than derived.
 //   - A source item that cannot be derived PROTECTS its existing host from
 //     deletion, so one bad manifest or label edit cannot take a service
-//     offline; the single exception is an unresolvable profile, which fails
+//     offline; the exceptions are an unresolvable profile, and a resolved
+//     profile whose chain differs from the stored host's, which both fail
 //     CLOSED by disabling the host so a retired chain cannot be pinned forever.
 //
 // Writing those rules twice would mean maintaining two copies of the one part
@@ -36,6 +37,7 @@
 package discovery
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"reflect"
@@ -45,6 +47,7 @@ import (
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
+	"go.yaml.in/yaml/v3"
 )
 
 // Per-host outcomes reported in a Result.
@@ -96,6 +99,12 @@ type Ownership struct {
 	// handover that depends on a write the store drops would leave a duplicate
 	// domain that fails the whole batch on every poll. nil means none is.
 	Unwritable func(model.ProxyHost) bool
+
+	// DomainAllowed reports whether a domain may be derived under tmpl (the
+	// suffix lists and the profile's allowedHostnames). It is checked against a
+	// stored host's domains when its source cannot be derived; nil skips that
+	// check.
+	DomainAllowed func(tmpl model.IngressHostTemplate, domain string) bool
 }
 
 // Item is one source object, already derived by the caller.
@@ -120,6 +129,12 @@ type Item struct {
 	// UnknownProfile marks Err as "the named profile does not resolve", the one
 	// failure that fails CLOSED (disable) rather than freezing.
 	UnknownProfile bool
+	// Resolved is the profile the item resolved to when Err is a failure AFTER
+	// profile resolution (no usable hostname, no usable upstream). The plan then
+	// freezes the existing host only while its stored chain still matches this
+	// profile, and disables it otherwise. nil when Err is nil or the profile did
+	// not resolve.
+	Resolved *model.IngressHostTemplate
 }
 
 // HostResult is what one reconcile decided about one derived (or previously
@@ -238,7 +253,24 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// the host is disabled instead: the object is preserved (nothing is
 			// destroyed, the operator can re-add the profile and the very next
 			// reconcile re-enables it), but it stops serving the revoked chain.
-			if cur, ok := managed[it.Name]; ok && it.UnknownProfile && !cur.Disabled {
+			// A malformed object whose profile still resolves only freezes the host
+			// while the stored chain is the one that profile renders today, on
+			// domains it still allows. Once the
+			// operator has changed the profile, freezing would keep the host serving
+			// the chain from before the change for as long as the object stays
+			// malformed, so it fails closed exactly like an unresolvable profile.
+			// A stored domain the resolved profile no longer allows counts the same:
+			// freezing would keep serving it under that profile.
+			stale := false
+			if cur, ok := managed[it.Name]; ok && !it.UnknownProfile && it.Resolved != nil {
+				stale = ChainDiffers(cur, *it.Resolved)
+				for _, d := range cur.Domains {
+					if own.DomainAllowed != nil && !own.DomainAllowed(*it.Resolved, model.NormalizeHostname(d)) {
+						stale = true
+					}
+				}
+			}
+			if cur, ok := managed[it.Name]; ok && (it.UnknownProfile || stale) && !cur.Disabled {
 				off := cur
 				off.Disabled = true
 				// Mark the disable as DISCOVERY's own, so the next reconcile that
@@ -260,11 +292,15 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 				off.Labels[own.DisabledByKey] = own.Value
 				disable[it.Name] = off
 				p.Updated++
+				reason := "disabled (fails closed rather than keep serving a chain that no longer resolves): "
+				msg := ": profile no longer resolves; disabling the derived host rather than leaving it serving the old chain"
+				if stale {
+					reason = "disabled (fails closed rather than keep serving a chain or domain its profile no longer renders): "
+					msg = ": source cannot be derived and the stored host differs from what its profile allows; disabling the derived host rather than leaving it serving the old chain"
+				}
 				p.Hosts = append(p.Hosts, HostResult{Name: it.Name, Ref: it.Ref, Domains: cur.Domains,
-					Action: ActionUpdated, Profile: it.Profile,
-					Reason: "disabled (fails closed rather than keep serving a chain that no longer resolves): " + it.Err.Error()})
-				log.Warn().Str("host", it.Name).Str("source", it.Ref).Err(it.Err).
-					Msg(own.Subsystem + ": profile no longer resolves; disabling the derived host rather than leaving it serving the old chain")
+					Action: ActionUpdated, Profile: it.Profile, Reason: reason + it.Err.Error()})
+				log.Warn().Str("host", it.Name).Str("source", it.Ref).Err(it.Err).Msg(own.Subsystem + msg)
 				continue
 			}
 			p.Skipped++
@@ -552,6 +588,41 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		p.Hosts = []HostResult{}
 	}
 	return p
+}
+
+// ChainDiffers reports whether the access-relevant fields of a stored host
+// (TLS including client auth, middlewares, access lists and their mode,
+// locations, response-header policy) differ from what tmpl stamps onto a
+// derived host. Both sides are compared in the YAML form the store writes, so
+// an explicit empty list in settings and the nil a stored host round-trips to
+// compare equal, at every nesting level.
+func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate) bool {
+	pick := func(h model.ProxyHost) model.ProxyHost {
+		return model.ProxyHost{
+			TLS:                  h.TLS,
+			Middlewares:          h.Middlewares,
+			AccessLists:          h.AccessLists,
+			AccessListsMode:      h.AccessListsMode,
+			Locations:            h.Locations,
+			StripResponseHeaders: h.StripResponseHeaders,
+			SecurityHeaders:      h.SecurityHeaders,
+		}
+	}
+	want := model.ProxyHost{
+		TLS:                  tmpl.TLS,
+		Middlewares:          tmpl.Middlewares,
+		AccessLists:          tmpl.AccessLists,
+		AccessListsMode:      tmpl.AccessListsMode,
+		Locations:            model.CloneLocations(tmpl.Locations),
+		StripResponseHeaders: tmpl.StripResponseHeaders,
+		SecurityHeaders:      tmpl.SecurityHeaders,
+	}
+	a, errA := yaml.Marshal(pick(cur))
+	b, errB := yaml.Marshal(want)
+	if errA != nil || errB != nil {
+		return true
+	}
+	return !bytes.Equal(a, b)
 }
 
 // cloneLabels copies a label map so a write through the copy can never mutate

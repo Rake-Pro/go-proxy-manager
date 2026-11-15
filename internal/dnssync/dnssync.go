@@ -203,6 +203,9 @@ type Syncer struct {
 	// lastSuccess survives the Status replacement each run does, so a failing
 	// reconcile still reports when the last clean one was.
 	lastSuccess time.Time
+	// plaintextWarned is the last Pi-hole URL a plain-http warning was logged
+	// for, so the warning is not repeated on every reconcile.
+	plaintextWarned string
 
 	// single serialises reconciles so two runs never race the same backend.
 	single sync.Mutex
@@ -672,6 +675,17 @@ func decide(backend string, desired []string, present map[string]string, apex st
 		}
 	}
 	return d
+}
+
+// keepClaim puts the ledger entry for name back to what it was before the run
+// (or drops it when there was none), for a create or delete that failed: the
+// backend still holds whatever it held, so the ledger must say the same.
+func keepClaim(final, before map[string]model.DNSClaim, name string) {
+	if c, ok := before[name]; ok {
+		final[name] = c
+		return
+	}
+	delete(final, name)
 }
 
 // desiredDomains collects the domains every enabled proxy host asks to publish

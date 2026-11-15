@@ -61,7 +61,7 @@ sub-key is settable and applied verbatim:
 | `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
 Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`,
-`stripResponseHeaders`, `securityHeaders`, `allowedDomainSuffixes`) is documented on
+`stripResponseHeaders`, `securityHeaders`, `allowedDomainSuffixes`, `allowedHostnames`) is documented on
 [Kubernetes Ingress discovery](ingress-discovery.md), which uses the identical
 type.
 
@@ -108,6 +108,8 @@ Two modes, one choice, decided by where gpm itself runs.
 
 - Each opted-in container produces one proxy host named `dkr-<container name>`
   (lowercased), e.g. `dkr-grafana`, with `displayName` set to the container name.
+  A derived name longer than 250 characters is skipped (its object file has to
+  fit a 255-byte file name).
 - Every derived host carries
   `labels["gpm.rake.pro/managed-by"] = "docker-discovery"`.
 - Only objects carrying that exact label pair are created, updated or deleted. A
@@ -138,7 +140,11 @@ Two modes, one choice, decided by where gpm itself runs.
   before any write.
 - **A bad label freezes one host.** A container that cannot be derived (bad
   hostname, ambiguous port) is skipped **and** protects its existing host from
-  deletion.
+  deletion, as long as the stored host still carries the chain its resolved
+  profile renders today. When the stored chain differs (TLS, middlewares,
+  access lists and mode, locations, response-header policy), or a stored domain
+  is no longer allowed by the suffix lists or `allowedHostnames`, the host is
+  disabled the same way as for an unresolvable profile.
 - **An unresolvable profile fails closed.** The existing host is updated with
   `disabled: true` and `gpm.rake.pro/disabled-by: docker-discovery`, so a
   retired chain cannot be pinned by naming a profile that no longer exists.

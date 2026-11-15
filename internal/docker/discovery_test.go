@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"go.yaml.in/yaml/v3"
 )
 
 // testConf builds a resolved dockerDiscovery block the way production does:
@@ -205,6 +206,15 @@ func TestDerive(t *testing.T) {
 			wantName: "dkr-hostnet",
 			wantErr:  "no usable IP address",
 		},
+		{
+			// "<name>.yaml" must fit a 255-byte file name; no name is returned so
+			// it is a plain skip.
+			name:      "derived name longer than the store can write",
+			conf:      testConf(nil),
+			container: container(strings.Repeat("a", 247), enabled(nil), nil),
+			wantName:  "",
+			wantErr:   "longer than 250 characters",
+		},
 	}
 
 	for _, tc := range tests {
@@ -262,6 +272,26 @@ func TestDeriveInheritsResponseHeaderFields(t *testing.T) {
 	}
 	if err := host.Validate(); err != nil {
 		t.Fatalf("derived host must be valid: %v", err)
+	}
+}
+
+// A template bound to exact hostnames rejects every other name in the domains
+// label the same way a name outside the suffix list is rejected.
+func TestDeriveHonoursAllowedHostnames(t *testing.T) {
+	conf := testConf(func(s *model.Settings) {
+		s.DockerDiscovery.Template.AllowedHostnames = []string{"app.example.com"}
+	})
+	_, host, _, err := derive(container("grafana", enabled(map[string]string{
+		"gpm.rake.pro/domains": "app.example.com,other.example.com",
+	}), nil), conf)
+	if err != nil || strings.Join(host.Domains, ",") != "app.example.com" {
+		t.Fatalf("domains = %v err = %v, want only the listed name", host.Domains, err)
+	}
+	_, _, _, err = derive(container("grafana", enabled(map[string]string{
+		"gpm.rake.pro/domains": "other.example.com",
+	}), nil), conf)
+	if err == nil || !strings.Contains(err.Error(), "allowedHostnames") {
+		t.Fatalf("err = %v, want a refusal naming allowedHostnames", err)
 	}
 }
 
@@ -428,6 +458,18 @@ func TestPlanReconcile(t *testing.T) {
 		}
 		if p.Skipped != 1 {
 			t.Fatalf("skipped %d, want 1", p.Skipped)
+		}
+	})
+
+	t.Run("a derive failure disables a host whose chain the profile no longer renders", func(t *testing.T) {
+		cur := managedHostFixture("dkr-app", func(h *model.ProxyHost) { h.AccessLists = nil })
+		broken := container("app", map[string]string{
+			"gpm.rake.pro/enabled": "true",
+			"gpm.rake.pro/domains": "not a hostname",
+		}, nil)
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{cur}}, conf, []Container{broken}, nil)
+		if len(p.Deletes) != 0 || len(p.Upserts) != 1 || !p.Upserts[0].Disabled {
+			t.Fatalf("plan %+v, want one disabling upsert and no delete", p)
 		}
 	})
 
@@ -640,5 +682,38 @@ func TestReconcileRefusesWhileRunning(t *testing.T) {
 	}
 	if _, err := d.Plan(context.Background()); err != ErrReconcileInProgress {
 		t.Fatalf("Plan error %v, want ErrReconcileInProgress", err)
+	}
+}
+
+// A template location written with explicit empty lists derives a host whose
+// stored form carries none, and that host must still compare as the profile's
+// own chain: a container that briefly cannot be derived (no address while it
+// restarts) leaves it frozen, not disabled.
+func TestEmptyListsInATemplateLocationDoNotDisableAFrozenHost(t *testing.T) {
+	var loc []model.Location
+	if err := yaml.Unmarshal([]byte("- path: /api\n  middlewares: []\n  accessLists: []\n"), &loc); err != nil {
+		t.Fatal(err)
+	}
+	if loc[0].Middlewares == nil {
+		t.Fatal("fixture must decode to a non-nil empty list")
+	}
+	conf := testConf(func(s *model.Settings) { s.DockerDiscovery.Template.Locations = loc })
+	_, host, _, err := derive(container("app", enabled(nil), nil), conf)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	// The host as the store reads it back.
+	raw, err := yaml.Marshal(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored model.ProxyHost
+	if err := yaml.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	noAddress := container("app", enabled(nil), func(c *Container) { c.NetworkSettings.Networks = nil })
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stored}}, conf, []Container{noAddress}, nil)
+	if len(p.Upserts) != 0 || len(p.Deletes) != 0 || p.Skipped != 1 {
+		t.Fatalf("plan %+v, want the host frozen (one skip, no write)", p)
 	}
 }

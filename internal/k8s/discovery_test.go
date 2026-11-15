@@ -1459,10 +1459,10 @@ func TestUnresolvableProfileDisablesTheExistingHost(t *testing.T) {
 	}
 }
 
-// The fail-closed rule is scoped to PROFILE RESOLUTION. Every other derive
-// failure - a malformed hostname, an unusable derived name - still freezes: the
-// operator's policy has not changed there, and disabling would let any tenant
-// take their own service offline with a one-character manifest edit.
+// A malformed Ingress whose profile still resolves, and whose stored host
+// still carries the chain that profile renders, freezes: the operator's policy
+// has not changed there, and disabling would let any tenant take their own
+// service offline with a one-character manifest edit.
 func TestMalformedIngressStillFreezesRatherThanDisabling(t *testing.T) {
 	f := newFakeAPI(t, "tok")
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
@@ -1474,6 +1474,9 @@ func TestMalformedIngressStillFreezesRatherThanDisabling(t *testing.T) {
 	}
 	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
 	existing := managedHostFixture("ing-paste.web", "paste.example.com")
+	prof := settings.IngressDiscovery.Profiles["sso-internal"]
+	existing.Upstream, existing.UpstreamGroupRef = model.Upstream{}, prof.UpstreamGroupRef
+	existing.TLS, existing.Middlewares, existing.AccessLists = prof.TLS, prof.Middlewares, prof.AccessLists
 	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
 	rec := &recorder{}
 	d := newDiscoverer(f, cfg, settings, rec)
@@ -1490,6 +1493,41 @@ func TestMalformedIngressStillFreezesRatherThanDisabling(t *testing.T) {
 	}
 	if st.Managed != 1 {
 		t.Fatalf("managed = %d, want the existing host still counted (the skip protects it)", st.Managed)
+	}
+}
+
+// A malformed Ingress whose profile resolves but whose stored host carries a
+// different chain (the profile was changed since the host was written) fails
+// closed: the host is disabled instead of serving the old chain while the
+// Ingress stays underivable.
+func TestMalformedIngressDisablesAHostWithAStaleChain(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "paste", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "paste.outside.test"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: profileSettings(f)}
+	// Written before the profile gained its middlewares and access list.
+	existing := managedHostFixture("ing-paste.web", "paste.example.com")
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{existing}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || len(rec.deletes) != 0 {
+		t.Fatalf("upserts=%d deletes=%d, want one disable and no delete", len(rec.upserts), len(rec.deletes))
+	}
+	got := rec.upserts[0]
+	if !got.Disabled || got.Labels[model.DisabledByLabel] != model.ManagedByIngressDiscovery {
+		t.Fatalf("host = %+v, want disabled by discovery", got)
+	}
+	if strings.Join(got.Domains, ",") != "paste.example.com" || len(got.AccessLists) != 0 {
+		t.Fatalf("host = %+v, want the stored object preserved apart from the disable", got)
 	}
 }
 
@@ -1801,6 +1839,52 @@ func TestReconcilePerProfileAllowedDomainSuffixes(t *testing.T) {
 	}
 	if strings.Join(rec.upserts[0].Domains, ",") != "paste.example.com" {
 		t.Fatalf("domains = %v, want only the one covered by the profile's narrower list", rec.upserts[0].Domains)
+	}
+}
+
+// A profile bound to exact hostnames can only be used for those names: every
+// other name is rejected like one outside the suffix list, and an Ingress left
+// with no listed name derives nothing. The zone apex is the case a suffix list
+// cannot bind.
+func TestProfileAllowedHostnamesBindsExactNames(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	conf := profileSettings(f)
+	prof := conf.Profiles["public-ratelimited"]
+	prof.AllowedHostnames = []string{"Example.com."}
+	conf.Profiles["public-ratelimited"] = prof
+	ann := map[string]string{model.AnnotationManaged: "true", model.AnnotationProfile: "public-ratelimited"}
+
+	ing := func(hosts ...string) Ingress {
+		var i Ingress
+		i.Metadata.Namespace, i.Metadata.Name, i.Metadata.Annotations = "web", "site", ann
+		for _, h := range hosts {
+			i.Spec.Rules = append(i.Spec.Rules, struct {
+				Host string `json:"host"`
+			}{Host: h})
+		}
+		return i
+	}
+
+	_, host, _, err := derive(ing("example.com", "other.example.com"), conf)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if strings.Join(host.Domains, ",") != "example.com" {
+		t.Fatalf("domains = %v, want only the listed name", host.Domains)
+	}
+
+	name, _, _, err := derive(ing("other.example.com"), conf)
+	if err == nil || !strings.Contains(err.Error(), "allowedHostnames") {
+		t.Fatalf("err = %v, want a refusal naming allowedHostnames", err)
+	}
+	if name != "ing-site.web" {
+		t.Fatalf("name = %q, want the derived name returned like any other per-host refusal", name)
+	}
+
+	// Unset key: unchanged behaviour.
+	_, host, _, err = derive(ing("other.example.com"), profileSettings(f))
+	if err != nil || strings.Join(host.Domains, ",") != "other.example.com" {
+		t.Fatalf("without allowedHostnames: domains=%v err=%v, want the name accepted", host.Domains, err)
 	}
 }
 
@@ -2881,5 +2965,60 @@ func TestDerivedHostCarriesAccessListsMode(t *testing.T) {
 	}
 	if rec.calls != 2 || len(rec.upserts) != 1 || rec.upserts[0].AccessListsMode != "" {
 		t.Fatalf("calls=%d upserts=%+v, want one update clearing the mode", rec.calls, rec.upserts)
+	}
+}
+
+// A derived name whose object file "<name>.yaml" would not fit a 255-byte file
+// name is a per-Ingress skip with no name returned, so the rest of the batch
+// still lands.
+func TestOverlongDerivedNameIsAPerIngressSkip(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream: model.Upstream{Scheme: "http", Host: "192.0.2.40", Port: 80},
+			TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+		},
+	}
+	ing := func(name, host string) Ingress {
+		var i Ingress
+		i.Metadata.Namespace, i.Metadata.Name = "default", name
+		i.Metadata.Annotations = map[string]string{model.AnnotationManaged: "true"}
+		i.Spec.Rules = append(i.Spec.Rules, struct {
+			Host string `json:"host"`
+		}{Host: host})
+		return i
+	}
+	long := ing(strings.Repeat("a", 240), "long.example.com")
+	name, _, _, err := derive(long, conf)
+	if err == nil || name != "" {
+		t.Fatalf("derive = (%q, %v), want an error and no name", name, err)
+	}
+	p := planReconcile(model.Config{}, conf, []Ingress{long, ing("ok", "ok.example.com")}, nil)
+	if len(p.upserts) != 1 || p.upserts[0].Name != "ing-ok.default" {
+		t.Fatalf("upserts = %+v, want only the well-formed Ingress", p.upserts)
+	}
+}
+
+// Binding a profile to exact names reaches hosts that already exist: an
+// Ingress left with no allowed name, whose stored host serves a name the
+// profile no longer allows, gets its host disabled rather than frozen.
+func TestAllowedHostnamesDisablesAnExistingHostOnAnUnlistedName(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "site", map[string]string{model.AnnotationManaged: "true"}, "site.example.com"),
+		}, "")
+	}
+	settings := &model.Settings{IngressDiscovery: baseSettings(f)}
+	settings.IngressDiscovery.Template.AllowedHostnames = []string{"example.com"}
+	cfg := &model.Config{ProxyHosts: []model.ProxyHost{managedHostFixture("ing-site.web", "site.example.com")}}
+	rec := &recorder{}
+	d := newDiscoverer(f, cfg, settings, rec)
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 1 || !rec.upserts[0].Disabled {
+		t.Fatalf("upserts = %+v, want the existing host disabled", rec.upserts)
 	}
 }

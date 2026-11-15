@@ -245,7 +245,9 @@ rules), it is recorded as `action: "skipped"` with a reason and a WARN log, and
 its derived name is added to the **protected** set, so the previously-derived
 host is left exactly as-is rather than deleted. Deletion follows only from
 *absence* from a healthy list, never from a parse failure. One bad manifest edit
-must not take a host offline.
+must not take a host offline. (Section 5a lists the two cases where a derive
+failure disables the host instead: an unknown profile, and a stored chain that
+differs from what the resolved profile renders.)
 
 Status distinguishes `lastRun` from `lastSuccess`, so a UI that shows "last run
 2 minutes ago" cannot hide "last successful run 6 hours ago".
@@ -561,10 +563,17 @@ next reconcile, but the revoked chain stops being served. Without this the
 security property holds for **creating** a host and not for **revoking** one.
 
 Every other derive failure still freezes and **protects** the existing host from
-deletion: a bad hostname or an unusable derived name is a tenant typo against a
-policy that has not changed, the host on disk is its last good rendering, and
-failing closed there would let any tenant take their own service offline with a
-one-character edit while buying no security at all.
+deletion **while the stored host still carries the chain its resolved profile
+renders today**: a bad hostname or an unusable derived name is then a tenant typo
+against a policy that has not changed, the host on disk is its last good
+rendering, and failing closed would let any tenant take their own service
+offline with a one-character edit while buying no security at all. When the
+stored chain differs (TLS and client auth, middlewares, access lists and mode,
+locations, response-header policy), or a stored domain is no longer allowed by
+the suffix lists or the profile's `allowedHostnames`, the policy *has* changed, and freezing
+would keep the pre-change chain in service for as long as the source object
+stays malformed; the host is disabled exactly like the unknown-profile case,
+and a clean derive re-enables it.
 
 **A profile is applied verbatim, never merged with the default.** A merge would
 mean the default's access list leaks onto a profile that is public on purpose:
@@ -772,6 +781,11 @@ repo entirely rather than relying on placeholder discipline.
   template/profile; `Settings.Validate` rejects one that is not a **subset** of
   the global list, so a profile can only shrink the domains a tenant may
   publish, never grow them. See [Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md#per-profile-alloweddomainsuffixes).
+- **Per-profile `allowedHostnames`.** `IngressHostTemplate.AllowedHostnames`
+  binds a template/profile to exact names; a derived name not listed is
+  rejected like a name outside the suffix list. Empty means no binding. It
+  covers the case the suffix list cannot: a permissive profile meant for one
+  name that is itself a suffix of others. See [Settings: Kubernetes Ingress discovery](../docs/reference/config/settings/ingress-discovery.md#per-profile-allowedhostnames).
 - **`locations` on a template/profile** (section 5, "`locations` is deliberately not a
   template field"). Not a gap: locations are per-service path routing, and
   discovery forwards everything to the cluster ingress controller by vhost so the

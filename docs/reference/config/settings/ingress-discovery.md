@@ -36,6 +36,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-security-headers"></span> `template.securityHeaders` | map | Applied to every derived host: that host's `securityHeaders` override (name -> value/scope), merged over `settings.securityHeaders` per key at request time. Validated by the same rules as a hand-written host. Without it a hand-set override on a managed host is reverted on the next reconcile. See [Security headers](security-headers.md#settings-security-headers). |
 | <span id="settings-ingress-discovery-template-default-dns"></span> `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
 | <span id="settings-ingress-discovery-template-allowed-domain-suffixes"></span> `template.allowedDomainSuffixes` | []string | Optional. **Narrows** the top-level `allowedDomainSuffixes` for hosts derived from the template. Must be a **subset** of the global list (checked at settings-write time); empty means no narrowing. |
+| <span id="settings-ingress-discovery-template-allowed-hostnames"></span> `template.allowedHostnames` | []string | Optional. Binds the template (or a profile) to **exact** hostnames: a derived host using it may only carry names listed here, on top of the suffix check. Empty means no binding. Each entry must be a valid hostname (no wildcards). See [below](#per-profile-allowedhostnames). |
 | <span id="settings-ingress-discovery-profiles"></span> `profiles` | map[string]-> same shape as `template` (including its own `allowedDomainSuffixes`) | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
 | <span id="settings-ingress-discovery-profile-rules"></span> `profileRules` | []IngressProfileRule | Optional, ordered. Operator-side profile selection, see [below](#operator-side-profile-selection-profilerules). |
 | <span id="settings-ingress-discovery-profile-selection"></span> `profileSelection` | `"annotation-or-rules"` \| `"rules-only"` | Empty means `"annotation-or-rules"` (today's behaviour: try `profileRules` first, then the annotation). `"rules-only"` never reads `gpm.rake.pro/profile` at all. |
@@ -133,6 +134,8 @@ you control, not unbounded, but not nothing). If it is too coarse for your clust
 the escalation path is an operator-side selector table (deferred, see
 [design/ingress-discovery.md section 5a](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/ingress-discovery.md), which also holds
 the full threat model).
+To bind a permissive profile to the names it is meant for, set its
+[`allowedHostnames`](#per-profile-allowedhostnames).
 
 **Resolution rules:**
 
@@ -158,10 +161,18 @@ not exist), and the host would go on serving the revoked chain indefinitely.
 Retiring a profile (or clearing the profile rows in the UI) disables the hosts
 derived from it for the same reason.
 
-Every *other* derive failure (a malformed hostname, an unusable derived name)
-still **freezes** the existing host instead: your policy has not changed there,
-the host on disk is the last good rendering of it, and failing closed would let
-any tenant take their own service offline with a one-character manifest edit.
+Every *other* derive failure (a malformed hostname, no usable host) **freezes**
+the existing host instead, as long as the stored host still carries the chain
+its resolved profile renders today: your policy has not changed there, the host
+on disk is the last good rendering of it, and failing closed would let any
+tenant take their own service offline with a one-character manifest edit. If the
+stored chain differs from the profile (`tls` including `clientAuth`,
+`middlewares`, `accessLists`, `accessListsMode`, `locations`,
+`stripResponseHeaders`, `securityHeaders`), or one of its domains is no longer
+allowed by `allowedDomainSuffixes` or the profile's `allowedHostnames`, the
+policy was changed after the host was written, and the host is **disabled** the
+same way, so a malformed Ingress cannot keep the old chain or name in service.
+A clean derive re-enables it.
 A profile is applied **verbatim**, never merged with the template, so the
 default's access list can never leak onto a profile that is public on purpose.
 
@@ -229,6 +240,37 @@ would *widen* the domains a tenant could publish fails `Settings.Validate` at th
 settings write, the same standard every other profile field is held to. Leaving
 it unset means the profile uses the global list unchanged: this is a narrowing
 knob only, never a second way to grant a wider set of names.
+
+## Per-profile `allowedHostnames`
+
+`allowedDomainSuffixes` cannot bind a profile to one name when that name is
+itself a suffix of others (the zone apex, say), and every profile is selectable
+by every annotating Ingress unless `profileRules` with `rules-only` decide. A
+profile (or the template) may set `allowedHostnames` to list the **exact** names
+it may be used for:
+
+| Setting | Effect |
+|---|---|
+| unset or empty | no binding: any name the suffix lists allow (unchanged behaviour) |
+| one or more hostnames | a derived host using this profile keeps only the listed names (exact match after lowercasing and trimming one trailing dot); every other name is rejected like a name outside `allowedDomainSuffixes` |
+
+- A rejected name appears in the warn log and, when no name is left, in the
+  status `reason` as `<name> (not in the profile's allowedHostnames)`.
+- The suffix check still applies: a listed name outside the suffix list is
+  rejected too.
+- Typical use: bind each profile without an access list or auth middleware to
+  the names that are meant to be public, so an Ingress cannot select it for any
+  other name.
+
+```yaml
+ingressDiscovery:
+  profiles:
+    public-ratelimited:
+      upstreamGroupRef: k8s-nodes
+      tls: { certificateRef: wildcard, forceSSL: true }
+      middlewares: [rate-limit]
+      allowedHostnames: [example.com, paste.example.com]
+```
 
 ## What a derived host cannot express
 
@@ -402,11 +444,25 @@ timeout, non-`200` status, decode failure, a page that fails mid-pagination, or 
 HTTPS service behind the same CA, a mesh or gateway envelope, a `Status` reply)
 aborts the run *before any write*: no creates, no updates, no deletes. One list
 is bounded to two minutes end to end, so a hung endpoint fails the run rather
-than holding the reconciler for the page limit times the per-request timeout. An
-annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
+than holding the reconciler for the page limit times the per-request timeout.
+
+| List bound | Value | When exceeded |
+|---|---|---|
+| Response body per page | 8 MiB | the same page is asked for again with `limit` 10, then 1; only a single object over the cap fails the list |
+| Pages per list | 100 (pages retried at a smaller `limit` count too) | the list fails and discovery freezes |
+| Objects per list | 10000 (every Ingress in scope, annotated or not) | the list fails and discovery freezes |
+
+Anyone who can create Ingress objects in the listed scope can therefore freeze
+discovery by creating enough of them; set `namespace` or `labelSelector` to
+narrow the scope when that matters. A derived name longer than 250 characters
+(`ing-<name>.<namespace>`, so that its object file fits a 255-byte file name) is
+skipped like any other underivable Ingress, without protecting a host.
+
+An annotated Ingress that cannot be derived (bad hostname, unusable name) is skipped
 **and** protects its existing host from deletion, so one bad manifest edit cannot
-take a host offline, the one exception being an unresolvable *profile*, which
-disables the existing host rather than freezing it (see "Resolution rules"). An
+take a host offline. The exceptions are an unresolvable *profile*, and a stored
+chain or domain that the resolved profile no longer renders or allows; both disable
+the existing host rather than freezing it (see "Resolution rules"). An
 *empty successful* list is a different thing entirely: it
 is a legitimate delete-all, applied and logged per host at WARN.
 

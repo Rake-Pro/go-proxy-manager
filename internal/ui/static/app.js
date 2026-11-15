@@ -4464,6 +4464,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(idt.allowedHostnames).length ? idt.allowedHostnames : undefined,
       },
     };
     if (idc.annotationPrefixMigrate) ingressDiscovery.annotationPrefixMigrate = true;
@@ -4507,6 +4508,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
@@ -4588,6 +4590,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(ddt.allowedHostnames).length ? ddt.allowedHostnames : undefined,
       },
     };
     if (dkrOn) dockerDiscovery.enabled = true;
@@ -4619,6 +4622,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('dpf-dns-lan-' + uid), publicCname: isOn('dpf-dns-pub-' + uid) };

@@ -90,6 +90,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
   on each list also comes back when you return to it (per browser).
 - Access Logs: **Export** downloads the rows the filter shows as CSV or
   JSON, in the table's order, with spreadsheet-formula cells neutralised.
+- Discovery: `allowedHostnames` on the Ingress or Docker discovery template or
+  on a profile binds it to exact hostnames. A derived name not listed is
+  rejected like a name outside `allowedDomainSuffixes`. Unset keeps today's
+  behaviour. It binds a profile with no gate to the names meant to be public,
+  including a zone apex a suffix list cannot single out.
+- DNS sync: a plain `http://` `pihole.url` on a non-loopback host is logged at
+  warn, once per URL; the application password crosses the network in clear.
 
 ### Security
 
@@ -213,6 +220,13 @@ Admin plane:
   `access-list`, indistinguishable from a CIDR deny). A dashboard or alert
   that sums `access-list` sees those move to `geo`; `geo` still also covers
   "geo rules configured but no database loaded".
+- Discovery: a source object that cannot be derived (no usable hostname, no
+  usable upstream) while its profile still resolves now disables its existing
+  host when the stored chain (TLS and client auth, middlewares, access lists
+  and mode, locations, response-header policy) differs from what that profile
+  renders today, or a stored domain is no longer allowed. Before, it froze the
+  host with the chain from before the profile change. A host whose chain still matches is frozen as before, and a
+  clean derive re-enables it.
 
 ### Fixed
 
@@ -233,6 +247,22 @@ Admin plane:
   foreign host is now skipped instead of failing validation of the whole
   batch. Skip reasons name the holder's kind and say whether discovery manages
   it (#74).
+- Ingress discovery: a list page larger than the 8 MiB body cap is requested
+  again with `limit` 10, then 1, instead of failing the list and freezing
+  discovery. The page, item and body bounds are now documented.
+- Discovery: a derived host name longer than 250 characters (one whose object
+  file would not fit a 255-byte file name) is skipped per object instead of
+  failing the whole reconcile batch on every poll.
+- Discovery: the store-side ownership re-check uses the configured
+  `annotationPrefix` (and, during `annotationPrefixMigrate`, the previous
+  one). With a custom prefix every update, fail-closed disable and delete of a
+  discovered host was silently dropped.
+- DNS sync: a create or delete the Pi-hole or Cloudflare backend refuses is
+  recorded in the status and the run continues; deletes run regardless of
+  create failures. Before, the first refusal stopped every later create and
+  every delete on every run.
+- DNS sync: Cloudflare skips (and reports) names that are not the configured
+  zone or under it instead of submitting them to the zone.
 
 ## [2.5.0] - 2026-10-20
 

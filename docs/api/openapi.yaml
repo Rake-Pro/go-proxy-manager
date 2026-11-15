@@ -2007,6 +2007,11 @@ components:
             type: string
           description: Narrows the global list for hosts derived from this template/profile. Must be a
             subset.
+        allowedHostnames:
+          type: array
+          items:
+            type: string
+          description: Exact hostnames this template/profile may be used for. Empty means no binding.
       description: The shape every proxy host derived from discovery takes. certificateRef is required.
     IngressProfileRule:
       type: object

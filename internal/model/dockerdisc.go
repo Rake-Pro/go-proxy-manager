@@ -199,6 +199,16 @@ func (d DockerDiscoverySettings) HasStaleManagedByLabel(labels map[string]string
 	return hasStaleDiscoveryLabel(labels, d.ManagedByLabel(), "/managed-by", ManagedByDockerDiscovery)
 }
 
+// OwnsLabels is IngressDiscoverySettings.OwnsLabels for container-derived
+// hosts. d must come from Settings.DockerDiscoveryResolved, which fills in the
+// prefix and the migration flag.
+func (d DockerDiscoverySettings) OwnsLabels(labels map[string]string) bool {
+	if labels[d.ManagedByLabel()] == ManagedByDockerDiscovery {
+		return true
+	}
+	return d.PrefixMigrate && d.HasStaleManagedByLabel(labels)
+}
+
 // HasStaleDisabledByLabel is HasStaleManagedByLabel's counterpart for the
 // disabled-by label.
 func (d DockerDiscoverySettings) HasStaleDisabledByLabel(labels map[string]string) bool {

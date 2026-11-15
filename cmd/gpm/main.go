@@ -617,11 +617,18 @@ func main() {
 			// The reconciler's plan is made from a snapshot taken before a
 			// multi-second cluster list, so ownership is re-checked here under the
 			// store lock: anything that stopped being a discovery-owned object in
-			// the meantime is left alone rather than overwritten or deleted.
+			// the meantime is left alone rather than overwritten or deleted. The
+			// rule comes from the live settings, so a custom annotationPrefix (and
+			// a prefix migration) is recognised exactly as the planner does.
+			_, settings, err := st.Load(c)
+			if err != nil {
+				return "", err
+			}
+			conf := settings.IngressDiscovery
 			guard := func(existing model.Object) error {
-				if existing.GetMeta().Labels[model.ManagedByLabel] != model.ManagedByIngressDiscovery {
+				if !conf.OwnsLabels(existing.GetMeta().Labels) {
 					return fmt.Errorf("%s %q is not labelled %s=%s", existing.Kind(), existing.GetMeta().Name,
-						model.ManagedByLabel, model.ManagedByIngressDiscovery)
+						conf.ManagedByLabel(), model.ManagedByIngressDiscovery)
 				}
 				return nil
 			}
@@ -683,10 +690,15 @@ func main() {
 			// value: anything that stopped being a container-derived object between
 			// the plan and the write - including a host Ingress discovery has since
 			// claimed - is left alone rather than overwritten or deleted.
+			_, settings, err := st.Load(c)
+			if err != nil {
+				return "", err
+			}
+			conf := settings.DockerDiscoveryResolved()
 			guard := func(existing model.Object) error {
-				if existing.GetMeta().Labels[model.ManagedByLabel] != model.ManagedByDockerDiscovery {
+				if !conf.OwnsLabels(existing.GetMeta().Labels) {
 					return fmt.Errorf("%s %q is not labelled %s=%s", existing.Kind(), existing.GetMeta().Name,
-						model.ManagedByLabel, model.ManagedByDockerDiscovery)
+						conf.ManagedByLabel(), model.ManagedByDockerDiscovery)
 				}
 				return nil
 			}
