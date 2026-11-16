@@ -187,13 +187,22 @@ Every list has the same filter box.
 - The most recent proxied requests held in memory, newest first, while
   capture is on. **Enable capture** turns it on live (until the next
   restart); `-access-log` or `GPM_ACCESS_LOG=1` makes it the startup default.
+- **Paging**: the table shows one page of the buffer (50, 100, 250 or 500
+  rows, remembered in the browser). The pager stays pinned to the bottom of
+  the page; the filter and the sort apply to every buffered request, not to
+  the page on screen.
+- **Buffer** sets how many requests are kept (up to 100,000), which is how
+  far back the pages reach.
 - **Auto-refresh** reloads the rows in place at the chosen interval, keeping
   the filter, the sort and the scroll position; **Refresh** does it once.
-  Refreshing pauses while the tab is hidden.
+  Auto-refresh pauses while the tab is hidden or a page after the first is
+  open.
 - **Clear** empties the buffer after a confirmation; capture is unchanged.
-- **Export** downloads the rows the filter shows, in the table's order, as
-  CSV or JSON (`gpm-access-log-<timestamp>.csv|json`). A CSV cell that would
-  read as a spreadsheet formula is prefixed with a quote.
+- **Export** downloads every request the filter matches, across all pages
+  and in the table's order, as CSV or JSON
+  (`gpm-access-log-<timestamp>.csv|json`); with no filter that is the whole
+  buffer. A CSV cell that would read as a spreadsheet formula is prefixed
+  with a quote.
 - With capture off the page says so where the rows would be; there is no
   banner to dismiss.
 - The count line says how many of the captured requests the filter shows and
