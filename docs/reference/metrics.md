@@ -30,7 +30,8 @@ too and needs no scope.
 ProxyHost/StreamHost **name** from committed config, never the client's `Host`
 header: a header is attacker-chosen, and using it would let one client mint
 unbounded series and exhaust the process. A request matching no host is labelled
-`-`. Each metric additionally caps its series count and folds the rest into a
+`-`. The `method` label is likewise a fixed set: a method token outside it is
+counted as `other`. Each metric additionally caps its series count and folds the rest into a
 single `__overflow__` series, so no bug downstream of that rule can grow memory
 without limit.
 
@@ -43,7 +44,7 @@ every third-party dependency has to earn its place.
 | Metric | Type | Labels |
 |--------|------|--------|
 | `gpm_build_info` | gauge | `version`, `commit`, `go` |
-| `gpm_http_requests_total` | counter | `host`, `method`, `status` (class, e.g. `2xx`) |
+| `gpm_http_requests_total` | counter | `host`, `method` (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `CONNECT`, else `other`), `status` (class, e.g. `2xx`) |
 | `gpm_http_request_duration_seconds` | histogram | `host` |
 | `gpm_http_requests_in_flight` | gauge | none |
 | `gpm_http_request_bytes_total` | counter | `host` |

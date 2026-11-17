@@ -137,15 +137,15 @@ func TestCompleteTOTPLoginPendingExpiry(t *testing.T) {
 	}
 }
 
-// TestPendingTOTPCannotBeRedeemedAsOIDC checks the two half-finished login
-// flows share the pending map without being interchangeable.
+// TestPendingTOTPCannotBeRedeemedAsOIDC checks a pending TOTP token is not a
+// login state the OIDC callback accepts.
 func TestPendingTOTPCannotBeRedeemedAsOIDC(t *testing.T) {
 	a := totpLoginAuth(t, testSecret())
 	_, pending, err := a.LocalLogin(context.Background(), "admin", "s3cret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.CompleteLogin(context.Background(), pending, "some-code"); err == nil {
+	if _, _, err := a.CompleteLogin(context.Background(), pending, pending, "some-code"); err == nil {
 		t.Fatal("a pending TOTP login was redeemable at the OIDC callback")
 	}
 }

@@ -25,9 +25,9 @@ that needs something the setting cannot express (a path-scoped location, say).
 > **Set `settings.trustedProxies` before you proxy the admin panel.** It must
 > list the address the admin listener sees for gpm's own proxy listeners, for a
 > loopback bind, `127.0.0.1/32` and/or `::1/128`. Without it every admin login
-> attempt is attributed to that one address, and the login lockout, the TOTP
-> throttle and the pending-login cap all become a single global bucket: one
-> attacker can lock out every administrator. See
+> attempt is attributed to that one address, and the login lockout and the TOTP
+> throttle become a single global bucket: one attacker can lock out every
+> administrator. See
 > [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers).
 >
 > ```yaml
@@ -158,8 +158,11 @@ that needs something the setting cannot express (a path-scoped location, say).
    - Keep `adminAuth.localLoginEnabled: true`, the anti-lockout path if the
      IdP is unreachable or misconfigured.
    - Flip `adminAuth.ssoOnly: true` only after a real SSO login has
-     succeeded. Recovery from `ssoOnly: true` during an SSO outage is a
-     redeploy, not a UI action.
+     succeeded, and set `localLoginEnabled: false` with it (`ssoOnly` turns
+     local login off either way). Recovery from `ssoOnly: true` during an SSO
+     outage is a settings-file edit of both flags and a restart, not a UI
+     action: see
+     [Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery).
    - The `admin-lan-only` access list from step 4 stays in effect underneath
      either login method: it is a network gate, not a substitute for one.
 

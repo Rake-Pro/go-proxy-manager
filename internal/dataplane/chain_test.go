@@ -16,7 +16,7 @@ import (
 func TestUnresolvableRefFailsClosed(t *testing.T) {
 	reg := buildRegistry(model.Config{
 		AccessLists: []model.AccessList{{
-			ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+			ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 			DefaultAction: model.ActionDeny,
 			Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "10.0.0.0/8"}},
 		}},
@@ -34,7 +34,7 @@ func TestUnresolvableRefFailsClosed(t *testing.T) {
 	}{
 		{
 			name: "access list that does not exist",
-			host: model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "a"}, AccessLists: []string{"home-vpnn"}},
+			host: model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "a"}, AccessLists: []string{"lan-vpnn"}},
 			want: http.StatusServiceUnavailable,
 		},
 		{
@@ -45,13 +45,13 @@ func TestUnresolvableRefFailsClosed(t *testing.T) {
 		{
 			name: "one good ref and one bad one",
 			host: model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "c"},
-				Middlewares: []string{"sec-headers"}, AccessLists: []string{"home-vpn", "typo"}},
+				Middlewares: []string{"sec-headers"}, AccessLists: []string{"lan-vpn", "typo"}},
 			want: http.StatusServiceUnavailable,
 		},
 		{
 			name: "every ref resolves",
 			host: model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "d"},
-				Middlewares: []string{"sec-headers"}, AccessLists: []string{"home-vpn"}},
+				Middlewares: []string{"sec-headers"}, AccessLists: []string{"lan-vpn"}},
 			want: http.StatusOK,
 		},
 		{
@@ -86,7 +86,7 @@ func TestUnresolvableRefFailsClosed(t *testing.T) {
 		t.Run("location access list that does not exist, mode "+mode, func(t *testing.T) {
 			cfg := model.Config{
 				AccessLists: []model.AccessList{{
-					ObjectMeta:    model.ObjectMeta{Name: "home-vpn"},
+					ObjectMeta:    model.ObjectMeta{Name: "lan-vpn"},
 					DefaultAction: model.ActionDeny,
 					Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "10.0.0.0/8"}},
 				}},
@@ -94,8 +94,8 @@ func TestUnresolvableRefFailsClosed(t *testing.T) {
 					ObjectMeta:  model.ObjectMeta{Name: "app"},
 					Domains:     []string{"app.example.com"},
 					Upstream:    upstreamOf(t, backend),
-					AccessLists: []string{"home-vpn"},
-					Locations:   []model.Location{{Path: "/api", AccessLists: []string{"home-vpn", "typo"}, AccessListsMode: mode}},
+					AccessLists: []string{"lan-vpn"},
+					Locations:   []model.Location{{Path: "/api", AccessLists: []string{"lan-vpn", "typo"}, AccessListsMode: mode}},
 				}},
 			}
 			rt, err := buildRouter(cfg, "", nil)

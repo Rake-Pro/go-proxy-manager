@@ -236,6 +236,30 @@ type IngressHostTemplate struct {
 	// Settings.Validate so a widening profile fails the settings write, not a
 	// later reconcile.
 	AllowedDomainSuffixes []string `json:"allowedDomainSuffixes,omitempty" yaml:"allowedDomainSuffixes,omitempty"`
+
+	// AllowedHostnames binds this profile to exact hostnames. Empty means no
+	// binding: any name the suffix lists allow. When set, a derived host using
+	// this profile may only carry names listed here (after normalisation), on top
+	// of the suffix check, and every other name is rejected the same way a name
+	// outside the suffix list is. A suffix list cannot express "this one name
+	// only" for a name that is itself a suffix of others (the zone apex), and a
+	// profile without a gate is selectable by every annotating object.
+	AllowedHostnames []string `json:"allowedHostnames,omitempty" yaml:"allowedHostnames,omitempty"`
+}
+
+// AllowsHostname reports whether name may be derived under t: always when
+// AllowedHostnames is empty, otherwise only on an exact match. name is
+// expected to be already normalised by NormalizeHostname.
+func (t IngressHostTemplate) AllowsHostname(name string) bool {
+	if len(t.AllowedHostnames) == 0 {
+		return true
+	}
+	for _, h := range t.AllowedHostnames {
+		if NormalizeHostname(h) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // IngressDiscoverySettings configures discovery of annotated cluster Ingresses
@@ -389,6 +413,18 @@ func (d IngressDiscoverySettings) DisabledByLabel() string { return d.Prefix() +
 // discovery-owned so the next reconcile relabels them.
 func (d IngressDiscoverySettings) HasStaleManagedByLabel(labels map[string]string) bool {
 	return hasStaleDiscoveryLabel(labels, d.ManagedByLabel(), "/managed-by", ManagedByIngressDiscovery)
+}
+
+// OwnsLabels reports whether a proxy host with these labels is one Ingress
+// discovery owns under the current settings: managed-by under the current
+// prefix, or, during a prefix migration, under a previous one. It is the rule
+// the planner applies, for the store-side guard that re-checks ownership at
+// write time.
+func (d IngressDiscoverySettings) OwnsLabels(labels map[string]string) bool {
+	if labels[d.ManagedByLabel()] == ManagedByIngressDiscovery {
+		return true
+	}
+	return d.AnnotationPrefixMigrate && d.HasStaleManagedByLabel(labels)
 }
 
 // HasStaleDisabledByLabel is HasStaleManagedByLabel's counterpart for the
@@ -878,6 +914,11 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 	// with a bad location fails the settings write, not the next reconcile.
 	if err := validateLocations("ingressDiscovery."+path, t.Locations); err != nil {
 		return err
+	}
+	for i, h := range t.AllowedHostnames {
+		if !IsHostname(NormalizeHostname(h)) {
+			return fmt.Errorf("ingressDiscovery.%s.allowedHostnames[%d]: %q is not a valid hostname (exact names only, no wildcards)", path, i, h)
+		}
 	}
 	return nil
 }

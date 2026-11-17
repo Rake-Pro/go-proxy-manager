@@ -183,6 +183,26 @@ var nonPublicRanges = func() []*net.IPNet {
 	return out
 }()
 
+// predicateRanges are the blocks net.IP's predicates in isNonPublic match,
+// spelled out as networks. isNonPublic answers for one address; refuseEntry
+// also needs to know whether a feed network merely overlaps one of them (a
+// 172.0.0.0/8 entry starts at a public address but covers 172.16.0.0/12).
+var predicateRanges = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"0.0.0.0/32", "::/128", // unspecified
+		"127.0.0.0/8", "::1/128", // loopback
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", // private, ULA
+		"169.254.0.0/16", "fe80::/10", // link-local unicast
+		"224.0.0.0/4", "ff00::/8", // multicast (covers link- and interface-local)
+	} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 // isNonPublic reports whether ip is in a range no public feed and no public
 // endpoint ever legitimately uses.
 func isNonPublic(ip net.IP) bool {
@@ -255,8 +275,18 @@ func refuseEntry(n *net.IPNet) error {
 	if ones < min {
 		return fmt.Errorf("%s is broader than the /%d limit for this family", n, min)
 	}
-	if isNonPublic(n.IP) {
-		return fmt.Errorf("%s is not a public address range (loopback, link-local, private, ULA, CGNAT, multicast, reserved or documentation space)", n)
+	nonPublic := isNonPublic(n.IP)
+	for _, set := range [][]*net.IPNet{predicateRanges, nonPublicRanges} {
+		for _, r := range set {
+			// Two prefixes overlap exactly when one contains the other's
+			// network address.
+			if n.Contains(r.IP) || r.Contains(n.IP) {
+				nonPublic = true
+			}
+		}
+	}
+	if nonPublic {
+		return fmt.Errorf("%s is not a public address range, or overlaps one (loopback, link-local, private, ULA, CGNAT, multicast, reserved or documentation space)", n)
 	}
 	return nil
 }
@@ -655,6 +685,13 @@ func parseEntries(body string, max int) ([]string, error) {
 // an IP nor a CIDR. A bare IP becomes a /32 or /128.
 func parseEntry(s string) *net.IPNet {
 	if _, n, err := net.ParseCIDR(s); err == nil {
+		if v4 := n.IP.To4(); v4 != nil && len(n.Mask) == net.IPv6len {
+			// An IPv4-mapped prefix (::ffff:a.b.c.d/k) matches IPv4 clients as
+			// a.b.c.d/(k-96), so it is judged, and stored, as that network.
+			// ParseCIDR has already masked the address, so To4 succeeding means
+			// k >= 96 and the last four mask bytes are the IPv4 mask.
+			return &net.IPNet{IP: v4, Mask: n.Mask[12:]}
+		}
 		return n
 	}
 	if ip := net.ParseIP(s); ip != nil {

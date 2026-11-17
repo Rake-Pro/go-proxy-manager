@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -243,10 +244,32 @@ func (s *Syncer) cloudflareConnect(ctx context.Context, cfg model.Config, conf m
 // stays in force as a SECOND, independent condition: the ledger authorises a
 // delete and the comment still has to agree. That is strictly stronger than the
 // comment alone, so nothing this backend already guaranteed is weakened.
-func cloudflareDecisions(cfg model.Config, apex string, state cloudflareState, owned map[string]model.DNSClaim) (decisions, []string) {
+//
+// Only names equal to the zone or under it are decided at all. A name outside
+// the zone cannot live in it: submitted to the zone's record endpoint it would
+// be stored under the zone, never listed back under the name asked for, and
+// re-created on every run. It is reported as skipped instead.
+func cloudflareDecisions(cfg model.Config, apex, zoneName string, state cloudflareState, owned map[string]model.DNSClaim) (decisions, []string) {
 	desired := desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.PublicCname }, apex)
+	zone := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zoneName), "."))
+	inZone := make([]string, 0, len(desired))
+	var outside []string
+	for _, name := range desired {
+		if name == zone || strings.HasSuffix(name, "."+zone) {
+			inZone = append(inZone, name)
+			continue
+		}
+		outside = append(outside, name)
+		log.Warn().Str("backend", "cloudflare").Str("domain", name).Str("zone", zone).
+			Msg("dnssync: the name is outside the configured cloudflare zone; skipping it")
+	}
 	mark := func(name string) bool { return state.byName[name].Comment == ManagedComment }
-	return decide("cloudflare", desired, state.present, apex, owned, mark), desired
+	d := decide("cloudflare", inZone, state.present, apex, owned, mark)
+	if len(outside) > 0 {
+		d.skip = append(d.skip, outside...)
+		sort.Strings(d.skip)
+	}
+	return d, desired
 }
 
 // planCloudflare is the read-only preview: it resolves the zone, lists it and
@@ -257,7 +280,7 @@ func (s *Syncer) planCloudflare(ctx context.Context, cfg model.Config, conf mode
 	if err != nil {
 		return BackendPlan{Error: err.Error()}
 	}
-	d, _ := cloudflareDecisions(cfg, apex, state, owned)
+	d, _ := cloudflareDecisions(cfg, apex, conf.ZoneName, state, owned)
 	return d.plan()
 }
 
@@ -281,7 +304,7 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 		return st, owned
 	}
 
-	d, desired := cloudflareDecisions(cfg, apex, state, owned)
+	d, desired := cloudflareDecisions(cfg, apex, conf.ZoneName, state, owned)
 	st.Desired = len(desired)
 	st.Skipped = len(d.skip)
 	st.Untouched = d.untouched
@@ -329,11 +352,16 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 		log.Info().Str("name", name).Str("from", state.present[name]).Str("to", apex).
 			Msg("dnssync: cloudflare CNAME retargeted")
 	}
+	// A refused create or delete is recorded and the run goes on, so one name the
+	// zone will not accept cannot hold back every later create and every delete.
+	var failed []string
 	for _, name := range d.create {
 		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
-			return fail(err)
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("name", name).Msg("dnssync: cloudflare CNAME create failed; continuing with the remaining names")
+			continue
 		}
-		live[name] = model.DNSClaim{Target: apex}
 		st.Created++
 		log.Info().Str("name", name).Str("target", apex).Bool("proxied", conf.Proxied).Msg("dnssync: cloudflare CNAME created")
 	}
@@ -344,14 +372,20 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 		log.Warn().Str("name", name).Str("target", state.present[name]).Str("ledgerRev", ledgerRev).
 			Msg("dnssync: deleting a cloudflare CNAME on the authority of the ownership ledger")
 		if err := c.deleteRecord(ctx, state.zoneID, state.byName[name]); err != nil {
-			return fail(err)
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("name", name).Msg("dnssync: cloudflare CNAME delete failed; continuing with the remaining names")
+			continue
 		}
-		delete(live, name)
 		st.Deleted++
 	}
 	live = d.owned
 
 	st.Managed = len(live)
+	if len(failed) > 0 {
+		st.Error = strings.Join(failed, "; ")
+		return st, live
+	}
 	st.OK = true
 	if st.Adopted > 0 || st.Untouched > 0 {
 		log.Info().Str("backend", "cloudflare").Int("adopted", st.Adopted).Int("untouched", st.Untouched).

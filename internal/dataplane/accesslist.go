@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strconv"
@@ -265,9 +266,10 @@ var bcryptSem = make(chan struct{}, maxBcryptConcurrent)
 
 // authGate is a per-key rolling-window failure throttle, mirroring the admin
 // plane's rateGate (internal/auth/authenticator.go) for the data plane's basic
-// auth. Keys are client IPs; the map is capped (maxKeys) and fails CLOSED when
-// saturated, so a flood of distinct keys becomes a lockout rather than an
-// unthrottled brute-force path.
+// auth. Keys are client IPs (IPv6 grouped by /56, see authGateKey); the map
+// is capped (maxKeys) and fails CLOSED when saturated with live entries, so a
+// flood of distinct keys becomes a lockout rather than an unthrottled
+// brute-force path.
 type authGate struct {
 	mu      sync.Mutex
 	entries map[string]*authGateEntry
@@ -277,61 +279,113 @@ type authGate struct {
 }
 
 type authGateEntry struct {
-	fails   int
-	resetAt time.Time
+	fails    int           // finished failed attempts in the window
+	inflight int           // attempts whose password check has not finished
+	wake     chan struct{} // closed when an attempt finishes; nil when nobody waits
+	resetAt  time.Time
 }
+
+// authGateWaitMax bounds how long an attempt waits for a free slot behind the
+// in-flight checks of its key (see begin).
+const authGateWaitMax = 10 * time.Second
 
 func newAuthGate(window time.Duration, limit, maxKeys int) *authGate {
 	return &authGate{entries: map[string]*authGateEntry{}, window: window, limit: limit, maxKeys: maxKeys}
 }
 
-// atLimit reports whether key is currently locked out, evicting its entry if the
-// window has passed. An untracked key while the map is full counts as at-limit
-// (fail closed under saturation).
-func (g *authGate) atLimit(key string) bool {
+// begin admits one password check for key and returns the function that
+// records its outcome, or reports that key is locked out. Only finished
+// failures lock a key out. In-flight checks are counted apart: while finished
+// failures plus in-flight checks would reach the limit, the attempt waits
+// (bounded by ctx and authGateWaitMax) for one of them to finish and checks
+// again. So a parallel burst of wrong passwords gets at most limit checks in
+// total, and a parallel burst of correct ones (a page load sending the cached
+// Authorization header on every sub-resource) is queued, not refused. A
+// success clears the key's failures and wakes its waiters. An untracked key
+// while the map is full of live entries is refused (fail closed under
+// saturation).
+func (g *authGate) begin(ctx context.Context, key string) (finish func(ok bool), admitted bool) {
+	timeout := time.NewTimer(authGateWaitMax)
+	defer timeout.Stop()
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	e := g.entries[key]
-	if e == nil {
-		return len(g.entries) >= g.maxKeys
-	}
-	if time.Now().After(e.resetAt) {
-		delete(g.entries, key)
-		return false
-	}
-	return e.fails >= g.limit
-}
-
-// record counts one failure against key over a fresh window, opportunistically
-// evicting expired entries so the map cannot grow without bound.
-func (g *authGate) record(key string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	now := time.Now()
-	e := g.entries[key]
-	if e == nil || now.After(e.resetAt) {
-		if e == nil && len(g.entries) >= g.maxKeys {
-			for k, ev := range g.entries {
-				if now.After(ev.resetAt) {
-					delete(g.entries, k)
-				}
-			}
-			if len(g.entries) >= g.maxKeys {
-				return // atLimit treats an untracked key as locked while saturated
+	for {
+		now := time.Now()
+		e := g.entries[key]
+		if e != nil && now.After(e.resetAt) {
+			e.fails = 0
+			if e.inflight == 0 {
+				delete(g.entries, key)
+				e = nil
 			}
 		}
-		e = &authGateEntry{}
-		g.entries[key] = e
+		if e == nil {
+			if g.saturatedLocked(now) {
+				g.mu.Unlock()
+				return nil, false
+			}
+			e = &authGateEntry{resetAt: now.Add(g.window)}
+			g.entries[key] = e
+		}
+		if e.fails >= g.limit {
+			g.mu.Unlock()
+			return nil, false
+		}
+		if e.fails+e.inflight < g.limit {
+			e.inflight++
+			g.mu.Unlock()
+			return func(ok bool) { g.finish(key, e, ok) }, true
+		}
+		if e.wake == nil {
+			e.wake = make(chan struct{})
+		}
+		wake := e.wake
+		g.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return nil, false
+		case <-timeout.C:
+			return nil, false
+		}
+		g.mu.Lock()
 	}
-	e.fails++
-	e.resetAt = now.Add(g.window)
 }
 
-// clear forgets key's failures, e.g. after a successful authentication.
-func (g *authGate) clear(key string) {
+// finish records the outcome of one check admitted by begin and wakes the
+// attempts waiting on key.
+func (g *authGate) finish(key string, e *authGateEntry, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.entries, key)
+	e.inflight--
+	if ok {
+		e.fails = 0
+	} else {
+		e.fails++
+		e.resetAt = time.Now().Add(g.window)
+	}
+	if e.wake != nil {
+		close(e.wake)
+		e.wake = nil
+	}
+	if ok && e.inflight == 0 && g.entries[key] == e {
+		delete(g.entries, key)
+	}
+}
+
+// saturatedLocked reports whether the map is full of LIVE entries, sweeping
+// expired ones first: a map full of dead entries must not keep every new
+// client locked out until a config reload. An entry with a check in flight is
+// live. Called with g.mu held.
+func (g *authGate) saturatedLocked(now time.Time) bool {
+	if len(g.entries) < g.maxKeys {
+		return false
+	}
+	for k, ev := range g.entries {
+		if ev.inflight == 0 && now.After(ev.resetAt) {
+			delete(g.entries, k)
+		}
+	}
+	return len(g.entries) >= g.maxKeys
 }
 
 // authOK verifies the request's basic-auth credentials against the list's
@@ -393,22 +447,22 @@ func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup 
 		authOK := !c.hasAuth
 		if c.hasAuth {
 			key := authGateKey(ipOf, r)
+			_, _, presented := r.BasicAuth()
 			switch {
-			case gate.atLimit(key):
-				log.Warn().Str("accessList", c.name).Str("client", key).
-					Msg("data plane basic auth: client is locked out after repeated failures")
+			case !presented:
+				// Only a real attempt counts. Browsers routinely send one
+				// credential-less request per fresh page load; counting those
+				// would lock out normal users. Nothing to verify: answered with
+				// the challenge.
 			default:
-				authOK = c.authOK(r)
-				if _, _, presented := r.BasicAuth(); presented {
-					// Only a real attempt counts. Browsers routinely send one
-					// credential-less request per fresh page load; counting those
-					// would lock out normal users.
-					if authOK {
-						gate.clear(key)
-					} else {
-						gate.record(key)
-					}
+				finish, admitted := gate.begin(r.Context(), key)
+				if !admitted {
+					log.Warn().Str("accessList", c.name).Str("client", key).
+						Msg("data plane basic auth: client is locked out after repeated failures")
+					break
 				}
+				authOK = c.authOK(r)
+				finish(authOK)
 			}
 		}
 
@@ -507,7 +561,13 @@ func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
 	if ip == nil {
 		return "unknown"
 	}
-	return ipBucketKey(ip)
+	if ip.To4() == nil {
+		// IPv6 clients are grouped by /56 here, wider than the rate limiter's
+		// /64: the map is bounded and fails closed when full, and a single
+		// delegated prefix commonly holds 256 /64s.
+		return ip.Mask(net.CIDRMask(56, 128)).String() + "/56"
+	}
+	return ip.String()
 }
 
 // peerIP, clientIPResolver and the rest of the client-IP derivation live in

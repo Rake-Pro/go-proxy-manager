@@ -920,7 +920,7 @@
     "doc": "reference/config/settings/admin-auth.md#settings-admin-auth-providers"
   },
   "settings.adminAuth.ssoOnly": {
-    "text": "Turns local sign-in off: only the single sign-on providers ticked above can sign in to this panel. There is no in-band break-glass door; recovering from a provider outage means a redeploy.",
+    "text": "Turns local sign-in off: only the single sign-on providers ticked above can sign in to this panel. There is no in-band break-glass door; recovering from a provider outage means setting ssoOnly: false and localLoginEnabled: true in settings.yaml and restarting.",
     "doc": "reference/config/settings/admin-auth.md#settings-admin-auth-sso-only"
   },
   "settings.trustedProxies": {

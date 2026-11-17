@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -148,25 +150,40 @@ func nonceOf(t *testing.T, authURL string) string {
 
 // --- BeginLogin / CompleteLogin -------------------------------------------
 
+// stateOf pulls the OAuth2 state gpm generated out of the authorization URL.
+func stateOf(t *testing.T, authURL string) string {
+	t.Helper()
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := u.Query().Get("state")
+	if s == "" {
+		t.Fatalf("authorization URL carries no state: %s", authURL)
+	}
+	return s
+}
+
 func TestBeginAndCompleteLogin(t *testing.T) {
 	idp := newAuthIdP(t)
 	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
 	ctx := context.Background()
 
-	authURL, state, err := a.BeginLogin(ctx, "acme", "/hosts", "203.0.113.7")
+	authURL, stateCookie, err := a.BeginLogin(ctx, "acme", "/hosts")
 	if err != nil {
 		t.Fatalf("BeginLogin: %v", err)
 	}
-	if state == "" {
-		t.Fatal("BeginLogin must return a state value")
+	if stateCookie == "" {
+		t.Fatal("BeginLogin must return a login-state cookie value")
 	}
 	u, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	q := u.Query()
-	if q.Get("state") != state {
-		t.Fatalf("authorization URL state = %q, want %q", q.Get("state"), state)
+	state := q.Get("state")
+	if state == "" {
+		t.Fatal("authorization URL carries no state")
 	}
 	if q.Get("client_id") != "gpm-client" || q.Get("response_type") != "code" {
 		t.Fatalf("authorization URL params = %v", q)
@@ -183,7 +200,7 @@ func TestBeginAndCompleteLogin(t *testing.T) {
 		"nonce": nonceOf(t, authURL), "email": "a@example.test", "name": "A",
 		"groups": []string{"proxy-admins"},
 	})
-	sess, returnTo, err := a.CompleteLogin(ctx, state, "the-code")
+	sess, returnTo, err := a.CompleteLogin(ctx, stateCookie, state, "the-code")
 	if err != nil {
 		t.Fatalf("CompleteLogin: %v", err)
 	}
@@ -203,47 +220,71 @@ func TestBeginAndCompleteLogin(t *testing.T) {
 	if _, err := a.store.Get(ctx, sess.ID); err != nil {
 		t.Fatalf("session not persisted: %v", err)
 	}
-	// The state is consumed exactly once.
-	if _, _, err := a.CompleteLogin(ctx, state, "the-code"); err == nil {
-		t.Fatal("a state must not be reusable")
+	// The cookie binds exactly this flow's state.
+	if _, _, err := a.CompleteLogin(ctx, stateCookie, "another-state", "the-code"); !errors.Is(err, ErrLoginState) {
+		t.Fatalf("a login state for another flow: err = %v, want ErrLoginState", err)
 	}
 }
 
 func TestCompleteLoginFailures(t *testing.T) {
-	t.Run("unknown state", func(t *testing.T) {
+	t.Run("unsigned state cookie", func(t *testing.T) {
 		a := oidcAuthenticator(t, newAuthIdP(t), &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-		if _, _, err := a.CompleteLogin(context.Background(), "never-issued", "code"); err == nil {
-			t.Fatal("expected an error for an unknown state")
+		if _, _, err := a.CompleteLogin(context.Background(), "never-issued", "never-issued", "code"); !errors.Is(err, ErrLoginState) {
+			t.Fatalf("err = %v, want ErrLoginState", err)
 		}
 	})
 
-	t.Run("expired pending login", func(t *testing.T) {
-		idp := newAuthIdP(t)
-		a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-		authURL, state, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7")
+	t.Run("expired login state", func(t *testing.T) {
+		a := oidcAuthenticator(t, newAuthIdP(t), &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+		c, err := a.signLoginState(loginState{State: "st", Nonce: "n", Verifier: "v", IdP: "acme", Return: "/",
+			Exp: time.Now().Add(-time.Minute).Unix()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		idp.setClaims(map[string]any{"nonce": nonceOf(t, authURL), "groups": []string{"proxy-admins"}})
-		a.pmu.Lock()
-		p := a.pending[state]
-		p.expires = time.Now().Add(-time.Minute)
-		a.pending[state] = p
-		a.pmu.Unlock()
-		if _, _, err := a.CompleteLogin(context.Background(), state, "code"); err == nil {
-			t.Fatal("an expired login state must be rejected")
+		if _, _, err := a.CompleteLogin(context.Background(), c, "st", "code"); !errors.Is(err, ErrLoginState) {
+			t.Fatalf("err = %v, want ErrLoginState", err)
+		}
+	})
+
+	t.Run("tampered login state", func(t *testing.T) {
+		a := oidcAuthenticator(t, newAuthIdP(t), &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+		authURL, c, err := a.BeginLogin(context.Background(), "acme", "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, sig, _ := strings.Cut(c, ".")
+		raw, err := base64.RawURLEncoding.DecodeString(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forged := base64.RawURLEncoding.EncodeToString([]byte(strings.Replace(string(raw), `"r":"/"`, `"r":"/x"`, 1))) + "." + sig
+		if _, _, err := a.CompleteLogin(context.Background(), forged, stateOf(t, authURL), "code"); !errors.Is(err, ErrLoginState) {
+			t.Fatalf("err = %v, want ErrLoginState", err)
+		}
+	})
+
+	t.Run("login state from another process", func(t *testing.T) {
+		idp := newAuthIdP(t)
+		a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+		authURL, c, err := a.BeginLogin(context.Background(), "acme", "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		restarted := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+		if _, _, err := restarted.CompleteLogin(context.Background(), c, stateOf(t, authURL), "code"); !errors.Is(err, ErrLoginState) {
+			t.Fatalf("err = %v, want ErrLoginState", err)
 		}
 	})
 
 	t.Run("nonce mismatch", func(t *testing.T) {
 		idp := newAuthIdP(t)
 		a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-		_, state, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7")
+		authURL, c, err := a.BeginLogin(context.Background(), "acme", "/")
 		if err != nil {
 			t.Fatal(err)
 		}
 		idp.setClaims(map[string]any{"nonce": "wrong", "groups": []string{"proxy-admins"}})
-		_, _, err = a.CompleteLogin(context.Background(), state, "code")
+		_, _, err = a.CompleteLogin(context.Background(), c, stateOf(t, authURL), "code")
 		if err == nil || !strings.Contains(err.Error(), "nonce") {
 			t.Fatalf("expected a nonce mismatch error, got %v", err)
 		}
@@ -252,23 +293,71 @@ func TestCompleteLoginFailures(t *testing.T) {
 	t.Run("no role mapping denies", func(t *testing.T) {
 		idp := newAuthIdP(t)
 		a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-		authURL, state, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7")
+		authURL, c, err := a.BeginLogin(context.Background(), "acme", "/")
 		if err != nil {
 			t.Fatal(err)
 		}
 		idp.setClaims(map[string]any{"nonce": nonceOf(t, authURL), "groups": []string{"nobody"}})
-		_, _, err = a.CompleteLogin(context.Background(), state, "code")
+		_, _, err = a.CompleteLogin(context.Background(), c, stateOf(t, authURL), "code")
 		if err == nil || !strings.Contains(err.Error(), "no role mapping") {
 			t.Fatalf("expected a role-mapping denial, got %v", err)
 		}
 	})
 }
 
+// Only a provider listed in adminAuth.providers can sign in to the panel. Any
+// other configured OIDC provider is refused at the start of the login and at
+// the callback with the error an unknown name gets.
+func TestAdminLoginRequiresListedProvider(t *testing.T) {
+	idp := newAuthIdP(t)
+	a := NewAuthenticator(Options{Store: testStore(t), SessionTTL: time.Hour})
+	cfg := model.Config{IdentityProviders: []model.IdentityProvider{
+		{ObjectMeta: model.ObjectMeta{Name: "admin-sso"}, Type: model.IdPTypeOIDC,
+			OIDC:        &model.OIDCSpec{IssuerURL: idp.srv.URL, ClientID: "gpm-client"},
+			RoleMapping: &model.RoleMapping{AdminGroups: []string{"proxy-admins"}}},
+		{ObjectMeta: model.ObjectMeta{Name: "site-gate"}, Type: model.IdPTypeOIDC,
+			OIDC:        &model.OIDCSpec{IssuerURL: idp.srv.URL, ClientID: "gpm-client"},
+			RoleMapping: &model.RoleMapping{AdminGroups: []string{"site-users"}}},
+	}}
+	settings := model.Settings{ExternalBaseURL: "https://admin.example.test",
+		AdminAuth: model.AdminAuthSettings{Providers: []string{"admin-sso"}}}
+	a.Configure(cfg, settings)
+	ctx := context.Background()
+
+	_, _, err := a.BeginLogin(ctx, "site-gate", "/")
+	if err == nil || err.Error() != `identity provider "site-gate" not found` {
+		t.Fatalf("BeginLogin with an unlisted provider: err = %v, want the not-found error", err)
+	}
+
+	// A login state naming an unlisted provider is refused at the callback too.
+	c, err := a.signLoginState(loginState{State: "st", Nonce: "n", Verifier: "v", IdP: "site-gate", Return: "/",
+		Exp: time.Now().Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idp.setClaims(map[string]any{"nonce": "n", "groups": []string{"site-users"}})
+	if _, _, err := a.CompleteLogin(ctx, c, "st", "code"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("CompleteLogin with an unlisted provider: err = %v, want not found", err)
+	}
+
+	// A provider taken off the list between the start and the callback.
+	authURL, c, err := a.BeginLogin(ctx, "admin-sso", "/")
+	if err != nil {
+		t.Fatalf("BeginLogin with the listed provider: %v", err)
+	}
+	settings.AdminAuth.Providers = nil
+	a.Configure(cfg, settings)
+	idp.setClaims(map[string]any{"nonce": nonceOf(t, authURL), "groups": []string{"proxy-admins"}})
+	if _, _, err := a.CompleteLogin(ctx, c, stateOf(t, authURL), "code"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("CompleteLogin after the provider was delisted: err = %v, want not found", err)
+	}
+}
+
 // A non-default groupsClaim is honoured end to end.
 func TestCompleteLoginCustomGroupsClaim(t *testing.T) {
 	idp := newAuthIdP(t)
 	a := oidcAuthenticator(t, idp, &model.RoleMapping{GroupsClaim: "roles", UserGroups: []string{"viewers"}})
-	authURL, state, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7")
+	authURL, c, err := a.BeginLogin(context.Background(), "acme", "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +368,7 @@ func TestCompleteLoginCustomGroupsClaim(t *testing.T) {
 		"groups": []string{"proxy-admins"},
 		"roles":  []string{"viewers"},
 	})
-	sess, _, err := a.CompleteLogin(context.Background(), state, "code")
+	sess, _, err := a.CompleteLogin(context.Background(), c, stateOf(t, authURL), "code")
 	if err != nil {
 		t.Fatalf("CompleteLogin: %v", err)
 	}
@@ -292,11 +381,12 @@ func TestBeginLoginConfigErrors(t *testing.T) {
 	idp := newAuthIdP(t)
 	oidcSpec := &model.OIDCSpec{IssuerURL: idp.srv.URL, ClientID: "gpm-client"}
 	cases := []struct {
-		name    string
-		cfg     model.Config
-		base    string
-		idpName string
-		wantErr string
+		name     string
+		cfg      model.Config
+		base     string
+		idpName  string
+		unlisted bool // leave idpName out of adminAuth.providers
+		wantErr  string
 	}{
 		{
 			name:    "unknown provider",
@@ -304,6 +394,16 @@ func TestBeginLoginConfigErrors(t *testing.T) {
 			base:    "https://admin.example.test",
 			idpName: "nope",
 			wantErr: "not found",
+		},
+		{
+			name: "provider not in adminAuth.providers",
+			cfg: model.Config{IdentityProviders: []model.IdentityProvider{{
+				ObjectMeta: model.ObjectMeta{Name: "acme"}, Type: model.IdPTypeOIDC, OIDC: oidcSpec,
+			}}},
+			base:     "https://admin.example.test",
+			idpName:  "acme",
+			unlisted: true,
+			wantErr:  "not found",
 		},
 		{
 			name: "provider is not oidc",
@@ -349,100 +449,68 @@ func TestBeginLoginConfigErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			a := NewAuthenticator(Options{Store: testStore(t)})
-			a.Configure(tc.cfg, model.Settings{ExternalBaseURL: tc.base})
-			_, _, err := a.BeginLogin(context.Background(), tc.idpName, "/", "203.0.113.7")
+			var providers []string
+			if !tc.unlisted {
+				providers = []string{tc.idpName}
+			}
+			a.Configure(tc.cfg, model.Settings{ExternalBaseURL: tc.base, AdminAuth: model.AdminAuthSettings{Providers: providers}})
+			_, c, err := a.BeginLogin(context.Background(), tc.idpName, "/")
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
 			}
-			// Nothing was stored for a login that never started.
-			a.pmu.Lock()
-			n := len(a.pending)
-			a.pmu.Unlock()
-			if n != 0 {
-				t.Fatalf("pending map should stay empty on failure, got %d entries", n)
+			if c != "" {
+				t.Fatal("a login that never started must not return a login state")
 			}
 		})
 	}
 }
 
-// --- pending-login bookkeeping --------------------------------------------
+// --- login-state storage ----------------------------------------------------
 
-func TestPendingLoginGlobalCap(t *testing.T) {
+// Starting a login stores nothing on the server, so no number of anonymous
+// login starts, from one client or many, can refuse another client's login.
+func TestBeginLoginKeepsNoServerState(t *testing.T) {
 	idp := newAuthIdP(t)
 	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
 
 	a.pmu.Lock()
 	for i := 0; i < maxPendingLogins; i++ {
-		a.pending[fmt.Sprintf("live-%d", i)] = pendingLogin{expires: time.Now().Add(time.Hour)}
+		a.pending[fmt.Sprintf("live-%d", i)] = pendingLogin{totpUser: "admin", expires: time.Now().Add(time.Hour)}
 	}
 	a.pmu.Unlock()
 
-	_, _, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7")
-	if err == nil || !strings.Contains(err.Error(), "too many pending logins") {
-		t.Fatalf("err = %v, want a pending-login cap error", err)
+	for i := 0; i < 100; i++ {
+		if _, _, err := a.BeginLogin(context.Background(), "acme", "/"); err != nil {
+			t.Fatalf("login start %d refused: %v", i+1, err)
+		}
+	}
+	a.pmu.Lock()
+	n := len(a.pending)
+	a.pmu.Unlock()
+	if n != maxPendingLogins {
+		t.Fatalf("pending map changed from %d to %d entries", maxPendingLogins, n)
 	}
 }
 
-// gcPendingLocked prunes expired states, so a map full of stale entries does not
-// permanently wedge logins.
-func TestPendingLoginGCReclaimsExpiredStates(t *testing.T) {
-	idp := newAuthIdP(t)
-	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+// gcPendingLocked prunes expired pending-TOTP logins, so a map full of stale
+// entries does not permanently wedge the second step.
+func TestPendingTOTPGCReclaimsExpiredEntries(t *testing.T) {
+	a := NewAuthenticator(Options{Store: testStore(t), LocalUser: "admin"})
 
 	a.pmu.Lock()
 	for i := 0; i < maxPendingLogins; i++ {
-		a.pending[fmt.Sprintf("stale-%d", i)] = pendingLogin{expires: time.Now().Add(-time.Minute)}
+		a.pending[fmt.Sprintf("stale-%d", i)] = pendingLogin{totpUser: "admin", expires: time.Now().Add(-time.Minute)}
 	}
 	a.pmu.Unlock()
 
-	if _, _, err := a.BeginLogin(context.Background(), "acme", "/", "203.0.113.7"); err != nil {
-		t.Fatalf("expired states should be reclaimed, got %v", err)
+	if _, err := a.startPendingTOTP(); err != nil {
+		t.Fatalf("expired entries should be reclaimed, got %v", err)
 	}
 	a.pmu.Lock()
 	n := len(a.pending)
 	a.pmu.Unlock()
 	if n != 1 {
-		t.Fatalf("pending map should hold only the new state, got %d entries", n)
-	}
-}
-
-func TestPendingLoginPerIPCap(t *testing.T) {
-	idp := newAuthIdP(t)
-	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-	const key = "203.0.113.7"
-
-	for i := 0; i < maxPendingPerIP; i++ {
-		if _, _, err := a.BeginLogin(context.Background(), "acme", "/", key); err != nil {
-			t.Fatalf("attempt %d should be allowed: %v", i+1, err)
-		}
-	}
-	_, _, err := a.BeginLogin(context.Background(), "acme", "/", key)
-	if err == nil || !strings.Contains(err.Error(), "too many login attempts") {
-		t.Fatalf("err = %v, want a per-IP cap error", err)
-	}
-	// The cap is per client IP.
-	if _, _, err := a.BeginLogin(context.Background(), "acme", "/", "198.51.100.9"); err != nil {
-		t.Fatalf("another client must be unaffected: %v", err)
-	}
-}
-
-// Retries against a down or misconfigured IdP must not burn the caller's per-IP
-// budget: the attempt is only counted once a login state actually exists.
-func TestFailedBeginLoginDoesNotBurnBudget(t *testing.T) {
-	idp := newAuthIdP(t)
-	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
-	const key = "203.0.113.7"
-
-	for i := 0; i < maxPendingPerIP*2; i++ {
-		if _, _, err := a.BeginLogin(context.Background(), "unknown-idp", "/", key); err == nil {
-			t.Fatal("expected the unknown provider to fail")
-		}
-	}
-	if a.pendingLoginAtCap(key) {
-		t.Fatal("failed login starts must not count against the per-IP budget")
-	}
-	if _, _, err := a.BeginLogin(context.Background(), "acme", "/", key); err != nil {
-		t.Fatalf("a real login start should still be allowed: %v", err)
+		t.Fatalf("pending map should hold only the new entry, got %d entries", n)
 	}
 }
 
@@ -650,6 +718,55 @@ func TestSlidingExpiryLeavesFreshSessionsAlone(t *testing.T) {
 	}
 	if got.ExpiresAt.Sub(exp) > time.Second || exp.Sub(got.ExpiresAt) > time.Second {
 		t.Fatalf("expiry should be unchanged: was %v, now %v", exp, got.ExpiresAt)
+	}
+}
+
+// A session past its absolute lifetime is refused and deleted even though its
+// sliding expiry is still in the future, and sliding never extends a session
+// past that lifetime.
+func TestSessionAbsoluteLifetime(t *testing.T) {
+	st := testStore(t)
+	a := NewAuthenticator(Options{Store: st, SessionTTL: time.Hour})
+	a.Configure(model.Config{}, model.Settings{})
+	h := a.RequireRole(RoleAdmin, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	call := func(id string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		req.AddCookie(&http.Cookie{Name: a.cookieName, Value: id})
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	old := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local",
+		CreatedAt: time.Now().Add(-maxSessionAge - time.Minute), ExpiresAt: time.Now().Add(50 * time.Minute)}
+	if err := st.Create(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if rec := call(old.ID); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("session past its absolute lifetime: got %d, want 401", rec.Code)
+	}
+	if _, err := st.Get(context.Background(), old.ID); err == nil {
+		t.Fatal("a session past its absolute lifetime must be deleted")
+	}
+
+	created := time.Now().Add(-maxSessionAge + 10*time.Minute)
+	near := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local",
+		CreatedAt: created, ExpiresAt: time.Now().Add(5 * time.Minute)}
+	if err := st.Create(context.Background(), near); err != nil {
+		t.Fatal(err)
+	}
+	if rec := call(near.ID); rec.Code != http.StatusOK {
+		t.Fatalf("session inside its lifetime: got %d, want 200", rec.Code)
+	}
+	got, err := st.Get(context.Background(), near.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limit := created.Add(maxSessionAge); got.ExpiresAt.After(limit.Add(time.Second)) {
+		t.Fatalf("sliding moved expiry to %v, past the absolute limit %v", got.ExpiresAt, limit)
+	}
+	if !got.ExpiresAt.After(near.ExpiresAt) {
+		t.Fatalf("sliding should still extend up to the limit: was %v, now %v", near.ExpiresAt, got.ExpiresAt)
 	}
 }
 

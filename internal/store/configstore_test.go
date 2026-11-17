@@ -946,7 +946,7 @@ func TestSaveSettingsRejectsDanglingDiscoveryRefs(t *testing.T) {
 		st := newTestStore(t)
 		for _, o := range []model.Object{
 			sampleCert("wildcard"),
-			model.AccessList{ObjectMeta: model.ObjectMeta{Name: "home-vpn"}, Rules: []model.IPRule{{CIDR: "10.0.0.0/8", Action: "allow"}}},
+			model.AccessList{ObjectMeta: model.ObjectMeta{Name: "lan-vpn"}, Rules: []model.IPRule{{CIDR: "10.0.0.0/8", Action: "allow"}}},
 		} {
 			if _, err := st.Save(ctx, o, author); err != nil {
 				t.Fatalf("seed %s: %v", o.Kind(), err)
@@ -957,8 +957,8 @@ func TestSaveSettingsRejectsDanglingDiscoveryRefs(t *testing.T) {
 			t.Fatalf("load: %v", err)
 		}
 		s.IngressDiscovery = base()
-		s.IngressDiscovery.Template.AccessLists = []string{"home-vpn"}
-		s.IngressDiscovery.Profiles = map[string]model.IngressHostTemplate{"vpn": profile(nil, []string{"home-vpn"})}
+		s.IngressDiscovery.Template.AccessLists = []string{"lan-vpn"}
+		s.IngressDiscovery.Profiles = map[string]model.IngressHostTemplate{"vpn": profile(nil, []string{"lan-vpn"})}
 		if _, err := st.SaveSettings(ctx, s, author); err != nil {
 			t.Fatalf("SaveSettings rejected a config whose refs all resolve: %v", err)
 		}

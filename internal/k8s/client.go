@@ -29,6 +29,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -69,6 +70,10 @@ const (
 	// value cached for the process lifetime would start failing mid-run.
 	tokenTTL = 5 * time.Minute
 )
+
+// listPageLimits are the page sizes tried in turn for one page whose response
+// overflows maxRespBody (see ListIngresses).
+var listPageLimits = []int{listPageSize, 10, 1}
 
 // Ingress is the subset of a networking.k8s.io/v1 Ingress this package consumes.
 // Anything not listed here is deliberately not decoded: the derived proxy host
@@ -315,7 +320,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 		return fmt.Errorf("kubernetes: GET %s: read body: %w", path, err)
 	}
 	if len(body) > maxRespBody {
-		return fmt.Errorf("kubernetes: GET %s: response exceeded the %d-byte body cap (lower the page size, or trim oversized annotations on the listed objects)", path, maxRespBody)
+		return fmt.Errorf("kubernetes: GET %s: %w (lower the page size, or trim oversized annotations on the listed objects)", path, errBodyCap)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized {
@@ -328,6 +333,9 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	}
 	return nil
 }
+
+// errBodyCap marks a response that was larger than maxRespBody.
+var errBodyCap = fmt.Errorf("response exceeded the %d-byte body cap", maxRespBody)
 
 // apiErrorMessage pulls the message out of a Kubernetes Status reply, falling
 // back to a bounded excerpt of whatever arrived.
@@ -368,17 +376,28 @@ func (c *Client) ListIngresses(ctx context.Context) ([]Ingress, error) {
 		if page > maxListPages {
 			return nil, fmt.Errorf("kubernetes: ingress list exceeded %d pages; refusing to treat a truncated list as complete", maxListPages)
 		}
-		q := url.Values{}
-		q.Set("limit", fmt.Sprint(listPageSize))
-		if c.labelSelector != "" {
-			q.Set("labelSelector", c.labelSelector)
-		}
-		if cont != "" {
-			q.Set("continue", cont)
-		}
 		var list ingressList
-		if err := c.get(ctx, path, q, &list); err != nil {
-			return nil, err
+		// A page that overflows the body cap is asked for again with a smaller
+		// limit, from the same continue token. One object is bounded by the API
+		// server's own request size limit, far below the cap, so a page of one
+		// always fits; a few large objects then cost requests, not the whole list.
+		for _, limit := range listPageLimits {
+			q := url.Values{}
+			q.Set("limit", fmt.Sprint(limit))
+			if c.labelSelector != "" {
+				q.Set("labelSelector", c.labelSelector)
+			}
+			if cont != "" {
+				q.Set("continue", cont)
+			}
+			list = ingressList{}
+			err := c.get(ctx, path, q, &list)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, errBodyCap) || limit == listPageLimits[len(listPageLimits)-1] {
+				return nil, err
+			}
 		}
 		// Shape assertion. A LIST reply from a Kubernetes API server always carries
 		// kind: IngressList; anything else on a 200 - a Status envelope, a mesh or

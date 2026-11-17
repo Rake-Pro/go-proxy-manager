@@ -272,6 +272,9 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
+			// The router refuses a request target not in origin form; clearing
+			// Opaque here keeps the request line built from Path regardless.
+			pr.Out.URL.Opaque = ""
 			// SetURL joins the upstream base path and the request path; re-clean
 			// and re-confine the result (see confineUpstreamPath) so a dot
 			// segment cannot reach the backend even if something upstream of
@@ -280,6 +283,7 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 				pr.Out.URL.Path = p
 				pr.Out.URL.RawPath = ""
 			}
+			reapplySetRequest(pr)
 			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
 			setForwardedClient(pr)
 			applyHostHeader(pr.Out, hostHeader, pr.In.Host)
@@ -352,6 +356,9 @@ func isUpstreamTimeout(err error) bool {
 // A bodiless, non-upgrade request keeps its deadline - and the stdlib clears that
 // one itself once the handler starts, so a long-streamed RESPONSE is unaffected
 // either way.
+//
+// Every response that is not hijacked is written through a progressWriter,
+// which bounds each write by progress (see responseWriteIdleTimeout).
 func longLivedProxy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isUpgradeRequest(r) {
@@ -361,7 +368,15 @@ func longLivedProxy(next http.Handler) http.Handler {
 			// not a reason to fail the request.
 			_ = rc.SetReadDeadline(time.Time{})
 			_ = rc.SetWriteDeadline(time.Time{})
-		} else if r.ContentLength != 0 {
+			// The upstream may answer without upgrading; that body is bounded
+			// like any other. A real upgrade hijacks through Unwrap with the
+			// deadline already cleared, and finish has no body to flush.
+			pw := &progressWriter{ResponseWriter: w, rc: rc}
+			next.ServeHTTP(pw, r)
+			pw.finish()
+			return
+		}
+		if r.ContentLength != 0 {
 			// A body is bounded by progress, not by a total: each read of it
 			// moves the connection's read deadline bodyIdleTimeout ahead, so a
 			// large upload streams for as long as it keeps moving while a
@@ -373,8 +388,81 @@ func longLivedProxy(next http.Handler) http.Handler {
 				r.Body = &idleBody{ReadCloser: r.Body, rc: rc}
 			}
 		}
-		next.ServeHTTP(w, r)
+		pw := &progressWriter{ResponseWriter: w, rc: http.NewResponseController(w)}
+		next.ServeHTTP(pw, r)
+		pw.finish()
 	})
+}
+
+// responseWriteIdleTimeout is the longest one response write may make no
+// progress (a client that stops reading) before the connection's write
+// deadline expires and the write fails, the response-side mirror of
+// bodyIdleTimeout. It is also the listeners' HTTP/2 WriteByteTimeout.
+var responseWriteIdleTimeout = 60 * time.Second
+
+// progressWriteChunk is the most one write deadline has to cover: a larger
+// Write is split, so a slow client that keeps reading is never cut off by the
+// size of the proxy's copy buffer.
+const progressWriteChunk = 64 << 10
+
+// progressWriter sets the write deadline before every WriteHeader, Write chunk
+// and Flush and clears it again afterwards, so the deadline bounds only a write
+// that is in progress: an idle stream (server-sent events between events, a
+// handler waiting for upstream trailers) holds no deadline that could expire,
+// and nothing stale is left on a reused connection.
+type progressWriter struct {
+	http.ResponseWriter
+	rc        *http.ResponseController
+	wroteBody bool
+}
+
+func (p *progressWriter) arm() {
+	_ = p.rc.SetWriteDeadline(time.Now().Add(responseWriteIdleTimeout))
+}
+
+func (p *progressWriter) disarm() { _ = p.rc.SetWriteDeadline(time.Time{}) }
+
+func (p *progressWriter) WriteHeader(code int) {
+	p.arm()
+	p.ResponseWriter.WriteHeader(code)
+	p.disarm()
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n := 0
+	for {
+		c := min(len(b), progressWriteChunk)
+		p.arm()
+		m, err := p.ResponseWriter.Write(b[:c])
+		p.disarm()
+		n += m
+		if m > 0 {
+			p.wroteBody = true
+		}
+		if err != nil || c == len(b) {
+			return n, err
+		}
+		b = b[c:]
+	}
+}
+
+func (p *progressWriter) FlushError() error {
+	p.arm()
+	err := p.rc.Flush()
+	p.disarm()
+	return err
+}
+
+func (p *progressWriter) Flush() { _ = p.FlushError() }
+
+func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+// finish flushes what the server still buffers under a deadline before the
+// handler returns, so a stalled client cannot hold the response's tail.
+func (p *progressWriter) finish() {
+	if p.wroteBody {
+		_ = p.FlushError()
+	}
 }
 
 // bodyIdleTimeout is the longest a request body may make no progress before

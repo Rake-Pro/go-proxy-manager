@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"sync"
 	"syscall"
@@ -233,11 +234,23 @@ func (d *Dispatcher) deliver(ctx context.Context, t model.WebhookConfig, body []
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return 0, time.Since(started), err
+		return 0, time.Since(started), TransportCause(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	return resp.StatusCode, time.Since(started), nil
+}
+
+// TransportCause strips the *url.Error wrapper net/http puts around a
+// transport failure. Its text repeats the full request URL, and for several
+// receivers (Discord, Slack, ntfy) the URL path is the credential, so the
+// stored status, the test result and the log line carry only the cause.
+func TransportCause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 // record stores the outcome of the most recent POST to a target. It is in-memory

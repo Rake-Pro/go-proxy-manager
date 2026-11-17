@@ -63,6 +63,7 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 	outpost := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(base)          // dial the auth server, keep the inbound path
+			pr.Out.URL.Opaque = ""   // request target not in origin form: send Path only
 			pr.Out.Host = pr.In.Host // preserve the browser-facing host
 			pr.SetXForwarded()
 			pr.Out.Header.Set("X-Original-URL", absoluteURL(pr.In))

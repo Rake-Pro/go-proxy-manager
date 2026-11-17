@@ -122,10 +122,15 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	if uiHandler != nil {
 		mux.Handle("/", uiHandler)
 	}
+	// No server-wide ReadTimeout or WriteTimeout: backup restores, pprof
+	// profiles and reconcile calls legitimately run long. IdleTimeout closes
+	// keep-alive connections that send nothing, which ReadHeaderTimeout does
+	// not cover once a first request has been served.
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return s
 }

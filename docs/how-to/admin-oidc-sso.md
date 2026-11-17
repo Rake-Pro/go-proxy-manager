@@ -19,7 +19,10 @@ local login kept as the anti-lockout path.
    `roleMapping.adminGroups`.
 3. List the provider under `settings.adminAuth.providers`. Keep
    `localLoginEnabled: true` while you validate; flip `ssoOnly: true` once an SSO
-   login succeeds (recovery from SSO-only is by redeploy).
+   login succeeds, and set `localLoginEnabled: false` with it: `ssoOnly` turns
+   local login off whatever `localLoginEnabled` says. Recovery from SSO-only is
+   [Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery)
+   (both flags, restart).
 
 Only an `oidc` provider renders a sign-in button. A settings write that turns on
 `ssoOnly` while `adminAuth.providers` names a provider that does not exist, or
@@ -45,8 +48,15 @@ login page with no buttons and no password form.
 To set the local anti-lockout credential:
 
 ```
-docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > ./admin_hash
+read -rsp 'admin password: ' pw; echo
+printf '%s\n' "$pw" | docker run --rm -i ghcr.io/rake-pro/go-proxy-manager hashpw \
+  | sudo tee ./admin_hash >/dev/null
+unset pw
 ```
+
+Create `./admin_hash` first, owned by the image's `gpm` user with mode `0400`
+([Secret files](../getting-started/install-docker.md#secret-files)); `hashpw`
+reads the password from stdin when it gets no argument.
 
 Then set `GPM_LOCAL_ADMIN_USER=admin` and
 `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE=/run/secrets/gpm_admin_hash` (the file must

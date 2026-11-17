@@ -903,3 +903,66 @@ func TestEscapeRecord(t *testing.T) {
 		t.Fatalf("escapeRecord = %q", got)
 	}
 }
+
+// A create the resolver refuses is recorded in the status and the run goes on:
+// later creates and every delete still land, and the ledger claims only what
+// actually exists.
+func TestPiholeRefusedCreateDoesNotStopTheRun(t *testing.T) {
+	fake := &fakePihole{password: "secret", failAddRecord: "blocked.example.com,edge.example.com", records: []string{
+		"gone.example.com,edge.example.com", // ours, no longer wanted
+	}}
+	srv := startPihole(t, fake)
+	led := ownsPihole("gone.example.com", "edge.example.com")
+	hosts := []model.ProxyHost{
+		lanHost("a", "aaa.example.com"),
+		lanHost("b", "blocked.example.com"),
+		lanHost("z", "zzz.example.com"),
+	}
+	s := piholeSyncerWith(t, srv, hosts, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Pihole
+	if st.OK || !strings.Contains(st.Error, "blocked.example.com") {
+		t.Fatalf("status = %+v, want a failure naming the refused record", st)
+	}
+	if st.Created != 2 || st.Deleted != 1 {
+		t.Fatalf("status = %+v, want two creates and one delete despite the refusal", st)
+	}
+	got := strings.Join(fake.snapshot(), " ")
+	if got != "aaa.example.com,edge.example.com zzz.example.com,edge.example.com" {
+		t.Fatalf("records = %q", got)
+	}
+	wantLedger(t, led.pihole(), "aaa.example.com", "edge.example.com", "zzz.example.com", "edge.example.com")
+}
+
+// A plain-http Pi-hole URL on a non-loopback host is accepted but logged at
+// warn, once per URL; https and loopback URLs are not.
+func TestPiholePlaintextURLWarnsOnce(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"http://192.0.2.10:8080":     true,
+		"http://pihole.lan":          true,
+		"HTTP://[2001:db8::53]":      true,
+		"https://192.0.2.10":         false,
+		"http://127.0.0.1:8080":      false,
+		"http://localhost":           false,
+		"http://[::1]:8080":          false,
+		"http://[::ffff:127.0.0.1]/": false,
+	} {
+		if _, got := plaintextHost(raw); got != want {
+			t.Errorf("plaintextHost(%q) = %v, want %v", raw, got, want)
+		}
+	}
+
+	logs := captureLogs(t)
+	s := New(nil, nil)
+	s.warnPlaintextPihole("http://user:pw@192.0.2.10:8080")
+	s.warnPlaintextPihole("http://user:pw@192.0.2.10:8080")
+	out := logs.String()
+	if n := strings.Count(out, "plain http on a non-loopback host"); n != 1 {
+		t.Fatalf("warnings = %d, want exactly one, logs:\n%s", n, out)
+	}
+	if strings.Contains(out, "pw") {
+		t.Fatalf("the warning must not echo URL credentials, logs:\n%s", out)
+	}
+}

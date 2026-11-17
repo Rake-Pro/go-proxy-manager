@@ -487,6 +487,9 @@ func ownership(conf model.IngressDiscoverySettings) discovery.Ownership {
 		HasStaleManaged:  conf.HasStaleManagedByLabel,
 		HasStaleDisabled: conf.HasStaleDisabledByLabel,
 		StripStale:       conf.StripStaleDiscoveryLabels,
+		DomainAllowed: func(tmpl model.IngressHostTemplate, d string) bool {
+			return conf.AllowedDomainFor(tmpl, d) && tmpl.AllowsHostname(d)
+		},
 	}
 }
 
@@ -503,14 +506,20 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			continue // opt-in only: absent or any other value means invisible
 		}
 		name, host, prof, err := derive(ing, conf)
-		items = append(items, discovery.Item{
+		it := discovery.Item{
 			Ref:            ing.Metadata.Namespace + "/" + ing.Metadata.Name,
 			Name:           name,
 			Host:           host,
 			Profile:        prof,
 			Err:            err,
 			UnknownProfile: isUnknownProfile(err),
-		})
+		}
+		if err != nil && name != "" && !it.UnknownProfile {
+			if tmpl, _, ok := conf.ResolveProfileFor(ing.Metadata.Namespace, ing.Metadata.Labels, ing.Metadata.Annotations[conf.AnnotationProfile()]); ok {
+				it.Resolved = &tmpl
+			}
+		}
+		items = append(items, it)
 	}
 
 	own := ownership(conf)
@@ -596,13 +605,16 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		return "", model.ProxyHost{}, "", fmt.Errorf("namespace %q is not a DNS-1123 label", ns)
 	}
 	name := "ing-" + nm + "." + ns
+	if len(name) > model.MaxDerivedNameLen {
+		return "", model.ProxyHost{}, "", fmt.Errorf("derived name %q is longer than %d characters", ellipsize(name, 64), model.MaxDerivedNameLen)
+	}
 	if err := model.ValidateName(name); err != nil {
 		return "", model.ProxyHost{}, "", fmt.Errorf("derived name %q is not usable: %w", name, err)
 	}
 
 	// Profile selection, before anything else is derived. An unknown name is a
 	// SKIP, never a fall back to the default: an Ingress that asked for
-	// "public-ratelimited" and silently received the default's home-vpn access
+	// "public-ratelimited" and silently received the default's lan-vpn access
 	// list (or, the other way round, lost its rate limit) is a security-relevant
 	// regression that nobody would see. The name is returned so the caller
 	// protects any existing host for this Ingress from deletion - a typo in an
@@ -634,6 +646,10 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 		}
 		if !conf.AllowedDomainFor(tmpl, h) {
 			rejected = append(rejected, h+" (outside allowedDomainSuffixes)")
+			continue
+		}
+		if !tmpl.AllowsHostname(h) {
+			rejected = append(rejected, h+" (not in the profile's allowedHostnames)")
 			continue
 		}
 		if seen[h] {

@@ -370,3 +370,90 @@ func TestStreamUDPAccessList(t *testing.T) {
 		t.Fatalf("an allowed udp source must be forwarded: %v", err)
 	}
 }
+
+// stallingConn writes normally but never returns from Read, so a TLS client on
+// top of it sends its ClientHello and then never completes the handshake.
+type stallingConn struct {
+	net.Conn
+	stop chan struct{}
+}
+
+func (c *stallingConn) Read([]byte) (int, error) { <-c.stop; return 0, io.EOF }
+
+// In terminate mode the TLS handshake finishes, under a deadline, before the
+// backend is dialled: a client that sends a ClientHello and stalls is closed
+// and never causes a backend connection.
+func TestStreamTLSTerminateHandshakeDeadlineBeforeDial(t *testing.T) {
+	prev := streamTLSHandshakeTimeout
+	streamTLSHandshakeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { streamTLSHandshakeTimeout = prev })
+
+	dir := t.TempDir()
+	writeSelfSigned(t, dir, "stream.example.com")
+	var dials atomic.Int32
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			c.Close()
+		}
+	}()
+
+	port := freePort(t)
+	cfg := model.Config{
+		Certificates: []model.Certificate{{
+			ObjectMeta: model.ObjectMeta{Name: "stream-cert"},
+			Type:       model.CertTypeCustom,
+			Domains:    []string{"stream.example.com"},
+			Custom:     &model.CustomCertSpec{CertFile: "cert.pem", KeyFile: "key.pem"},
+		}},
+		StreamHosts: []model.StreamHost{streamHostFor("secure-db", ln.Addr().String(), port, &model.StreamTLS{
+			Mode:           model.StreamTLSTerminate,
+			SNIMatch:       []string{"stream.example.com"},
+			CertificateRef: "stream-cert",
+		})},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	certs, err := buildCertResolver(cfg.Certificates, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpRoutes, _ := buildStreamRoutes(cfg, certs)
+	f, err := startTCPForwarder(0, tcpRoutes[port], nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+
+	raw, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", f.ln.Addr().(*net.TCPAddr).Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	stall := &stallingConn{Conn: raw, stop: make(chan struct{})}
+	defer close(stall.stop)
+	go func() {
+		_ = tls.Client(stall, &tls.Config{ServerName: "stream.example.com", InsecureSkipVerify: true}).Handshake() //nolint:gosec // self-signed test cert
+	}()
+
+	// The server's handshake flight is read here and discarded; the connection
+	// must then be closed by gpm once the handshake deadline passes.
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = io.Copy(io.Discard, raw)
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("a stalled handshake must be closed at the handshake deadline")
+	}
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("backend saw %d dials, want 0 (the handshake completes before the dial)", n)
+	}
+}

@@ -31,7 +31,7 @@ certificate strategy. For the very first host, start at
 3. **Attach access control**, if the host is not meant to be public:
 
    ```yaml
-   accessLists: [home-vpn]
+   accessLists: [lan-vpn]
    ```
 
    See [Which mechanism do I use?](../concepts/which-mechanism.md) to choose

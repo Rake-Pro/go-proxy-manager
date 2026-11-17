@@ -299,8 +299,9 @@ func TestCRLReloadOnMTimeChange(t *testing.T) {
 }
 
 // certPassthroughRouter builds a host with client-certificate identity
-// passthrough enabled, proxying to a backend that records what it received.
-func certPassthroughRouter(t *testing.T, headers *model.ClientCertHeaders) (*router, *http.Header) {
+// passthrough enabled, proxying to a backend that records what it received. It
+// returns the host's client CA so a test can issue certificates it trusts.
+func certPassthroughRouter(t *testing.T, headers *model.ClientCertHeaders) (*router, *http.Header, *x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	var got http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +316,7 @@ func certPassthroughRouter(t *testing.T, headers *model.ClientCertHeaders) (*rou
 	if err != nil {
 		t.Fatal(err)
 	}
-	caPEM, _, _ := crlCA(t, "corp-ca")
+	caPEM, caCert, caKey := crlCA(t, "corp-ca")
 	cfg := model.Config{
 		ClientCAs: []model.ClientCA{{ObjectMeta: model.ObjectMeta{Name: "corp"}, CAPEM: caPEM}},
 		ProxyHosts: []model.ProxyHost{{
@@ -332,15 +333,14 @@ func certPassthroughRouter(t *testing.T, headers *model.ClientCertHeaders) (*rou
 	if err != nil {
 		t.Fatal(err)
 	}
-	return rt, &got
+	return rt, &got, caCert, caKey
 }
 
 // TestClientCertIdentityPassthrough proves gpm asserts the verified certificate's
 // identity upstream, and that a forged header from the client is stripped first -
 // the value the backend sees is always gpm's, never the client's.
 func TestClientCertIdentityPassthrough(t *testing.T) {
-	rt, got := certPassthroughRouter(t, &model.ClientCertHeaders{SAN: true, Serial: true, Fingerprint: true})
-	_, caCert, caKey := crlCA(t, "corp-ca")
+	rt, got, caCert, caKey := certPassthroughRouter(t, &model.ClientCertHeaders{SAN: true, Serial: true, Fingerprint: true})
 	_, leaf := clientCertSerial(t, caCert, caKey, 0x2a, "ops")
 
 	r := httptest.NewRequest("GET", "https://m.example/", nil)
@@ -348,6 +348,7 @@ func TestClientCertIdentityPassthrough(t *testing.T) {
 	r.Header.Set(model.DefaultClientCertSubjectHeader, "CN=forged")
 	r.Header.Set(model.ClientCertSerialHeader, "deadbeef")
 	r.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
 		ServerName:       "m.example",
 		PeerCertificates: []*x509.Certificate{leaf},
 		VerifiedChains:   [][]*x509.Certificate{{leaf, caCert}},
@@ -372,16 +373,16 @@ func TestClientCertIdentityPassthrough(t *testing.T) {
 // are in the baseline denylist: a host that never enabled them still strips a
 // client's forged values rather than forwarding them.
 func TestClientCertHeadersStrippedWithoutPassthrough(t *testing.T) {
-	rt, got := certPassthroughRouter(t, nil)
+	rt, got, caCert, caKey := certPassthroughRouter(t, nil)
 	r := httptest.NewRequest("GET", "https://m.example/", nil)
 	r.Host = "m.example"
 	r.Header.Set(model.DefaultClientCertSubjectHeader, "CN=forged")
 	r.Header.Set(model.ClientCertSANHeader, "forged.example")
 	r.Header.Set(model.ClientCertSerialHeader, "deadbeef")
 	r.Header.Set(model.ClientCertFingerprintHeader, "beef")
-	_, caCert, caKey := crlCA(t, "corp-ca")
 	_, leaf := clientCertSerial(t, caCert, caKey, 1, "ops")
 	r.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
 		ServerName:       "m.example",
 		PeerCertificates: []*x509.Certificate{leaf},
 		VerifiedChains:   [][]*x509.Certificate{{leaf, caCert}},
@@ -401,13 +402,13 @@ func TestClientCertHeadersStrippedWithoutPassthrough(t *testing.T) {
 // TestClientCertCustomSubjectHeaderStripped proves a custom subject header name
 // joins this host's strip set, so it is asserted only by gpm.
 func TestClientCertCustomSubjectHeaderStripped(t *testing.T) {
-	rt, got := certPassthroughRouter(t, &model.ClientCertHeaders{SubjectHeader: "X-Corp-Client"})
+	rt, got, caCert, caKey := certPassthroughRouter(t, &model.ClientCertHeaders{SubjectHeader: "X-Corp-Client"})
 	r := httptest.NewRequest("GET", "https://m.example/", nil)
 	r.Host = "m.example"
 	r.Header.Set("X-Corp-Client", "CN=forged")
-	_, caCert, caKey := crlCA(t, "corp-ca")
 	_, leaf := clientCertSerial(t, caCert, caKey, 2, "ops")
 	r.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
 		ServerName:       "m.example",
 		PeerCertificates: []*x509.Certificate{leaf},
 		VerifiedChains:   [][]*x509.Certificate{{leaf, caCert}},

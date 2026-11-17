@@ -740,8 +740,10 @@ function wireSortHead(head, sort, storageKey, rerender) {
 // tr.sub-row travels with the row above it. The choice persists under
 // storageKey; only a remembered choice reorders at first paint, the server's
 // order stands otherwise. Returns apply(), for a caller that replaces the rows
-// and wants the same order back.
-function wireTableSort(table, storageKey, def) {
+// and wants the same order back. With onSort the rows are left alone: a paged
+// table holds one page of its data, so the caller orders the data itself from
+// the returned sort ({key, dir}) and is called back when a header changes it.
+function wireTableSort(table, storageKey, def, onSort) {
   if (!table || !table.tHead || !table.tBodies.length) return { apply() {} };
   const head = table.tHead;
   const cols = $$('th', head).map((th) => ({
@@ -775,11 +777,11 @@ function wireTableSort(table, storageKey, def) {
   }
   function renderHead() {
     head.innerHTML = '<tr>' + cols.map((c) => sortThHtml(c, sort)).join('') + '</tr>';
-    wireSortHead(head, sort, storageKey, () => { renderHead(); apply(); });
+    wireSortHead(head, sort, storageKey, () => { renderHead(); if (onSort) onSort(); else apply(); });
   }
   renderHead();
-  if (sort.stored) apply();
-  return { apply };
+  if (sort.stored && !onSort) apply();
+  return { apply, sort };
 }
 // wireMiniTables wires every table[data-sort-key] under root that has not
 // been wired yet; a view that renders a status table calls it after painting.
@@ -3597,7 +3599,7 @@ async function viewIntegrations(c, tab) {
               </div>
               <div class="hint">Leave blank and name an upstream group below instead when the controller runs on more than one node.</div>
             </div>
-            <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(idt.upstreamGroupRef || '')}" placeholder="k8s-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
+            <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(idt.upstreamGroupRef || '')}" placeholder="cluster-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
             <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required: point this at your wildcard certificate.</div></div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
@@ -3894,7 +3896,7 @@ async function viewIntegrations(c, tab) {
               <input class="field mono pf-up-port" data-hint="settings.ingressDiscovery.template.upstream" style="flex:0 0 90px" value="${esc(up.port || '')}" placeholder="80" aria-label="Upstream port" />
             </div>
           </div>
-          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono pf-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(p.upstreamGroupRef || '')}" placeholder="k8s-nodes" aria-label="Upstream group" /><div class="hint">Mutually exclusive with the upstream above.</div></div>
+          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono pf-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(p.upstreamGroupRef || '')}" placeholder="cluster-nodes" aria-label="Upstream group" /><div class="hint">Mutually exclusive with the upstream above.</div></div>
           <div class="field-group"><label>Certificate</label><input class="field mono pf-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" value="${esc(tls.certificateRef || '')}" placeholder="wildcard" aria-label="Certificate" /><div class="hint">Required, exactly as for the template.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('pf-forcessl-' + i, !!tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
         </div>
@@ -4464,6 +4466,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(idt.allowedHostnames).length ? idt.allowedHostnames : undefined,
       },
     };
     if (idc.annotationPrefixMigrate) ingressDiscovery.annotationPrefixMigrate = true;
@@ -4507,6 +4510,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
@@ -4588,6 +4592,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(ddt.allowedHostnames).length ? ddt.allowedHostnames : undefined,
       },
     };
     if (dkrOn) dockerDiscovery.enabled = true;
@@ -4619,6 +4624,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('dpf-dns-lan-' + uid), publicCname: isOn('dpf-dns-pub-' + uid) };
@@ -9753,6 +9759,16 @@ async function viewTokens(c) {
 // ---------- ACCESS LOGS ----------
 const LOGS_AUTO_KEY = 'gpm.logs.auto';
 const LOGS_SORT_KEY = 'gpm.logs.sort';
+const LOGS_PAGE_KEY = 'gpm.logs.pageSize';
+const LOG_PAGE_SIZES = [50, 100, 250, 500];
+// What each sortable column orders by. Time is absent: the buffer arrives
+// newest first, so that order (or its reverse) is the time sort.
+const LOG_SORT_VAL = {
+  method: (e) => e.method, host: (e) => e.host, path: (e) => e.path, client: (e) => e.client, country: (e) => e.country,
+  status: (e) => e.status, dur: (e) => e.durMs, bytes: (e) => e.bytes || 0,
+};
+const LOG_SORT_NUM = { status: true, dur: true, bytes: true };
+const logCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const LOG_FIELDS = {
   method: 'request method', host: 'the Host header', path: 'request path', status: 'a status code, or a class such as 5xx',
   client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
@@ -9762,7 +9778,7 @@ const LOG_FIELDS = {
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
 // {name: [cidr]}; an unknown name matches nothing), anything else as a
-// substring of the logged address, so `client:10.10.2.` still works.
+// substring of the logged address, so `client:192.0.2.` still works.
 function clientHit(client, alt, nets) {
   if (alt.charAt(0) === '@') {
     const list = (nets || {})[alt.slice(1)];
@@ -9830,6 +9846,8 @@ async function viewLogs(c) {
   const capacity = data.capacity || 0;
   let auto = 0;
   try { auto = Number(localStorage.getItem(LOGS_AUTO_KEY)) || 0; } catch (e) { /* ignore */ }
+  let pageSize = 100;
+  try { const n = Number(localStorage.getItem(LOGS_PAGE_KEY)); if (LOG_PAGE_SIZES.includes(n)) pageSize = n; } catch (e) { /* ignore */ }
   const AUTO = [[0, 'Off'], [2, 'Every 2s'], [5, 'Every 5s'], [15, 'Every 15s'], [60, 'Every minute']];
   // Buffer sizes offered for the live resize; the running size is always listed
   // so a value set by flag or API shows as selected rather than as a blank.
@@ -9845,9 +9863,9 @@ async function viewLogs(c) {
       <button class="btn" id="logsRefresh" type="button">${ICON.history}Refresh</button>
       <button class="btn" id="logsClear" type="button"${entries.length ? '' : ' disabled'}>Clear</button>
       <button class="btn" id="logsToggle" type="button">${enabled ? 'Disable capture' : 'Enable capture'}</button>
-      <div class="fsaved"><button class="btn" id="logsExport" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="logsExportMenu"${entries.length ? '' : ' disabled'} title="Download the rows the filter shows, in the table's order">Export${ICON.caret}</button><div class="menu fsaved-menu" id="logsExportMenu" role="menu" hidden>
-        <button type="button" role="menuitem" data-fmt="csv">CSV, the rows shown</button>
-        <button type="button" role="menuitem" data-fmt="json">JSON, the rows shown</button>
+      <div class="fsaved"><button class="btn" id="logsExport" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="logsExportMenu"${entries.length ? '' : ' disabled'} title="Download every request the filter matches, across all pages, in the table's order">Export${ICON.caret}</button><div class="menu fsaved-menu" id="logsExportMenu" role="menu" hidden>
+        <button type="button" role="menuitem" data-fmt="csv"></button>
+        <button type="button" role="menuitem" data-fmt="json"></button>
       </div></div>
     </div>
     <div class="toolbar" id="logsToolbar"${entries.length ? '' : ' hidden'}>
@@ -9860,6 +9878,17 @@ async function viewLogs(c) {
         <tbody id="logRows"></tbody>
       </table>
     </div>
+    <nav class="pager" id="logsPager" aria-label="Access log pages" hidden>
+      <label class="auto-refresh" for="logsPageSize"><span>Rows per page</span><select class="field" id="logsPageSize" aria-label="Rows per page">${LOG_PAGE_SIZES.map((v) => `<option value="${v}"${v === pageSize ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
+      <span class="pager-note" id="logsPaused" hidden>Auto-refresh waits for page 1</span>
+      <span id="logsRange" aria-live="polite"></span>
+      <span class="pager-nav">
+        <button class="btn" type="button" data-go="first">First</button>
+        <button class="btn" type="button" data-go="prev">Previous</button>
+        <button class="btn" type="button" data-go="next">Next</button>
+        <button class="btn" type="button" data-go="last">Last</button>
+      </span>
+    </nav>
     <div class="list-empty" id="logsNone" hidden>No request matches this filter.</div>
     <div id="logsEmpty"></div>`;
 
@@ -9869,26 +9898,78 @@ async function viewLogs(c) {
     ? emptyState('No requests captured yet', 'Requests that reach a proxy host appear here as they arrive.')
     : emptyState('Capture is off', 'Enable capture to record requests from now on; it stays on until the next restart.'));
   let terms = [];
-  const sorter = wireTableSort($('#logsTable'), LOGS_SORT_KEY, { key: 'time', dir: -1 });
-  function paint() {
-    $('#logRows').innerHTML = entries.map(logRowHtml).join('');
-    sorter.apply();
-    const shown = applyRowFilter($$('#logRows tr[data-i]'), recs, terms);
-    $('#logsNone').hidden = !entries.length || shown > 0;
+  // The table holds one page. view is the whole buffer after the filter and
+  // the sort, as indexes into entries; page is a window onto it, so paging,
+  // the count and the export all cover every buffered request.
+  let view = [];
+  let page = 0;
+  const sorter = wireTableSort($('#logsTable'), LOGS_SORT_KEY, { key: 'time', dir: -1 }, () => { page = 0; paint(); });
+  const pageCount = () => Math.max(1, Math.ceil(view.length / pageSize));
+  function paintPage() {
+    if (page >= pageCount()) page = pageCount() - 1;
+    const from = page * pageSize;
+    const slice = view.slice(from, from + pageSize);
+    $('#logRows').innerHTML = slice.map((i) => logRowHtml(entries[i], i)).join('');
     highlightTerms($('#logRows'), terms);
+    $('#logsPager').hidden = !view.length;
+    $('#logsRange').textContent = `${(from + 1).toLocaleString()}-${(from + slice.length).toLocaleString()} of ${view.length.toLocaleString()}`;
+    $('#logsPaused').hidden = !auto || page === 0;
+    $$('#logsPager button[data-go]').forEach((b) => {
+      b.disabled = (b.dataset.go === 'first' || b.dataset.go === 'prev') ? page === 0 : page >= pageCount() - 1;
+    });
+  }
+  function paint() {
+    view = [];
+    for (let i = 0; i < entries.length; i++) if (filterHit(recs[i], terms)) view.push(i);
+    const { key, dir } = sorter.sort;
+    const val = LOG_SORT_VAL[key];
+    if (val) {
+      const num = !!LOG_SORT_NUM[key];
+      view.sort((a, b) => {
+        const x = val(entries[a]), y = val(entries[b]);
+        if (num) return (x - y) * dir || a - b;
+        const bx = x == null || x === '', by = y == null || y === '';
+        if (bx !== by) return bx ? 1 : -1;
+        return logCollator.compare(String(x || ''), String(y || '')) * dir || a - b;
+      });
+    } else if (dir === 1) {
+      view.reverse();
+    }
+    paintPage();
+    const shown = view.length;
+    $('#logsNone').hidden = !entries.length || shown > 0;
     $('#logsCount').textContent = (shown === entries.length ? `${entries.length}` : `${shown} of ${entries.length}`)
       + ` ${entries.length === 1 ? 'request' : 'requests'}` + (capacity ? ` (buffer holds ${capacity})` : '');
     $('#logsToolbar').hidden = !entries.length;
     $('#logsWrap').hidden = !entries.length;
     $('#logsClear').disabled = !entries.length || $('#logsClear').classList.contains('cap-disabled');
-    $('#logsExport').disabled = !entries.length;
+    $('#logsExport').disabled = !shown;
+    const what = shown === entries.length ? `all ${plural(shown, 'buffered request', 'buffered requests')}` : `the ${plural(shown, 'request', 'requests')} the filter matches`;
+    $$('#logsExportMenu button[data-fmt]').forEach((b) => { b.textContent = `${b.dataset.fmt.toUpperCase()}, ${what}`; });
     $('#logsEmpty').innerHTML = entries.length ? '' : emptyHtml();
   }
   paint();
-  // Export: the rows the filter shows, in the order the table sorts them.
+  $('#logsPager').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-go]');
+    if (!b || b.disabled) return;
+    const go = b.dataset.go;
+    page = go === 'first' ? 0 : go === 'prev' ? page - 1 : go === 'next' ? page + 1 : pageCount() - 1;
+    paintPage();
+    // The pager is pinned to the bottom of the viewport; a new page starts
+    // at its first row, not wherever the last one was scrolled to.
+    $('#main').scrollTop = 0;
+  });
+  $('#logsPageSize').addEventListener('change', () => {
+    pageSize = Number($('#logsPageSize').value) || 100;
+    try { localStorage.setItem(LOGS_PAGE_KEY, String(pageSize)); } catch (e) { /* ignore */ }
+    page = 0;
+    paintPage();
+  });
+  // Export: every request the filter matches, across all pages, in the order
+  // the table sorts them.
   // A cell that would read as a spreadsheet formula is prefixed with a quote
   // so a crafted request path cannot run in whatever opens the CSV.
-  const shownEntries = () => $$('#logRows tr[data-i]').filter((r) => r.style.display !== 'none').map((r) => entries[Number(r.dataset.i)]).filter(Boolean);
+  const shownEntries = () => view.map((i) => entries[i]);
   const csvCell = (v) => {
     let t = v == null ? '' : String(v);
     if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
@@ -9929,11 +10010,11 @@ async function viewLogs(c) {
     v.client = Object.keys(nets).sort().map((n) => '@' + n).concat(v.client || []);
     return v;
   };
-  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; paint(); }, 'logs');
+  wireFilter('logFilter', LOG_FIELDS, suggestions, (t) => { terms = t; page = 0; paint(); }, 'logs');
 
-  // A refresh replaces the rows in place and keeps the filter, the sort and
-  // the scroll position; the capture state and the shell banners are only
-  // re-read through route().
+  // A refresh replaces the rows in place and keeps the filter, the sort, the
+  // page and the scroll position; the capture state and the shell banners are
+  // only re-read through route().
   async function refresh() {
     let d;
     try { d = (await api('/api/logs')).data || {}; } catch (e) { toastErr(e, 'Could not refresh the access log'); return; }
@@ -9945,7 +10026,9 @@ async function viewLogs(c) {
     paint();
   }
   // The timer belongs to this render: it stops when the route moves on
-  // (routeSeq changes) or the tab is hidden, and never stacks.
+  // (routeSeq changes) or the tab is hidden, and never stacks. It waits while
+  // a later page is open, so the rows being read do not slide to the next page
+  // as new requests arrive; the Refresh button still reloads on any page.
   const mySeq = routeSeq;
   let timer = null;
   function schedule() {
@@ -9953,7 +10036,7 @@ async function viewLogs(c) {
     if (!auto) return;
     timer = setInterval(() => {
       if (mySeq !== routeSeq || !c.isConnected) { clearInterval(timer); timer = null; return; }
-      if (document.hidden) return;
+      if (document.hidden || page > 0) return;
       refresh();
     }, auto * 1000);
   }
@@ -9961,6 +10044,7 @@ async function viewLogs(c) {
   $('#logsAuto').addEventListener('change', () => {
     auto = Number($('#logsAuto').value) || 0;
     try { localStorage.setItem(LOGS_AUTO_KEY, String(auto)); } catch (e) { /* ignore */ }
+    $('#logsPaused').hidden = !auto || page === 0;
     schedule();
   });
   $('#logsRefresh').addEventListener('click', refresh);
@@ -10422,7 +10506,7 @@ async function viewSettings(c, tab) {
           <div class="hint">Only OIDC providers can sign in to this panel. Define them under <a href="#/identity">Identity Providers</a>.</div>
         </div>
         <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Require SSO for admins</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'Require SSO for admins', 'settings.adminAuth.ssoOnly')}</div>
-        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local sign-in re-enabled.</div>
+        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means setting <span class="mono">ssoOnly: false</span> and <span class="mono">localLoginEnabled: true</span> in settings.yaml and restarting.</div>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Admin front door</p>
@@ -10637,7 +10721,7 @@ async function viewSettings(c, tab) {
       title: 'Require SSO for admins?',
       body: '<p>Local sign-in is <b>disabled</b> for this admin panel. Every operator signs in through one of the providers above.</p>'
         + '<p>There is deliberately no in-band break-glass door. If the identity provider is unreachable, its configuration drifts, or the provider entry is removed, '
-        + '<b>recovery is a redeploy</b> with local sign-in re-enabled - not a sign-in page.</p>',
+        + '<b>recovery is a settings.yaml edit and a restart</b> (ssoOnly: false and localLoginEnabled: true; local sign-in alone stays off) - not a sign-in page.</p>',
       confirmLabel: 'Require SSO',
     });
     if (!ok) $('#set-sso').setAttribute('aria-checked', 'false');

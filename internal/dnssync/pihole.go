@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -222,6 +223,7 @@ func (s *Syncer) piholeConnect(ctx context.Context, conf model.PiholeDNSSync) (*
 	if err != nil {
 		return nil, piholeState{}, fmt.Errorf("pihole: resolve appPassword: %w", err)
 	}
+	s.warnPlaintextPihole(conf.URL)
 	c := newPiholeClient(conf.URL, pass, s.client)
 	if err := c.login(ctx); err != nil {
 		return nil, piholeState{}, err
@@ -232,6 +234,41 @@ func (s *Syncer) piholeConnect(ctx context.Context, conf model.PiholeDNSSync) (*
 		return nil, piholeState{}, err
 	}
 	return c, state, nil
+}
+
+// plaintextHost returns the host of raw and true when raw is an http:// URL
+// whose host is not a loopback name or address, i.e. one where the application
+// password and the session id cross a network in clear text.
+func plaintextHost(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(u.Scheme, "http") {
+		return "", false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return "", false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsLoopback() {
+		return "", false
+	}
+	return u.Host, true
+}
+
+// warnPlaintextPihole logs a warning, once per configured URL, when the
+// Pi-hole API is reached over plain http on a non-loopback host.
+func (s *Syncer) warnPlaintextPihole(raw string) {
+	host, plain := plaintextHost(raw)
+	if !plain {
+		return
+	}
+	s.mu.Lock()
+	seen := s.plaintextWarned == raw
+	s.plaintextWarned = raw
+	s.mu.Unlock()
+	if !seen {
+		log.Warn().Str("host", host).
+			Msg("dnssync: dnsSync.pihole.url is plain http on a non-loopback host; the application password and session id are sent unencrypted, use an https URL")
+	}
 }
 
 // piholeDecisions reads Pi-hole and works out what a reconcile would do.
@@ -336,11 +373,17 @@ func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.Pi
 		log.Info().Str("domain", name).Str("from", state.present[name]).Str("to", apex).
 			Msg("dnssync: pihole CNAME retargeted")
 	}
+	// A refused create or delete is recorded and the run goes on, so one name the
+	// resolver will not accept cannot hold back every later create and every
+	// delete.
+	var failed []string
 	for _, name := range d.create {
 		if err := c.addCname(ctx, name+","+apex); err != nil {
-			return fail(err)
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("domain", name).Msg("dnssync: pihole CNAME create failed; continuing with the remaining names")
+			continue
 		}
-		live[name] = model.DNSClaim{Target: apex}
 		st.Created++
 		log.Info().Str("domain", name).Str("target", apex).Msg("dnssync: pihole CNAME created")
 	}
@@ -354,17 +397,24 @@ func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.Pi
 		log.Warn().Str("domain", name).Str("target", state.present[name]).Str("ledgerRev", ledgerRev).
 			Msg("dnssync: deleting a pihole CNAME on the authority of the ownership ledger")
 		if err := c.deleteCname(ctx, state.raw[name]); err != nil {
-			return fail(err)
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("domain", name).Msg("dnssync: pihole CNAME delete failed; continuing with the remaining names")
+			continue
 		}
-		delete(live, name)
 		st.Deleted++
 	}
-	// Every planned write landed, so the ledger is exactly the planned end state -
-	// including the names gpm disowned this run (changed or removed out of band),
-	// which leave the ledger without any record being touched.
+	// The ledger is the planned end state, with every failed create or delete put
+	// back to its claim from before the run - including the names gpm disowned
+	// this run (changed or removed out of band), which leave the ledger without
+	// any record being touched.
 	live = d.owned
 
 	st.Managed = len(live)
+	if len(failed) > 0 {
+		st.Error = strings.Join(failed, "; ")
+		return st, live
+	}
 	st.OK = true
 	if st.Adopted > 0 || st.Untouched > 0 {
 		log.Info().Str("backend", "pihole").Int("adopted", st.Adopted).Int("untouched", st.Untouched).

@@ -105,11 +105,17 @@ scripts and styles ship inside the binary. More screens in the
 
 Prerequisites: Docker and Docker Compose.
 
-1. Generate an admin password hash and write it to a file:
+1. Generate an admin password hash into a file that only the container's
+   non-root `gpm` user can read (`0400`). `hashpw` reads the password from
+   stdin, so it stays out of shell history and the process list:
 
    ```
-   docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > admin_hash
-   chmod 644 admin_hash
+   img=ghcr.io/rake-pro/go-proxy-manager
+   sudo install -m 0400 -o "$(docker run --rm --entrypoint id "$img" -u)" \
+     -g "$(docker run --rm --entrypoint id "$img" -g)" /dev/null admin_hash
+   read -rsp 'admin password: ' pw; echo
+   printf '%s\n' "$pw" | docker run --rm -i "$img" hashpw | sudo tee admin_hash >/dev/null
+   unset pw
    ```
 
 2. Write a minimal compose file:

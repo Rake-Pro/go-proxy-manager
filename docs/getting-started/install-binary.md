@@ -32,7 +32,10 @@ sudo install -m 0755 bin/gpm /usr/local/bin/gpm
 # Ingress-discovery token below - a plain redirect creates it world-readable
 # for the window between creation and chmod.
 sudo install -m 0600 -o gpm -g gpm /dev/null /etc/gpm/admin_hash
-/usr/local/bin/gpm hashpw 'your-password' | sudo tee /etc/gpm/admin_hash >/dev/null
+# hashpw reads the password from stdin: it stays out of history and ps.
+read -rsp 'admin password: ' pw; echo
+printf '%s\n' "$pw" | /usr/local/bin/gpm hashpw | sudo tee /etc/gpm/admin_hash >/dev/null
+unset pw
 ```
 
 ## Environment file

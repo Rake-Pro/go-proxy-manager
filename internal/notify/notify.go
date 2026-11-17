@@ -309,7 +309,7 @@ func (n *Notifier) post(ctx context.Context, t model.NotificationTarget, ev Even
 	}
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return 0, time.Since(started), err
+		return 0, time.Since(started), webhook.TransportCause(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))

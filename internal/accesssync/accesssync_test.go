@@ -53,7 +53,7 @@ func testSyncer(t *testing.T, ts *httptest.Server, src model.AccessListSource, l
 	t.Helper()
 	src.URL = ts.URL
 	cfg := model.Config{AccessLists: []model.AccessList{{
-		ObjectMeta: model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
 		Sources:    []model.AccessListSource{src},
 		Rules:      []model.IPRule{{Action: model.ActionAllow, Source: src.Name, Paths: []string{"/health"}}},
 	}}}
@@ -133,7 +133,7 @@ func TestFetchParsesTheSourceFormat(t *testing.T) {
 	if got.Fetched().IsZero() {
 		t.Fatalf("fetchedAt = %q, want an RFC3339 timestamp", got.FetchedAt)
 	}
-	if got.List != "home-vpn" || got.Source != "uptimerobot" || got.URL != ts.URL {
+	if got.List != "lan-vpn" || got.Source != "uptimerobot" || got.URL != ts.URL {
 		t.Fatalf("entry identity = %+v", got)
 	}
 }
@@ -177,9 +177,9 @@ func TestFetchRefusals(t *testing.T) {
 			ts := serving(t, tt.status, tt.body)
 			prev := []string{"192.0.2.0/24"}
 			led := &memLedger{l: model.AccessListSourceLedger{Sources: []model.AccessListSourceEntry{{
-				List: "home-vpn", Source: "uptimerobot", URL: ts.URL,
+				List: "lan-vpn", Source: "uptimerobot", URL: ts.URL,
 				FetchedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
-				SHA256:    model.AccessListSourceHash("home-vpn/uptimerobot", ts.URL, prev), Entries: prev,
+				SHA256:    model.AccessListSourceHash("lan-vpn/uptimerobot", ts.URL, prev), Entries: prev,
 			}}}}
 			src := tt.src
 			src.Name = "uptimerobot"
@@ -221,7 +221,7 @@ func TestUnchangedSetWritesNoLedger(t *testing.T) {
 		t.Fatalf("saves after first run = %d, want 1", saves)
 	}
 	// Force the source to look due again, so the second run really does fetch.
-	s.clearAttempt(model.AccessListSourceKey("home-vpn", "uptimerobot"))
+	s.clearAttempt(model.AccessListSourceKey("lan-vpn", "uptimerobot"))
 	led.mu.Lock()
 	led.l.Sources[0].FetchedAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
 	led.mu.Unlock()
@@ -248,7 +248,7 @@ func TestChangedSetSavesAndReloads(t *testing.T) {
 	led := &memLedger{}
 	reloads := 0
 	cfg := model.Config{AccessLists: []model.AccessList{{
-		ObjectMeta: model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
 		Sources:    []model.AccessListSource{{Name: "uptimerobot", URL: ts.URL, Interval: "1h"}},
 	}}}
 	s := New(func(context.Context) (model.Config, model.Settings, error) {
@@ -266,7 +266,7 @@ func TestChangedSetSavesAndReloads(t *testing.T) {
 	mu.Lock()
 	body = "203.0.113.9\n203.0.113.1\n"
 	mu.Unlock()
-	s.clearAttempt(model.AccessListSourceKey("home-vpn", "uptimerobot"))
+	s.clearAttempt(model.AccessListSourceKey("lan-vpn", "uptimerobot"))
 	led.mu.Lock()
 	led.l.Sources[0].FetchedAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
 	led.mu.Unlock()
@@ -398,7 +398,7 @@ func TestDisabledSyncFetchesNothing(t *testing.T) {
 	off := false
 	led := &memLedger{}
 	cfg := model.Config{AccessLists: []model.AccessList{{
-		ObjectMeta: model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
 		Sources:    []model.AccessListSource{{Name: "uptimerobot", URL: ts.URL}},
 	}}}
 	s := New(func(context.Context) (model.Config, model.Settings, error) {
@@ -422,9 +422,9 @@ func TestDisabledSyncFetchesNothing(t *testing.T) {
 func TestDroppedSourceLeavesTheLedger(t *testing.T) {
 	stale := []string{"192.0.2.0/24"}
 	led := &memLedger{l: model.AccessListSourceLedger{Sources: []model.AccessListSourceEntry{{
-		List: "home-vpn", Source: "gone", URL: "https://example.com/i.txt",
+		List: "lan-vpn", Source: "gone", URL: "https://example.com/i.txt",
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
-		SHA256:    model.AccessListSourceHash("home-vpn/gone", "https://example.com/i.txt", stale), Entries: stale,
+		SHA256:    model.AccessListSourceHash("lan-vpn/gone", "https://example.com/i.txt", stale), Entries: stale,
 	}}}}
 	s := New(func(context.Context) (model.Config, model.Settings, error) {
 		return model.Config{}, model.Settings{}, nil
@@ -446,7 +446,7 @@ func TestSSRFGuardRefusesALoopbackSource(t *testing.T) {
 	ts := serving(t, http.StatusOK, "203.0.113.1\n")
 	led := &memLedger{}
 	cfg := model.Config{AccessLists: []model.AccessList{{
-		ObjectMeta: model.ObjectMeta{Name: "home-vpn"},
+		ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
 		// A perfectly well-formed https source URL: what refuses it is the DIALER,
 		// on the destination address, not the scheme check above it.
 		Sources: []model.AccessListSource{{Name: "uptimerobot", URL: ts.URL}},
@@ -501,6 +501,16 @@ func TestReconcileNowRefusesAConcurrentRun(t *testing.T) {
 	}
 }
 
+// predicateRanges spells out what isNonPublic's net.IP predicates match, so
+// every network in it must start at an address isNonPublic refuses.
+func TestPredicateRangesAreNonPublic(t *testing.T) {
+	for _, r := range predicateRanges {
+		if !isNonPublic(r.IP) {
+			t.Errorf("%s is listed as non-public but isNonPublic(%s) is false", r, r.IP)
+		}
+	}
+}
+
 func TestParseEntries(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -546,6 +556,26 @@ func TestParseEntries(t *testing.T) {
 		{name: "NAT64", body: "64:ff9b::/96\n", max: 10, wantErr: "not a public address range"},
 		{name: "multicast", body: "224.0.0.1\n", max: 10, wantErr: "not a public address range"},
 		{name: "unspecified address", body: "0.0.0.0\n", max: 10, wantErr: "not a public address range"},
+		// An IPv4-mapped prefix matches IPv4 clients, so the IPv4 limits apply.
+		{name: "IPv4-mapped prefix broader than the IPv4 limit", body: "::ffff:128.0.0.0/97\n", max: 10, wantErr: "broader than the /8 limit"},
+		{name: "IPv4-mapped /2", body: "::ffff:64.0.0.0/98\n", max: 10, wantErr: "broader than the /8 limit"},
+		{name: "IPv4-mapped private prefix", body: "::ffff:10.0.0.0/104\n", max: 10, wantErr: "not a public address range"},
+		{
+			name: "IPv4-mapped prefix is stored as IPv4",
+			body: "::ffff:198.51.100.0/120\n",
+			max:  10,
+			want: []string{"198.51.100.0/24"},
+		},
+		// A network that starts at a public address but covers non-public space.
+		{name: "covers RFC1918", body: "172.0.0.0/8\n", max: 10, wantErr: "not a public address range"},
+		{name: "covers CGNAT", body: "100.0.0.0/8\n", max: 10, wantErr: "not a public address range"},
+		{name: "covers IETF protocol assignments", body: "192.0.0.0/16\n", max: 10, wantErr: "not a public address range"},
+		{
+			name: "a public /8 that overlaps nothing is still accepted",
+			body: "8.0.0.0/8\n",
+			max:  10,
+			want: []string{"8.0.0.0/8"},
+		},
 		{name: "empty", body: "\n\n# only comments\n", max: 10, wantErr: "no valid entries"},
 		{name: "over the cap", body: "203.0.113.1\n203.0.113.2\n", max: 1, wantErr: "more than maxEntries"},
 	}

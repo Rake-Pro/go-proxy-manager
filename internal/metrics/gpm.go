@@ -108,7 +108,7 @@ func (m *Metrics) RequestFinished() { m.inFlight.Add(-1) }
 // ProxyHost NAME, never the client's Host header, so the label set is bounded by
 // the config rather than by whatever an attacker sends.
 func (m *Metrics) HTTPRequest(host, method string, status int, dur time.Duration, bytesIn, bytesOut int64) {
-	m.httpRequests.Inc(host, method, statusClass(status))
+	m.httpRequests.Inc(host, methodLabel(method), statusClass(status))
 	m.httpDuration.Observe(dur, host)
 	m.requestBytes.Add(bytesIn, host)
 	m.responseBytes.Add(bytesOut, host)
@@ -125,6 +125,17 @@ func (m *Metrics) StreamOpened(host string) {
 }
 
 func (m *Metrics) StreamClosed(host string) { m.streamActive.Add(-1, host) }
+
+// methodLabel maps the request method to a fixed set. net/http accepts any
+// token as a method, so the raw value would let a client mint label values.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodConnect:
+		return method
+	}
+	return "other"
+}
 
 // statusClass collapses a status code to its class, so the status label can
 // never carry more than a handful of values.

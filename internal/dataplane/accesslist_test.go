@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -485,23 +487,182 @@ func TestAccessListBasicAuthSuccessClearsFailures(t *testing.T) {
 	}
 }
 
+// failOnce runs one attempt for key through g that ends in a wrong password,
+// reporting whether the gate admitted it.
+func failOnce(g *authGate, key string) bool {
+	finish, admitted := g.begin(context.Background(), key)
+	if admitted {
+		finish(false)
+	}
+	return admitted
+}
+
 // The throttle map is bounded and fails CLOSED when saturated, so a flood of
 // distinct client IPs cannot grow it without bound nor buy an unthrottled
 // guessing path.
 func TestAuthGateFailsClosedWhenSaturated(t *testing.T) {
 	g := newAuthGate(time.Minute, 2, 4)
 	for i := range 4 {
-		g.record(net.IPv4(10, 0, 0, byte(i)).String())
+		if !failOnce(g, net.IPv4(10, 0, 0, byte(i)).String()) {
+			t.Fatalf("key %d refused below the cap", i)
+		}
 	}
 	if len(g.entries) != 4 {
 		t.Fatalf("gate holds %d entries, want its 4-key cap", len(g.entries))
 	}
-	g.record("10.0.0.99") // one key too many: not tracked...
-	if len(g.entries) != 4 {
+	if failOnce(g, "10.0.0.99") { // one key too many: refused...
+		t.Fatal("an untracked key must be refused while the map is saturated")
+	}
+	if len(g.entries) != 4 { // ...and not tracked
 		t.Fatalf("gate grew past its cap to %d entries", len(g.entries))
 	}
-	if !g.atLimit("10.0.0.99") { // ...and therefore treated as locked out
-		t.Fatal("an untracked key must be treated as at-limit while the map is saturated")
+}
+
+// A map full of expired entries is not saturated: they are swept before
+// saturation is reported, so a past burst of distinct keys does not keep every
+// new client locked out until a reload.
+func TestAuthGateSweepsExpiredEntriesBeforeSaturation(t *testing.T) {
+	g := newAuthGate(20*time.Millisecond, 2, 4)
+	for i := range 4 {
+		failOnce(g, net.IPv4(10, 0, 0, byte(i)).String())
+	}
+	if failOnce(g, "10.0.0.99") {
+		t.Fatal("a new key must be refused while the map is full of live entries")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if !failOnce(g, "10.0.0.99") {
+		t.Fatal("a new key must be admitted once the tracked entries have expired")
+	}
+	if len(g.entries) != 1 {
+		t.Fatalf("gate holds %d entries after the sweep, want 1", len(g.entries))
+	}
+}
+
+// Finished failures lock a key out; a success clears them.
+func TestAuthGateLocksOutOnFinishedFailures(t *testing.T) {
+	g := newAuthGate(time.Minute, 3, 16)
+	for i := range 2 {
+		if !failOnce(g, "k") {
+			t.Fatalf("attempt %d refused below the limit", i)
+		}
+	}
+	finish, admitted := g.begin(context.Background(), "k")
+	if !admitted {
+		t.Fatal("attempt below the limit refused")
+	}
+	finish(true)
+	for i := range 3 {
+		if !failOnce(g, "k") {
+			t.Fatalf("attempt %d after a success refused: the success must clear the failures", i)
+		}
+	}
+	if failOnce(g, "k") {
+		t.Fatal("attempt past the limit must be refused")
+	}
+}
+
+// A parallel burst of wrong passwords from one key gets at most the failure
+// limit of password checks in total: attempts beyond the budget wait for the
+// in-flight checks and are then refused.
+func TestAuthGateParallelWrongBurstBoundedByLimit(t *testing.T) {
+	const limit = 5
+	g := newAuthGate(time.Minute, limit, 16)
+	var checks atomic.Int32
+	var wg sync.WaitGroup
+	for range 40 {
+		wg.Go(func() {
+			finish, admitted := g.begin(context.Background(), "k")
+			if !admitted {
+				return
+			}
+			checks.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			finish(false)
+		})
+	}
+	wg.Wait()
+	if n := checks.Load(); n > limit {
+		t.Fatalf("burst of wrong passwords got %d checks, want at most %d", n, limit)
+	}
+	if failOnce(g, "k") {
+		t.Fatal("key must be locked out after the burst")
+	}
+}
+
+// An attempt waiting behind in-flight checks gives up when its request is
+// cancelled.
+func TestAuthGateWaitHonorsContext(t *testing.T) {
+	g := newAuthGate(time.Minute, 1, 16)
+	finish, admitted := g.begin(context.Background(), "k")
+	if !admitted {
+		t.Fatal("first attempt refused")
+	}
+	defer finish(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, ok := g.begin(ctx, "k"); ok {
+		t.Fatal("attempt over the in-flight budget must not be admitted while the check runs")
+	}
+}
+
+// Parallel requests with the correct password (a browser sends the cached
+// Authorization header on every sub-resource of a page) are all admitted
+// through the deprecated access-list basic auth.
+func TestAccessListBasicAuthParallelCorrectCredentialsAllPass(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	h := accessListHandler(compileAccessList(model.AccessList{
+		ObjectMeta: model.ObjectMeta{Name: "auth"},
+		BasicAuth:  []model.BasicAuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	}), ipFrom("203.0.113.9"), nil, nil, "", nil, okHandler())
+	if refused := parallelCorrectBurst(h, "admin", "hunter2", 20); refused != 0 {
+		t.Fatalf("%d of 20 parallel correct-password requests refused, want 0", refused)
+	}
+}
+
+// parallelCorrectBurst sends n parallel requests with the given credentials
+// while every bcrypt slot is held, so all of them are in flight at once, and
+// returns how many were not answered 200.
+func parallelCorrectBurst(h http.Handler, user, pass string, n int) int {
+	for range maxBcryptConcurrent {
+		bcryptSem <- struct{}{}
+	}
+	var refused atomic.Int32
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.SetBasicAuth(user, pass)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+			if rec.Code != http.StatusOK {
+				refused.Add(1)
+			}
+		})
+	}
+	time.Sleep(100 * time.Millisecond)
+	for range maxBcryptConcurrent {
+		<-bcryptSem
+	}
+	wg.Wait()
+	return int(refused.Load())
+}
+
+// IPv6 clients share one basic-auth throttle key per /56; IPv4 keys stay the
+// address.
+func TestAuthGateKeyGroupsIPv6By56(t *testing.T) {
+	key := func(s string) string { return authGateKey(ipFrom(s), httptest.NewRequest("GET", "/", nil)) }
+	a, b, c := key("2001:db8:1:200::1"), key("2001:db8:1:2ff:ffff::1"), key("2001:db8:1:300::1")
+	if a != b {
+		t.Fatalf("two addresses in one /56 must share a key: %q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("different /56s must not share a key: %q", a)
+	}
+	if a != "2001:db8:1:200::/56" {
+		t.Fatalf("IPv6 key = %q, want the /56 prefix", a)
+	}
+	if got := key("192.0.2.10"); got != "192.0.2.10" {
+		t.Fatalf("IPv4 key = %q, want the address", got)
 	}
 }
 

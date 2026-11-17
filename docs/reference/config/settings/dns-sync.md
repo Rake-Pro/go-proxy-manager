@@ -15,7 +15,7 @@ contacts anything.
 | Field | Type | Notes |
 |-------|------|-------|
 | <span id="settings-dns-sync-pihole-enabled"></span> `pihole.enabled` | bool | Turn on local (LAN) CNAME reconciliation. |
-| <span id="settings-dns-sync-pihole-url"></span> `pihole.url` | string | Pi-hole base URL, absolute http/https, no `/api` suffix. Required when enabled. |
+| <span id="settings-dns-sync-pihole-url"></span> `pihole.url` | string | Pi-hole base URL, absolute http/https, no `/api` suffix. Required when enabled. A plain `http://` URL whose host is not loopback is accepted but logged at warn (once per URL): the application password and the session id cross the network unencrypted. Prefer an `https://` URL. |
 | <span id="settings-dns-sync-pihole-app-password"></span> `pihole.appPassword` | Secret | Pi-hole **application password** (placeholder-resolved). Used for `POST /api/auth`. |
 | <span id="settings-dns-sync-pihole-apex-target"></span> `pihole.apexTarget` | string | CNAME target every managed record points at. Required when enabled. **Not an ownership marker**, see below. |
 | <span id="settings-dns-sync-cloudflare-enabled"></span> `cloudflare.enabled` | bool | Turn on public zone reconciliation. |
@@ -124,7 +124,16 @@ create, adopt, retarget and delete, without writing anything.
 
 Wildcard domains (`*.example.com`) are skipped by both backends, as is a domain
 equal to the apex target (which would be a CNAME loop). Disabled proxy hosts
-contribute nothing.
+contribute nothing. Cloudflare also skips (and counts in `skipped`, logged at
+warn) every name that is neither equal to `cloudflare.zoneName` nor under it: a
+record for another zone cannot live in this one.
+
+**One refused write does not stop the run.** A create or delete the backend
+refuses is logged at error, named in the backend's `error` field and the run
+goes on with the remaining names; deletes run whatever happened to the creates.
+The backend then reports `ok: false`, the ledger keeps the claim it had before
+the run for that name, and the next reconcile tries it again. A failed retarget
+(delete then create) still ends the run, after restoring the original record.
 
 `dnsProviderRef` is validated for *name shape* at settings-write time only:
 settings are a separate singleton from the object graph, so a reference to a

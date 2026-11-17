@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -376,5 +378,37 @@ func TestTestSendOnUnwiredDispatcher(t *testing.T) {
 	var nilDispatcher *Dispatcher
 	if got := nilDispatcher.Status(); len(got) != 0 {
 		t.Fatalf("nil dispatcher Status() = %v, want empty", got)
+	}
+}
+
+// A transport failure is reported by its cause only: net/http's *url.Error
+// text repeats the request URL, whose path is the credential for some
+// receivers, and the status and test result are readable without the admin
+// scope.
+func TestTransportErrorOmitsReceiverURL(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	const secretPath = "hooks/123/receiver-path-token"
+	d := New(func() []model.WebhookConfig {
+		return []model.WebhookConfig{{Name: "down", URL: "http://" + addr + "/" + secretPath}}
+	})
+	res, err := d.Test(context.Background(), "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || res.Error == "" {
+		t.Fatalf("a refused connection must be reported as a failure: %+v", res)
+	}
+	if strings.Contains(res.Error, secretPath) {
+		t.Fatalf("test result error repeats the receiver URL: %q", res.Error)
+	}
+	for _, dl := range d.Status() {
+		if strings.Contains(dl.Error, secretPath) {
+			t.Fatalf("status error repeats the receiver URL: %q", dl.Error)
+		}
 	}
 }
