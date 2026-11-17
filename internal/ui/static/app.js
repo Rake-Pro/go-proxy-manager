@@ -3599,7 +3599,7 @@ async function viewIntegrations(c, tab) {
               </div>
               <div class="hint">Leave blank and name an upstream group below instead when the controller runs on more than one node.</div>
             </div>
-            <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(idt.upstreamGroupRef || '')}" placeholder="k8s-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
+            <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono" id="set-id-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(idt.upstreamGroupRef || '')}" placeholder="cluster-nodes" /><div class="hint">Mutually exclusive with the upstream above. Preferred when the ingress controller runs on every node: derived hosts then fail over exactly like hand-written ones.</div></div>
             <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required: point this at your wildcard certificate.</div></div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
@@ -3896,7 +3896,7 @@ async function viewIntegrations(c, tab) {
               <input class="field mono pf-up-port" data-hint="settings.ingressDiscovery.template.upstream" style="flex:0 0 90px" value="${esc(up.port || '')}" placeholder="80" aria-label="Upstream port" />
             </div>
           </div>
-          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono pf-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(p.upstreamGroupRef || '')}" placeholder="k8s-nodes" aria-label="Upstream group" /><div class="hint">Mutually exclusive with the upstream above.</div></div>
+          <div class="field-group"><label>Upstream group (instead of the address above)</label><input class="field mono pf-up-group" data-hint="settings.ingressDiscovery.template.upstreamGroupRef" value="${esc(p.upstreamGroupRef || '')}" placeholder="cluster-nodes" aria-label="Upstream group" /><div class="hint">Mutually exclusive with the upstream above.</div></div>
           <div class="field-group"><label>Certificate</label><input class="field mono pf-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" value="${esc(tls.certificateRef || '')}" placeholder="wildcard" aria-label="Certificate" /><div class="hint">Required, exactly as for the template.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('pf-forcessl-' + i, !!tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
         </div>
@@ -4466,6 +4466,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(idt.allowedHostnames).length ? idt.allowedHostnames : undefined,
       },
     };
     if (idc.annotationPrefixMigrate) ingressDiscovery.annotationPrefixMigrate = true;
@@ -4509,6 +4510,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
@@ -4590,6 +4592,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
+        allowedHostnames: arr(ddt.allowedHostnames).length ? ddt.allowedHostnames : undefined,
       },
     };
     if (dkrOn) dockerDiscovery.enabled = true;
@@ -4621,6 +4624,7 @@ async function viewIntegrations(c, tab) {
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
+        allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
       };
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('dpf-dns-lan-' + uid), publicCname: isOn('dpf-dns-pub-' + uid) };
@@ -9774,7 +9778,7 @@ const LOG_FIELDS = {
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
 // {name: [cidr]}; an unknown name matches nothing), anything else as a
-// substring of the logged address, so `client:10.10.2.` still works.
+// substring of the logged address, so `client:192.0.2.` still works.
 function clientHit(client, alt, nets) {
   if (alt.charAt(0) === '@') {
     const list = (nets || {})[alt.slice(1)];
@@ -10502,7 +10506,7 @@ async function viewSettings(c, tab) {
           <div class="hint">Only OIDC providers can sign in to this panel. Define them under <a href="#/identity">Identity Providers</a>.</div>
         </div>
         <div class="toggle-line" style="margin-top:6px"><div class="tl-text"><div class="nm">Require SSO for admins</div><div class="ds">All admin access goes through SSO</div></div>${switchHtml('set-sso', !!admin.ssoOnly, 'Require SSO for admins', 'settings.adminAuth.ssoOnly')}</div>
-        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means redeploying with local sign-in re-enabled.</div>
+        <div class="hint" id="set-sso-hint" style="margin-top:8px">There is no in-band break-glass door: recovering from an identity-provider outage under SSO-only means setting <span class="mono">ssoOnly: false</span> and <span class="mono">localLoginEnabled: true</span> in settings.yaml and restarting.</div>
       </div>
       <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Admin front door</p>
@@ -10717,7 +10721,7 @@ async function viewSettings(c, tab) {
       title: 'Require SSO for admins?',
       body: '<p>Local sign-in is <b>disabled</b> for this admin panel. Every operator signs in through one of the providers above.</p>'
         + '<p>There is deliberately no in-band break-glass door. If the identity provider is unreachable, its configuration drifts, or the provider entry is removed, '
-        + '<b>recovery is a redeploy</b> with local sign-in re-enabled - not a sign-in page.</p>',
+        + '<b>recovery is a settings.yaml edit and a restart</b> (ssoOnly: false and localLoginEnabled: true; local sign-in alone stays off) - not a sign-in page.</p>',
       confirmLabel: 'Require SSO',
     });
     if (!ok) $('#set-sso').setAttribute('aria-checked', 'false');

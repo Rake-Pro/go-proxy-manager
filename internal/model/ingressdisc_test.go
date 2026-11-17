@@ -64,10 +64,10 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"upstream port range", func(d *IngressDiscoverySettings) { d.Template.Upstream.Port = 70000 }, "template.upstream"},
 		{"upstreamGroupRef replaces upstream", func(d *IngressDiscoverySettings) {
 			d.Template.Upstream = Upstream{}
-			d.Template.UpstreamGroupRef = "k8s-nodes"
+			d.Template.UpstreamGroupRef = "cluster-nodes"
 		}, ""},
 		{"upstream and group are mutually exclusive", func(d *IngressDiscoverySettings) {
-			d.Template.UpstreamGroupRef = "k8s-nodes"
+			d.Template.UpstreamGroupRef = "cluster-nodes"
 		}, "mutually exclusive"},
 		{"upstreamGroupRef name shape", func(d *IngressDiscoverySettings) {
 			d.Template.Upstream = Upstream{}
@@ -144,7 +144,7 @@ func TestIngressDiscoveryValidate(t *testing.T) {
 		{"profile with both upstream and group", func(d *IngressDiscoverySettings) {
 			d.Profiles = map[string]IngressHostTemplate{"sso-internal": {
 				Upstream:         Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
-				UpstreamGroupRef: "k8s-nodes",
+				UpstreamGroupRef: "cluster-nodes",
 				TLS:              TLSSettings{CertificateRef: "wildcard"},
 			}}
 		}, `ingressDiscovery.profiles.sso-internal.upstream: upstream and upstreamGroupRef are mutually exclusive`},
@@ -335,7 +335,7 @@ func TestResolveProfile(t *testing.T) {
 		Upstream:    Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
 		TLS:         TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
 		Middlewares: []string{"sso"},
-		AccessLists: []string{"home-vpn"},
+		AccessLists: []string{"lan-vpn"},
 	}
 	def := IngressHostTemplate{
 		Upstream: Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80},
@@ -513,13 +513,13 @@ func TestProfilesSurviveYAMLRoundTrip(t *testing.T) {
 			Middlewares: []string{"rate-limit"},
 		},
 		"sso-internal": {
-			UpstreamGroupRef:  "k8s-nodes",
+			UpstreamGroupRef:  "cluster-nodes",
 			TLS:               TLSSettings{CertificateRef: "wildcard", ForceSSL: true},
 			WebsocketsUpgrade: true,
 			RobotsNoIndex:     true,
 			Timeouts:          &HostTimeouts{ConnectSeconds: 3, ReadSeconds: 7},
 			Middlewares:       []string{"sso", "rate-limit"},
-			AccessLists:       []string{"home-vpn"},
+			AccessLists:       []string{"lan-vpn"},
 			Tags:              []string{"sso"},
 			DefaultDNS:        &DNSSyncPolicy{LanDirect: true},
 		},
@@ -720,6 +720,31 @@ func TestAllowedDomainFor(t *testing.T) {
 	}
 	if d.AllowedDomainFor(narrowed, "other.example.com") {
 		t.Fatal("a name outside the narrowed suffix must be rejected even though the global list would allow it")
+	}
+}
+
+// allowedHostnames binds a template to exact names (after normalisation); unset
+// means no binding, and a wildcard or malformed entry fails the settings write.
+func TestAllowedHostnames(t *testing.T) {
+	if !(IngressHostTemplate{}).AllowsHostname("anything.example.com") {
+		t.Fatal("an unset allowedHostnames must not restrict anything")
+	}
+	bound := IngressHostTemplate{AllowedHostnames: []string{" Example.COM. "}}
+	if !bound.AllowsHostname("example.com") {
+		t.Fatal("a listed name must be allowed after normalisation")
+	}
+	if bound.AllowsHostname("app.example.com") {
+		t.Fatal("a sub-domain of a listed name must not be allowed: the binding is exact")
+	}
+	for _, bad := range []string{"*.example.com", "example", "a b.example.com"} {
+		tmpl := IngressHostTemplate{
+			Upstream:         Upstream{Scheme: "http", Host: "192.0.2.10", Port: 80},
+			TLS:              TLSSettings{CertificateRef: "wildcard"},
+			AllowedHostnames: []string{bad},
+		}
+		if err := tmpl.validate("template"); err == nil || !strings.Contains(err.Error(), "allowedHostnames") {
+			t.Errorf("allowedHostnames %q: err = %v, want a validation error", bad, err)
+		}
 	}
 }
 
@@ -965,5 +990,39 @@ func TestIngressDiscoveryValidateRefsAnnotationPrefixMigration(t *testing.T) {
 	disabled.Enabled = false
 	if err := disabled.ValidateRefs(cfg); err != nil {
 		t.Fatalf("ValidateRefs() on a disabled block = %v, want nil", err)
+	}
+}
+
+// The store-side ownership guard is built from OwnsLabels, so it must follow
+// the configured prefix and, during a migration, the previous one, for both
+// reconcilers, and never claim the other reconciler's hosts.
+func TestOwnsLabelsFollowsTheConfiguredPrefix(t *testing.T) {
+	custom := IngressDiscoverySettings{AnnotationPrefix: "edge.example.com"}
+	mine := map[string]string{"edge.example.com/managed-by": ManagedByIngressDiscovery}
+	old := map[string]string{ManagedByLabel: ManagedByIngressDiscovery}
+	if !custom.OwnsLabels(mine) {
+		t.Fatal("a host labelled under the configured prefix must be owned")
+	}
+	if custom.OwnsLabels(old) {
+		t.Fatal("a host labelled under another prefix must not be owned outside a migration")
+	}
+	custom.AnnotationPrefixMigrate = true
+	if !custom.OwnsLabels(old) {
+		t.Fatal("during a prefix migration a host labelled under the previous prefix must be owned")
+	}
+	if (IngressDiscoverySettings{}).OwnsLabels(map[string]string{ManagedByLabel: ManagedByDockerDiscovery}) {
+		t.Fatal("Ingress discovery must not own a container-derived host")
+	}
+
+	dk := Settings{IngressDiscovery: IngressDiscoverySettings{AnnotationPrefix: "edge.example.com"}}.DockerDiscoveryResolved()
+	if !dk.OwnsLabels(map[string]string{"edge.example.com/managed-by": ManagedByDockerDiscovery}) {
+		t.Fatal("docker discovery must own a host labelled under the inherited prefix")
+	}
+	if dk.OwnsLabels(map[string]string{ManagedByLabel: ManagedByDockerDiscovery}) || dk.OwnsLabels(mine) {
+		t.Fatal("docker discovery must not own a stale-prefix host outside a migration, nor an Ingress-derived host")
+	}
+	dk = Settings{IngressDiscovery: IngressDiscoverySettings{AnnotationPrefix: "edge.example.com", AnnotationPrefixMigrate: true}}.DockerDiscoveryResolved()
+	if !dk.OwnsLabels(map[string]string{ManagedByLabel: ManagedByDockerDiscovery}) {
+		t.Fatal("during a prefix migration docker discovery must own a host labelled under the previous prefix")
 	}
 }

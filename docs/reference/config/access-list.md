@@ -93,9 +93,11 @@ A source that has **never been fetched** resolves to the empty set, so rules
 referencing it match nothing and the list falls through to `defaultAction`. An
 unfetched or refused feed can never widen access. Entries are bounded too: a
 default route (`0.0.0.0/0`, `::/0`), a prefix broader than `/8` (IPv4) or `/32`
-(IPv6), or any address in a non-public range (loopback, link-local, RFC1918,
-ULA, CGNAT `100.64.0.0/10`, multicast, `192.0.0.0/24`, `198.18.0.0/15`,
-`64:ff9b::/96`) refuses the whole fetch.
+(IPv6), or any network that overlaps a non-public range (loopback, link-local,
+RFC1918, ULA, CGNAT `100.64.0.0/10`, multicast, `192.0.0.0/24`, `198.18.0.0/15`,
+`64:ff9b::/96`) refuses the whole fetch. An IPv4-mapped entry
+(`::ffff:192.0.2.0/120`) is judged and stored as the IPv4 network it matches
+(`192.0.2.0/24`), so the IPv4 limits apply to it.
 
 > **Pair every `source` rule with `paths`.** A source rule *without* `paths` is
 > an ordinary allow rule: it grants every address in the feed full access to the

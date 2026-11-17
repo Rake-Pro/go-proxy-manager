@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"slices"
 	"sort"
 	"strings"
 
@@ -179,12 +180,27 @@ var baselineOverrideHeaders = []string{
 }
 
 // clientAddressHeaders name a client address the way a CDN or load balancer
-// does. They follow the client-IP trust tier: a peer whose X-Forwarded-For
-// the host believes may carry them to the backend, any other peer loses
-// them. The URL and method overrides above are never passed on from anyone:
-// a CDN forwards those unchanged from the client, so trusting the CDN would
-// reopen the guard bypass.
-var clientAddressHeaders = []string{"True-Client-Ip", "X-Client-Ip", "X-Real-Ip", "Cf-Connecting-Ip", "Forwarded"}
+// does, and the other forwarded-request headers front proxies set (the
+// original scheme, port, prefix, server, path or host, and the client
+// certificate a front TLS terminator verified). They follow the client-IP
+// trust tier: a peer whose X-Forwarded-For the host believes may carry them to
+// the backend, any other peer loses them. The URL and method overrides above
+// are never passed on from anyone: a CDN forwards those unchanged from the
+// client, so trusting the CDN would reopen the guard bypass.
+var clientAddressHeaders = []string{
+	"True-Client-Ip", "X-Client-Ip", "X-Real-Ip", "Cf-Connecting-Ip", "Forwarded",
+	"X-Original-Forwarded-For", "X-Cluster-Client-Ip", "Fastly-Client-Ip", "X-Azure-Clientip",
+	"X-Forwarded-Port", "X-Forwarded-Prefix", "X-Forwarded-Scheme", "X-Forwarded-Ssl",
+	"X-Forwarded-Server", "Front-End-Https", "X-Url-Scheme",
+	"X-Forwarded-Path", "X-Envoy-Original-Path", "X-Original-Host", "X-Host",
+	"X-Forwarded-Tls-Client-Cert", "X-Forwarded-Tls-Client-Cert-Info", "X-Forwarded-Client-Cert",
+	"Ssl-Client-Cert", "Ssl-Client-Verify", "X-Ssl-Client-Dn",
+}
+
+// proxyWrittenHeaders are removed from every inbound request and rewritten by
+// the reverse proxy itself (see setForwardedClient); only their underscore
+// spellings need stripping, which stripUnderscoreSpellings does for every peer.
+var proxyWrittenHeaders = []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"}
 
 // baselineIdentityPrefixes strip whole header families whose member names vary:
 // oauth2-proxy's X-Auth-Request-* and authentik's X-Authentik-*.
@@ -222,6 +238,43 @@ func stripIdentityHeaders(h http.Header, extra []string) {
 			}
 		}
 	}
+}
+
+// stripUnderscoreSpellings deletes every header whose name contains "_" and,
+// read with "_" as "-", names a header the strip lists cover. Some upstream
+// servers (CGI-style environments) map both spellings to one variable, so the
+// underscore form would stand in for the stripped one. keepAddress and
+// keepIdentity are the peer's trust tiers, as in stripUntrustedIdentity; extra
+// is the host's own identity-header set.
+func stripUnderscoreSpellings(h http.Header, extra []string, keepAddress, keepIdentity bool) {
+	for key := range h {
+		if !strings.Contains(key, "_") {
+			continue
+		}
+		name := textproto.CanonicalMIMEHeaderKey(strings.ReplaceAll(key, "_", "-"))
+		if slices.Contains(baselineOverrideHeaders, name) || slices.Contains(proxyWrittenHeaders, name) ||
+			(!keepAddress && slices.Contains(clientAddressHeaders, name)) ||
+			(!keepIdentity && isIdentityHeaderName(name, extra)) {
+			delete(h, key)
+		}
+	}
+}
+
+// isIdentityHeaderName reports whether the canonical name is one
+// stripIdentityHeaders removes.
+func isIdentityHeaderName(name string, extra []string) bool {
+	if slices.Contains(baselineIdentityHeaders, name) || slices.Contains(extra, name) {
+		return true
+	}
+	if _, keep := identityPrefixExceptions[name]; keep {
+		return false
+	}
+	for _, p := range baselineIdentityPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostIdentityTrust returns the provider-configured identity headers a host

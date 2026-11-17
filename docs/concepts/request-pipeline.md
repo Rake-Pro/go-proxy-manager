@@ -72,16 +72,38 @@ URL and method overrides that would ask a backend to treat it as a different
 request, whoever sent them (a CDN forwards them from the client unchanged):
 `X-Original-URL`, `X-Rewrite-URL`, `X-Original-URI`, `X-Forwarded-URI`,
 `X-Forwarded-Method`, `X-HTTP-Method-Override`, `X-HTTP-Method` and
-`X-Method-Override`. The client-address headers `True-Client-IP`,
-`X-Client-IP`, `X-Real-IP`, `CF-Connecting-IP` and `Forwarded` follow the
-client-IP tier: a peer in the host's effective `trustedProxies` may carry
-them, any other peer loses them. gpm sets `X-Real-IP` and `X-Forwarded-For`
+`X-Method-Override`. The client-address and forwarded-request headers
+`True-Client-IP`, `X-Client-IP`, `X-Real-IP`, `CF-Connecting-IP`,
+`Forwarded`, `X-Original-Forwarded-For`, `X-Cluster-Client-IP`,
+`Fastly-Client-IP`, `X-Azure-ClientIP`, `X-Forwarded-Port`,
+`X-Forwarded-Prefix`, `X-Forwarded-Scheme`, `X-Forwarded-Ssl`,
+`X-Forwarded-Server`, `Front-End-Https`, `X-Url-Scheme`,
+`X-Forwarded-Path`, `X-Envoy-Original-Path`, `X-Original-Host`, `X-Host`,
+and the client-certificate headers a front TLS terminator sets
+(`X-Forwarded-Tls-Client-Cert`, `X-Forwarded-Tls-Client-Cert-Info`,
+`X-Forwarded-Client-Cert`, `Ssl-Client-Cert`, `Ssl-Client-Verify`,
+`X-Ssl-Client-Dn`) follow the client-IP tier: a peer in the host's effective
+`trustedProxies` may carry them, any other peer loses them. A header spelled
+with `_` in place of `-` (`X_Forwarded_User`, `Remote_User`) is removed under
+the same tier as the hyphen form, because CGI-style backends read both as one
+variable; other underscore headers pass unchanged. gpm sets `X-Real-IP` and `X-Forwarded-For`
 itself afterwards. A `Host` header whose port part is not a
 number in range (or that carries a second colon) is answered `400` before
 routing, so nothing but a name and a real port is ever forwarded upstream. A
+request target not in origin form is answered `400` before routing too. A
 request body may stall for at most 60 seconds between reads before the
 connection's read deadline cuts it off; an upload that keeps moving is not
-bounded (protocol upgrades keep no deadline at all).
+bounded (protocol upgrades keep no deadline at all). The response side mirrors
+it: a proxied response write that makes no progress for 60 seconds (a client
+that stopped reading) fails and frees the upstream request; a stream that is
+idle between writes (server-sent events) or a client that reads slowly but
+steadily is not cut off.
+
+**Headers set by a headers middleware.** A `setRequest` header reaches the
+upstream even when the client names it in its `Connection` header (which
+otherwise makes the proxy drop it as hop-by-hop). Hop-by-hop names and
+`X-Forwarded-For`/`-Host`/`-Proto`, which the proxy writes itself, keep the
+proxy's handling.
 
 **Request-aware access-list rules.** An IP rule may carry `paths` (and
 `methods`), in which case it matches only a request to one of those exact paths

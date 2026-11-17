@@ -20,8 +20,8 @@ negotiates, so an edge can be hardened in one place instead of host by host.
 ## Precedence: a host overrides the fleet, in both directions
 
 [ProxyHost `tls.minTLSVersion`](../proxy-host.md#proxy-host-tls) is a per-host
-floor selected by SNI at handshake time, and it wins over this setting whichever
-way it points.
+floor selected by SNI at handshake time (and re-checked against the `Host` of
+each request), and it wins over this setting whichever way it points.
 
 | `settings.tls.minVersion` | Host `tls.minTLSVersion` | Floor for that host |
 |---|---|---|

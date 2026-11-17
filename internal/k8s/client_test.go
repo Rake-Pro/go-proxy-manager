@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -543,5 +544,37 @@ func TestListPageSizeLeavesHeadroomUnderTheBodyCap(t *testing.T) {
 	const generousObjectBytes = 64 << 10
 	if listPageSize*generousObjectBytes > maxRespBody {
 		t.Fatalf("listPageSize %d x %d bytes exceeds the %d-byte body cap", listPageSize, generousObjectBytes, maxRespBody)
+	}
+}
+
+// A page whose response overflows the body cap is asked for again with a
+// smaller limit from the same continue token, so a few large but legal objects
+// do not fail the whole list.
+func TestOversizedPageIsRetriedWithASmallerLimit(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	big := strings.Repeat("x", 250<<10)
+	var items []string
+	for i := 0; i < 34; i++ {
+		items = append(items, ingressJSON("tenant", fmt.Sprintf("pad-%02d", i), map[string]string{"example.org/pad": big}, "pad.example.com"))
+	}
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		off, _ := strconv.Atoi(r.URL.Query().Get("continue"))
+		end := min(off+limit, len(items))
+		cont := ""
+		if end < len(items) {
+			cont = strconv.Itoa(end)
+		}
+		writeList(w, items[off:end], cont)
+	}
+	got, err := f.client(t).ListIngresses(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(items) {
+		t.Fatalf("got %d items, want %d", len(got), len(items))
+	}
+	if len(f.requests) < 2 || f.requests[0] != "limit=100" || f.requests[1] != "limit=10" {
+		t.Fatalf("requests = %v, want limit=100 followed by a retry at limit=10", f.requests)
 	}
 }

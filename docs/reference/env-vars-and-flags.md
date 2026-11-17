@@ -75,7 +75,9 @@ preference:
 - `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE`: path to a file (e.g. a Docker secret), or
 - `GPM_LOCAL_ADMIN_PASSWORD_HASH`: the hash inline.
 
-Generate one with `gpm hashpw 'your-password'` (or `docker run --rm <image> hashpw ...`).
+Generate one with `gpm hashpw` (or `docker run --rm -i <image> hashpw`), which
+reads the password from stdin; the positional form puts the password in shell
+history and the process list.
 
 **Admin second factor (TOTP)** is not a flag either. Supply a base32 secret via
 `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` or `GPM_LOCAL_ADMIN_TOTP_SECRET`; see
@@ -90,13 +92,20 @@ below exits when it is done and never starts a listener.
 |---|---|---|
 | `gpm` | every flag in the table above, plus `-version` | Runs the daemon: proxy listeners, admin panel, ACME, reconcilers. |
 | `gpm -version` | none | Prints the build version and exits. |
-| `gpm hashpw [password]` | none; the password is a positional argument, or read from stdin when omitted | Prints a bcrypt hash on stdout for `GPM_LOCAL_ADMIN_PASSWORD_HASH*`. |
+| `gpm hashpw [password]` | none; the password is read from stdin when omitted (preferred), or taken from a positional argument | Prints a bcrypt hash on stdout for `GPM_LOCAL_ADMIN_PASSWORD_HASH*`. |
 | `gpm totp-secret` | `-account` (default `GPM_LOCAL_ADMIN_USER`, else `admin`), `-issuer` (default `gpm`) | Prints a base32 TOTP secret on stdout and the `otpauth://` enrolment URI on stderr. No QR code is rendered. |
 
 ```
-gpm hashpw 'your-password' > admin_hash
+install -m 0600 /dev/null admin_hash
+install -m 0600 /dev/null admin_totp
+read -rsp 'admin password: ' pw; echo
+printf '%s\n' "$pw" | gpm hashpw > admin_hash
+unset pw
 gpm totp-secret -account admin -issuer gpm > admin_totp
 ```
+
+Create each file with an owner-only mode first, as above (for Docker, owned by
+the image's `gpm` user: [Secret files](../getting-started/install-docker.md#secret-files)).
 
 ## Runtime facts (operations)
 

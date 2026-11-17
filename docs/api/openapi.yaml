@@ -1420,8 +1420,8 @@ components:
           type: string
           description: Absolute https URL of a plain-text feed - one IP or CIDR per line, "#" comments
             and blank lines ignored. http is not accepted, and no proxy is honoured. An entry that is
-            a default route, broader than /8 (IPv4) or /32 (IPv6), or in a non-public range refuses
-            the whole fetch.
+            a default route, broader than /8 (IPv4) or /32 (IPv6), or overlapping a non-public range
+            refuses the whole fetch; an IPv4-mapped entry is judged as the IPv4 network it matches.
         interval:
           type: string
           description: Go duration between re-fetches. Empty means 24h; below 1h is refused.
@@ -2007,6 +2007,11 @@ components:
             type: string
           description: Narrows the global list for hosts derived from this template/profile. Must be a
             subset.
+        allowedHostnames:
+          type: array
+          items:
+            type: string
+          description: Exact hostnames this template/profile may be used for. Empty means no binding.
       description: The shape every proxy host derived from discovery takes. certificateRef is required.
     IngressProfileRule:
       type: object
@@ -2105,7 +2110,7 @@ components:
             object list such as `access`. Lower-case letters, digits and hyphens.
         query:
           type: string
-          description: The filter text as typed in the box, e.g. `-client:@home-only -status:2xx`. At
+          description: The filter text as typed in the box, e.g. `-client:@lan-only -status:2xx`. At
             most 1024 characters, one line.
     Settings:
       type: object
@@ -6851,7 +6856,8 @@ paths:
         '302':
           description: Redirect to the original return path, with the session cookie set.
         '400':
-          description: Missing state/code, or the state does not match the login cookie.
+          description: Missing state/code, or the signed login-state cookie is missing, expired, not
+            issued by this process, or for another login.
           content:
             application/json:
               schema:
@@ -6958,7 +6964,8 @@ paths:
         required: false
         schema:
           type: string
-        description: IdentityProvider name to start an OIDC redirect immediately.
+        description: IdentityProvider name to start an OIDC redirect immediately. Must be listed in
+          adminAuth.providers.
       - name: return
         in: query
         required: false
@@ -6982,7 +6989,8 @@ paths:
         '302':
           description: Redirect to the IdP's authorization endpoint.
         '502':
-          description: The IdP could not be reached to start the flow.
+          description: The IdP could not be reached to start the flow, or idp names no provider listed
+            in adminAuth.providers.
           content:
             application/json:
               schema:

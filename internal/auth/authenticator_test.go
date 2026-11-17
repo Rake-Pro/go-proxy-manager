@@ -56,6 +56,33 @@ func TestLocalLoginPolicy(t *testing.T) {
 	}
 }
 
+// The documented break-glass recovery depends on this: localLoginEnabled alone
+// does not reopen local login while ssoOnly is set; ssoOnly must go off too.
+func TestLocalLoginNeedsSSOOnlyOff(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	a := NewAuthenticator(Options{Store: testStore(t), LocalUser: "admin", LocalHash: string(hash)})
+
+	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{
+		Providers:         []string{"x"},
+		LocalLoginEnabled: true,
+		SSOOnly:           true,
+	}})
+	if _, _, err := a.LocalLogin(context.Background(), "admin", "s3cret"); err == nil {
+		t.Fatal("ssoOnly must keep local login off even with localLoginEnabled")
+	}
+	if a.LocalLoginVisible() {
+		t.Fatal("ssoOnly must keep the local form hidden even with localLoginEnabled")
+	}
+
+	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{
+		Providers:         []string{"x"},
+		LocalLoginEnabled: true,
+	}})
+	if _, _, err := a.LocalLogin(context.Background(), "admin", "s3cret"); err != nil {
+		t.Fatalf("local login must work once ssoOnly is off: %v", err)
+	}
+}
+
 func TestRequireRoleWithSession(t *testing.T) {
 	st := testStore(t)
 	a := NewAuthenticator(Options{Store: st})

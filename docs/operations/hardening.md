@@ -2,6 +2,12 @@
 
 The settings to check before an instance faces the internet.
 
+- Treat the admin listener (`:8081`) as plain HTTP: no password, session
+  cookie or API token may cross a network to it. Bind or publish it on
+  loopback (`127.0.0.1:8081`) or a management address (`192.0.2.10:8081`),
+  not on every interface, and reach it from elsewhere through an SSH tunnel or
+  the HTTPS admin hostname
+  ([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
 - Keep `-pprof` off unless actively profiling; it is admin-role **and**
   admin-scope gated but still needless attack surface when idle.
@@ -35,7 +41,12 @@ The settings to check before an instance faces the internet.
 - What the admin listener does on its own, so you know not to re-implement it
   in front: `/version` needs a signed-in session or token (only `/healthz` is
   anonymous); local login locks a client IP after five failures and a username
-  after twenty, both for 15 minutes, with one identical 429 page; a guard
+  after twenty, both for 15 minutes, with one identical 429 page; an admin
+  session is extended while in use but ends 7 days after sign-in; only
+  `adminAuth.providers` can start a panel SSO login, and starting one stores
+  nothing server-side (the state rides in a signed cookie); idle keep-alive
+  connections close after 120 s and the login form bodies are capped at
+  64 KiB; a guard
   `queryEquals` trigger fails closed on a repeated query key; a backup restore
   keeps the live `api-tokens/*` and ignores the archive's, as Revert does.
 

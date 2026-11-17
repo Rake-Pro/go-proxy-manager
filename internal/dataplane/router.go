@@ -542,12 +542,15 @@ func (hh *hostHandler) stripUntrustedIdentity(r *http.Request) {
 	for _, name := range baselineOverrideHeaders {
 		r.Header.Del(name)
 	}
-	if ip == nil || !ipInNets(ip, hh.trustedProxies) {
+	addressTrusted := ip != nil && ipInNets(ip, hh.trustedProxies)
+	if !addressTrusted {
 		for _, name := range clientAddressHeaders {
 			r.Header.Del(name)
 		}
 	}
-	if ip != nil && ipInNets(ip, hh.trustedNets) {
+	identityTrusted := ip != nil && ipInNets(ip, hh.trustedNets)
+	stripUnderscoreSpellings(r.Header, hh.identityHeaders, addressTrusted, identityTrusted)
+	if identityTrusted {
 		return // a proxy this host trusts may assert identity headers
 	}
 	stripIdentityHeaders(r.Header, hh.identityHeaders)
@@ -570,6 +573,11 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 	if req.requireChain && len(r.TLS.VerifiedChains) == 0 {
 		return false
 	}
+	// A chain verified before a reload changed the host's client CA must still
+	// end in the CURRENT anchor.
+	if len(r.TLS.VerifiedChains) > 0 && !req.anchor.anchorsConn(r.Context(), r.TLS.VerifiedChains) {
+		return false
+	}
 	// A certificate revoked after the handshake is refused on the next request
 	// of a long-lived connection, not only at the next handshake.
 	if req.anchor != nil && len(r.TLS.VerifiedChains) > 0 && req.anchor.chainRevoked(r.TLS.VerifiedChains) {
@@ -583,6 +591,10 @@ func (rt *router) clientAuthSatisfied(req *clientAuthReq, r *http.Request) bool 
 func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 	if !validHostHeader(r.Host) {
 		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
+	if !originFormTarget(r) {
+		http.Error(w, "bad request target", http.StatusBadRequest)
 		return
 	}
 	name := hostKey(r.Host)
@@ -604,6 +616,14 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// is actually asked for. Without it a connection negotiated before the host
 		// turned mTLS on, or coalesced from a non-mTLS host under the same cert,
 		// keeps answering 421 for as long as the client keeps it busy.
+		w.Header().Set("Connection", "close")
+		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
+		return
+	}
+	// A host's minimum TLS version is applied by SNI at the handshake. A request
+	// whose Host names a host with a higher floor than this connection negotiated
+	// gets the same 421 + close, so the client re-handshakes under that name.
+	if c := rt.tlsConfigForSNI(name); c != nil && r.TLS != nil && r.TLS.Version < c.MinVersion {
 		w.Header().Set("Connection", "close")
 		http.Error(w, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
 		return
@@ -653,6 +673,14 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "no such host", http.StatusNotFound)
+}
+
+// originFormTarget reports false for a request target not in origin form
+// (URL.Opaque set), which is refused before routing: routing and every
+// path-scoped tier read URL.Path, which is empty for it. Asterisk-form
+// ("OPTIONS *") and absolute-form targets leave URL.Opaque empty.
+func originFormTarget(r *http.Request) bool {
+	return r.URL.Opaque == ""
 }
 
 // validHostHeader accepts a Host header the router can route and forward
@@ -711,6 +739,10 @@ func validHostHeader(h string) bool {
 func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if !validHostHeader(r.Host) {
 		http.Error(w, "bad request host", http.StatusBadRequest)
+		return
+	}
+	if !originFormTarget(r) {
+		http.Error(w, "bad request target", http.StatusBadRequest)
 		return
 	}
 	name := hostKey(r.Host)

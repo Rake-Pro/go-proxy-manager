@@ -27,14 +27,16 @@ import (
 // fakeIdP is a minimal OpenID Provider: discovery document, JWKS backed by a
 // freshly generated RSA key, an authorize endpoint that records what the client
 // asked for, and a token endpoint that mints a signed ID token from claims the
-// test controls (nonce, groups, email, ...).
+// test controls (nonce, groups, email, ...). Like a real provider, it redeems
+// each authorization code once.
 type fakeIdP struct {
 	srv    *httptest.Server
 	signer jose.Signer
 	pub    jose.JSONWebKey
 
-	mu     sync.Mutex
-	claims map[string]any
+	mu        sync.Mutex
+	claims    map[string]any
+	usedCodes map[string]bool
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -52,9 +54,10 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		t.Fatal(err)
 	}
 	f := &fakeIdP{
-		signer: signer,
-		pub:    jose.JSONWebKey{Key: &key.PublicKey, KeyID: kid, Algorithm: "RS256", Use: "sig"},
-		claims: map[string]any{},
+		signer:    signer,
+		pub:       jose.JSONWebKey{Key: &key.PublicKey, KeyID: kid, Algorithm: "RS256", Use: "sig"},
+		claims:    map[string]any{},
+		usedCodes: map[string]bool{},
 	}
 	mux := http.NewServeMux()
 	f.srv = httptest.NewServer(mux)
@@ -82,8 +85,18 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		// drive the callback themselves, so just acknowledge.
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		code := r.FormValue("code")
+		f.mu.Lock()
+		used := f.usedCodes[code]
+		f.usedCodes[code] = true
+		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if used {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "at", "token_type": "Bearer", "expires_in": 3600,
 			"id_token": f.signIDToken(t),
@@ -291,8 +304,8 @@ func TestOIDCLoginHappyPath(t *testing.T) {
 	if state == "" || nonce == "" {
 		t.Fatal("authorize URL must carry both state and nonce")
 	}
-	if stateCookie.Value != state {
-		t.Fatalf("state cookie %q must equal the state sent to the IdP %q", stateCookie.Value, state)
+	if stateCookie.Value == "" || stateCookie.Value == state {
+		t.Fatalf("state cookie %q must carry the signed login state, not the bare state %q", stateCookie.Value, state)
 	}
 	if stateCookie.Path != "/auth" || !stateCookie.HttpOnly || stateCookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("state cookie attributes: path=%q httpOnly=%v sameSite=%v", stateCookie.Path, stateCookie.HttpOnly, stateCookie.SameSite)
@@ -413,15 +426,20 @@ func TestCallbackRejectsBadState(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown state is not in the pending map", func(t *testing.T) {
+	t.Run("state cookie not signed by this server", func(t *testing.T) {
 		e := newTestEnv(t, envOpts{})
 		res := e.callback("never-issued", "code", &http.Cookie{Name: "gpm_oidc_state", Value: "never-issued"})
-		if res.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("got %d, want 401", res.StatusCode)
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("got %d, want 400", res.StatusCode)
+		}
+		if c := cookie(t, res, "gpm_session"); c != nil {
+			t.Fatal("a rejected callback must not mint a session")
 		}
 	})
 
-	t.Run("state cannot be replayed", func(t *testing.T) {
+	// The callback clears the state cookie; a replay that still presents it is
+	// refused because the IdP redeems each authorization code once.
+	t.Run("replayed callback", func(t *testing.T) {
 		e := newTestEnv(t, envOpts{})
 		sc, state, nonce := e.beginLogin("/")
 		e.idp.setClaims(map[string]any{"nonce": nonce, "groups": []string{"proxy-admins"}})
@@ -430,7 +448,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 		}
 		res := e.callback(state, "code", sc)
 		if res.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("replayed state: got %d, want 401", res.StatusCode)
+			t.Fatalf("replayed callback: got %d, want 401", res.StatusCode)
 		}
 	})
 }
@@ -902,5 +920,78 @@ func TestLocalLoginRejectsUnparseableForm(t *testing.T) {
 	res := e.do(req)
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400", res.StatusCode)
+	}
+}
+
+// The unauthenticated login form posts are capped well below net/http's 10 MB
+// form default; an oversized body is refused as an unreadable form.
+func TestLoginFormBodyIsCapped(t *testing.T) {
+	e := newTestEnv(t, envOpts{localUser: "admin", localPass: "s3cret", localEnabled: true})
+	body := "username=admin&password=wrong&pad=" + strings.Repeat("a", maxLoginFormBytes)
+	for _, target := range []string{"/auth/local", "/auth/local/totp"} {
+		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if res := e.do(req); res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s with an oversized body: got %d, want 400", target, res.StatusCode)
+		}
+	}
+}
+
+// The admin listener closes idle keep-alive connections and bounds header
+// reads, but sets no whole-request read or write deadline, which would cut off
+// long-running admin responses and uploads.
+func TestAdminServerTimeouts(t *testing.T) {
+	e := newTestEnv(t, envOpts{})
+	h := e.srv.http
+	if h.IdleTimeout <= 0 || h.ReadHeaderTimeout <= 0 {
+		t.Fatalf("IdleTimeout=%v ReadHeaderTimeout=%v, want both set", h.IdleTimeout, h.ReadHeaderTimeout)
+	}
+	if h.ReadTimeout != 0 || h.WriteTimeout != 0 {
+		t.Fatalf("ReadTimeout=%v WriteTimeout=%v, want neither set", h.ReadTimeout, h.WriteTimeout)
+	}
+}
+
+// Login starts keep no server-side state, so a burst of them from one address
+// (every request proxied over loopback shares one) does not refuse the next
+// client's login.
+func TestLoginStartsDoNotExhaustAShareableBudget(t *testing.T) {
+	e := newTestEnv(t, envOpts{ssoOnly: true})
+	start := func(xff string) int {
+		req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("X-Forwarded-For", xff)
+		return e.do(req).StatusCode
+	}
+	for i := 0; i < 100; i++ {
+		if code := start("198.51.100." + strconv.Itoa(i%250+1)); code != http.StatusFound {
+			t.Fatalf("login start %d: got %d, want 302", i+1, code)
+		}
+	}
+	if code := start("203.0.113.7"); code != http.StatusFound {
+		t.Fatalf("another client after the burst: got %d, want 302", code)
+	}
+}
+
+// A configured OIDC provider that is not in adminAuth.providers cannot start an
+// admin-panel login; it is answered like an unknown name.
+func TestLoginRefusesProviderNotInAdminList(t *testing.T) {
+	e := newTestEnv(t, envOpts{})
+	spec := &model.OIDCSpec{IssuerURL: e.idp.issuer(), ClientID: "gpm-client"}
+	e.authn.Configure(model.Config{IdentityProviders: []model.IdentityProvider{
+		{ObjectMeta: model.ObjectMeta{Name: "acme"}, Type: model.IdPTypeOIDC, OIDC: spec,
+			RoleMapping: &model.RoleMapping{AdminGroups: []string{"proxy-admins"}}},
+		{ObjectMeta: model.ObjectMeta{Name: "sitegate"}, Type: model.IdPTypeOIDC, OIDC: spec,
+			RoleMapping: &model.RoleMapping{AdminGroups: []string{"site-users"}}},
+	}}, model.Settings{ExternalBaseURL: "http://admin.example.test",
+		AdminAuth: model.AdminAuthSettings{Providers: []string{"acme"}}})
+
+	for _, idp := range []string{"sitegate", "nope"} {
+		res := e.get("/auth/login?idp=" + idp)
+		if res.StatusCode != http.StatusBadGateway {
+			t.Fatalf("idp=%s: got %d, want 502", idp, res.StatusCode)
+		}
+		if cookie(t, res, "gpm_oidc_state") != nil {
+			t.Fatalf("idp=%s: a refused login start must not set a state cookie", idp)
+		}
 	}
 }

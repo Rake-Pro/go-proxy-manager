@@ -86,9 +86,9 @@ jobs:
           tags: |
             type=raw,value=dev
             type=sha,prefix=dev-,format=short
-          # The version label follows the first tag ("dev") unless overridden;
-          # homelb's update-apps.sh reads this label, so every dev build looked
-          # like the same version. Match what the binary itself reports.
+          # The version label follows the first tag ("dev") unless overridden,
+          # so to any tool that reads it every dev build looked like the same
+          # version. Match what the binary itself reports.
           labels: |
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
 

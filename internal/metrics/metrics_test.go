@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,6 +138,36 @@ func TestStatusClass(t *testing.T) {
 		if got := statusClass(tc.code); got != tc.want {
 			t.Errorf("statusClass(%d) = %q, want %q", tc.code, got, tc.want)
 		}
+	}
+}
+
+// TestHTTPRequestMethodLabelIsBounded checks that arbitrary method tokens
+// collapse to "other", so they cannot spend the per-metric series budget.
+func TestHTTPRequestMethodLabelIsBounded(t *testing.T) {
+	m := NewMetrics("test", "c", "go")
+	for i := 0; i < 2*MaxSeriesPerMetric; i++ {
+		m.HTTPRequest("app", fmt.Sprintf("X%d", i), 200, time.Millisecond, 0, 0)
+	}
+	m.HTTPRequest("app", "get", 200, time.Millisecond, 0, 0)
+	m.HTTPRequest("app", "DELETE", 200, time.Millisecond, 0, 0)
+	m.HTTPRequest("new", "GET", 500, time.Millisecond, 0, 0)
+
+	var b strings.Builder
+	if _, err := m.Registry.WriteTo(&b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		fmt.Sprintf(`gpm_http_requests_total{host="app",method="other",status="2xx"} %d`, 2*MaxSeriesPerMetric+1),
+		`gpm_http_requests_total{host="app",method="DELETE",status="2xx"} 1`,
+		`gpm_http_requests_total{host="new",method="GET",status="5xx"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `method="X1"`) || strings.Contains(out, OverflowLabel) {
+		t.Errorf("raw method token or overflow series in exposition\n%s", out)
 	}
 }
 

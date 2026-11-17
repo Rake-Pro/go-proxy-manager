@@ -82,6 +82,12 @@ func (m ObjectMeta) GetMeta() ObjectMeta { return m }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-_.]{0,251}[a-z0-9])?$`)
 
+// MaxDerivedNameLen bounds the name of a host derived by discovery so that its
+// object file "<name>.yaml" fits a 255-byte file name. ValidateName allows up to
+// 253 characters, which the store cannot write, and one such name in a reconcile
+// batch fails the whole batch.
+const MaxDerivedNameLen = 250
+
 // ValidateName enforces a filesystem- and reference-safe object name.
 func ValidateName(name string) error {
 	if name == "" {

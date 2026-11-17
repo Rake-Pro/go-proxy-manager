@@ -89,21 +89,22 @@ func basicAuthGate(spec model.AuthMiddleware, realm string, clientIP func(*http.
 		}
 		key := authGateKey(clientIP, r)
 		ok := false
-		if gate.atLimit(key) {
-			log.Warn().Str("host", host).Str("client", key).
-				Msg("basic auth middleware: client is locked out after repeated failures")
-		} else {
-			ok = users.verify(r)
-			if _, _, presented := r.BasicAuth(); presented {
-				// Only a real attempt counts. Browsers routinely send one
-				// credential-less request per fresh page load; counting those
-				// would lock out normal users.
-				if ok {
-					gate.clear(key)
-				} else {
-					gate.record(key)
-				}
+		_, _, presented := r.BasicAuth()
+		switch {
+		case !presented:
+			// Only a real attempt counts. Browsers routinely send one
+			// credential-less request per fresh page load; counting those would
+			// lock out normal users. Nothing to verify: answered with the
+			// challenge.
+		default:
+			finish, admitted := gate.begin(r.Context(), key)
+			if !admitted {
+				log.Warn().Str("host", host).Str("client", key).
+					Msg("basic auth middleware: client is locked out after repeated failures")
+				break
 			}
+			ok = users.verify(r)
+			finish(ok)
 		}
 		if ok {
 			next.ServeHTTP(w, r)

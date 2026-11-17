@@ -77,7 +77,7 @@ All notable changes to go-proxy-manager are documented here. The format follows
   network, a bare IP matches exactly (an IPv4-mapped IPv6 client counts as
   IPv4), and `@name` stands for the networks an access list allows (its
   `cidr` rules plus what its named sources last fetched), so
-  `-client:@home-only` shows only what reached the proxy from outside your
+  `-client:@lan-only` shows only what reached the proxy from outside your
   own networks and `-client:@uptimerobot` hides a monitor fed by its
   published IP list. The `client:` suggestions offer the `@` lists first.
 - `GET /api/access-list-networks` (scope `access-lists:read`) returns the
@@ -95,6 +95,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
   remembered in the browser) with a pager pinned to the bottom of the page.
   The filter, the sort and the count cover the whole buffer; auto-refresh
   waits while a page after the first is open.
+- Discovery: `allowedHostnames` on the Ingress or Docker discovery template or
+  on a profile binds it to exact hostnames. A derived name not listed is
+  rejected like a name outside `allowedDomainSuffixes`. Unset keeps today's
+  behaviour. It binds a profile with no gate to the names meant to be public,
+  including a zone apex a suffix list cannot single out.
+- DNS sync: a plain `http://` `pihole.url` on a non-loopback host is logged at
+  warn, once per URL; the application password crosses the network in clear.
 
 ### Security
 
@@ -112,7 +119,8 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   about. A client-cert gate refuses a certificate verified under another
   host's SNI (so on a host without its own `tls.clientAuth`, which is warned
   about, it admits only its allowFrom exemptions) and re-checks revocation per
-  request, as does the host's own mTLS gate. Rate-limit buckets and the basic-auth lockout key IPv6 by /64.
+  request, as does the host's own mTLS gate. Rate-limit buckets key IPv6 by /64
+  (the basic-auth lockout by /56, see below).
   Discovery keeps an existing managed host's current domain ahead of any
   claimant instead of failing the batch. (#50)
 - Explicit discovery `tokenFile`/`caFile` paths are confined to the secret
@@ -131,6 +139,97 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   link-local guard refuses zoned addresses; the release workflow only
   runs from `main` and only builds a tag that sits on `main`, and the docs
   workflow grants Pages permissions per job. (#51)
+- A request target not in origin form is answered `400` before routing on
+  both listeners.
+- A proxied response write that makes no progress for 60 s (a client that
+  stopped reading) fails and frees its copy buffer and upstream request;
+  each write is bounded on its own, so idle server-sent-event streams, slow
+  but steady readers and trailers are unaffected. HTTP/2 connections get a
+  60 s write-byte timeout.
+- Underscore spellings of stripped request headers (`X_Forwarded_User`,
+  `Remote_User`, `X_Client_Cert_Subject`, ...) are removed under the same
+  trust tier as the hyphen form; other underscore headers pass. More
+  forwarded-family headers are stripped unless the peer is one of the host's
+  trusted proxies: forwarded scheme, port, prefix, server, path and host
+  (`X-Forwarded-Port`, `X-Forwarded-Prefix`, `X-Original-Host`, ...), more
+  client-address headers (`Fastly-Client-IP`, ...) and front-proxy
+  client-certificate headers (`X-Forwarded-Client-Cert`, `Ssl-Client-Cert`,
+  ...). A trusted proxy keeps forwarding them as before.
+- A `setRequest` header of a headers middleware can no longer be removed by
+  naming it in the client's `Connection` header.
+- A guard trigger's `methods` match the request method in any letter case
+  (`post` and `Post` fire a `POST` trigger), as the access-list tier already
+  did.
+- A host's `minTLSVersion` (or the fleet floor) is enforced for the host a
+  request is routed to, not only for the SNI of the handshake: a request whose
+  `Host` names a host with a higher floor than the connection negotiated gets
+  `421` with `Connection: close`, like the mTLS gate.
+- An mTLS host re-checks on an open connection that the client certificate's
+  verified chain still ends in the host's current client CA. After a reload
+  that re-points `caRef` or removes the CA certificate from `caPEM`, the next
+  request on a connection verified under the old CA gets `421` with
+  `Connection: close` (checked once per connection per reload).
+- UDP stream hosts: one source address (IPv6 by /64) may hold at most 64 of a
+  listener's 4096 sessions. A full table lets a new source replace the
+  session that was silent the longest only if it has had no client traffic for
+  30 s; otherwise the new source is dropped as before. TCP stream hosts in
+  `tls.mode: terminate` complete the TLS handshake within 10 s of the
+  ClientHello before the backend is dialled.
+- `gpm_http_requests_total{method}` carries only `GET`, `HEAD`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `OPTIONS`, `CONNECT` or `other`, so request methods sent
+  by clients cannot use up the series budget. Any other method (including
+  `TRACE` and non-upper-case spellings) is counted under `other`.
+- Data-plane basic auth (`mode: basic` and deprecated access-list `basicAuth`):
+  the failure map sweeps expired entries before it reports itself full, so a
+  past burst of distinct clients no longer locks every new client out until a
+  reload; it still fails closed while full of live entries. Password checks
+  in flight count against the 5-failure budget and further parallel requests
+  from the same client wait for one to finish, so a parallel burst gets no
+  more guesses than the limit while parallel correct-password requests (a page
+  load) all pass. IPv6 clients are counted per /56.
+- Access-list source feeds: an IPv4-mapped entry (`::ffff:a.b.c.d/k`) is judged
+  and stored as the IPv4 network it matches, so the `/8` IPv4 limit applies to
+  it, and an entry that overlaps a non-public range is refused even when its
+  network address is public (`172.0.0.0/8` covers `172.16.0.0/12`).
+
+Admin plane:
+
+- Only the OIDC providers listed in `adminAuth.providers` can start or
+  complete an admin-panel login; any other configured provider is answered
+  as an unknown name.
+- An admin SSO login no longer keeps server-side state per login start: the
+  state, nonce, PKCE verifier and return path travel in the signed, HttpOnly
+  `gpm_oidc_state` cookie, cleared at the callback. The per-client and global
+  pending-login caps are gone, so login starts from one shared address (the
+  edge's loopback hop) can no longer refuse everyone else's. The signing key is
+  random per process: a login started before a restart or upgrade fails once
+  at its callback and is simply started again. With `adminEdge` enabled and
+  the loopback hop not in `settings.trustedProxies`, a warning is logged at
+  startup.
+- Admin sessions end 7 days after sign-in; sliding expiry no longer extends
+  them past that.
+- Webhook and notification delivery error text no longer repeats the receiver
+  URL (whose path is the credential for Discord, Slack and ntfy targets), so
+  the status routes and the test result no longer expose it.
+- A `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` that is set but unreadable is logged at
+  error level and refuses every local admin login instead of dropping to the
+  password alone; an unreadable `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` is now
+  logged at error level too. Neither stops the process.
+- The admin listener closes idle keep-alive connections after 120 s, and the
+  local login and TOTP form bodies are capped at 64 KiB.
+
+Follow-ups of the 2026-11-15 review:
+
+- Release workflow: only a `vX.Y.Z` tag name is released, on the computed
+  path and on the pushed-tag path, and the tag reaches the shell only through
+  quoted environment variables. Other `v*` tag names are ignored when the next
+  version is computed. A pushed tag must still sit on `main`.
+- Docs: secret files are created owned by the image's `gpm` user with mode
+  `0400` (was `chmod 644`), the admin password is fed to `gpm hashpw` on
+  stdin, and the backup cron reads its token from a header file and calls the
+  HTTPS admin hostname. The break-glass recovery under `ssoOnly` is
+  documented step by step (both flags, restart, repair, restore the settings
+  file, rotate the password).
 
 ### Changed
 
@@ -139,6 +238,13 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   `access-list`, indistinguishable from a CIDR deny). A dashboard or alert
   that sums `access-list` sees those move to `geo`; `geo` still also covers
   "geo rules configured but no database loaded".
+- Discovery: a source object that cannot be derived (no usable hostname, no
+  usable upstream) while its profile still resolves now disables its existing
+  host when the stored chain (TLS and client auth, middlewares, access lists
+  and mode, locations, response-header policy) differs from what that profile
+  renders today, or a stored domain is no longer allowed. Before, it froze the
+  host with the chain from before the profile change. A host whose chain still matches is frozen as before, and a
+  clean derive re-enables it.
 
 ### Fixed
 
@@ -159,6 +265,22 @@ The open items of the 2026-10-18 review (issues #49, #50, #51), all shipped:
   foreign host is now skipped instead of failing validation of the whole
   batch. Skip reasons name the holder's kind and say whether discovery manages
   it (#74).
+- Ingress discovery: a list page larger than the 8 MiB body cap is requested
+  again with `limit` 10, then 1, instead of failing the list and freezing
+  discovery. The page, item and body bounds are now documented.
+- Discovery: a derived host name longer than 250 characters (one whose object
+  file would not fit a 255-byte file name) is skipped per object instead of
+  failing the whole reconcile batch on every poll.
+- Discovery: the store-side ownership re-check uses the configured
+  `annotationPrefix` (and, during `annotationPrefixMigrate`, the previous
+  one). With a custom prefix every update, fail-closed disable and delete of a
+  discovered host was silently dropped.
+- DNS sync: a create or delete the Pi-hole or Cloudflare backend refuses is
+  recorded in the status and the run continues; deletes run regardless of
+  create failures. Before, the first refusal stopped every later create and
+  every delete on every run.
+- DNS sync: Cloudflare skips (and reports) names that are not the configured
+  zone or under it instead of submitting them to the zone.
 
 ## [2.5.0] - 2026-10-20
 

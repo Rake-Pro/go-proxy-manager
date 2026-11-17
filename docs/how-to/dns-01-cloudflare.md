@@ -13,7 +13,9 @@ token scoped to one zone.
 ## Steps
 
 1. Create the Cloudflare API token and mount it as a secret
-   (`./secrets/cf_token`, `chmod 644`).
+   (`./secrets/cf_token`, owner the image's `gpm` user, mode `0400`, token
+   pasted at a prompt rather than typed on a command line: see
+   [Secret files](../getting-started/install-docker.md#secret-files)).
 2. Add a DNS provider and a certificate to the config:
 
    ```yaml

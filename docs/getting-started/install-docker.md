@@ -57,18 +57,21 @@ services:
 
 secrets:
   admin_hash:
-    file: ./secrets/admin_hash    # from `gpm hashpw`; chmod 644
+    file: ./secrets/admin_hash    # from `gpm hashpw`; owner gpm, mode 0400
   cf_token:
-    file: ./secrets/cf_token      # Cloudflare API token; chmod 644
+    file: ./secrets/cf_token      # Cloudflare API token; owner gpm, mode 0400
 
 volumes:
   gpm-data:
 ```
 
-> **Docker secret file permissions:** plain `docker compose` mounts file-based
-> secrets with the host file's own permissions. The non-root `gpm` user must be
-> able to read them, so `chmod 644` the secret files (the `uid`/`gid`/`mode`
-> secret options only apply in Swarm).
+> **The admin port is plain HTTP.** Passwords, session cookies and API tokens
+> sent to `8081` are readable by anyone on the path, so they must not cross a
+> network to it. Publish it on loopback (`127.0.0.1:8081:8081`, as above) or on
+> a management address only (`192.0.2.10:8081:8081`), never as a bare
+> `8081:8081`, which Docker publishes on every host address. From another
+> machine, use an SSH tunnel or the HTTPS admin hostname
+> ([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
 
 > **First login needs no cookie setting.** `GPM_COOKIE_SECURE` defaults to
 > `auto`: the admin session cookie is issued without `Secure` over
@@ -76,6 +79,40 @@ volumes:
 > automatically once the request reaches gpm over TLS, arrives through a trusted
 > proxy sending `X-Forwarded-Proto: https`, or `externalBaseURL` is an
 > `https://` URL.
+
+## Secret files
+
+Plain `docker compose` mounts file-based secrets with the host file's own owner
+and mode (the `uid`/`gid`/`mode` secret options only apply in Swarm). Give each
+file to the image's non-root `gpm` user with mode `0400`, so no other account on
+the host can read it:
+
+- Create the file with that owner and mode **before** writing the secret: a
+  plain shell redirect creates it world-readable first.
+- Feed the secret through stdin, never as a command-line argument: `gpm hashpw`
+  with no argument reads the password from stdin, and a token pasted at a
+  `read -s` prompt stays out of shell history and the process list.
+
+```
+img=ghcr.io/rake-pro/go-proxy-manager
+uid=$(docker run --rm --entrypoint id "$img" -u)
+gid=$(docker run --rm --entrypoint id "$img" -g)
+mkdir -p -m 0700 secrets
+for f in admin_hash cf_token; do
+  sudo install -m 0400 -o "$uid" -g "$gid" /dev/null "secrets/$f"
+done
+
+read -rsp 'admin password: ' pw; echo
+printf '%s\n' "$pw" | docker run --rm -i "$img" hashpw | sudo tee secrets/admin_hash >/dev/null
+unset pw
+
+read -rsp 'Cloudflare API token: ' tok; echo
+printf '%s' "$tok" | sudo tee secrets/cf_token >/dev/null
+unset tok
+```
+
+To replace a secret later, run the same `printf ... | sudo tee` line: it keeps
+the file's owner and mode. Restart gpm afterwards.
 
 ## Data directory
 

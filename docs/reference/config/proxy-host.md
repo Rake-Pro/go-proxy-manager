@@ -73,6 +73,11 @@ and kept as-is on save rather than the picker quietly retargeting the trust
 anchor, and if the CA list cannot be loaded at all the page says so and leaves
 `caRef`/`mode` untouched instead of guessing.
 
+A certificate verified on an open connection stays bound to the host's
+current CA: after a reload that re-points `caRef` or drops the issuing CA
+certificate from the ClientCA's `caPEM`, the next request on that connection
+gets `421` with `Connection: close` and the client must handshake again.
+
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | <span id="proxy-host-tls-client-auth-ca-ref"></span>  `caRef` | string | yes | ClientCA name. Must exist and be enabled; the host also requires `forceSSL: true`. |
@@ -96,7 +101,10 @@ gpm sets them *after* the strip, only from a certificate the handshake actually
 **verified**; in `optional` mode a certless request reaches the upstream with no
 identity headers at all.
 
-`minTLSVersion` is a **per-host** floor selected by SNI at handshake time. The
+`minTLSVersion` is a **per-host** floor selected by SNI at handshake time and
+re-checked per request: a request whose `Host` names this host over a connection
+that negotiated a lower version (opened under another name) gets `421` with
+`Connection: close`, so the client reconnects under this host's own name. The
 edge already negotiates TLS 1.2 *or* 1.3 per client (1.2 is the default floor);
 set `"1.3"` only on hosts where every client supports it (drops 1.2: old smart
 TVs / embedded clients / legacy scripts may then fail to connect). Leave it unset

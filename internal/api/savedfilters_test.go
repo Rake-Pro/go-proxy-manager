@@ -21,7 +21,7 @@ func TestSavedFilters(t *testing.T) {
 		t.Fatalf("seed settings: %d %s", w.Code, w.Body.String())
 	}
 
-	good := `[{"name":"Outside, errors","list":"logs","query":"-client:@home-only -status:2xx"},{"name":"LAN","list":"hosts","query":"tag:lan"}]`
+	good := `[{"name":"Outside, errors","list":"logs","query":"-client:@lan-only -status:2xx"},{"name":"LAN","list":"hosts","query":"tag:lan"}]`
 	if w := do(t, h, "PUT", "/settings/saved-filters", good); w.Code != http.StatusOK {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}

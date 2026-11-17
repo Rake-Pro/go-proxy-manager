@@ -70,7 +70,7 @@ services:
      allowedDomainSuffixes: [example.com]
      template:
        tls: { certificateRef: wildcard, forceSSL: true }
-       accessLists: [home-vpn]
+       accessLists: [lan-vpn]
        robotsNoIndex: true
        tags: [docker]
        defaultDNS: { lanDirect: true }
@@ -83,7 +83,9 @@ services:
    ```
 
 3. **Label the containers.** A label can only ever name a profile the operator
-   wrote, and an address inside the container's own network:
+   wrote, and an address inside the container's own network. Labels baked into
+   an image count as well (see
+   [Container labels](../reference/config/settings/docker-discovery.md#container-labels)):
 
    ```yaml
    services:

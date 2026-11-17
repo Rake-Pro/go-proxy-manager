@@ -2,9 +2,16 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -71,19 +78,22 @@ type Authenticator struct {
 	tokenCached bool
 
 	pmu     sync.Mutex
-	pending map[string]pendingLogin // OIDC flow state -> login context
+	pending map[string]pendingLogin // pending-TOTP token -> password-verified local login
 
-	loginGate   *rateGate // local-login failure throttle, keyed by client IP
-	userGate    *rateGate // local-login failure throttle, keyed by username (distributed guessing)
-	pendingGate *rateGate // OIDC begin-login throttle, keyed by client IP
+	// stateKey signs the OIDC login-state cookie (see signLoginState). It is
+	// random per process: a login started before a restart fails at its
+	// callback and is simply started again.
+	stateKey []byte
+
+	loginGate *rateGate // local-login failure throttle, keyed by client IP
+	userGate  *rateGate // local-login failure throttle, keyed by username (distributed guessing)
 }
 
 // rateGate is a per-key rolling-window rate gate: it counts events for each key
-// (a client IP) within a window and reports when a key has reached its limit. The
-// map of keys is bounded (maxKeys) with opportunistic eviction of expired keys, so
-// a flood of distinct keys cannot grow it without bound. It backs both the
-// local-login failure throttle and the OIDC begin-login throttle, which differ
-// only in their window and limit.
+// (a client IP or a username) within a window and reports when a key has reached
+// its limit. The map of keys is bounded (maxKeys) with opportunistic eviction of
+// expired keys, so a flood of distinct keys cannot grow it without bound. It
+// backs the local-login failure throttles.
 type rateGate struct {
 	mu      sync.Mutex
 	entries map[string]*gateEntry
@@ -234,29 +244,23 @@ const (
 	// for everyone (keys are at most 64 bytes).
 	maxUserLoginGates = maxLoginFails * maxLoginGates
 	loginLockout      = 15 * time.Minute // how long failures are remembered / locked
-	maxPendingLogins  = 1024             // cap on in-flight OIDC states (anti-DoS)
+	maxPendingLogins  = 1024             // cap on in-flight pending-TOTP logins (anti-DoS)
 	maxLoginGates     = 4096             // cap on tracked client keys (anti-DoS)
-
-	// maxPendingPerIP caps how many OIDC logins one client IP may start within
-	// pendingLoginWindow, so a client looping GET /auth/login cannot exhaust the
-	// global maxPendingLogins budget for everyone. Kept generous so many users
-	// behind a shared NAT are unaffected; a completed callback never counts here.
-	maxPendingPerIP    = 30
-	pendingLoginWindow = 10 * time.Minute
 )
 
+// pendingLogin is a half-completed LOCAL login: the password was verified and
+// only the TOTP code for totpUser is outstanding. Only a correct password
+// creates one, so anonymous requests cannot fill the map.
 type pendingLogin struct {
-	idp      string
-	nonce    string
-	verifier string
-	returnTo string
 	expires  time.Time
-	// totpUser marks a half-completed LOCAL login: the password was verified and
-	// only the TOTP code is outstanding. Non-empty exactly for those entries, so
-	// the two flows share this map's bounds and garbage collection without an
-	// OIDC state ever being redeemable as a TOTP one (or the reverse).
 	totpUser string
 }
+
+// maxSessionAge is the absolute lifetime of an admin session, counted from its
+// creation. Sliding expiry extends a session in use, but never past this: the
+// role mapped at login is not re-checked against the identity provider, so a
+// session that is used every day must still end and sign in again.
+const maxSessionAge = 7 * 24 * time.Hour
 
 // pendingTOTPTTL is how long a password-verified login may wait for its TOTP
 // code. Short enough that a leaked pending token is near-worthless, long enough
@@ -307,6 +311,10 @@ func NewAuthenticator(o Options) *Authenticator {
 			totpKey = k
 		}
 	}
+	stateKey := make([]byte, 32)
+	if _, err := rand.Read(stateKey); err != nil {
+		panic("auth: cannot generate the login-state signing key: " + err.Error())
+	}
 	return &Authenticator{
 		store:            o.Store,
 		cookieName:       o.CookieName,
@@ -321,9 +329,9 @@ func NewAuthenticator(o Options) *Authenticator {
 		idps:             map[string]model.IdentityProvider{},
 		clients:          map[string]*oidc.Client{},
 		pending:          map[string]pendingLogin{},
+		stateKey:         stateKey,
 		loginGate:        newRateGate(loginLockout, maxLoginFails, maxLoginGates),
 		userGate:         newRateGate(loginLockout, maxUserLoginFails, maxUserLoginGates),
-		pendingGate:      newRateGate(pendingLoginWindow, maxPendingPerIP, maxLoginGates),
 	}
 }
 
@@ -354,13 +362,19 @@ func (a *Authenticator) AppName() string {
 
 // --- OIDC login -----------------------------------------------------------
 
+// oidcClient returns the OIDC client for an admin login provider. Only a name
+// listed in adminAuth.providers is one: every other configured provider
+// (a site gate, for example) answers exactly like a name that does not exist.
+// Both BeginLogin and CompleteLogin go through here, so a provider removed
+// from the list between the start of a login and its callback is refused too.
 func (a *Authenticator) oidcClient(ctx context.Context, idpName string) (*oidc.Client, *model.IdentityProvider, error) {
 	a.mu.RLock()
 	idp, ok := a.idps[idpName]
+	listed := slices.Contains(a.settings.Providers, idpName)
 	client := a.clients[idpName]
 	base := a.baseURL
 	a.mu.RUnlock()
-	if !ok {
+	if !ok || !listed {
 		return nil, nil, fmt.Errorf("identity provider %q not found", idpName)
 	}
 	if idp.Type != model.IdPTypeOIDC || idp.OIDC == nil {
@@ -396,20 +410,82 @@ func (a *Authenticator) oidcClient(ctx context.Context, idpName string) (*oidc.C
 	return c, &idp, nil
 }
 
-// oidcStateCookie holds the login state value so the callback can confirm the
-// flow was started by this same browser (CSRF/login-fixation binding). It is
-// short-lived and scoped to the auth endpoints.
+// oidcStateCookie carries the signed login state (see loginState) so the
+// callback can confirm the flow was started by this same browser
+// (CSRF/login-fixation binding). It is short-lived and scoped to the auth
+// endpoints.
 const oidcStateCookie = "gpm_oidc_state"
 
-// BeginLogin returns the authorization URL to redirect the browser to, along
-// with the opaque state value the caller must echo into a browser cookie (see
-// SetLoginStateCookie) so the callback can bind the flow to this browser.
-// clientKey (the client IP) is rate-limited so a client cannot fill the pending
-// map and block OIDC logins for everyone.
-func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo, clientKey string) (string, string, error) {
-	if a.pendingLoginAtCap(clientKey) {
-		return "", "", fmt.Errorf("too many login attempts; try again shortly")
+// loginStateTTL bounds an OIDC login from its start to its callback.
+const loginStateTTL = 10 * time.Minute
+
+// maxLoginReturnLen caps the return path carried in the login-state cookie, so
+// the cookie stays well inside browser size limits.
+const maxLoginReturnLen = 1024
+
+// macLabelLoginState is mixed into the login-state MAC so the key cannot be
+// used to forge any other token type.
+const macLabelLoginState = "gpm-admin-login-state-v1|"
+
+// ErrLoginState is returned by CompleteLogin when the login-state cookie is
+// absent, not signed by this process, expired, or for a different flow than
+// the state the identity provider echoed back.
+var ErrLoginState = errors.New("invalid or expired login state")
+
+// loginState is everything the callback needs to finish an OIDC login. It
+// travels in the signed, HttpOnly login-state cookie instead of a server-side
+// map, so starting a login stores nothing on the server and no number of
+// anonymous login starts can block another client's login.
+type loginState struct {
+	State    string `json:"s"`
+	Nonce    string `json:"n"`
+	Verifier string `json:"v"`
+	IdP      string `json:"i"`
+	Return   string `json:"r"`
+	Exp      int64  `json:"exp"`
+}
+
+// signLoginState encodes st as base64url(json).base64url(HMAC-SHA256(label ||
+// json)), the format of the data-plane SSO cookies.
+func (a *Authenticator) signLoginState(st loginState) (string, error) {
+	b, err := json.Marshal(st)
+	if err != nil {
+		return "", err
 	}
+	mac := hmac.New(sha256.New, a.stateKey)
+	mac.Write([]byte(macLabelLoginState))
+	mac.Write(b)
+	return base64.RawURLEncoding.EncodeToString(b) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// readLoginState verifies and decodes a signLoginState value.
+func (a *Authenticator) readLoginState(v string) (loginState, bool) {
+	var st loginState
+	payloadPart, sigPart, ok := strings.Cut(v, ".")
+	if !ok {
+		return st, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return st, false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(sigPart)
+	if err != nil {
+		return st, false
+	}
+	mac := hmac.New(sha256.New, a.stateKey)
+	mac.Write([]byte(macLabelLoginState))
+	mac.Write(payload)
+	if !hmac.Equal(sig, mac.Sum(nil)) {
+		return st, false
+	}
+	return st, json.Unmarshal(payload, &st) == nil
+}
+
+// BeginLogin returns the authorization URL to redirect the browser to, along
+// with the signed login state the caller must store in a browser cookie (see
+// SetLoginStateCookie) so the callback can bind the flow to this browser.
+func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string) (string, string, error) {
 	client, _, err := a.oidcClient(ctx, idpName)
 	if err != nil {
 		return "", "", err
@@ -423,36 +499,32 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo, clien
 		return "", "", err
 	}
 	verifier := oidc.GenerateVerifier()
-
-	a.pmu.Lock()
-	a.gcPendingLocked()
-	if len(a.pending) >= maxPendingLogins {
-		a.pmu.Unlock()
-		return "", "", fmt.Errorf("too many pending logins; try again shortly")
+	if len(returnTo) > maxLoginReturnLen {
+		returnTo = "/"
 	}
-	a.pending[state] = pendingLogin{idp: idpName, nonce: nonce, verifier: verifier, returnTo: returnTo, expires: time.Now().Add(10 * time.Minute)}
-	a.pmu.Unlock()
-
-	// Count the attempt only now that a login state was actually created and
-	// stored, so retries against a down/misconfigured IdP (which fail in
-	// oidcClient above) don't burn the user's per-IP budget.
-	a.recordPendingLogin(clientKey)
-
-	return client.AuthCodeURL(state, nonce, verifier), state, nil
+	cookie, err := a.signLoginState(loginState{
+		State: state, Nonce: nonce, Verifier: verifier, IdP: idpName, Return: returnTo,
+		Exp: time.Now().Add(loginStateTTL).Unix(),
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return client.AuthCodeURL(state, nonce, verifier), cookie, nil
 }
 
-// SetLoginStateCookie stores the login state in a short-lived, SameSite=Lax
-// cookie (Lax so it survives the top-level redirect back from the IdP). The
-// callback compares it to the state query parameter to bind the flow.
-func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, r *http.Request, state string) {
+// SetLoginStateCookie stores the signed login state in a short-lived,
+// SameSite=Lax cookie (Lax so it survives the top-level redirect back from the
+// IdP). The callback hands it to CompleteLogin, which checks it against the
+// state query parameter to bind the flow.
+func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, r *http.Request, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookie,
-		Value:    state,
+		Value:    value,
 		Path:     "/auth",
 		HttpOnly: true,
 		Secure:   a.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   600,
+		MaxAge:   int(loginStateTTL.Seconds()),
 	})
 }
 
@@ -477,47 +549,46 @@ func (a *Authenticator) ClearLoginStateCookie(w http.ResponseWriter, r *http.Req
 	})
 }
 
-// CompleteLogin handles the OIDC callback: validates state, exchanges the code,
+// CompleteLogin handles the OIDC callback: validates the signed login state
+// from the cookie against the state the IdP echoed back, exchanges the code,
 // maps the identity to a role, and creates a session. Returns the new session
-// and the post-login return path.
-func (a *Authenticator) CompleteLogin(ctx context.Context, state, code string) (*session.Session, string, error) {
-	a.pmu.Lock()
-	p, ok := a.pending[state]
-	delete(a.pending, state)
-	a.pmu.Unlock()
-	if !ok || p.totpUser != "" || time.Now().After(p.expires) {
-		// p.totpUser != "" is a half-finished LOCAL login being replayed at the
-		// OIDC callback. It shares this map, so refuse it explicitly rather than
-		// relying on the empty idp name failing later.
-		return nil, "", fmt.Errorf("invalid or expired login state")
+// and the post-login return path. A bad login state is ErrLoginState.
+//
+// The state is not single-use on the server: the caller clears the cookie at
+// the callback, and the IdP redeems each authorization code only once.
+func (a *Authenticator) CompleteLogin(ctx context.Context, stateCookie, state, code string) (*session.Session, string, error) {
+	p, ok := a.readLoginState(stateCookie)
+	if !ok || p.Exp < time.Now().Unix() || state == "" ||
+		subtle.ConstantTimeCompare([]byte(p.State), []byte(state)) != 1 {
+		return nil, "", ErrLoginState
 	}
 
-	client, idp, err := a.oidcClient(ctx, p.idp)
+	client, idp, err := a.oidcClient(ctx, p.IdP)
 	if err != nil {
 		return nil, "", err
 	}
-	claims, err := client.Exchange(ctx, code, p.verifier, p.nonce)
+	claims, err := client.Exchange(ctx, code, p.Verifier, p.Nonce)
 	if err != nil {
 		return nil, "", err
 	}
 
 	role := MapRole(claims.Groups, idp.RoleMapping)
 	if role == RoleNone {
-		return nil, "", fmt.Errorf("user %q has no role mapping for provider %q", claims.Subject, p.idp)
+		return nil, "", fmt.Errorf("user %q has no role mapping for provider %q", claims.Subject, p.IdP)
 	}
 	sess := &session.Session{
 		Subject:   claims.Subject,
 		Email:     claims.Email,
 		Name:      claims.Name,
 		Roles:     []string{string(role)},
-		IdP:       p.idp,
+		IdP:       p.IdP,
 		AMR:       claims.AMR,
 		ExpiresAt: time.Now().Add(a.sessionTTL),
 	}
 	if err := a.store.Create(ctx, sess); err != nil {
 		return nil, "", err
 	}
-	return sess, p.returnTo, nil
+	return sess, p.Return, nil
 }
 
 // --- local login ----------------------------------------------------------
@@ -561,9 +632,7 @@ func (a *Authenticator) LocalTOTPEnabled() bool {
 }
 
 // startPendingTOTP mints the opaque token that carries a password-verified
-// login to its second step. It reuses the pending-login map (and therefore its
-// global cap and expiry sweep) so the two half-finished login flows share one
-// bounded, garbage-collected store.
+// login to its second step, in the bounded, garbage-collected pending map.
 func (a *Authenticator) startPendingTOTP() (string, error) {
 	token, err := oidc.NewState()
 	if err != nil {
@@ -706,36 +775,6 @@ func (a *Authenticator) NoteUserLoginResult(username string, ok bool) {
 	}
 }
 
-// AbandonLogin drops a pending OIDC login that will not complete (the IdP
-// refused it, or the callback came back without a code), so its state cannot
-// be redeemed later within the TTL.
-func (a *Authenticator) AbandonLogin(state string) {
-	if state == "" {
-		return
-	}
-	a.pmu.Lock()
-	delete(a.pending, state)
-	a.pmu.Unlock()
-}
-
-// pendingLoginAtCap reports whether key has already hit its per-IP pending-login
-// budget, without recording an attempt. BeginLogin checks this before the
-// failure-prone IdP discovery (oidcClient) so a user's own retries against a
-// down/misconfigured IdP don't burn their budget; the attempt is only counted
-// via recordPendingLogin once a login state is actually created. The tiny
-// check-then-record gap under concurrency is acceptable for rate limiting.
-func (a *Authenticator) pendingLoginAtCap(key string) bool {
-	return a.pendingGate.atLimit(key, false)
-}
-
-// recordPendingLogin counts one started OIDC login against key's per-IP budget.
-// It mirrors the local-login gate: a per-IP counter over a rolling window. Only
-// login starts (BeginLogin) are counted - a successful callback goes through
-// CompleteLogin and never touches this gate.
-func (a *Authenticator) recordPendingLogin(key string) {
-	a.pendingGate.record(key)
-}
-
 // localAllowed reports whether local password login is permitted: under SSO-only
 // it is always off (recover from lockout by redeploying with local login
 // enabled); otherwise it follows LocalLoginEnabled.
@@ -813,7 +852,8 @@ func (a *Authenticator) RequireRole(min Role, next http.Handler) http.Handler {
 // the cookie path: a presented-but-invalid token is an authentication failure,
 // not an invitation to try another credential. Otherwise the session cookie is
 // resolved with sliding expiry - an active session past the refresh threshold is
-// extended in the store and its cookie re-issued, so continued use keeps it alive.
+// extended in the store and its cookie re-issued, so continued use keeps it alive
+// up to its absolute lifetime (maxSessionAge).
 func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	if secret, ok := bearerTokenSecret(r); ok {
 		return a.authenticateToken(secret)
@@ -839,6 +879,10 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Pr
 		// store.Create has one. Treat it as invalid so a stale/legacy token-less
 		// session forces a clean re-login (401) instead of silently failing every
 		// mutating request with "invalid or missing CSRF token".
+		return Principal{}, false
+	}
+	if time.Since(sess.CreatedAt) >= maxSessionAge {
+		_ = a.store.Delete(r.Context(), sess.ID)
 		return Principal{}, false
 	}
 	a.maybeSlide(w, r.Context(), sess, secure)
@@ -870,13 +914,20 @@ func (a *Authenticator) cookieNameFor(secure bool) string {
 
 // maybeSlide extends a still-valid session whose remaining lifetime has dropped
 // below half the configured TTL, re-issuing the cookie with the new expiry. The
-// half-TTL threshold avoids a store write and Set-Cookie on every request.
+// half-TTL threshold avoids a store write and Set-Cookie on every request. The
+// new expiry never passes the session's absolute lifetime (maxSessionAge).
 func (a *Authenticator) maybeSlide(w http.ResponseWriter, ctx context.Context, sess *session.Session, secure bool) {
 	remaining := time.Until(sess.ExpiresAt)
 	if remaining <= 0 || remaining > a.sessionTTL/2 {
 		return
 	}
 	newExp := time.Now().Add(a.sessionTTL)
+	if limit := sess.CreatedAt.Add(maxSessionAge); newExp.After(limit) {
+		newExp = limit
+	}
+	if !newExp.After(sess.ExpiresAt) {
+		return
+	}
 	if err := a.store.Touch(ctx, sess.ID, newExp); err != nil {
 		return
 	}

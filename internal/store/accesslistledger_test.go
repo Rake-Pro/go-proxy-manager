@@ -43,7 +43,7 @@ func TestAccessListSourceLedgerRoundTripAndCommit(t *testing.T) {
 	author := Author{Name: "access-list-sync", Email: "gpm@localhost"}
 
 	l := model.AccessListSourceLedger{Sources: []model.AccessListSourceEntry{
-		accessLedgerEntry("home-vpn", "uptimerobot", "1.2.3.0/24", "2001:db8::/32"),
+		accessLedgerEntry("lan-vpn", "uptimerobot", "1.2.3.0/24", "2001:db8::/32"),
 	}}
 	commit, err := st.SaveAccessListSourceLedger(ctx, l, author, "")
 	if err != nil {
@@ -57,7 +57,7 @@ func TestAccessListSourceLedgerRoundTripAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(got.Sources) != 1 || got.Sources[0].Key() != "home-vpn/uptimerobot" ||
+	if len(got.Sources) != 1 || got.Sources[0].Key() != "lan-vpn/uptimerobot" ||
 		len(got.Sources[0].Entries) != 2 {
 		t.Fatalf("ledger = %+v", got)
 	}

@@ -26,8 +26,8 @@ func refuseLinkLocal(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
-// ipBucketKey is the per-client key the rate limiter and the basic-auth
-// lockout use. IPv6 clients are grouped by /64, as the admin login gate does:
+// ipBucketKey is the per-client key the rate limiter uses (the basic-auth
+// lockout groups IPv6 wider, see authGateKey). IPv6 clients are grouped by /64, as the admin login gate does:
 // one subscriber holds a whole /64, so keying each address on its own would
 // hand them a fresh bucket per address (a bypass) and let one prefix fill a
 // bounded map on its own (a lockout for everyone else). IPv4 keys stay the

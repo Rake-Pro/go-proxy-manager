@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
@@ -114,5 +115,63 @@ func TestDNSLedgerSaveCommitsDespiteACancelledContext(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "dns-ledger.yaml")); err != nil {
 		t.Fatalf("ledger file: %v", err)
+	}
+}
+
+// A set but unreadable <KEY>_FILE is an error, never an empty value, and an
+// unreadable TOTP secret refuses local login rather than dropping to the
+// password alone.
+func TestUnreadableSecretFileFailsClosed(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	t.Run("totp secret file", func(t *testing.T) {
+		t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH", "$2a$10$example")
+		t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE", "")
+		t.Setenv("GPM_LOCAL_ADMIN_TOTP_SECRET_FILE", missing)
+		if _, err := secretFromEnv("GPM_LOCAL_ADMIN_TOTP_SECRET"); err == nil {
+			t.Fatal("an unreadable _FILE must be reported as an error")
+		}
+		hash, totp := localAdminSecrets()
+		if hash != "" || totp != "" {
+			t.Fatalf("localAdminSecrets() = (%q, %q), want both empty so local login is refused", hash, totp)
+		}
+		st, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		authn := auth.NewAuthenticator(auth.Options{Store: st, LocalUser: "admin", LocalHash: hash, LocalTOTPSecret: totp})
+		authn.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{LocalLoginEnabled: true}})
+		if _, _, err := authn.LocalLogin(context.Background(), "admin", "pw"); err == nil {
+			t.Fatal("local login must be refused while the TOTP secret file is unreadable")
+		}
+	})
+
+	t.Run("password hash file", func(t *testing.T) {
+		t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE", missing)
+		t.Setenv("GPM_LOCAL_ADMIN_TOTP_SECRET_FILE", "")
+		t.Setenv("GPM_LOCAL_ADMIN_TOTP_SECRET", "")
+		if hash, _ := localAdminSecrets(); hash != "" {
+			t.Fatalf("hash = %q, want empty", hash)
+		}
+	})
+}
+
+// The startup warning fires only for an enabled admin edge whose loopback hop
+// is not a trusted proxy.
+func TestAdminEdgeHopUntrusted(t *testing.T) {
+	t.Cleanup(func() { clientip.SetTrusted(nil) })
+	on := model.Settings{AdminEdge: model.AdminEdgeSettings{Enabled: true}}
+
+	clientip.SetTrusted(nil)
+	if !adminEdgeHopUntrusted(on, ":8081") {
+		t.Fatal("enabled edge with no trusted proxies must be reported")
+	}
+	if adminEdgeHopUntrusted(model.Settings{}, ":8081") {
+		t.Fatal("a disabled edge must not be reported")
+	}
+	clientip.SetTrusted([]string{"127.0.0.1/32", "::1/128"})
+	if adminEdgeHopUntrusted(on, ":8081") {
+		t.Fatal("a trusted loopback hop must not be reported")
 	}
 }

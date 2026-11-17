@@ -148,3 +148,108 @@ func portOf(t *testing.T, hostport string) int {
 	}
 	return n
 }
+
+// silentUDPBackend accepts datagrams and never answers.
+func silentUDPBackend(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				return
+			}
+		}
+	}()
+	return pc.LocalAddr().String()
+}
+
+func udpSessionCount(f *udpForwarder) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sessions)
+}
+
+// One source address may hold only its share of the UDP session table; other
+// sources still get sessions.
+func TestUDPPerSourceSessionCap(t *testing.T) {
+	prev := maxUDPSessionsPerSource
+	maxUDPSessionsPerSource = 4
+	t.Cleanup(func() { maxUDPSessionsPerSource = prev })
+
+	f, err := startUDPForwarder(0, streamTarget{name: "s", addr: silentUDPBackend(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	for p := 1; p <= 8; p++ {
+		f.forward(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000 + p}, []byte("x"))
+	}
+	if n := udpSessionCount(f); n != 4 {
+		t.Fatalf("one source opened %d sessions, want the per-source cap 4", n)
+	}
+	f.forward(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 40000}, []byte("x"))
+	if n := udpSessionCount(f); n != 5 {
+		t.Fatalf("another source must still get a session, table has %d", n)
+	}
+}
+
+// A full UDP session table makes room for a new source only by closing a
+// session that has been silent for at least udpEvictIdle; when every session is
+// active, the new source is dropped and no session is closed.
+func TestUDPFullTableEvictsOnlyIdleSession(t *testing.T) {
+	prev := maxUDPSessions
+	maxUDPSessions = 3
+	t.Cleanup(func() { maxUDPSessions = prev })
+
+	f, err := startUDPForwarder(0, streamTarget{name: "s", addr: silentUDPBackend(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	src := func(i byte) *net.UDPAddr { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, i), Port: 40000} }
+	for i := byte(1); i <= 3; i++ {
+		f.forward(src(i), []byte("x"))
+	}
+
+	// Every session active: the new source is dropped, nothing is evicted.
+	f.forward(src(4), []byte("x"))
+	f.mu.Lock()
+	if len(f.sessions) != 3 || f.sessions[src(4).String()] != nil {
+		f.mu.Unlock()
+		t.Fatalf("with every session active a new source must be dropped, table has %d", len(f.sessions))
+	}
+	for i := byte(1); i <= 3; i++ {
+		if s := f.sessions[src(i).String()]; s == nil || s.done.Load() {
+			f.mu.Unlock()
+			t.Fatalf("active session %d was closed", i)
+		}
+	}
+	// Session 2 silent past udpEvictIdle (session 1 is the oldest still active).
+	idle := f.sessions[src(2).String()]
+	idle.last.Store(time.Now().Add(-udpEvictIdle - time.Second).UnixNano())
+	f.mu.Unlock()
+
+	f.forward(src(5), []byte("x"))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sessions) != 3 {
+		t.Fatalf("table has %d sessions, want 3", len(f.sessions))
+	}
+	if f.sessions[src(5).String()] == nil {
+		t.Fatal("the new source must take the slot of the idle session")
+	}
+	if f.sessions[src(2).String()] != nil || !idle.done.Load() {
+		t.Fatal("the idle session must be evicted and closed")
+	}
+	if f.sessions[src(1).String()] == nil || f.sessions[src(3).String()] == nil {
+		t.Fatal("active sessions must be kept")
+	}
+	if f.perSource[ipBucketKey(src(2).IP)] != 0 {
+		t.Fatalf("the evicted session's source slot was not released: %v", f.perSource)
+	}
+}

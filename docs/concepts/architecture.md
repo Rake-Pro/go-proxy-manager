@@ -870,7 +870,8 @@ effect of this defence in depth.
   keeps the previous set, and a source that has never been fetched resolves to
   the empty set. The *contents* are bounded by the same range table: an entry
   that is a default route (`0.0.0.0/0`, `::/0`), broader than a `/8` (v4) or
-  `/32` (v6), or inside a non-public range refuses the whole fetch: one such
+  `/32` (v6), or overlapping a non-public range refuses the whole fetch (an
+  IPv4-mapped entry is judged as the IPv4 network it matches): one such
   line in a hijacked feed would otherwise pass every other check and allow the
   internet.
 

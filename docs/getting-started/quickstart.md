@@ -14,15 +14,21 @@ minutes, plus certificate issuance time.
 ## Steps
 
 1. **Generate an admin password hash and write it to a file.** The container
-   runs as a non-root user, so the file must be readable by it:
+   runs as a non-root `gpm` user, so the file is owned by that user and
+   readable by it alone (`0400`). `hashpw` reads the password from stdin, so it
+   stays out of shell history and the process list:
 
    ```
-   docker run --rm ghcr.io/rake-pro/go-proxy-manager hashpw 'your-password' > admin_hash
-   chmod 644 admin_hash
+   img=ghcr.io/rake-pro/go-proxy-manager
+   sudo install -m 0400 -o "$(docker run --rm --entrypoint id "$img" -u)" \
+     -g "$(docker run --rm --entrypoint id "$img" -g)" /dev/null admin_hash
+   read -rsp 'admin password: ' pw; echo
+   printf '%s\n' "$pw" | docker run --rm -i "$img" hashpw | sudo tee admin_hash >/dev/null
+   unset pw
    ```
 
-   Without the `chmod`, gpm starts, logs one `warn` line, and serves a login
-   page that can never succeed. See
+   If the container user cannot read the file, gpm starts, logs one `warn`
+   line, and serves a login page that can never succeed. See
    [Troubleshooting](../operations/troubleshooting.md).
 
 2. **Write a compose file:**
@@ -132,7 +138,7 @@ minutes, plus certificate issuance time.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Login always fails, no error in the UI | The hash file is unreadable by the non-root container user | `chmod 644` the secret file and restart |
+| Login always fails, no error in the UI | The hash file is unreadable by the non-root container user | Give the file to the image's `gpm` user, mode `0400` (step 1), and restart |
 | Login page says no administrator login is configured | Neither a local credential nor an `oidc` provider is usable | Set `GPM_LOCAL_ADMIN_USER` plus a hash, or finish [admin OIDC](../how-to/admin-oidc-sso.md) |
 | Certificate stays `pending` | HTTP-01 cannot reach `:80`, or the DNS-01 credential is wrong | Check `lastError` on the certificate; see [Certificate health](../operations/certificate-health.md) |
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check the host is enabled and that no other host lists the same domain |

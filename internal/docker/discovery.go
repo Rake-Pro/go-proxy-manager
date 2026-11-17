@@ -570,6 +570,9 @@ func ownership(conf model.DockerDiscoverySettings) discovery.Ownership {
 		HasStaleManaged:  conf.HasStaleManagedByLabel,
 		HasStaleDisabled: conf.HasStaleDisabledByLabel,
 		StripStale:       conf.StripStaleDiscoveryLabels,
+		DomainAllowed: func(tmpl model.IngressHostTemplate, d string) bool {
+			return conf.AllowedDomainFor(tmpl, d) && tmpl.AllowsHostname(d)
+		},
 	}
 }
 
@@ -588,14 +591,20 @@ func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, contain
 			continue
 		}
 		name, host, prof, err := derive(ct, conf)
-		items = append(items, discovery.Item{
+		it := discovery.Item{
 			Ref:            ct.Name(),
 			Name:           name,
 			Host:           host,
 			Profile:        prof,
 			Err:            err,
 			UnknownProfile: isUnknownProfile(err),
-		})
+		}
+		if err != nil && name != "" && !it.UnknownProfile {
+			if tmpl, _, ok := conf.ResolveProfile(ct.Labels[conf.LabelProfile()]); ok {
+				it.Resolved = &tmpl
+			}
+		}
+		items = append(items, it)
 	}
 	own := ownership(conf)
 	own.Unwritable = unwritable
@@ -668,6 +677,9 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 	// name is lowercased before the shape check rather than rejected for a case
 	// nobody chose deliberately.
 	name := model.DockerHostNamePrefix + strings.ToLower(raw)
+	if len(name) > model.MaxDerivedNameLen {
+		return "", model.ProxyHost{}, "", fmt.Errorf("derived name %q is longer than %d characters", ellipsize(name, 64), model.MaxDerivedNameLen)
+	}
 	if err := model.ValidateName(name); err != nil {
 		return "", model.ProxyHost{}, "", fmt.Errorf("derived name %q is not usable: %w", name, err)
 	}
@@ -765,6 +777,10 @@ func deriveDomains(ct Container, conf model.DockerDiscoverySettings, tmpl model.
 		}
 		if !conf.AllowedDomainFor(tmpl, h) {
 			rejected = append(rejected, h+" (outside allowedDomainSuffixes)")
+			continue
+		}
+		if !tmpl.AllowsHostname(h) {
+			rejected = append(rejected, h+" (not in the profile's allowedHostnames)")
 			continue
 		}
 		if seen[h] {

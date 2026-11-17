@@ -27,7 +27,7 @@ func TestAccessListSourceAndPathRuleValidation(t *testing.T) {
 		{
 			name: "source rule with paths and methods",
 			al: AccessList{
-				ObjectMeta: ObjectMeta{Name: "home-vpn"},
+				ObjectMeta: ObjectMeta{Name: "lan-vpn"},
 				Sources:    src,
 				Rules: []IPRule{
 					{Action: ActionAllow, CIDR: "10.0.0.0/8"},
@@ -329,8 +329,8 @@ func TestAccessListSourceLedgerValidate(t *testing.T) {
 		{
 			name: "well-formed entry",
 			ledger: AccessListSourceLedger{Sources: []AccessListSourceEntry{{
-				List: "home-vpn", Source: "uptimerobot", URL: "https://example.com/i.txt",
-				FetchedAt: "2026-09-01T00:00:00Z", SHA256: AccessListSourceHash("home-vpn/uptimerobot", "https://example.com/i.txt", good), Entries: good,
+				List: "lan-vpn", Source: "uptimerobot", URL: "https://example.com/i.txt",
+				FetchedAt: "2026-09-01T00:00:00Z", SHA256: AccessListSourceHash("lan-vpn/uptimerobot", "https://example.com/i.txt", good), Entries: good,
 			}}},
 		},
 		{
@@ -398,11 +398,11 @@ func TestAccessListSourceLedgerValidate(t *testing.T) {
 // feed's URL) with its recorded hash still verifying.
 func TestAccessListSourceHashBindsIdentity(t *testing.T) {
 	entries := []string{"203.0.113.0/24"}
-	base := AccessListSourceHash("home-vpn/uptimerobot", "https://example.com/i.txt", entries)
+	base := AccessListSourceHash("lan-vpn/uptimerobot", "https://example.com/i.txt", entries)
 	for _, other := range []struct{ key, url string }{
 		{"public/uptimerobot", "https://example.com/i.txt"},
-		{"home-vpn/other", "https://example.com/i.txt"},
-		{"home-vpn/uptimerobot", "https://evil.example/i.txt"},
+		{"lan-vpn/other", "https://example.com/i.txt"},
+		{"lan-vpn/uptimerobot", "https://evil.example/i.txt"},
 	} {
 		if AccessListSourceHash(other.key, other.url, entries) == base {
 			t.Fatalf("hash must change with %s / %s", other.key, other.url)

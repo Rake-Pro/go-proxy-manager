@@ -30,6 +30,9 @@ type fakeCloudflare struct {
 	// can fail the create half of a retarget while leaving the rollback that
 	// restores the original able to succeed.
 	failCreateContent string
+	// failCreateName refuses a create for exactly this name, the way a zone
+	// refuses a CNAME on a name that already holds another record type.
+	failCreateName string
 	// omitResultInfo drops result_info from listing responses, the shape that used
 	// to truncate pagination at page 1.
 	omitResultInfo bool
@@ -96,7 +99,7 @@ func (f *fakeCloudflare) handler() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if f.failCreateContent != "" && body.Content == f.failCreateContent {
+		if (f.failCreateContent != "" && body.Content == f.failCreateContent) || (f.failCreateName != "" && body.Name == f.failCreateName) {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":1004,"message":"record create failed"}]}`))
 			return
@@ -534,5 +537,59 @@ func TestCloudflareUnknownZone(t *testing.T) {
 	st := s.Status().Cloudflare
 	if st.OK || !strings.Contains(st.Error, "no zone found") {
 		t.Fatalf("status = %+v", st)
+	}
+}
+
+// A create the zone refuses is recorded in the status and the run goes on:
+// later creates and every delete still land, and the ledger claims only what
+// actually exists.
+func TestCloudflareRefusedCreateDoesNotStopTheRun(t *testing.T) {
+	f := &fakeCloudflare{zoneName: "example.com", zoneID: "zone-1", failCreateName: "blocked.example.com"}
+	f.records = append(f.records, cfRecord{ID: "old-1", Type: "CNAME", Name: "stale.example.com", Content: "edge.example.com", Comment: ManagedComment})
+	srv := startCloudflare(t, f)
+	led := ownsCloudflare("stale.example.com", "edge.example.com")
+	hosts := []model.ProxyHost{
+		publicHost("a", "aaa.example.com"),
+		publicHost("b", "blocked.example.com"),
+		publicHost("z", "zzz.example.com"),
+	}
+	s := cloudflareSyncerWith(t, srv, hosts, false, led)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	st := s.Status().Cloudflare
+	if st.OK || st.Error == "" {
+		t.Fatalf("status = %+v, want the refused create reported", st)
+	}
+	if st.Created != 2 || st.Deleted != 1 {
+		t.Fatalf("status = %+v, want two creates and one delete despite the refusal", st)
+	}
+	names := strings.Join(f.names(), " ")
+	if !strings.Contains(names, "zzz.example.com") || strings.Contains(names, "stale.example.com") {
+		t.Fatalf("records = %q, want zzz created and the stale record deleted", names)
+	}
+	wantLedger(t, led.cloudflare(), "aaa.example.com", "edge.example.com", "zzz.example.com", "edge.example.com")
+}
+
+// Only names equal to the zone or under it are submitted to the zone; anything
+// else is reported as skipped and never written.
+func TestCloudflareSkipsNamesOutsideTheZone(t *testing.T) {
+	f := &fakeCloudflare{zoneName: "example.com", zoneID: "zone-1"}
+	srv := startCloudflare(t, f)
+	hosts := []model.ProxyHost{
+		publicHost("x", "app.other-zone.test"),
+		publicHost("y", "notexample.com"),
+		publicHost("a", "app.example.com"),
+	}
+	s := cloudflareSyncerWith(t, srv, hosts, false, &memLedger{})
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := f.names(); len(got) != 1 || !strings.HasPrefix(got[0], "app.example.com|") {
+		t.Fatalf("records = %v, want only the in-zone name", got)
+	}
+	st := s.Status().Cloudflare
+	if !st.OK || st.Created != 1 || st.Skipped != 2 {
+		t.Fatalf("status = %+v, want one create and two skips", st)
 	}
 }
