@@ -485,6 +485,11 @@ mark.hl { background:var(--warn-bg2); color:inherit; padding:0; border-radius:2p
 .toolbar-actions .muted { font-size:13px; white-space:nowrap; }
 .auto-refresh { display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--muted); }
 .auto-refresh select.field { width:auto; padding-right:28px; }
+/* Pinned to the bottom of the scrolling page, so a long page of rows never
+   hides the way to the next one. */
+.pager { position:sticky; bottom:0; z-index:2; display:flex; align-items:center; justify-content:flex-end; gap:16px; flex-wrap:wrap; margin:0 -24px -24px; padding:10px 24px; background:var(--panel); box-shadow:0 -1px 0 var(--border); font-size:13.5px; color:var(--muted); }
+.pager-nav { display:inline-flex; gap:6px; }
+.pager-note { margin-right:auto; }
 
 /* form controls (PatternFly form-control: flat box, darker bottom edge, blue on focus) */
 input.field, select.field, textarea.field {

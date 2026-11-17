@@ -88,8 +88,13 @@ All notable changes to go-proxy-manager are documented here. The format follows
   /api/settings/saved-filters`, scope `settings:read`/`settings:write`), so
   they follow you across browsers and show in History. The last filter typed
   on each list also comes back when you return to it (per browser).
-- Access Logs: **Export** downloads the rows the filter shows as CSV or
-  JSON, in the table's order, with spreadsheet-formula cells neutralised.
+- Access Logs: **Export** downloads every request the filter matches as CSV
+  or JSON, across all pages and in the table's order, with
+  spreadsheet-formula cells neutralised.
+- Access Logs: the table is paged (50, 100, 250 or 500 rows per page,
+  remembered in the browser) with a pager pinned to the bottom of the page.
+  The filter, the sort and the count cover the whole buffer; auto-refresh
+  waits while a page after the first is open.
 - Discovery: `allowedHostnames` on the Ingress or Docker discovery template or
   on a profile binds it to exact hostnames. A derived name not listed is
   rejected like a name outside `allowedDomainSuffixes`. Unset keeps today's
