@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"go.yaml.in/yaml/v3"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -745,6 +746,30 @@ func TestApplyBatchGuardRefusesObjectsThatChangedOwnerSincePlanning(t *testing.T
 	}
 }
 
+// The guard for a delete sees the object as stored, even when the same batch
+// also upserts that name.
+func TestApplyBatchDeleteGuardSeesStoredObject(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.SaveBatch(ctx, []model.Object{managedByFixture("x")}, "seed", Author{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	incoming := managedByFixture("x")
+	incoming.Domains = []string{"incoming.example.com"}
+	var seen []string
+	guard := func(existing model.Object) error {
+		seen = append(seen, existing.(model.ProxyHost).Domains[0])
+		return nil
+	}
+	if _, err := s.ApplyBatch(ctx, []model.Object{incoming},
+		[]ObjectRef{{Kind: "ProxyHost", Name: "x"}}, "upsert and delete", Author{}, guard); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "x.example.com" || seen[1] != "x.example.com" {
+		t.Fatalf("guard saw %v, want the stored object (x.example.com) for the upsert and the delete", seen)
+	}
+}
+
 // The guard authorises only objects that ALREADY exist: a brand-new object has
 // no owner to check, so a create still goes through beside a guarded-away update.
 func TestApplyBatchGuardAllowsCreatesAndOwnedObjects(t *testing.T) {
@@ -1270,6 +1295,103 @@ func TestAdminEdgeWritePaths(t *testing.T) {
 	s.AdminEdge.Enabled = true
 	if _, err := st.SaveSettings(ctx, s, Author{}); err == nil || !strings.Contains(err.Error(), `"old"`) {
 		t.Fatalf("enable over a stored host accepted: %v", err)
+	}
+}
+
+// A host that spells the admin panel's hostname with a port routes under the
+// front door's key. A write that adds one is refused; one already stored is a
+// load warning, keeps the front door compiled as before, and does not block
+// unrelated writes.
+func TestAdminEdgePortSpellingRefusedWhenNewWarnedWhenStored(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	st.SetAdminEdgeUpstream(model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 8081})
+	_, s, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ExternalBaseURL = "https://gpm.example.com"
+	s.AdminAuth.LocalLoginEnabled = true
+	s.AdminEdge = model.AdminEdgeSettings{Enabled: true}
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatal(err)
+	}
+	h := sampleHost("old")
+	h.Domains = []string{"gpm.example.com:443"}
+	if _, err := st.Save(ctx, h, Author{}); err == nil || !strings.Contains(err.Error(), "domain gpm.example.com is claimed by") {
+		t.Fatalf("a write that adds the collision: err = %v, want refused", err)
+	}
+	if _, err := st.ApplyBatch(ctx, []model.Object{h}, nil, "", Author{}, nil); err == nil {
+		t.Fatal("a batch that adds the collision must be refused")
+	}
+
+	// The same host stored out of band.
+	b, err := yaml.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir(), "proxy-hosts", "old.yaml"), b, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := 0
+	for _, w := range cfg.Warnings() {
+		if strings.Contains(w, `"old"`) && strings.Contains(w, `"gpm-admin"`) {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Fatalf("stored collision: %d warnings naming it, want 1: %v", warned, cfg.Warnings())
+	}
+	ccfg, _, err := st.LoadCompiled(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, warned := false, 0
+	for _, ph := range ccfg.ProxyHosts {
+		edge = edge || ph.AdminEdge
+	}
+	for _, w := range ccfg.Warnings() {
+		if strings.Contains(w, `"old"`) && strings.Contains(w, "is claimed by") {
+			warned++
+		}
+	}
+	if !edge || warned != 1 {
+		t.Fatalf("compiled view: front door=%v, warnings naming the collision=%d, want true and 1: %v", edge, warned, ccfg.Warnings())
+	}
+
+	if _, err := st.Save(ctx, sampleHost("other"), Author{}); err != nil {
+		t.Fatalf("an unrelated save with a stored collision: %v", err)
+	}
+	if _, err := st.SaveBatch(ctx, []model.Object{sampleHost("batch")}, "", Author{}); err != nil {
+		t.Fatalf("an unrelated batch: %v", err)
+	}
+	if _, err := st.ApplyBatch(ctx, []model.Object{sampleHost("apply")}, nil, "", Author{}, nil); err != nil {
+		t.Fatalf("an unrelated apply: %v", err)
+	}
+	if _, err := st.Delete(ctx, "ProxyHost", "other", Author{}); err != nil {
+		t.Fatalf("an unrelated delete: %v", err)
+	}
+	s.AppName = "edge"
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatalf("an unrelated settings write: %v", err)
+	}
+	h2 := sampleHost("second")
+	h2.Domains = []string{"gpm.example.com:8443"}
+	if _, err := st.Save(ctx, h2, Author{}); err == nil {
+		t.Fatal("a second host joining the stored collision must be refused")
+	}
+	// Turning the edge off and on again would re-create it: refused.
+	s.AdminEdge.Enabled = false
+	if _, err := st.SaveSettings(ctx, s, Author{}); err != nil {
+		t.Fatalf("turning the edge off: %v", err)
+	}
+	s.AdminEdge.Enabled = true
+	if _, err := st.SaveSettings(ctx, s, Author{}); err == nil || !strings.Contains(err.Error(), `"old"`) {
+		t.Fatalf("turning the edge on over a port spelling: err = %v, want refused", err)
 	}
 }
 

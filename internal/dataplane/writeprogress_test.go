@@ -467,8 +467,11 @@ func TestGeneratedResponseWritesUnderDeadline(t *testing.T) {
 	withWriteIdleTimeout(t, idle)
 
 	t.Run("error page larger than the stream buffer", func(t *testing.T) {
-		page := "<html><body>" + strings.Repeat("refused ", 4<<10) + "</body></html>"
-		if err := SetErrorPages(model.ErrorPagesConfig{Inline: map[string]string{"403": page}}, ""); err != nil {
+		// The output, not the source, is larger than the stream buffer: an
+		// error page template is at most 32 KiB.
+		src := "<html><body>" + strings.Repeat(`{{printf "%999d" .Status}}`, 40) + "</body></html>"
+		page := "<html><body>" + strings.Repeat(strings.Repeat(" ", 996)+"403", 40) + "</body></html>"
+		if err := SetErrorPages(model.ErrorPagesConfig{Inline: map[string]string{"403": src}}, ""); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = SetErrorPages(model.ErrorPagesConfig{}, "") })

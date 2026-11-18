@@ -407,6 +407,9 @@ func compileBouncer(name string, spec model.BouncerMiddleware) *bouncer {
 			DialContext:         (&net.Dialer{Timeout: b.timeout, KeepAlive: 30 * time.Second, Control: refuseLinkLocal}).DialContext,
 			MaxIdleConns:        64,
 			MaxIdleConnsPerHost: 64,
+			// Lookups past this wait for a connection inside the client
+			// timeout instead of opening sockets without bound.
+			MaxConnsPerHost:     64,
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: b.timeout,
 		},
@@ -601,7 +604,16 @@ func (b *bouncer) startupPull(ctx context.Context) error {
 	s.startupDone = done
 	s.mu.Unlock()
 
-	err := b.pullStream(context.Background(), true)
+	// A panic in the pull counts as a failed pull, so the waiters are released
+	// and the next startup pull runs after the backoff instead of never.
+	err := func() (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				err = fmt.Errorf("crowdsec stream: startup pull panicked: %v", p)
+			}
+		}()
+		return b.pullStream(context.Background(), true)
+	}()
 
 	s.mu.Lock()
 	s.startupDone = nil

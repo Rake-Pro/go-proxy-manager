@@ -220,3 +220,30 @@ func TestDigitalOceanRequiresToken(t *testing.T) {
 		t.Error("expected an error for an empty token")
 	}
 }
+
+func TestDigitalOceanZonePaginationStaysOnBaseURL(t *testing.T) {
+	other := 0
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		other++
+		writeJSON(t, w, map[string]any{"domains": []map[string]string{{"name": "example.com"}}})
+	}))
+	t.Cleanup(elsewhere.Close)
+	host := strings.TrimPrefix(elsewhere.URL, "http://")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"domains": []map[string]string{{"name": "first.test"}},
+			"links":   map[string]any{"pages": map[string]any{"next": "x:@" + host + "/v2/domains"}},
+		})
+	}))
+	t.Cleanup(api.Close)
+	s, err := NewDigitalOceanSolver("do-token", WithDOBaseURL(api.URL), WithDOHTTPClient(api.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.zoneFor(context.Background(), "_acme-challenge.example.com"); err == nil {
+		t.Error("zoneFor found a zone from a page outside the API base URL")
+	}
+	if other != 0 {
+		t.Errorf("%d request(s) left the API base URL, want 0", other)
+	}
+}

@@ -21,6 +21,23 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
+// requestedAuthz reports whether an authorization identifier belongs to one of
+// the order's domains. A wildcard authorization carries the base name, so it
+// matches the domain "*." + value.
+func requestedAuthz(domains []string, value string, wildcard bool) bool {
+	norm := func(v string) string { return strings.ToLower(strings.TrimSuffix(v, ".")) }
+	want := norm(value)
+	if wildcard {
+		want = "*." + want
+	}
+	for _, d := range domains {
+		if norm(d) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // issue runs a full order (dns-01 or http-01) for cert's domains and persists
 // the result. For dns-01 solver provisions the TXT records; for http-01 the
 // key authorizations are parked in the manager's token store, which the data
@@ -53,6 +70,10 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		authz, err := client.GetAuthorization(ctx, authzURL)
 		if err != nil {
 			return fmt.Errorf("get authorization: %w", err)
+		}
+		if authz.Identifier.Type != "dns" || !requestedAuthz(domains, authz.Identifier.Value, authz.Wildcard) {
+			m.http01.Delete(httpTokens...)
+			return fmt.Errorf("authorization for %q was not requested by this order", authz.Identifier.Value)
 		}
 		if authz.Status == acme.StatusValid {
 			continue // already authorized

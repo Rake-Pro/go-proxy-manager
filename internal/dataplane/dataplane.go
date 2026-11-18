@@ -336,10 +336,14 @@ func (s *Server) Reload(cfg model.Config) error {
 		return fmt.Errorf("compile data plane: %w", err)
 	}
 	stage.commit()
+	rt.live = s.current
 	s.cur.Store(rt)
 	// Published only now: a build that failed above never replaces the anchors
 	// the live router checks revocation against.
 	registerCRLAnchors(rt.clientCAs)
+	// Upgraded connections whose host, chain or client certificate this
+	// build no longer admits are closed.
+	recheckTunnels()
 	s.streams.reload(cfg, rt.certs)
 	log.Info().
 		Int("proxyHosts", len(rt.hosts)).
@@ -439,8 +443,12 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		// A reload in flight finishes (and commits its stage) before the
+		// stream listeners and probers are stopped.
+		s.reloadMu.Lock()
 		s.streams.stopAll()
 		s.health.stopAll()
+		s.reloadMu.Unlock()
 		_ = s.httpSrv.Shutdown(shutdownCtx)
 		_ = s.httpsSrv.Shutdown(shutdownCtx)
 		return nil

@@ -142,9 +142,12 @@ func (g *execGit) run(ctx context.Context, env []string, args ...string) (string
 	// Fixed argv (no shell): literal git binary, repo dir from server config,
 	// args are internal literals from the GitRepo methods.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
-	if env != nil {
-		cmd.Env = env
+	// Every call runs under execEnv, so no git invocation reads the system
+	// config or prompts.
+	if env == nil {
+		env = execEnv()
 	}
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -240,6 +243,7 @@ func (g *execGit) Diff(ctx context.Context, from, to string) (string, error) {
 	// Not run(): a patch keeps its final newline (a trimmed one is not a valid
 	// patch), and stdout is capped rather than buffered whole.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
+	cmd.Env = execEnv()
 	var stderr bytes.Buffer
 	out := &cappedBuffer{max: MaxDiffBytes}
 	cmd.Stdout = out

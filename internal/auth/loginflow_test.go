@@ -226,6 +226,39 @@ func TestBeginAndCompleteLogin(t *testing.T) {
 	}
 }
 
+func TestBeginLoginKeepsLoginStateCookieInsideBrowserLimits(t *testing.T) {
+	idp := newAuthIdP(t)
+	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, ret, want string
+	}{
+		{"escaping-heavy return path", "/" + strings.Repeat("<", maxLoginReturnLen-1), "/"},
+		{"ordinary return path", "/hosts?q=" + strings.Repeat("a", 500), "/hosts?q=" + strings.Repeat("a", 500)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authURL, cookie, err := a.BeginLogin(ctx, "acme", tc.ret)
+			if err != nil {
+				t.Fatalf("BeginLogin: %v", err)
+			}
+			if len(cookie) > maxLoginStateCookieLen {
+				t.Fatalf("login-state cookie is %d bytes, want at most %d", len(cookie), maxLoginStateCookieLen)
+			}
+			idp.setClaims(map[string]any{
+				"nonce": nonceOf(t, authURL), "email": "a@example.test", "name": "A",
+				"groups": []string{"proxy-admins"},
+			})
+			_, returnTo, err := a.CompleteLogin(ctx, cookie, stateOf(t, authURL), "the-code")
+			if err != nil {
+				t.Fatalf("CompleteLogin: %v", err)
+			}
+			if returnTo != tc.want {
+				t.Errorf("returnTo = %q, want %q", returnTo, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompleteLoginFailures(t *testing.T) {
 	t.Run("unsigned state cookie", func(t *testing.T) {
 		a := oidcAuthenticator(t, newAuthIdP(t), &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})

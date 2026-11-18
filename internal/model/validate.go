@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -574,6 +576,9 @@ func (c Config) Warnings() []string {
 	}
 	for _, h := range c.ProxyHosts {
 		checkClientCertMode(&out, h, clientCertMWs)
+		if h.TLS.MinTLSVersion == "1.3" && !h.TLS.ForceSSL {
+			out = append(out, fmt.Sprintf("proxy host %q: tls.minTLSVersion is \"1.3\" but tls.forceSSL is off, so the host is also served on the plain HTTP listener; set tls.forceSSL: true", h.Name))
+		}
 		// Every OIDC gate on a host shares one session cookie and one callback
 		// path, and a session is bound to the provider that minted it, so gates
 		// for two DIFFERENT providers on one host sign the user in and out of
@@ -651,6 +656,15 @@ func (c Config) Warnings() []string {
 	// loaded by an older one.
 	out = append(out, c.ConfigWarnings...)
 	collisions := c.DomainKeyCollisions()
+	// The compiled admin front door's key is reported by the store's load
+	// (ConfigWarnings), which also sees it when the config is not compiled.
+	for _, h := range c.ProxyHosts {
+		if h.AdminEdge {
+			for _, d := range h.Domains {
+				delete(collisions, DomainKey(d))
+			}
+		}
+	}
 	keys := make([]string, 0, len(collisions))
 	for k := range collisions {
 		keys = append(keys, k)
@@ -659,7 +673,105 @@ func (c Config) Warnings() []string {
 	for _, k := range keys {
 		out = append(out, collisions[k]+"; edit the domains so each name is claimed once (new writes with such a collision are refused)")
 	}
+	invalid := c.InvalidDomains()
+	owners := make([]string, 0, len(invalid))
+	for o := range invalid {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	for _, o := range owners {
+		out = append(out, invalidDomainsMessage(o, invalid[o])+"; edit the domains (new writes that add such a domain are refused)")
+	}
 	return out
+}
+
+// domainNameRe matches a lower-case LDH hostname of one or more labels.
+var domainNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// IsDomainName reports whether d is a name a host or certificate may claim:
+// dot-separated letter, digit and hyphen labels, at most 253 characters, with
+// no port and no trailing dot (the router would file such a spelling under a
+// different key than its hostname, see DomainKey). Case and surrounding space
+// are allowed, because every consumer folds them. With wildcard, one leading
+// "*." is allowed.
+func IsDomainName(d string, wildcard bool) bool {
+	d = strings.TrimSpace(d)
+	if wildcard {
+		d = strings.TrimPrefix(d, "*.")
+	}
+	return len(d) <= 253 && domainNameRe.MatchString(strings.ToLower(d))
+}
+
+// InvalidDomains returns, per object ("<kind>/<name>"), the domains that fail
+// IsDomainName: proxy, redirect and parked host domains (no wildcard; the
+// router matches exact names) and certificate domains (a leading "*." is
+// allowed). Disabled objects are included. A stored config with such a domain
+// still loads and is warned about (Warnings); the store refuses a write that
+// adds one.
+func (c Config) InvalidDomains() map[string][]string {
+	out := map[string][]string{}
+	add := func(kind, name string, wildcard bool, domains []string) {
+		for _, d := range domains {
+			if !IsDomainName(d, wildcard) {
+				out[kind+"/"+name] = append(out[kind+"/"+name], d)
+			}
+		}
+	}
+	for _, h := range c.ProxyHosts {
+		add("proxy host", h.Name, false, h.Domains)
+	}
+	for _, h := range c.RedirectHosts {
+		add("redirect host", h.Name, false, h.Domains)
+	}
+	for _, h := range c.ParkedHosts {
+		add("parked host", h.Name, false, h.Domains)
+	}
+	for _, ct := range c.Certificates {
+		add("certificate", ct.Name, true, ct.Domains)
+	}
+	return out
+}
+
+// InvalidDomainsError reports the first object in after that has an invalid
+// domain (InvalidDomains) the same object does not have in before, or nil.
+// Domains compare ignoring case and surrounding space. A write may keep or
+// remove a stored invalid domain, so such an object stays editable, but may
+// not add one.
+func InvalidDomainsError(before, after map[string][]string) error {
+	owners := make([]string, 0, len(after))
+	for o := range after {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	for _, o := range owners {
+		var added []string
+		for _, d := range after[o] {
+			if !slices.ContainsFunc(before[o], func(b string) bool {
+				return strings.EqualFold(strings.TrimSpace(b), strings.TrimSpace(d))
+			}) {
+				added = append(added, d)
+			}
+		}
+		if len(added) > 0 {
+			return errors.New(invalidDomainsMessage(o, added))
+		}
+	}
+	return nil
+}
+
+// invalidDomainsMessage renders "<kind> "<name>": domains: ..." for owner
+// "<kind>/<name>".
+func invalidDomainsMessage(owner string, domains []string) string {
+	kind, name, _ := strings.Cut(owner, "/")
+	quoted := make([]string, len(domains))
+	for i, d := range domains {
+		quoted[i] = fmt.Sprintf("%q", d)
+	}
+	hint := "a hostname"
+	if kind == "certificate" {
+		hint = "a hostname or *.<hostname>"
+	}
+	return fmt.Sprintf("%s %q: domains: %s must be %s (letters, digits and hyphens in dot-separated labels, no port, no trailing dot)", kind, name, strings.Join(quoted, ", "), hint)
 }
 
 // DomainKey is the key the data-plane router files a host domain (and looks a

@@ -207,6 +207,78 @@ func TestDerive(t *testing.T) {
 			wantErr:  "no usable IP address",
 		},
 		{
+			name: "loopback address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("loopback", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "127.0.0.1"}}
+			}),
+			wantName: "dkr-loopback",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "loopback address with no configured network",
+			conf: testConf(nil),
+			container: container("loopback", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "127.0.0.1"}}
+			}),
+			wantName: "dkr-loopback",
+			wantErr:  "no usable IP address",
+		},
+		{
+			name: "unspecified address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("unspecified", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "0.0.0.0"}}
+			}),
+			wantName: "dkr-unspecified",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "unspecified address with no configured network",
+			conf: testConf(nil),
+			container: container("unspecified", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "0.0.0.0"}}
+			}),
+			wantName: "dkr-unspecified",
+			wantErr:  "no usable IP address",
+		},
+		{
+			name: "multicast address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("multicast", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "224.0.0.1"}}
+			}),
+			wantName: "dkr-multicast",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "multicast address with no configured network",
+			conf: testConf(nil),
+			container: container("multicast", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "224.0.0.1"}}
+			}),
+			wantName: "dkr-multicast",
+			wantErr:  "no usable IP address",
+		},
+		{
 			// "<name>.yaml" must fit a 255-byte file name; no name is returned so
 			// it is a plain skip.
 			name:      "derived name longer than the store can write",

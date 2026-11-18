@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -103,5 +104,51 @@ func TestFailedCommitRestoresTheWorkingTree(t *testing.T) {
 	}
 	if clean, err := real.IsClean(ctx); err != nil || !clean {
 		t.Fatalf("the working tree after failed commits must match HEAD (clean=%v err=%v)", clean, err)
+	}
+}
+
+// TestGitIgnoresSystemConfig proves every git call runs without the system
+// config: a system file that hides untracked files from status and drops diff
+// context changes neither the clean check nor a patch.
+func TestGitIgnoresSystemConfig(t *testing.T) {
+	ctx := context.Background()
+	sys := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(sys, []byte("[status]\n\tshowUntrackedFiles = no\n[diff]\n\tcontext = 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_SYSTEM", sys)
+
+	dir := t.TempDir()
+	g := NewExecGit(dir)
+	if err := g.EnsureRepo(ctx); err != nil {
+		t.Fatalf("EnsureRepo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clean, err := g.IsClean(ctx)
+	if err != nil {
+		t.Fatalf("IsClean: %v", err)
+	}
+	if clean {
+		t.Fatal("an untracked file must make the tree dirty whatever the system config says")
+	}
+	first, err := g.CommitAll(ctx, "first", Author{Name: "t", Email: "t@example.com"})
+	if err != nil || first == "" {
+		t.Fatalf("first commit: %q %v", first, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte("one\nTWO\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := g.CommitAll(ctx, "second", Author{Name: "t", Email: "t@example.com"})
+	if err != nil || second == "" {
+		t.Fatalf("second commit: %q %v", second, err)
+	}
+	patch, err := g.Diff(ctx, first, second)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !strings.Contains(patch, "\n one\n") || !strings.Contains(patch, "\n three\n") {
+		t.Errorf("patch has no context lines:\n%s", patch)
 	}
 }

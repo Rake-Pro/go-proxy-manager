@@ -439,6 +439,12 @@ const loginStateTTL = 10 * time.Minute
 // the cookie stays well inside browser size limits.
 const maxLoginReturnLen = 1024
 
+// maxLoginStateCookieLen caps the signed login-state value. The return path is
+// capped before JSON escaping, which can grow it several times over; a value
+// past what a browser stores would leave the login without its state cookie,
+// so such a login returns to "/" instead.
+const maxLoginStateCookieLen = 4000
+
 // macLabelLoginState is mixed into the login-state MAC so the key cannot be
 // used to forge any other token type.
 const macLabelLoginState = "gpm-admin-login-state-v1|"
@@ -518,10 +524,15 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string
 	if len(returnTo) > maxLoginReturnLen {
 		returnTo = "/"
 	}
-	cookie, err := a.signLoginState(loginState{
+	st := loginState{
 		State: state, Nonce: nonce, Verifier: verifier, IdP: idpName, Return: returnTo,
 		Exp: time.Now().Add(loginStateTTL).Unix(),
-	})
+	}
+	cookie, err := a.signLoginState(st)
+	if err == nil && len(cookie) > maxLoginStateCookieLen {
+		st.Return = "/"
+		cookie, err = a.signLoginState(st)
+	}
 	if err != nil {
 		return "", "", err
 	}

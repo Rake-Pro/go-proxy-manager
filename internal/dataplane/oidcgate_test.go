@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -562,6 +563,73 @@ func TestDataOIDCDiscoveryDoesNotBlockCachedHosts(t *testing.T) {
 	}
 }
 
+// The first request of a shared discovery hanging up does not fail the
+// discovery for the requests waiting on it.
+func TestDataOIDCDiscoverySurvivesFirstCallerCancel(t *testing.T) {
+	idp := newGateIdP(t)
+	g := newGate(t, idp.url, "app", []string{"app.example.com"})
+	h := g.handler(okHandler())
+	stall := make(chan struct{})
+	idp.setStall(stall)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		r := httptest.NewRequest("GET", "https://app.example.com/x", nil).WithContext(ctx)
+		r.Host = "app.example.com"
+		h.ServeHTTP(httptest.NewRecorder(), r)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for idp.discoveries.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("discovery did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	second := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "https://app.example.com/y", nil)
+		r.Host = "app.example.com"
+		h.ServeHTTP(rec, r)
+		second <- rec.Code
+	}()
+	time.Sleep(50 * time.Millisecond) // let the second request join the wait
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	idp.setStall(nil)
+	close(stall)
+	<-first
+	select {
+	case code := <-second:
+		if code != http.StatusFound {
+			t.Fatalf("waiting request: got %d, want 302", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waiting request did not complete")
+	}
+	if n := idp.discoveries.Load(); n != 1 {
+		t.Errorf("%d discoveries, want 1 shared", n)
+	}
+}
+
+// An error parameter on the callback is not echoed in the response body.
+func TestDataOIDCCallbackErrorIsNotReflected(t *testing.T) {
+	g := newGate(t, "http://127.0.0.1:1/not-a-real-idp", "app", []string{"app.example.com"})
+	h := g.handler(okHandler())
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "https://app.example.com"+oidcCallbackPath+"?error="+url.QueryEscape("<b>reflected-text</b>"), nil)
+	r.Host = "app.example.com"
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "reflected-text") {
+		t.Errorf("callback error text echoed in the body: %q", rec.Body.String())
+	}
+}
+
 // A failed discovery must not be cached: the next request retries instead of
 // serving 502 for the rest of the process's life.
 func TestDataOIDCFailedDiscoveryIsNotCached(t *testing.T) {
@@ -578,5 +646,183 @@ func TestDataOIDCFailedDiscoveryIsNotCached(t *testing.T) {
 	}
 	if n := len(g.clients); n != 0 {
 		t.Fatalf("a failed discovery left %d cache entries, want 0", n)
+	}
+}
+
+// With the provider's requireVerifiedEmail set, an oidc gate refuses a login
+// whose email is not verified (clear 401, no session, nothing upstream) and
+// admits one whose email is verified. Unset, an unverified email still signs in.
+func TestOIDCGateRequireVerifiedEmail(t *testing.T) {
+	login := func(t *testing.T, require bool, verified any) (*httptest.ResponseRecorder, *http.Cookie) {
+		t.Helper()
+		idpSrv := newMockIdP(t)
+		gate, err := compileDataOIDC(model.IdentityProvider{
+			ObjectMeta: model.ObjectMeta{Name: "idp"},
+			Type:       model.IdPTypeOIDC,
+			OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client", RequireVerifiedEmail: require},
+		}, nil, "app", []string{"app.example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := gate.handler(okHandler())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "https://app.example.com/", nil))
+		sc := cookieByName(rec.Result(), oidcStateCookie)
+		payload, _ := verifyToken(macLabelSSOState, sc.Value)
+		var st oidcLoginState
+		_ = json.Unmarshal(payload, &st)
+		idpSrv.claims = map[string]any{"nonce": st.Nonce, "email": "user@example.com"}
+		if verified != nil {
+			idpSrv.claims["email_verified"] = verified
+		}
+		rec2 := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "https://app.example.com"+oidcCallbackPath+"?code=c&state="+url.QueryEscape(st.State), nil)
+		req.AddCookie(sc)
+		h.ServeHTTP(rec2, req)
+		return rec2, cookieByName(rec2.Result(), oidcSessionCookie)
+	}
+	for _, verified := range []any{false, nil} {
+		rec, sess := login(t, true, verified)
+		if sess != nil || rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "not verified the email address") {
+			t.Fatalf("required, email_verified=%v: status %d, session %v, body %q; want 401 saying the email is not verified and no session", verified, rec.Code, sess != nil, rec.Body.String())
+		}
+	}
+	rec, sess := login(t, true, true)
+	if sess == nil {
+		t.Fatalf("required, email_verified=true: no session (status %d)", rec.Code)
+	}
+	var minted oidcSession
+	if payload, ok := verifyToken(macLabelSSOSession, sess.Value); !ok || json.Unmarshal(payload, &minted) != nil || !minted.EmailVerified {
+		t.Fatalf("required, email_verified=true: the session does not record the verified email (%+v)", minted)
+	}
+	if rec, sess := login(t, false, false); sess == nil {
+		t.Fatalf("not required, email_verified=false: no session (status %d); the default must not change", rec.Code)
+	}
+}
+
+// A session is checked against requireVerifiedEmail when it is used, not only
+// at sign-in: with the option on, a session without the verified flag (minted
+// before the option was turned on, or by an older build) goes back through
+// sign-in and no identity reaches the upstream. With the option off such a
+// session keeps working.
+func TestOIDCGateRequireVerifiedEmailOnExistingSession(t *testing.T) {
+	idpSrv := newMockIdP(t)
+	serve := func(t *testing.T, require bool, sess oidcSession) (int, string) {
+		t.Helper()
+		gate, err := compileDataOIDC(model.IdentityProvider{
+			ObjectMeta: model.ObjectMeta{Name: "idp"},
+			Type:       model.IdPTypeOIDC,
+			OIDC:       &model.OIDCSpec{IssuerURL: idpSrv.server.URL, ClientID: "gpm-client", RequireVerifiedEmail: require},
+		}, nil, "app", []string{"app.example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var user string
+		h := gate.handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user = r.Header.Get("X-Forwarded-User")
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		payload, _ := json.Marshal(sess)
+		req := httptest.NewRequest("GET", "https://app.example.com/", nil)
+		req.AddCookie(&http.Cookie{Name: oidcSessionCookie, Value: signToken(macLabelSSOSession, payload)})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, user
+	}
+	now := time.Now().Unix()
+	old := oidcSession{Sub: "u", Email: "user@example.com", Host: "app", IdP: "idp", Exp: now + 3600, Iat: now}
+	// The cookie an older build minted has no "ev" field at all.
+	if b, _ := json.Marshal(old); strings.Contains(string(b), `"ev"`) {
+		t.Fatalf("an unverified session marshals the verified flag: %s", b)
+	}
+	if code, user := serve(t, false, old); code != http.StatusNoContent || user != "user@example.com" {
+		t.Fatalf("option off, session without the flag: %d user %q, want it served as before", code, user)
+	}
+	if code, user := serve(t, true, old); code != http.StatusFound || user != "" {
+		t.Fatalf("option on, session without the flag: %d user %q, want a redirect to sign-in and nothing upstream", code, user)
+	}
+	verified := old
+	verified.EmailVerified = true
+	if code, user := serve(t, true, verified); code != http.StatusNoContent || user != "user@example.com" {
+		t.Fatalf("option on, verified session: %d user %q, want it served", code, user)
+	}
+}
+
+// The upstream behind an SSO gate does not receive the gate's own cookies;
+// every other cookie, and the Cookie header of an auth subrequest further down
+// the chain, is unchanged. A request no gate admitted is forwarded as is.
+func TestSSOGateCookiesAreNotForwardedUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var backendCookie []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		backendCookie = r.Header.Values("Cookie")
+		mu.Unlock()
+	}))
+	t.Cleanup(backend.Close)
+	target, _ := url.Parse(backend.URL)
+	proxy := newProxyWith(target, http.DefaultTransport, "app", nil, nil, nil, "")
+
+	stub := &outpostStub{authStatus: http.StatusOK}
+	outpost := httptest.NewServer(stub.handler())
+	t.Cleanup(outpost.Close)
+	ar, err := compileAuthRequest(model.AuthRequestSpec{OutpostURL: outpost.URL})
+	if err != nil {
+		t.Fatalf("compileAuthRequest: %v", err)
+	}
+	gate := newGate(t, "http://127.0.0.1:1/not-used", "app", []string{"app.example.com"})
+	gated := gate.handler(ar.handler(peerIP, nil, "app", nil, proxy))
+
+	rec := httptest.NewRecorder()
+	setSignedCookie(rec, oidcSessionCookie, macLabelSSOSession, oidcSession{
+		Sub: "u", Email: "a@example.com", Host: "app", IdP: "idp",
+		Iat: time.Now().Unix(), Exp: time.Now().Add(time.Hour).Unix(),
+	}, time.Hour)
+	sess := cookieByName(rec.Result(), oidcSessionCookie)
+	if sess == nil {
+		t.Fatal("no session cookie minted")
+	}
+
+	serve := func(h http.Handler, cookie string) int {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "https://app.example.com/x", nil)
+		r.Host = "app.example.com"
+		r.Header.Set("Cookie", cookie)
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	got := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return backendCookie
+	}
+
+	inbound := "a=1; " + oidcSessionCookie + "=" + sess.Value + "; b=2; " + oidcStateCookie + "=s"
+	if code := serve(gated, inbound); code != http.StatusOK {
+		t.Fatalf("gated request: got %d, want 200", code)
+	}
+	if c := got(); len(c) != 1 || c[0] != "a=1; b=2" {
+		t.Errorf("upstream Cookie = %q, want [\"a=1; b=2\"]", c)
+	}
+	if stub.gotCookie != inbound {
+		t.Errorf("auth subrequest Cookie = %q, want the inbound header %q", stub.gotCookie, inbound)
+	}
+
+	if code := serve(gated, oidcSessionCookie+"="+sess.Value); code != http.StatusOK {
+		t.Fatalf("gated request: got %d, want 200", code)
+	}
+	if c := got(); len(c) != 0 {
+		t.Errorf("upstream Cookie = %q, want none when only the gate cookie was sent", c)
+	}
+
+	// No gate on the route: the header is forwarded byte for byte, a gpm-named
+	// cookie included.
+	for _, cookie := range []string{"a=1;b=2 ; c", "x=1; " + oidcSessionCookie + "=other"} {
+		if code := serve(proxy, cookie); code != http.StatusOK {
+			t.Fatalf("ungated request: got %d, want 200", code)
+		}
+		if c := got(); len(c) != 1 || c[0] != cookie {
+			t.Errorf("ungated upstream Cookie = %q, want [%q]", c, cookie)
+		}
 	}
 }

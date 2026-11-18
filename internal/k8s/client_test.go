@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -20,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeAPI is a hermetic stand-in for the Kubernetes API server: a TLS httptest
@@ -636,5 +638,22 @@ func TestListIngressesRefusesEndlessEmptyPages(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "requests") {
 		t.Fatalf("error should name the request bound: %v", err)
+	}
+}
+
+func TestAPIErrorMessageIsBounded(t *testing.T) {
+	body, err := json.Marshal(map[string]string{"message": strings.Repeat("\u00e9", 1<<19)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := apiErrorMessage(body)
+	if len(got) > 600 {
+		t.Errorf("error message is %d bytes, want at most 600", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("clipped message is not valid UTF-8: %q", got)
+	}
+	if got := apiErrorMessage([]byte(`{"message":"no such container"}`)); got != "no such container" {
+		t.Errorf("short message = %q, want it unchanged", got)
 	}
 }

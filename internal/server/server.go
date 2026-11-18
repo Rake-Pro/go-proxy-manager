@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"strings"
 	"time"
 
 	openapidoc "github.com/Rake-Pro/go-proxy-manager/docs/api"
@@ -209,6 +210,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", csp)
 		h.Set("Referrer-Policy", "same-origin")
+		// API responses carry config and session data: never stored by a
+		// browser or shared cache. A handler that sets its own value wins.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-store")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

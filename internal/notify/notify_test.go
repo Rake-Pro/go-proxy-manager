@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -602,5 +603,22 @@ func TestTransportErrorOmitsReceiverURL(t *testing.T) {
 		if strings.Contains(dl.Error, topic) {
 			t.Fatalf("status error repeats the receiver URL: %q", dl.Error)
 		}
+	}
+}
+
+// A Discord payload disables every mention, so event text never pings anyone.
+func TestDiscordPayloadDisablesMentions(t *testing.T) {
+	req, err := buildDiscordRequest(context.Background(), model.NotificationTarget{
+		Name: "discord", Type: model.NotificationTypeDiscord, URL: "https://discord.example.com/api/webhooks/1/abc",
+	}, Event{Kind: model.EventUpstreamUnhealthy, Title: "@everyone upstream down", Severity: "warning"})
+	if err != nil {
+		t.Fatalf("buildDiscordRequest: %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"allowed_mentions":{"parse":[]}`) {
+		t.Errorf("discord payload %s does not disable mentions", body)
 	}
 }

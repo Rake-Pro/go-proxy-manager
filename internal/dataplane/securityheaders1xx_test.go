@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
 	"testing"
 
@@ -139,5 +141,73 @@ func assert1xxHeaders(t *testing.T, resp *http.Response) {
 	}
 	if got := resp.Header.Get("X-Proxied-Scope"); got != "1" {
 		t.Fatalf("X-Proxied-Scope = %q, want the proxied-only scoped header to survive the 1xx", got)
+	}
+}
+
+// A headers middleware's response rules apply to the final response that
+// follows an interim 103.
+func TestResponseHeaderRulesApplyAfterInterimResponse(t *testing.T) {
+	up := upstreamFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Link", "</style.css>; rel=preload; as=style")
+		w.Header().Set("X-Leak", "early")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Set("X-Leak", "1")
+		_, _ = w.Write([]byte("final body"))
+	}))
+	cfg := model.Config{
+		Middlewares: []model.Middleware{{
+			ObjectMeta: model.ObjectMeta{Name: "resp-rules"},
+			Type:       model.MWTypeHeaders,
+			Headers: &model.HeadersMiddleware{
+				RemoveResponse: []string{"X-Leak"},
+				SetResponse:    map[string]string{"X-Set": "1"},
+			},
+		}},
+		ProxyHosts: []model.ProxyHost{{
+			ObjectMeta:  model.ObjectMeta{Name: "front"},
+			Domains:     []string{"front.example"},
+			Upstream:    up,
+			Middlewares: []string{"resp-rules"},
+		}},
+	}
+	rt, err := buildRouter(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+	srv := frontServer(t, rt)
+
+	var interim []int
+	var interimLeak []string
+	req, err := http.NewRequest("GET", srv.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		Got1xxResponse: func(code int, h textproto.MIMEHeader) error {
+			interim = append(interim, code)
+			interimLeak = append(interimLeak, h.Get("X-Leak"))
+			return nil
+		},
+	}))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "final body" {
+		t.Fatalf("final response = %d %q", resp.StatusCode, body)
+	}
+	if len(interim) != 1 || interim[0] != http.StatusEarlyHints {
+		t.Fatalf("interim responses = %v, want one 103", interim)
+	}
+	if interimLeak[0] != "" {
+		t.Errorf("X-Leak = %q on the interim response, want it removed", interimLeak[0])
+	}
+	if got := resp.Header.Get("X-Leak"); got != "" {
+		t.Errorf("X-Leak = %q on the final response, want it removed", got)
+	}
+	if got := resp.Header.Get("X-Set"); got != "1" {
+		t.Errorf("X-Set = %q on the final response, want 1", got)
 	}
 }

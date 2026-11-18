@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog/log"
 
@@ -222,8 +223,11 @@ func (hs *handlerSwitch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dataHandler builds one listener's swappable chain: the plain dispatch handler
 // and its observed wrapper are constructed once, and SetAccessLog picks the
-// active side at runtime.
+// active side at runtime. Both sides count requests against the per-client
+// in-flight limit (see limitInFlight), inside the observer so a refusal is
+// logged and counted like any other response.
 func (s *Server) dataHandler(dispatch http.HandlerFunc) *handlerSwitch {
+	dispatch = s.limitInFlight(dispatch)
 	return newHandlerSwitch(dispatch, s.observe(dispatch), s.observeActive())
 }
 
@@ -476,6 +480,18 @@ const (
 func clipLog(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Cut at a rune boundary so a clipped value never ends in a partial
+	// UTF-8 sequence. A sequence that crosses n starts at most utf8.UTFMax-1
+	// bytes back; when none does, the input is not valid UTF-8 there and is
+	// cut at n.
+	for i := n; i >= 0 && n-i < utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			if _, size := utf8.DecodeRuneInString(s[i:]); size > n-i {
+				return s[:i] + "..."
+			}
+			break
+		}
 	}
 	return s[:n] + "..."
 }

@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -246,6 +247,38 @@ func TestBouncerCacheHit(t *testing.T) {
 	h.ServeHTTP(rec, bouncerReq("203.0.113.8"))
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("lapi calls after a new IP = %d, want 2 (the cache is per client IP)", got)
+	}
+}
+
+func TestBouncerLookupConnectionsAreBounded(t *testing.T) {
+	var conns int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`null`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			atomic.AddInt32(&conns, 1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	h := bouncerHandler(compileBouncer("bnc", model.BouncerMiddleware{
+		URL: srv.URL, APIKey: model.Secret("k"), Timeout: "10s",
+	}), "app", clientIPResolver(nil), nil, bouncerNext(nil))
+
+	var wg sync.WaitGroup
+	for i := range 150 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.ServeHTTP(httptest.NewRecorder(), bouncerReq(fmt.Sprintf("198.51.100.%d", i+1)))
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&conns); got > 64 {
+		t.Errorf("lookups opened %d connections to the bouncer, want at most 64", got)
 	}
 }
 
@@ -904,5 +937,53 @@ func TestStreamDecisionSetRanges(t *testing.T) {
 	}
 	if ok, _ := s.lookup(net.ParseIP("10.200.0.1")); ok {
 		t.Fatal("an address outside every range matches")
+	}
+}
+
+// panicOnceTransport panics on its first round trip and answers every later one
+// with an empty decision stream.
+type panicOnceTransport struct{ calls atomic.Int32 }
+
+func (p *panicOnceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if p.calls.Add(1) == 1 {
+		panic("test: pull failure")
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+}
+
+// A panic inside the startup pull is handled as a failed pull: the request
+// takes onError, the pull is no longer marked running (so later requests do not
+// wait on it), and the next startup pull runs after the backoff and loads the
+// set.
+func TestCrowdSecStreamStartupPullPanicReleasesAndRetries(t *testing.T) {
+	b := compileBouncer("cs", model.BouncerMiddleware{URL: "http://192.0.2.1:8080", APIKey: model.Secret("k"), Timeout: "300ms", Stream: true})
+	rt := &panicOnceTransport{}
+	b.client = &http.Client{Transport: rt}
+	h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, bouncerReq("203.0.113.1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request whose startup pull panicked: status %d, want 200 (onError fail-open)", rec.Code)
+	}
+	b.stream.mu.Lock()
+	running, retryAt := b.stream.startupDone != nil, b.stream.startupRetryAt
+	b.stream.startupRetryAt = time.Now() // skip the backoff
+	b.stream.mu.Unlock()
+	if running || retryAt.IsZero() {
+		t.Fatalf("after the panic: pull still marked running = %v, backoff set = %v; want released and backed off", running, !retryAt.IsZero())
+	}
+
+	start := time.Now()
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, bouncerReq("203.0.113.2"))
+	if rec.Code != http.StatusOK || time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("next request: status %d after %v; want 200 without waiting", rec.Code, time.Since(start))
+	}
+	b.stream.mu.RLock()
+	ready := b.stream.ready
+	b.stream.mu.RUnlock()
+	if got := rt.calls.Load(); got != 2 || !ready {
+		t.Fatalf("pulls = %d, ready = %v; want the retry to run and load the set", got, ready)
 	}
 }

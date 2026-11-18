@@ -64,6 +64,11 @@ type router struct {
 	// clientCAs are this build's client-CA anchors. Reload publishes them to
 	// the CRL watch only once the build is the live router (registerCRLAnchors).
 	clientCAs map[string]*clientCAAnchor
+
+	// live returns the owning Server's current router; set by Reload. Upgraded
+	// connections are tracked against it (see tunnels.go). nil for a router
+	// built outside a Server, which tracks none.
+	live func() *router
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -175,6 +180,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		// identity header. Compiled here so dispatch can derive the client IP once
 		// per request, before the chain runs (see clientip.go).
 		hh.trustedProxies = hostTrustedProxies(h)
+		hh.chainKey = hostChainKey(h, cfg, hh.trustedProxies)
 		// Client-certificate passthrough headers ride the same strip model: the
 		// fixed names are in the baseline denylist, and a custom subject header is
 		// added to this host's strip set, so no untrusted peer can assert either -
@@ -664,7 +670,7 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// gpm-generated response below never marks it and keeps the generated subset.
 		r = requestWithSecurityWriter(r, w)
 		handler, _ := hh.route(r.URL.Path)
-		handler.ServeHTTP(w, r)
+		rt.serveRoute(handler, w, r, name, hh)
 		return
 	}
 	if rh, ok := rt.redirects[name]; ok {
@@ -676,6 +682,16 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "no such host", http.StatusNotFound)
+}
+
+// serveRoute runs a proxy host's route handler; an upgrade request is served
+// so that the tunnel it may open is tracked (see serveTracked).
+func (rt *router) serveRoute(handler http.Handler, w http.ResponseWriter, r *http.Request, name string, hh *hostHandler) {
+	if rt.live != nil && isUpgradeRequest(r) {
+		serveTracked(handler, w, r, rt.live, name, hh.chainKey)
+		return
+	}
+	handler.ServeHTTP(w, r)
 }
 
 // originFormTarget reports false for a request target not in origin form
@@ -795,7 +811,7 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w = withHostResponseHeaders(w, "", hh.robots)
 		r = requestWithSecurityWriter(r, w) // see serveHTTPS
 		handler, _ := hh.route(r.URL.Path)
-		handler.ServeHTTP(w, r)
+		rt.serveRoute(handler, w, r, name, hh)
 		return
 	}
 	if rh, ok := rt.redirects[name]; ok {
