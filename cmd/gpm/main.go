@@ -302,6 +302,8 @@ func main() {
 	// server's login and TOTP lockout buckets key on the same derivation, so an
 	// admin UI fronted by a gpm proxy host still throttles per real client.
 	dataplane.SetTrustedProxies(settings.TrustedProxies)
+	// Optional per-client in-flight request limit; nil (the default) sets none.
+	dataplane.SetClientLimits(settings.ClientLimits)
 	if adminEdgeHopUntrusted(settings, *adminAddr) {
 		log.Warn().Msg("settings.adminEdge is enabled but settings.trustedProxies does not cover the loopback hop to the admin listener: every request through the edge shares one client address for the local-login lockout; add 127.0.0.1/32 and ::1/128 to settings.trustedProxies")
 	}
@@ -356,6 +358,12 @@ func main() {
 	if err := dp.Reload(cfg); err != nil {
 		log.Fatal().Err(err).Msg("failed to compile data plane")
 	}
+	// Refuse, before it is committed, a config write the data plane could not
+	// build: such a write would fail every later reload and the next start.
+	// The dry-run build changes no live state (see dataplane.CheckConfig).
+	st.SetCompileCheck(func(c model.Config, s model.Settings) error {
+		return dp.CheckConfig(c, s.ErrorPages)
+	})
 
 	sessStore, err := session.Open(*sessionDB)
 	if err != nil {
@@ -437,6 +445,7 @@ func main() {
 		// The L7 trusted-proxy set, refreshed before the compile so the router
 		// build picks up the new set (see the initial load).
 		dataplane.SetTrustedProxies(st2.TrustedProxies)
+		dataplane.SetClientLimits(st2.ClientLimits)
 		// Same reasoning as the initial load: compile the settings-level error
 		// pages before the data plane, so a template that fails to parse fails
 		// the whole reload with a clear message rather than serving half of a
@@ -951,6 +960,8 @@ func main() {
 
 		CookieSecureState: authn.CookieSecureState,
 
+		RevokeAdminSessions: authn.RevokeAllSessions,
+
 		WebhookStatus: func() any { return hooks.Status() },
 		WebhookTest: func(c context.Context, name string) (any, error) {
 			return hooks.Test(c, name)
@@ -1156,31 +1167,36 @@ func envDur(key string, def time.Duration) time.Duration {
 // mounted Docker secret) over the plain <key> env var. Reading from a file keeps
 // secrets like the bcrypt admin hash - whose $ signs are otherwise mangled by
 // shell/compose interpolation - out of the environment entirely. A <key>_FILE
-// that is set but cannot be read is an error, never an empty value.
+// that is set but cannot be read, or holds only whitespace, is an error, never
+// an empty value: an operator who named a file meant a secret to be there.
 func secretFromEnv(key string) (string, error) {
 	if p := os.Getenv(key + "_FILE"); p != "" {
 		b, err := os.ReadFile(p) //nolint:gosec // G304: path is the operator-set <KEY>_FILE env var (mounted secret) read at startup, not request input
 		if err != nil {
 			return "", fmt.Errorf("%s_FILE: %w", key, err)
 		}
-		return strings.TrimSpace(string(b)), nil
+		v := strings.TrimSpace(string(b))
+		if v == "" {
+			return "", fmt.Errorf("%s_FILE: %s is empty", key, p)
+		}
+		return v, nil
 	}
 	return os.Getenv(key), nil
 }
 
 // localAdminSecrets reads the local admin's bcrypt hash and TOTP secret. An
-// unreadable secret file fails closed without stopping the process, which also
+// unreadable or empty secret file fails closed without stopping the process, which also
 // serves the data plane: an unreadable hash leaves no usable local credential,
 // and an unreadable TOTP secret drops the hash too, so local login is refused
 // instead of falling back to the password alone.
 func localAdminSecrets() (hash, totp string) {
 	hash, err := secretFromEnv("GPM_LOCAL_ADMIN_PASSWORD_HASH")
 	if err != nil {
-		log.Error().Err(err).Msg("local admin password hash is unreadable; local admin login is refused")
+		log.Error().Err(err).Msg("local admin password hash is unreadable or empty; local admin login is refused")
 	}
 	totp, err = secretFromEnv("GPM_LOCAL_ADMIN_TOTP_SECRET")
 	if err != nil {
-		log.Error().Err(err).Msg("local admin TOTP secret is unreadable; local admin login is refused")
+		log.Error().Err(err).Msg("local admin TOTP secret is unreadable or empty; local admin login is refused")
 		return "", ""
 	}
 	return hash, totp

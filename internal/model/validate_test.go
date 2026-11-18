@@ -644,6 +644,8 @@ func TestErrorPagesConfigValidate(t *testing.T) {
 		{name: "traversal dir is rejected", e: ErrorPagesConfig{Dir: "../secrets"}, wantErr: "relative"},
 		{name: "inline default key is valid", e: ErrorPagesConfig{Inline: map[string]string{"default": "<p>x</p>"}}},
 		{name: "inline status key is valid", e: ErrorPagesConfig{Inline: map[string]string{"502": "<p>x</p>"}}},
+		{name: "inline template at the size limit is valid", e: ErrorPagesConfig{Inline: map[string]string{"default": strings.Repeat("x", MaxInlineErrorPageBytes)}}},
+		{name: "inline template over the size limit is rejected", e: ErrorPagesConfig{Inline: map[string]string{"default": strings.Repeat("x", MaxInlineErrorPageBytes+1)}}, wantErr: "byte limit"},
 		{name: "inline non-numeric key is rejected", e: ErrorPagesConfig{Inline: map[string]string{"oops": "<p>x</p>"}}, wantErr: "status code"},
 		{name: "interceptUpstream 4xx/5xx is valid", e: ErrorPagesConfig{InterceptUpstream: []int{404, 502}}},
 		{name: "interceptUpstream out of range is rejected", e: ErrorPagesConfig{InterceptUpstream: []int{200}}, wantErr: "4xx/5xx"},
@@ -658,6 +660,118 @@ func TestErrorPagesConfigValidate(t *testing.T) {
 				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// An error-page template outside the allow-list is refused when it is new or
+// changed, and accepted when the stored block holds the same source. Validate
+// (which also runs at load) does not refuse it. Values built inside a pipeline
+// (a variable doubled by assignment, nested calls, a call with many arguments,
+// the whole page data as dot) are refused as well as loops, because they never
+// reach the size-capped output writer.
+func TestErrorPagesCheckNewTemplates(t *testing.T) {
+	var doubled strings.Builder
+	doubled.WriteString(`{{$a := printf "%1000000s" ""}}`)
+	for i := 0; i < 8; i++ {
+		doubled.WriteString(`{{$a = printf "%s%s" $a $a}}`)
+	}
+	doubled.WriteString(`{{len $a}}`)
+	nested := `{{len (print` + strings.Repeat(` (printf "%1000000s" "")`, 300) + `)}}`
+	refused := []string{
+		doubled.String(),
+		nested,
+		// Many arguments to one call, and dot as the whole page data.
+		`{{print` + strings.Repeat(" .", 2000) + `}}`,
+		`{{printf "` + strings.Repeat("%9999v", 10) + `"` + strings.Repeat(" .", 10) + `}}`,
+		`{{urlquery` + strings.Repeat(" .Host", 2000) + `}}`,
+		`{{.}}`,
+		`{{if .}}x{{end}}`,
+		`{{if .Status}}{{.}}{{end}}`,
+		`{{with .Host}}x{{else}}{{.}}{{end}}`,
+		`{{with eq .Status 502}}{{.}}{{end}}`,
+		`{{print .Status .Host}}`,
+		`{{html .Host .Host}}`,
+		`{{len}}`,
+		`{{.Host | print .Host}}`,
+		`{{printf "%s%s%s%s%s" .Host .Host .Host .Host .Host}}`,
+		`{{.Host | printf "%s%s%s%s%s" .Host .Host .Host .Host}}`,
+		`{{printf "%1000s" .Host}}`,
+		`{{printf "%.1000s" .Host}}`,
+		`{{printf "` + strings.Repeat("x", 65) + `"}}`,
+		`{{eq .Host .Host .Host .Host .Host}}`,
+		`{{if eq .Host "` + strings.Repeat("x", 65) + `"}}x{{end}}`,
+		strings.Repeat(`{{.Host}}`, 129),
+		"{{range 10}}x{{end}}",
+		"{{$n := 9}}{{range $n}}x{{end}}",
+		"{{if .Status}}{{with .Host}}{{range 3}}x{{end}}{{end}}{{end}}",
+		"{{if .Status}}a{{else}}{{range 3}}x{{end}}{{end}}",
+		`{{define "a"}}{{template "a"}}{{end}}{{template "a"}}`,
+		`{{block "b" .}}x{{end}}`,
+		`{{define "c"}}{{range 2}}x{{end}}{{end}}ok`,
+		`{{define "d"}}x{{end}}ok`,
+		`{{$x := .Host}}{{$x}}`,
+		`{{$}}`,
+		`{{(.Host)}}`,
+		`{{html (print .Host)}}`,
+		`{{.Host | html | js}}`,
+		`{{.Host | printf "%s" | html}}`,
+		`{{index .Host 0}}`,
+		`{{slice .Host 1}}`,
+		`{{call .Host}}`,
+		`{{.Missing}}`,
+		`{{.Host.Len}}`,
+		`{{"literal"}}`,
+		`{{print "a"}}`,
+		`{{printf .Host}}`,
+		`{{printf "%1000000s" .Host}}`,
+		`{{printf "%.99999s" .Host}}`,
+		`{{printf "%*d" .Status .Status}}`,
+		`{{printf "%[1]s" .Host}}`,
+		`{{if printf "%s" .Host}}x{{end}}`,
+		`{{if len .Host}}x{{end}}`,
+		`{{if eq (len .Host) 3}}x{{end}}`,
+		`{{if or (lt .Status 500) (ge .Status 599)}}x{{end}}`,
+		`{{with $h := .Host}}{{$h}}{{end}}`,
+	}
+	for _, src := range refused {
+		e := ErrorPagesConfig{Inline: map[string]string{"502": src}}
+		if err := e.validate(); err != nil {
+			t.Fatalf("%.80q: validate must not refuse it (a stored one has to keep loading): %v", src, err)
+		}
+		if err := e.CheckNewTemplates(nil); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("%.80q: new template: err = %v, want a refusal", src, err)
+		}
+		if err := e.CheckNewTemplates(&ErrorPagesConfig{Inline: map[string]string{"502": src}}); err != nil {
+			t.Fatalf("%.80q: stored unchanged: %v", src, err)
+		}
+		if err := e.CheckNewTemplates(&ErrorPagesConfig{Inline: map[string]string{"502": src + " "}}); err == nil {
+			t.Fatalf("%.80q: changed template must be refused", src)
+		}
+	}
+	// The documented examples and the allowed constructs.
+	allowed := []string{
+		`<html><body><h1>Slow down</h1><p>{{.Host}} is rate-limiting you.</p></body></html>`,
+		`{{.Status}} {{.StatusText}} {{.Host}} {{.RequestID}}`,
+		`<h1>{{.Status}} {{.StatusText}}</h1>{{if .RequestID}}<p>{{.RequestID}}</p>{{else}}-{{end}}{{with .Host}}{{.}}{{end}}`,
+		`{{if eq .Status 502 504}}down{{else if and .RequestID .Host}}x{{else if ne .Status 404}}y{{end}}`,
+		`{{if not .RequestID}}-{{end}}{{if lt .Status 500}}a{{end}}{{if ge .Status 1}}{{end}}{{if gt .Status 1}}{{end}}{{if le .Status 1}}{{end}}{{if or .RequestID true}}{{end}}`,
+		`{{with .Host}}{{.}}{{else with .RequestID}}{{.}}{{end}}`,
+		`{{or .RequestID "none"}}`,
+		`{{html .Host}}{{js .Host}}{{urlquery .Host}}{{len .Host}}{{print .Status}}`,
+		`{{.Host | html}}{{.Host | urlquery}}{{.Status | printf "%03d"}}`,
+		`{{printf "%s (%d %s)" .Host .Status .StatusText}}{{printf "%-999.999s|%%" .Host}}{{printf "plain"}}`,
+		`{{.Host | printf "%s %s %s %s" .Host .StatusText .RequestID}}`,
+		`{{with .Host}}{{print .}}{{html .}}{{printf "%s" .}}{{. | js}}{{if eq . "x"}}{{.}}{{end}}{{end}}`,
+		`{{if eq .Host "` + strings.Repeat("x", 64) + `"}}x{{end}}{{eq .Status 1 2 3}}`,
+		`{{if .RequestID}}<p>request {{.RequestID}}</p>{{end}}`,
+		strings.Repeat(`{{.Host}}`, 64) + `{{if .Status}}` + strings.Repeat(`{{.Status}}`, 64) + `{{end}}`,
+		`{{/* a comment */}}{{- .Host -}}`,
+	}
+	for _, src := range allowed {
+		e := ErrorPagesConfig{Inline: map[string]string{"default": src}}
+		if err := e.CheckNewTemplates(nil); err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
 	}
 }
 
@@ -960,5 +1074,216 @@ func TestConfigValidateDuplicateDomainsAcrossHosts(t *testing.T) {
 				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// settings.clientLimits is optional: absent or zero sets no limit, a negative
+// or oversized maxInFlight and a malformed allowFrom entry are refused.
+func TestSettingsClientLimitsValidate(t *testing.T) {
+	base := DefaultSettings()
+	for _, tc := range []struct {
+		name    string
+		cl      *ClientLimitsSettings
+		wantErr string
+	}{
+		{name: "absent", cl: nil},
+		{name: "zero", cl: &ClientLimitsSettings{}},
+		{name: "limit with exemptions", cl: &ClientLimitsSettings{MaxInFlight: 256, AllowFrom: []string{"192.0.2.0/24", "2001:db8::1"}}},
+		{name: "negative", cl: &ClientLimitsSettings{MaxInFlight: -1}, wantErr: "clientLimits.maxInFlight"},
+		{name: "too large", cl: &ClientLimitsSettings{MaxInFlight: MaxClientInFlightLimit + 1}, wantErr: "clientLimits.maxInFlight"},
+		{name: "bad allowFrom", cl: &ClientLimitsSettings{MaxInFlight: 10, AllowFrom: []string{"lan"}}, wantErr: "clientLimits.allowFrom"},
+	} {
+		s := base
+		s.ClientLimits = tc.cl
+		err := s.Validate()
+		switch {
+		case tc.wantErr == "" && err != nil:
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+			t.Errorf("%s: error = %v, want one mentioning %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestIsDomainName(t *testing.T) {
+	tests := []struct {
+		d        string
+		wildcard bool
+		want     bool
+	}{
+		{"app.example.com", false, true},
+		{"App.Example.COM", false, true},
+		{" app.example.com ", false, true},
+		{"localhost", false, true},
+		{"192.0.2.10", false, true},
+		{"app.example.com:8443", false, false},
+		{"app.example.com.", false, false},
+		{"app..example.com", false, false},
+		{"-app.example.com", false, false},
+		{"app_1.example.com", false, false},
+		{"app.example.com/path", false, false},
+		{"", false, false},
+		{"*.example.com", false, false},
+		{"*.example.com", true, true},
+		{"*.*.example.com", true, false},
+		{"a.*.example.com", true, false},
+		{strings.Repeat("a", 64) + ".example.com", false, false},
+	}
+	for _, tc := range tests {
+		if got := IsDomainName(tc.d, tc.wildcard); got != tc.want {
+			t.Errorf("IsDomainName(%q, %v) = %v, want %v", tc.d, tc.wildcard, got, tc.want)
+		}
+	}
+}
+
+// TestInvalidDomainsWarnedAndMayNotGrow proves a stored invalid domain is a
+// config warning, not a Validate error, and that only an added invalid domain
+// is reported as an error for a write.
+func TestInvalidDomainsWarnedAndMayNotGrow(t *testing.T) {
+	cfg := Config{
+		ProxyHosts: []ProxyHost{proxyHost("a", func(h *ProxyHost) { h.Domains = []string{"a.example.com:8443"} })},
+		Certificates: []Certificate{{ObjectMeta: ObjectMeta{Name: "c"}, Type: CertTypeCustom,
+			Domains: []string{"*.example.com", "odd.example.com."}, Custom: &CustomCertSpec{CertFile: "c.pem", KeyFile: "c.key"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("an invalid stored domain must not fail Validate: %v", err)
+	}
+	var warned []string
+	for _, w := range cfg.Warnings() {
+		if strings.Contains(w, "must be a hostname") {
+			warned = append(warned, w)
+		}
+	}
+	if len(warned) != 2 || !strings.Contains(warned[0], `certificate "c": domains: "odd.example.com."`) || !strings.Contains(warned[1], `proxy host "a": domains: "a.example.com:8443"`) {
+		t.Fatalf("warnings = %v, want one per object naming the invalid domain only", warned)
+	}
+	before := cfg.InvalidDomains()
+	if err := InvalidDomainsError(before, cfg.InvalidDomains()); err != nil {
+		t.Fatalf("an unchanged invalid domain must pass: %v", err)
+	}
+	cfg.ProxyHosts[0].Domains = []string{"A.example.com:8443", "b.example.com"}
+	if err := InvalidDomainsError(before, cfg.InvalidDomains()); err != nil {
+		t.Fatalf("keeping the stored invalid domain (any case) must pass: %v", err)
+	}
+	cfg.ProxyHosts[0].Domains = append(cfg.ProxyHosts[0].Domains, "b.example.com.")
+	if err := InvalidDomainsError(before, cfg.InvalidDomains()); err == nil || !strings.Contains(err.Error(), `"b.example.com."`) {
+		t.Fatalf("an added invalid domain must be refused and named: %v", err)
+	}
+	cfg.ProxyHosts = append(cfg.ProxyHosts[:0], proxyHost("x", func(h *ProxyHost) { h.Domains = []string{"a.example.com:8443"} }))
+	if err := InvalidDomainsError(before, cfg.InvalidDomains()); err == nil || !strings.Contains(err.Error(), `proxy host "x"`) {
+		t.Fatalf("another object's stored invalid domain does not license a new object: %v", err)
+	}
+}
+
+func TestMinTLS13WithoutForceSSLIsWarned(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		cfg := Config{ProxyHosts: []ProxyHost{proxyHost("a", func(h *ProxyHost) {
+			h.TLS.MinTLSVersion = "1.3"
+			h.TLS.ForceSSL = force
+		})}}
+		warned := false
+		for _, w := range cfg.Warnings() {
+			if strings.Contains(w, `proxy host "a": tls.minTLSVersion is "1.3" but tls.forceSSL is off`) {
+				warned = true
+			}
+		}
+		if warned == force {
+			t.Errorf("forceSSL %v: warned = %v, want %v", force, warned, !force)
+		}
+	}
+}
+
+// checkErrorPageSrc parses src as an inline error page and runs the write check.
+func checkErrorPageSrc(src string) error {
+	return ErrorPagesConfig{Inline: map[string]string{"default": src}}.CheckNewTemplates(nil)
+}
+
+// More than 16 levels of if/with (an else if or else with is one level more)
+// and more than 512 conditions are refused, so a render's stack and time stay
+// small; a stored page that breaks either rule still validates.
+func TestErrorPageTemplateDepthLimit(t *testing.T) {
+	nested := func(n int) string {
+		return `{{with .Host}}` + strings.Repeat(`{{if .}}`, n-1) + "x" + strings.Repeat(`{{end}}`, n-1) + `{{end}}`
+	}
+	elseIf := func(n int) string {
+		return `{{if .Host}}a` + strings.Repeat(`{{else if not .Status}}b`, n-1) + `{{end}}`
+	}
+	if err := checkErrorPageSrc(nested(16)); err != nil {
+		t.Fatalf("16 levels: %v", err)
+	}
+	if err := checkErrorPageSrc(elseIf(16)); err != nil {
+		t.Fatalf("an else if chain of 16: %v", err)
+	}
+	for name, src := range map[string]string{
+		"17 levels":             nested(17),
+		"else if chain of 17":   elseIf(17),
+		"16000 levels":          nested(16000),
+		"else with chain of 17": `{{with .Host}}a` + strings.Repeat(`{{else with .Status}}b`, 16) + `{{end}}`,
+		"513 conditions":        strings.Repeat(`{{if .Host}}x{{end}}`, 513),
+	} {
+		if err := checkErrorPageSrc(src); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("%s: err = %v, want refused", name, err)
+		}
+		if len(src) <= MaxInlineErrorPageBytes {
+			if err := (ErrorPagesConfig{Inline: map[string]string{"default": src}}).validate(); err != nil {
+				t.Fatalf("%s: validate must not refuse it: %v", name, err)
+			}
+		}
+	}
+	if err := checkErrorPageSrc(strings.Repeat(`{{if .Host}}x{{end}}`, 512)); err != nil {
+		t.Fatalf("512 conditions: %v", err)
+	}
+}
+
+// A template over 32 KiB is refused by the check; validation keeps its own
+// 256 KiB limit, so a stored page between the two still loads.
+func TestErrorPageTemplateSizeLimit(t *testing.T) {
+	for name, src := range map[string]string{
+		"256 KiB of <":            strings.Repeat("<", 256<<10),
+		"text past 32 KiB":        strings.Repeat("a", MaxErrorPageTemplateBytes+1),
+		"action past 32 KiB":      strings.Repeat("a", MaxErrorPageTemplateBytes-5) + `{{.Host}}`,
+		"textarea of <a past cap": "<textarea>" + strings.Repeat("<a", 20<<10) + "</textarea>",
+	} {
+		if err := checkErrorPageSrc(src); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("%s: err = %v, want refused", name, err)
+		}
+		if err := (ErrorPagesConfig{Inline: map[string]string{"default": src}}).validate(); err != nil {
+			t.Fatalf("%s: validate must not refuse it: %v", name, err)
+		}
+	}
+	if err := checkErrorPageSrc(strings.Repeat("a", MaxErrorPageTemplateBytes)); err != nil {
+		t.Fatalf("exactly 32 KiB: %v", err)
+	}
+}
+
+// The '#' and ' ' printf flags are refused: they widen a verb past its width.
+func TestErrorPageTemplatePrintfFlagRefusal(t *testing.T) {
+	for _, src := range []string{
+		`{{printf "% #x% #x% #x% #x" .Host .Host .Host .Host}}`,
+		`{{printf "%#x" .Host}}`,
+		`{{printf "% x" .Host}}`,
+		`{{printf "%-#5v" .Status}}`,
+	} {
+		if err := checkErrorPageSrc(src); err == nil || !strings.Contains(err.Error(), "flag") {
+			t.Fatalf("%q: err = %v, want the flag refused", src, err)
+		}
+	}
+	if err := checkErrorPageSrc(`{{printf "%-5s|%+d|%05d|%x" .Host .Status .Status .Host}}`); err != nil {
+		t.Fatalf("other flags: %v", err)
+	}
+}
+
+// The page shapes operators write: static HTML with the four fields, each
+// optionally inside an if on that field.
+func TestErrorPageTemplateRealWorldShapes(t *testing.T) {
+	for _, src := range []string{
+		`<!doctype html><html><head><title>{{.Status}} {{.StatusText}}</title><style>body{font-family:sans-serif}</style></head>` +
+			`<body><h1>{{.Status}} {{.StatusText}}</h1><p>{{.Host}} could not answer.</p><p>Request {{.RequestID}}</p></body></html>`,
+		`<!doctype html><html><body>{{if .Status}}<h1>{{.Status}}</h1>{{end}}{{if .StatusText}}<p>{{.StatusText}}</p>{{end}}` +
+			`{{if .Host}}<p>{{.Host}}</p>{{end}}{{if .RequestID}}<p>Request {{.RequestID}}</p>{{end}}</body></html>`,
+	} {
+		if err := checkErrorPageSrc(src); err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
 	}
 }

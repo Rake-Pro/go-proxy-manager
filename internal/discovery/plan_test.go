@@ -212,6 +212,23 @@ func TestExistingManagedHostKeepsItsDomainAheadOfANewClaimant(t *testing.T) {
 	}
 }
 
+// The domain gate keys on the router's key: an operator host whose stored
+// domain carries a port routes as the bare name, so a discovered host asking
+// for that bare name is skipped instead of taking the operator host's traffic.
+func TestDomainGateKeysOnTheRouterKey(t *testing.T) {
+	operator := host("app", "", "App.example.com:443")
+	cfg := model.Config{ProxyHosts: []model.ProxyHost{operator}}
+	p := Plan(cfg, own("a discovery", "a-discovery"), []Item{
+		{Ref: "ns/ing", Name: "ing", Host: host("ing", "a-discovery", "app.example.com")},
+	})
+	if p.Skipped != 1 || len(p.Upserts) != 0 {
+		t.Fatalf("a discovered host must not claim an operator host's router key: skipped=%d upserts=%+v", p.Skipped, p.Upserts)
+	}
+	if !strings.Contains(p.Hosts[0].Reason, `claimed by proxy host "app"`) {
+		t.Fatalf("reason = %q, want the operator host named", p.Hosts[0].Reason)
+	}
+}
+
 // applyPlan is what ApplyBatch does with a plan, minus the disk: upserts
 // replace by name, except that an upsert of a stored host in unwritable is
 // dropped (the store's unknown-keys skip), deletes remove, and the result is

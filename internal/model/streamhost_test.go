@@ -401,3 +401,34 @@ func TestStreamHostDoesNotEmitRetiredKeys(t *testing.T) {
 		}
 	}
 }
+
+// idleTimeout and maxConnsPerSource are optional TCP limits: a positive
+// duration and a non-negative count, refused on a udp-only host.
+func TestStreamHostTCPLimitsValidation(t *testing.T) {
+	base := func() StreamHost {
+		return StreamHost{ObjectMeta: ObjectMeta{Name: "s"}, ListenPort: 5432, Protocol: "tcp",
+			Target: StreamTarget{Host: "192.0.2.10", Port: 5432}}
+	}
+	ok := base()
+	ok.IdleTimeout, ok.MaxConnsPerSource = "10m", 8
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid limits: %v", err)
+	}
+	ok.Protocol = "both"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid limits on protocol both: %v", err)
+	}
+	for name, mut := range map[string]func(*StreamHost){
+		"bad duration":  func(h *StreamHost) { h.IdleTimeout = "soon" },
+		"zero duration": func(h *StreamHost) { h.IdleTimeout = "0s" },
+		"negative cap":  func(h *StreamHost) { h.MaxConnsPerSource = -1 },
+		"udp idle":      func(h *StreamHost) { h.Protocol = "udp"; h.IdleTimeout = "1m" },
+		"udp cap":       func(h *StreamHost) { h.Protocol = "udp"; h.MaxConnsPerSource = 4 },
+	} {
+		h := base()
+		mut(&h)
+		if err := h.Validate(); err == nil {
+			t.Errorf("%s: want a validation error", name)
+		}
+	}
+}

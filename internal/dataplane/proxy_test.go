@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -455,5 +456,28 @@ func TestAssertedIdentityHeaders(t *testing.T) {
 			t.Errorf("asserted set contains %q twice: %v", n, names)
 		}
 		seen[n] = true
+	}
+}
+
+// An upstream response header block over 1 MiB is refused with 502; a large
+// but ordinary one passes.
+func TestUpstreamResponseHeaderSizeIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		want int
+	}{
+		{64 << 10, http.StatusOK},
+		{2 << 20, http.StatusBadGateway},
+	} {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Big", strings.Repeat("a", tc.size))
+		}))
+		target, _ := url.Parse(backend.URL)
+		rec := httptest.NewRecorder()
+		newProxyWith(target, dataplaneTransport, "app", nil, nil, nil, "").ServeHTTP(rec, httptest.NewRequest("GET", "http://app.example.com/", nil))
+		backend.Close()
+		if rec.Code != tc.want {
+			t.Errorf("%d-byte upstream header: status %d, want %d", tc.size, rec.Code, tc.want)
+		}
 	}
 }

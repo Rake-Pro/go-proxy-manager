@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -814,5 +816,277 @@ func TestGroupWebSocketUpgrade(t *testing.T) {
 	}
 	if snap := m.snapshot()["g"]; len(snap) != 1 || snap[0].Active != 1 {
 		t.Fatalf("snapshot during upgrade = %+v, want one active request", snap)
+	}
+}
+
+// slowBody returns its chunks in order, waiting gap before every chunk after
+// the first.
+type slowBody struct {
+	chunks  []string
+	gap     time.Duration
+	cur     string
+	started bool
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if b.cur == "" {
+		if len(b.chunks) == 0 {
+			return 0, io.EOF
+		}
+		if b.started {
+			time.Sleep(b.gap)
+		}
+		b.started = true
+		b.cur, b.chunks = b.chunks[0], b.chunks[1:]
+	}
+	n := copy(p, b.cur)
+	b.cur = b.cur[n:]
+	return n, nil
+}
+
+func withRetryBuffering(t *testing.T, budget int64, wait time.Duration) {
+	t.Helper()
+	pb, pw := groupRetryBudgetBytes, groupRetryBufWait
+	groupRetryBudgetBytes, groupRetryBufWait = budget, wait
+	t.Cleanup(func() { groupRetryBudgetBytes, groupRetryBufWait = pb, pw })
+}
+
+// A body still arriving groupRetryBufWait after buffering started gets a
+// single attempt, and its buffered prefix is released (memory and budget) as
+// soon as the attempt has read it, not when the request ends.
+func TestGroupRetryBufferBoundedInTime(t *testing.T) {
+	withRetryBuffering(t, groupRetryBudgetBytes, 50*time.Millisecond)
+	base := groupRetryBufInUse.Load()
+	sb := &slowBody{chunks: []string{strings.Repeat("a", 1000), strings.Repeat("b", 10), strings.Repeat("c", 10)}, gap: 100 * time.Millisecond}
+	req := httptest.NewRequest(http.MethodPost, "http://app.example.com/", io.NopCloser(sb))
+
+	src, retriable, err := newBodySource(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriable || src.buf != nil {
+		t.Fatalf("retriable=%v buffered=%d bytes, want a single attempt holding no replay buffer", retriable, len(src.buf))
+	}
+	if groupRetryBufInUse.Load() <= base {
+		t.Fatal("the buffered prefix holds no budget reservation")
+	}
+	body := src.next()
+	prefix := make([]byte, 1010)
+	if _, err := io.ReadFull(body, prefix); err != nil {
+		t.Fatal(err)
+	}
+	if pb, ok := body.(*prefixBody); !ok || pb.prefix != nil {
+		t.Fatal("the attempt body still references the prefix after it was read")
+	}
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use after the prefix was read = %d, want %d", got, base)
+	}
+	rest, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Repeat("a", 1000) + strings.Repeat("b", 10) + strings.Repeat("c", 10); string(prefix)+string(rest) != want {
+		t.Fatalf("attempt body = %d bytes, want the original %d", len(prefix)+len(rest), len(want))
+	}
+	_ = body.Close()
+	src.done()
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use after done = %d, want %d", got, base)
+	}
+}
+
+// A complete small body is replayable and reserves only what its buffer
+// holds, until the round trip is done. With the budget exhausted a body gets
+// a single attempt with nothing buffered.
+func TestGroupRetryBufferBudget(t *testing.T) {
+	withRetryBuffering(t, groupRetryBudgetBytes, time.Minute)
+	base := groupRetryBufInUse.Load()
+	req := httptest.NewRequest(http.MethodPost, "http://app.example.com/", strings.NewReader("hello"))
+	src, retriable, err := newBodySource(req)
+	if err != nil || !retriable || string(src.buf) != "hello" {
+		t.Fatalf("small body: retriable=%v buf=%q err=%v", retriable, src.buf, err)
+	}
+	if got := groupRetryBufInUse.Load() - base; got != int64(cap(src.buf)) {
+		t.Fatalf("small body reserves %d bytes, want its buffer size %d", got, cap(src.buf))
+	}
+	src.done()
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use after done = %d, want %d", got, base)
+	}
+
+	groupRetryBudgetBytes = 0
+	orig := io.NopCloser(strings.NewReader("hello"))
+	req = httptest.NewRequest(http.MethodPost, "http://app.example.com/", nil)
+	req.Body = orig
+	src, retriable, err = newBodySource(req)
+	if err != nil || retriable || src.buf != nil || src.single != orig {
+		t.Fatalf("budget exhausted: retriable=%v buf=%q single is the client body=%v err=%v", retriable, src.buf, src.single == orig, err)
+	}
+	src.done()
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use = %d, want %d", got, base)
+	}
+}
+
+// A replay buffer stays reserved while an attempt body still references it:
+// the transport may go on writing the body after RoundTrip has returned, so
+// the reservation is returned when the last attempt body is closed.
+func TestGroupRetryBufferReleasedWhenAttemptBodiesClose(t *testing.T) {
+	withRetryBuffering(t, groupRetryBudgetBytes, time.Minute)
+	base := groupRetryBufInUse.Load()
+	req := httptest.NewRequest(http.MethodPost, "http://app.example.com/", strings.NewReader("hello"))
+	src, retriable, err := newBodySource(req)
+	if err != nil || !retriable {
+		t.Fatalf("retriable=%v err=%v, want a replayable body", retriable, err)
+	}
+	held := int64(cap(src.buf))
+	first, second := src.next(), src.next()
+	_ = first.Close()
+	src.done()
+	if got := groupRetryBufInUse.Load() - base; got != held {
+		t.Fatalf("budget in use with one attempt body open = %d, want %d", got, held)
+	}
+	if b, err := io.ReadAll(second); err != nil || string(b) != "hello" {
+		t.Fatalf("open attempt body = %q, %v", b, err)
+	}
+	_ = second.Close()
+	_ = second.Close()
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use after every attempt body closed = %d, want %d", got, base)
+	}
+}
+
+// The retry budget counts the buffer a body actually holds, reserved as the
+// buffer grows: request bodies that have sent nothing yet do not use up the
+// budget, so a later small body keeps its failover retry, and every
+// reservation is returned when the stalled bodies end.
+func TestGroupRetryBudgetCountsHeldBytes(t *testing.T) {
+	withRetryBuffering(t, 4*(groupRetryBufBytes+1), time.Minute)
+	base := groupRetryBufInUse.Load()
+	const stalled = 8
+	var writers []*io.PipeWriter
+	errs := make(chan error, stalled)
+	for i := 0; i < stalled; i++ {
+		pr, pw := io.Pipe()
+		writers = append(writers, pw)
+		req := httptest.NewRequest(http.MethodPost, "http://app.example.com/", pr)
+		go func() {
+			_, _, err := newBodySource(req)
+			errs <- err
+		}()
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return groupRetryBufInUse.Load()-base >= stalled*512 }) {
+		t.Fatalf("budget in use = %d, want the stalled bodies' first buffers", groupRetryBufInUse.Load()-base)
+	}
+	if got := groupRetryBufInUse.Load() - base; got != stalled*512 {
+		t.Fatalf("%d stalled bodies reserve %d bytes, want %d (the buffers they hold)", stalled, got, stalled*512)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://app.example.com/", strings.NewReader("hello"))
+	src, retriable, err := newBodySource(req)
+	if err != nil || !retriable || string(src.buf) != "hello" {
+		t.Fatalf("small body next to stalled ones: retriable=%v buf=%q err=%v, want a replayable body", retriable, src.buf, err)
+	}
+	src.done()
+
+	for _, pw := range writers {
+		_ = pw.CloseWithError(errors.New("client went away"))
+	}
+	for i := 0; i < stalled; i++ {
+		if err := <-errs; err == nil {
+			t.Fatal("a body that failed mid-read was prepared without an error")
+		}
+	}
+	if got := groupRetryBufInUse.Load(); got != base {
+		t.Fatalf("budget in use after the stalled bodies ended = %d, want %d", got, base)
+	}
+}
+
+// Uploads through a group keep working on the single-attempt paths: a body
+// that arrives slowly, a large body, and any body while the budget is
+// exhausted all reach the upstream intact.
+func TestGroupUploadsSurviveSingleAttemptPaths(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintf(w, "%d:%s", len(b), b[:min(len(b), 8)])
+	}))
+	defer up.Close()
+	group := model.UpstreamGroup{
+		ObjectMeta:  model.ObjectMeta{Name: "g"},
+		Upstreams:   gups(upstreamOf(t, up)),
+		HealthCheck: model.HealthCheck{IntervalSeconds: 3600},
+	}
+	rt, _ := groupRouter(t, group, false)
+	base := groupRetryBufInUse.Load()
+
+	check := func(name string, body io.Reader, want string) {
+		t.Helper()
+		w := serveGroup(rt, http.MethodPost, "/upload", body)
+		if w.Code != http.StatusOK || w.Body.String() != want {
+			t.Fatalf("%s: %d %q, want 200 %q", name, w.Code, w.Body.String(), want)
+		}
+		if got := groupRetryBufInUse.Load(); got != base {
+			t.Fatalf("%s: budget in use afterwards = %d, want %d", name, got, base)
+		}
+	}
+
+	withRetryBuffering(t, groupRetryBudgetBytes, 50*time.Millisecond)
+	check("slow body", &slowBody{chunks: []string{"aaaa", "bbbb", "cccc"}, gap: 100 * time.Millisecond}, "12:aaaabbbb")
+	big := strings.Repeat("x", 4*groupRetryBufBytes)
+	check("large body", strings.NewReader(big), fmt.Sprintf("%d:xxxxxxxx", len(big)))
+	groupRetryBudgetBytes = 0
+	check("budget exhausted", strings.NewReader("hello"), "5:hello")
+}
+
+// Shutdown waits for a reload in flight before it stops the probers, so a
+// reload never commits probers that shutdown already stopped.
+func TestShutdownWaitsForReloadInFlight(t *testing.T) {
+	s := New(Config{HTTPAddr: "127.0.0.1:0", HTTPSAddr: "127.0.0.1:0", CertDir: t.TempDir()})
+	group := model.UpstreamGroup{
+		ObjectMeta:  model.ObjectMeta{Name: "g"},
+		Upstreams:   gups(deadUpstream(t)),
+		HealthCheck: model.HealthCheck{IntervalSeconds: 3600},
+	}
+	cfg := model.Config{UpstreamGroups: []model.UpstreamGroup{group}}
+	if err := s.Reload(cfg); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Start(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.httpsListening.Load() || !s.httpListening.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("listeners did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	s.reloadMu.Lock() // a reload in flight
+	cancel()
+	select {
+	case <-done:
+		s.reloadMu.Unlock()
+		t.Fatal("shutdown stopped the probers while a reload held the reload lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := len(s.health.snapshot()); n != 1 {
+		t.Errorf("groups during the in-flight reload = %d, want 1", n)
+	}
+	s.reloadMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Start did not return after the reload finished")
+	}
+	if n := len(s.health.snapshot()); n != 0 {
+		t.Errorf("groups after shutdown = %d, want 0", n)
 	}
 }

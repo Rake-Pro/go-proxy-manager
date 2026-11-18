@@ -150,6 +150,10 @@ func (a AdminEdgeSettings) ValidateRefs(cfg Config, externalBaseURL string) erro
 			return nil
 		}
 		for _, d := range domains {
+			// The exact name only. A spelling with a port routes under the same
+			// key; the store handles that one as a domain-key collision (refused
+			// when a write adds it, a warning when stored), so a host stored
+			// with it does not block unrelated writes or skip the front door.
 			if strings.EqualFold(strings.TrimSpace(d), name) {
 				return fmt.Errorf("%s %q: domains: %s is the admin panel's hostname (settings.adminEdge serves it); delete that host or turn adminEdge off", kind, obj, name)
 			}

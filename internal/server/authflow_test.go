@@ -285,6 +285,9 @@ func (e *testEnv) beginLogin(returnTo string) (stateCookie *http.Cookie, state, 
 		e.t.Fatalf("login should redirect to the IdP, got %q", loc)
 	}
 	q := loc.Query()
+	if c := cookie(e.t, res, "__Host-gpm_oidc_state"); c != nil {
+		return c, q.Get("state"), q.Get("nonce")
+	}
 	return mustCookie(e.t, res, "gpm_oidc_state"), q.Get("state"), q.Get("nonce")
 }
 
@@ -730,8 +733,8 @@ func TestSecureCookiesUseHostPrefix(t *testing.T) {
 
 	// Login-state cookie is Secure.
 	stateCookie, state, nonce := e.beginLogin("/")
-	if !stateCookie.Secure {
-		t.Fatal("login-state cookie must be Secure when cookies are secure")
+	if !stateCookie.Secure || stateCookie.Name != "__Host-gpm_oidc_state" || stateCookie.Path != "/" {
+		t.Fatalf("login-state cookie must be Secure, __Host- named and Path=/ when cookies are secure: %+v", stateCookie)
 	}
 	e.idp.setClaims(map[string]any{"nonce": nonce, "groups": []string{"proxy-admins"}})
 	res := e.callback(state, "code", stateCookie)
@@ -937,17 +940,17 @@ func TestLoginFormBodyIsCapped(t *testing.T) {
 	}
 }
 
-// The admin listener closes idle keep-alive connections and bounds header
-// reads, but sets no whole-request read or write deadline, which would cut off
-// long-running admin responses and uploads.
+// The admin listener closes idle keep-alive connections, bounds header reads
+// and request reads, but sets no write deadline, which would cut off
+// long-running admin responses.
 func TestAdminServerTimeouts(t *testing.T) {
 	e := newTestEnv(t, envOpts{})
 	h := e.srv.http
 	if h.IdleTimeout <= 0 || h.ReadHeaderTimeout <= 0 {
 		t.Fatalf("IdleTimeout=%v ReadHeaderTimeout=%v, want both set", h.IdleTimeout, h.ReadHeaderTimeout)
 	}
-	if h.ReadTimeout != 0 || h.WriteTimeout != 0 {
-		t.Fatalf("ReadTimeout=%v WriteTimeout=%v, want neither set", h.ReadTimeout, h.WriteTimeout)
+	if h.ReadTimeout <= 0 || h.WriteTimeout != 0 {
+		t.Fatalf("ReadTimeout=%v WriteTimeout=%v, want ReadTimeout set and no WriteTimeout", h.ReadTimeout, h.WriteTimeout)
 	}
 }
 
@@ -993,5 +996,30 @@ func TestLoginRefusesProviderNotInAdminList(t *testing.T) {
 		if cookie(t, res, "gpm_oidc_state") != nil {
 			t.Fatalf("idp=%s: a refused login start must not set a state cookie", idp)
 		}
+	}
+}
+
+// On a Secure request the login-state cookie is __Host- named, so one planted
+// by a sibling host under the same parent domain (which cannot carry that
+// prefix) is never read, and the callback tries every cookie of the name, so an
+// extra one sent first does not hide the real one.
+func TestLoginStateCookieCannotBePlantedBySibling(t *testing.T) {
+	e := newTestEnv(t, envOpts{secure: true})
+
+	// Another browser's (or an attacker's) genuinely signed state.
+	foreign, foreignState, _ := e.beginLogin("/")
+	res := e.callback(foreignState, "code", &http.Cookie{Name: "gpm_oidc_state", Value: foreign.Value})
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a signed state under the bare name on a Secure request: got %d, want 400", res.StatusCode)
+	}
+
+	own, state, nonce := e.beginLogin("/")
+	e.idp.setClaims(map[string]any{"nonce": nonce, "groups": []string{"proxy-admins"}})
+	res = e.callback(state, "code",
+		&http.Cookie{Name: "gpm_oidc_state", Value: "planted"},
+		&http.Cookie{Name: "__Host-gpm_oidc_state", Value: "stale"},
+		own)
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("callback with extra cookies of the same name sent first: got %d, want 302", res.StatusCode)
 	}
 }

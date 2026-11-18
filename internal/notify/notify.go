@@ -373,6 +373,13 @@ func ntfyTag(sev string) string {
 type discordPayload struct {
 	Content string         `json:"content,omitempty"`
 	Embeds  []discordEmbed `json:"embeds,omitempty"`
+	// AllowedMentions with an empty parse list disables every mention, so
+	// event text that happens to contain one never pings anyone.
+	AllowedMentions *discordAllowedMentions `json:"allowed_mentions,omitempty"`
+}
+
+type discordAllowedMentions struct {
+	Parse []string `json:"parse"`
 }
 
 type discordEmbed struct {
@@ -406,6 +413,7 @@ func buildDiscordRequest(ctx context.Context, t model.NotificationTarget, ev Eve
 			Color:       discordColor(ev.Severity),
 			Fields:      fields,
 		}},
+		AllowedMentions: &discordAllowedMentions{Parse: []string{}},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

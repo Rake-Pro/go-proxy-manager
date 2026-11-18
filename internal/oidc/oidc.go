@@ -6,11 +6,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
+
+// ErrEmailNotVerified is returned by Exchange when RequireVerifiedEmail is set
+// and the ID token does not carry email_verified: true.
+var ErrEmailNotVerified = errors.New("email not verified")
 
 // Config holds the configuration for an OIDC Client.
 type Config struct {
@@ -146,7 +151,7 @@ func (c *Client) Exchange(ctx context.Context, code, verifier, expectedNonce str
 	claims.AMR = stringSlice(raw["amr"])
 
 	if c.cfg.RequireVerifiedEmail && !claims.EmailVerified {
-		return nil, fmt.Errorf("email not verified")
+		return nil, ErrEmailNotVerified
 	}
 
 	return claims, nil

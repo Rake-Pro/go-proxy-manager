@@ -1,8 +1,11 @@
 package accesssync
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,8 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // memLedger is the in-memory Ledger the tests run against: it records how many
@@ -170,6 +175,13 @@ func TestFetchRefusals(t *testing.T) {
 			name: "over maxEntries", status: http.StatusOK,
 			body: "203.0.113.1\n203.0.113.2\n203.0.113.3\n",
 			src:  model.AccessListSource{MaxEntries: 2}, wantErr: "more than maxEntries",
+		},
+		{
+			// Each /8 passes the per-entry guard; together they exceed the
+			// one-/8 budget a maxCoverage with no family set applies.
+			name: "over the coverage budget", status: http.StatusOK,
+			body: "11.0.0.0/8\n12.0.0.0/8\n",
+			src:  model.AccessListSource{MaxCoverage: &model.AccessListSourceCoverage{}}, wantErr: "coverage budget",
 		},
 	}
 	for _, tt := range tests {
@@ -598,6 +610,138 @@ func TestParseEntries(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Fatalf("entries = %v, want %v", got, tt.want)
 				}
+			}
+		})
+	}
+}
+
+// With maxCoverage set, a feed may cover at most that budget per family, summed
+// over its entries, so many individually acceptable prefixes cannot add up to
+// most of the internet; a family left at 0 is bounded at one /8 of IPv4 or one
+// /24 of IPv6. Without maxCoverage there is no budget.
+func TestCheckCoverage(t *testing.T) {
+	nets := func(cidrs ...string) []*net.IPNet {
+		var out []*net.IPNet
+		for _, c := range cidrs {
+			_, n, err := net.ParseCIDR(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	var slash8s []string
+	for a := 1; a <= 9; a++ {
+		slash8s = append(slash8s, fmt.Sprintf("%d.0.0.0/8", a))
+	}
+	set := &model.AccessListSourceCoverage{}
+	tests := []struct {
+		name string
+		nets []*net.IPNet
+		cov  *model.AccessListSourceCoverage
+		ok   bool
+	}{
+		{"no maxCoverage: many /8s", nets(slash8s...), nil, true},
+		{"no maxCoverage: more than a /24 of IPv6", nets("2a00::/24", "2a01::/32"), nil, true},
+		{"single addresses", nets("203.0.113.1/32", "198.51.100.0/24", "2001:db8::1/128"), set, true},
+		{"exactly one /8 of IPv4", nets("11.0.0.0/9", "12.0.0.0/9"), set, true},
+		{"CDN-sized IPv4 and IPv6", nets("11.0.0.0/13", "12.0.0.0/13", "13.0.0.0/14", "14.0.0.0/15",
+			"2001:db8::/32", "2001:db9::/32", "2001:dba::/29"), set, true},
+		{"many /8s", nets(slash8s...), set, false},
+		{"one /8 plus one address", nets("11.0.0.0/8", "203.0.113.1/32"), set, false},
+		{"many /8s under a raised budget", nets(slash8s...), &model.AccessListSourceCoverage{IPv4: 4}, true},
+		{"more than a /24 of IPv6", nets("2a00::/24", "2a01::/32"), set, false},
+		{"IPv6 bounded when only ipv4 is set", nets("2a00::/24", "2a01::/32"), &model.AccessListSourceCoverage{IPv4: 4}, false},
+		{"IPv6 under a raised budget", nets("2a00::/24", "2a01::/32"), &model.AccessListSourceCoverage{IPv6: 20}, true},
+		{"a lowered budget", nets("203.0.113.0/24", "198.51.100.0/24"), &model.AccessListSourceCoverage{IPv4: 24}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckCoverage(tt.nets, model.AccessListSource{MaxCoverage: tt.cov})
+			if (err == nil) != tt.ok {
+				t.Fatalf("CheckCoverage = %v, want ok=%v", err, tt.ok)
+			}
+		})
+	}
+}
+
+// A broad feed on a source without maxCoverage is stored and served exactly as
+// before the coverage budget existed, and the fetch logs a warning that names
+// maxCoverage. A narrow feed logs nothing.
+func TestBroadSourceWithoutMaxCoverageIsAcceptedAndWarned(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		warn       bool
+	}{
+		{"broad", "11.0.0.0/8\n12.0.0.0/8\n2001:db8::1\n", true},
+		{"narrow", "203.0.113.1\n198.51.100.0/24\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Logger
+			log.Logger = zerolog.New(&buf)
+			t.Cleanup(func() { log.Logger = prev })
+
+			ts := serving(t, http.StatusOK, tt.body)
+			led := &memLedger{}
+			s := testSyncer(t, ts, model.AccessListSource{Name: "feed"}, led)
+			if err := s.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if st := s.Status(); st.Refused != 0 {
+				t.Fatalf("a source without maxCoverage must not be refused for coverage: %+v", st.Sources)
+			}
+			l, _ := led.state()
+			if len(l.Sources) != 1 || len(l.Sources[0].Entries) == 0 {
+				t.Fatalf("the fetched set must be stored: %+v", l)
+			}
+			if got := strings.Contains(buf.String(), "maxCoverage"); got != tt.warn {
+				t.Fatalf("broad-feed warning logged = %v, want %v; log: %s", got, tt.warn, buf.String())
+			}
+		})
+	}
+}
+
+// A source URL may carry a token in its query; refusal log lines name only the
+// host, and a transport failure does not repeat the URL.
+func TestRefusedFetchLogOmitsSourceURLQuery(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		closed bool
+	}{
+		{"http error", false},
+		{"transport error", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Logger
+			log.Logger = zerolog.New(&buf)
+			t.Cleanup(func() { log.Logger = prev })
+
+			ts := serving(t, http.StatusInternalServerError, "")
+			src := model.AccessListSource{Name: "feed", URL: ts.URL + "/list?token=s3cr3t-value"}
+			cfg := model.Config{AccessLists: []model.AccessList{{
+				ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
+				Sources:    []model.AccessListSource{src},
+				Rules:      []model.IPRule{{Action: model.ActionAllow, Source: src.Name, Paths: []string{"/health"}}},
+			}}}
+			s := New(func(context.Context) (model.Config, model.Settings, error) {
+				return cfg, model.Settings{}, nil
+			}, &memLedger{}, nil)
+			s.client = ts.Client()
+			if tt.closed {
+				ts.Close()
+			}
+			_ = s.Reconcile(context.Background())
+			if st := s.Status(); st.Refused != 1 {
+				t.Fatalf("refused = %d, want 1", st.Refused)
+			}
+			if strings.Contains(buf.String(), "s3cr3t-value") || strings.Contains(buf.String(), "/list") {
+				t.Errorf("log line carries the source URL path or query: %s", buf.String())
+			}
+			if !strings.Contains(buf.String(), strings.TrimPrefix(ts.URL, "https://")) {
+				t.Errorf("log line does not name the source host: %s", buf.String())
 			}
 		})
 	}

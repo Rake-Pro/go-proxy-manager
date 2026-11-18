@@ -133,7 +133,10 @@ Two modes, one choice, decided by where gpm itself runs.
   with a warning, never overwritten.
 - Ownership covers the **domain** as well as the name: a derived host whose
   domains include one already claimed by a host this reconciler does not own is
-  skipped, with the owner and its kind named in the status `reason`.
+  skipped, with the owner and its kind named in the status `reason`. If the
+  skipped host already exists, it keeps its current domains, but a stored chain
+  that differs from the resolved profile is restamped on them, and a stored
+  domain the profile no longer allows disables it, as for a bad label below.
 - A derived host can take a new domain in one reconcile when that domain is free
   or is released by another derived host updated or deleted in the same commit,
   which covers a swap or a longer cycle; a host that cannot move is skipped,

@@ -110,6 +110,10 @@ type Deps struct {
 	// RevokeSSOSessions, if set, invalidates every outstanding data-plane SSO
 	// session (POST /sso/revoke). May be nil (endpoint responds 501).
 	RevokeSSOSessions func() error
+	// RevokeAdminSessions, if set, ends every admin session except keepID and
+	// returns how many it ended (POST /sessions/revoke). May be nil (endpoint
+	// responds 501).
+	RevokeAdminSessions func(ctx context.Context, keepID string) (int, error)
 	// RequireScope, if set, gates every route on the calling principal's API
 	// token scopes, returning a non-nil error to refuse (403). It is injected
 	// rather than imported so the API stays testable unauthenticated.
@@ -377,6 +381,33 @@ func (d Deps) guardSecretDestination(r *http.Request, cfg model.Config, obj mode
 	return obj, nil, fmt.Errorf("%w: a bouncer that sends a secret placeholder to a URL may only be created, or have its url or apiKey changed, by an admin", errAdminRequired)
 }
 
+// guardACMEDestination is the certificates' beforeSave: acme.directoryURL
+// chooses where gpm sends its ACME requests, and acme.eab pairs a
+// ${ENV:}/${FILE:} HMAC key with that destination, so setting either, or
+// changing either on a stored certificate, needs the admin scope (issue #49,
+// as guardSecretDestination). Every other certificate write, an edit that
+// keeps both as stored, and one that clears them stay on certificates:write.
+func (d Deps) guardACMEDestination(r *http.Request, cfg model.Config, obj model.Certificate) (model.Certificate, map[string]any, error) {
+	if obj.ACME == nil || (obj.ACME.DirectoryURL == "" && obj.ACME.EAB == nil) || d.allows(r, model.ScopeAdmin) {
+		return obj, nil, nil
+	}
+	var cur *model.ACMESpec
+	for _, c := range cfg.Certificates {
+		if c.Name == obj.Name {
+			cur = c.ACME
+		}
+	}
+	if cur == nil {
+		cur = &model.ACMESpec{}
+	}
+	urlKept := obj.ACME.DirectoryURL == "" || obj.ACME.DirectoryURL == cur.DirectoryURL
+	eabKept := obj.ACME.EAB == nil || (cur.EAB != nil && *obj.ACME.EAB == *cur.EAB)
+	if urlKept && eabKept {
+		return obj, nil, nil
+	}
+	return obj, nil, fmt.Errorf("%w: acme.directoryURL and acme.eab may only be set or changed by an admin", errAdminRequired)
+}
+
 // redactSettingsURLs returns a copy of settings with the path and query of
 // every webhook and notification target URL replaced, for a caller without the
 // admin scope. The slices are copied so the loaded settings are untouched.
@@ -463,7 +494,7 @@ func New(d Deps) http.Handler {
 	register(mux, d, "proxy-hosts", resource[model.ProxyHost]{
 		kind: "ProxyHost",
 		list: func(c model.Config) []model.ProxyHost { return c.ProxyHosts },
-		decode: func(b []byte, name string) (model.ProxyHost, error) {
+		decodeCtx: func(ctx context.Context, b []byte, name string) (model.ProxyHost, error) {
 			var v model.ProxyHost
 			if err := json.Unmarshal(b, &v); err != nil {
 				return v, err
@@ -473,7 +504,7 @@ func New(d Deps) http.Handler {
 			// its locations, may carry plaintext passwords the stored object has
 			// no field for; hash them here on exactly the terms a `type: auth`
 			// middleware write gets.
-			return v, applyHostBasicAuthPasswords(b, &v)
+			return v, applyHostBasicAuthPasswords(ctx, b, &v)
 		},
 	})
 	register(mux, d, "redirect-hosts", resource[model.RedirectHost]{
@@ -519,7 +550,8 @@ func New(d Deps) http.Handler {
 		// /certificates and GET /certificates/{name} report (see certhealth.go).
 		// It is runtime state derived from the cert store on disk, never part of
 		// the stored object.
-		decorate: d.decorateCertificate,
+		decorate:   d.decorateCertificate,
+		beforeSave: d.guardACMEDestination,
 	})
 	// Force an immediate ACME order for one certificate, bypassing the normal
 	// 30-day renewal window. See certhealth.go.
@@ -623,7 +655,7 @@ func New(d Deps) http.Handler {
 		beforeSave:  d.guardSecretDestination,
 		revertScope: model.ScopeAdmin,
 		list:        func(c model.Config) []model.Middleware { return c.Middlewares },
-		decode: func(b []byte, name string) (model.Middleware, error) {
+		decodeCtx: func(ctx context.Context, b []byte, name string) (model.Middleware, error) {
 			var v model.Middleware
 			if err := json.Unmarshal(b, &v); err != nil {
 				return v, err
@@ -632,7 +664,7 @@ func New(d Deps) http.Handler {
 			// A `mode: basic` write may carry plaintext passwords the stored
 			// object has no field for; hash them here so only passwordHash is
 			// ever validated, committed or echoed back.
-			return v, applyBasicAuthPasswords(b, v.Auth)
+			return v, applyBasicAuthPasswords(ctx, b, v.Auth)
 		},
 	})
 
@@ -953,6 +985,24 @@ func New(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	}))
 
+	// End every admin session but the caller's own (incident response, or after
+	// withdrawing someone's admin access). A token caller has no session, so it
+	// ends all of them. Sessions live in this instance's session store, not in
+	// the config, so the route also works on an HA follower (see followerSafe).
+	mux.HandleFunc("POST /sessions/revoke", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		if d.RevokeAdminSessions == nil {
+			writeErr(w, http.StatusNotImplemented, fmt.Errorf("admin session revocation is not wired"))
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		n, err := d.RevokeAdminSessions(r.Context(), p.SessionID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "revoked", "revoked": n})
+	}))
+
 	// Whole-config reads (config dump, repo history) expose every object at once,
 	// so they need the wildcard read scope - no single resource scope is enough.
 	mux.HandleFunc("GET /config", d.scoped("*:read", func(w http.ResponseWriter, r *http.Request) {
@@ -1114,6 +1164,9 @@ func New(d Deps) http.Handler {
 	// Restore the whole config from an uploaded archive (replaces current config,
 	// validated, committed as one revision; rolled back if it does not validate).
 	mux.HandleFunc("POST /restore", d.scoped(model.ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		// An archive of up to maxArchiveBody may take longer than the admin
+		// server's ReadTimeout on a slow link; lift it for this admin request.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveBody))
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1257,14 +1310,15 @@ func followerReadOnly(next http.Handler) http.Handler {
 
 // followerSafe reports a non-GET request that only reads: a PUT dry run and
 // the YAML parse route. Both are what the admin UI's creation wizard uses, and
-// a warm standby previews exactly as the leader would.
+// a warm standby previews exactly as the leader would. Ending admin sessions is
+// also allowed: it changes this instance's session store, not the config.
 func followerSafe(r *http.Request) bool {
 	switch r.Method {
 	case http.MethodPut:
 		dry, err := dryRunParam(r)
 		return err == nil && dry
 	case http.MethodPost:
-		return strings.HasSuffix(r.URL.Path, "/_parse")
+		return strings.HasSuffix(r.URL.Path, "/_parse") || strings.HasSuffix(r.URL.Path, "/sessions/revoke")
 	}
 	return false
 }
@@ -1274,6 +1328,10 @@ type resource[T model.Object] struct {
 	kind   string
 	list   func(model.Config) []T
 	decode func(body []byte, name string) (T, error) // json.Unmarshal then set Name=name
+	// decodeCtx replaces decode for a kind whose decode does request-bound work
+	// (bcrypt hashing of plaintext passwords), so that work stops when the
+	// request is cancelled.
+	decodeCtx func(ctx context.Context, body []byte, name string) (T, error)
 
 	// readScope/writeScope override the default "<plural>:read"/"<plural>:write"
 	// API-token scopes for this resource. api-tokens sets both to "admin": a
@@ -1299,6 +1357,13 @@ type resource[T model.Object] struct {
 	// It sees the request so it can vary what it attaches by caller scope (e.g.
 	// certStatusError, which only shows an admin caller the raw ACME error).
 	decorate func(T, *http.Request) any
+}
+
+func (res resource[T]) decodeFor(ctx context.Context, body []byte, name string) (T, error) {
+	if res.decodeCtx != nil {
+		return res.decodeCtx(ctx, body, name)
+	}
+	return res.decode(body, name)
 }
 
 func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res resource[T]) {
@@ -1358,7 +1423,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		obj, err := res.decode(body, name)
+		obj, err := res.decodeFor(r.Context(), body, name)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
@@ -1470,7 +1535,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, fmt.Errorf("the YAML cannot be represented as a JSON object: %w", err))
 			return
 		}
-		obj, err := res.decode(jsonBody, name)
+		obj, err := res.decodeFor(r.Context(), jsonBody, name)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return

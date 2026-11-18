@@ -146,11 +146,11 @@ func ValidatePlan(name string, req GenerateRequest) (GenerateRequest, error) {
 	// Confinement is then checked authoritatively by building the object this call
 	// will produce and running the real validator over it, rather than trusting
 	// the shortcut above to stay exhaustive. The placeholder caPEM stands in for
-	// the certificate that does not exist yet; Validate only requires it to be
-	// non-empty (the parse check is deferred to data-plane compile, as it is for
-	// any ClientCA).
+	// the certificate that does not exist yet; the probe is marked disabled so
+	// Validate only requires it to be non-empty (an enabled CA's inline caPEM
+	// must parse, which the placeholder cannot).
 	probe := model.ClientCA{
-		ObjectMeta: model.ObjectMeta{Name: name},
+		ObjectMeta: model.ObjectMeta{Name: name, Disabled: true},
 		CAPEM:      "placeholder",
 		CAKeyFile:  keyRel,
 	}

@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -41,6 +42,13 @@ type errorPageData struct {
 // nothing, so callers can treat "not configured" and "configured but empty" the
 // same way. A parse (or unreadable dir) error is returned verbatim, naming the
 // offending file/status, so the reload it is part of fails with a clear message.
+// A template outside the allow-list (model.CheckErrorPageTemplate) is skipped with
+// a warning instead, as if it were not configured, so a stored template or a
+// file changed out of band never fails a reload or the start; writes of a new
+// such inline template are refused before they are stored. Each accepted
+// template is executed once here (warmErrorPage), so its one-time escaping
+// cost is paid when the config is built, not by the first request; one that
+// fails to execute is skipped the same way.
 func compileErrorPages(cfg model.ErrorPagesConfig, certDir string) (*compiledErrorPages, error) {
 	if cfg.Dir == "" && len(cfg.Inline) == 0 {
 		return nil, nil
@@ -63,9 +71,20 @@ func compileErrorPages(cfg model.ErrorPagesConfig, certDir string) (*compiledErr
 				continue
 			}
 			name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+			// The size limit of the check, applied before the file is read.
+			if info, err := e.Info(); err == nil && info.Size() > model.MaxErrorPageTemplateBytes {
+				log.Warn().Str("file", e.Name()).Str("dir", cfg.Dir).Int64("bytes", info.Size()).
+					Msgf("dataplane: error page template over %d bytes skipped; the next fallback page is served instead", model.MaxErrorPageTemplateBytes)
+				continue
+			}
 			tmpl, err := template.ParseFiles(filepath.Join(base, e.Name()))
 			if err != nil {
 				return nil, fmt.Errorf("errorPages.dir: parsing %q: %w", e.Name(), err)
+			}
+			if err := warmErrorPage(tmpl); err != nil {
+				log.Warn().Err(err).Str("file", e.Name()).Str("dir", cfg.Dir).
+					Msg("dataplane: error page template skipped; the next fallback page is served instead")
+				continue
 			}
 			if name == "default" {
 				cep.def = tmpl
@@ -83,6 +102,11 @@ func compileErrorPages(cfg model.ErrorPagesConfig, certDir string) (*compiledErr
 		if err != nil {
 			return nil, fmt.Errorf("errorPages.inline[%q]: %w", key, err)
 		}
+		if err := warmErrorPage(tmpl); err != nil {
+			log.Warn().Err(err).Str("inline", key).
+				Msg("dataplane: error page template skipped; the next fallback page is served instead")
+			continue
+		}
 		if key == "default" {
 			cep.def = tmpl
 			continue
@@ -95,6 +119,25 @@ func compileErrorPages(cfg model.ErrorPagesConfig, certDir string) (*compiledErr
 	}
 	return cep, nil
 }
+
+// warmErrorPage runs model.CheckErrorPageTemplate, then executes tmpl once
+// through the capped render with the longest field values gpm supplies (an
+// object name of 253 bytes, the longest status text, a 16-character request
+// ID), so html/template's escaping and any execution error happen here.
+// Reaching the output cap is not an error here: the request path falls back
+// for that page as it always has.
+func warmErrorPage(tmpl *template.Template) error {
+	if err := model.CheckErrorPageTemplate(tmpl); err != nil {
+		return err
+	}
+	_, err := renderTemplate(tmpl, http.StatusNetworkAuthenticationRequired, warmHost, "0123456789abcdef")
+	if err != nil && !errors.Is(err, errErrorPageTooLarge) {
+		return fmt.Errorf("error page template does not execute: %w", err)
+	}
+	return nil
+}
+
+var warmHost = strings.Repeat("h", 253)
 
 // globalErrorPages is the settings-level compiled pages, set once per config
 // reload via SetErrorPages and consulted live by every host that does not
@@ -144,10 +187,32 @@ func resolveTemplate(hostEP *compiledErrorPages, status int) *template.Template 
 	return lookupTemplate(currentErrorPages(), status)
 }
 
+// maxErrorPageBytes bounds one rendered error page. Execution stops at the
+// first write past it and the caller falls back to the built-in response, so a
+// template that expands without limit cannot grow a buffer per request.
+const maxErrorPageBytes = 1 << 20
+
+var errErrorPageTooLarge = fmt.Errorf("error page template output exceeds %d bytes", maxErrorPageBytes)
+
+// cappedBuffer is a bytes.Buffer that refuses a write that would take it past
+// max bytes.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errErrorPageTooLarge
+	}
+	return b.Buffer.Write(p)
+}
+
 // renderTemplate executes tmpl into a buffer first (never partially written on
-// a template error) and returns the rendered bytes.
+// a template error) and returns the rendered bytes. Output past
+// maxErrorPageBytes is an error.
 func renderTemplate(tmpl *template.Template, status int, host, requestID string) ([]byte, error) {
-	var buf bytes.Buffer
+	buf := cappedBuffer{max: maxErrorPageBytes}
 	data := errorPageData{Status: status, StatusText: http.StatusText(status), Host: host, RequestID: requestID}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, err

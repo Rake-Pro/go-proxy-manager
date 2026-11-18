@@ -205,13 +205,21 @@ updates, no deletes:
 | Any non-`200` status | abort, status error |
 | JSON decode failure on any page | abort, status error |
 | A pagination page fails after earlier pages succeeded | abort, status error: the partial accumulation is **discarded**, never returned |
-| Pagination exceeds the page/item safety cap | abort, status error (never a silent truncation) |
+| Pagination exceeds the object, byte or request safety cap | abort, status error (never a silent truncation) |
 
 The last two are the ones that matter: a partial list is exactly the input that
 would make freeze-vs-delete go wrong, so the client never returns partial data
 with a nil error. `ListIngresses` returns `([]Ingress, error)` and the
 accumulator is only returned when the `continue` token has been followed to
 exhaustion.
+
+The caps count what a list holds, not how many requests it took: at most 10000
+objects and 800 MiB of kept page bodies, plus 20000 requests so that empty
+pages with a `continue` token cannot hold the list. A page whose body
+overflows the 8 MiB per-response cap is asked for again with `limit` 10, then
+1, and the reduced limit is kept for the following pages; it steps back up one
+level after 10 pages in a row succeed. Large objects therefore cost one request
+each instead of two capped reads per page, and do not use up a page budget.
 
 ### Making "empty list" and "error" impossible to confuse
 
@@ -247,7 +255,9 @@ host is left exactly as-is rather than deleted. Deletion follows only from
 *absence* from a healthy list, never from a parse failure. One bad manifest edit
 must not take a host offline. (Section 5a lists the two cases where a derive
 failure disables the host instead: an unknown profile, and a stored chain that
-differs from what the resolved profile renders.)
+differs from what the resolved profile renders. An existing host skipped for a
+domain conflict gets the same test: a stale chain is restamped on its current
+domains, a stored domain the profile no longer allows disables it.)
 
 Status distinguishes `lastRun` from `lastSuccess`, so a UI that shows "last run
 2 minutes ago" cannot hide "last successful run 6 hours ago".
@@ -481,7 +491,9 @@ operational cost is.
 - **B. Operator-defined named profiles, selected by annotation.** The operator
   writes N chains in settings; an Ingress names one.
 - **C. Selector-based mapping.** Operator writes rules in settings
-  (`namespace == x AND label y => profile p`). Nothing on the Ingress at all.
+  (`namespace == x AND label y => profile p`). Nothing the author writes on the
+  Ingress selects anything, as long as the rule matches on the namespace: the
+  labels a rule can match are written by the Ingress author too.
 
 ### Decision: **B: named profiles, selected by name only.**
 
@@ -515,7 +527,11 @@ The mitigation for the residual is that you only define profiles you are willing
 for any annotating tenant to select; if that is too coarse, option C is the
 escalation path.
 
-Option C is strictly stronger (nothing on the Ingress selects anything) but
+Option C is strictly stronger when a rule matches on the namespace, which the
+author cannot choose. A rule that matches on `matchLabels` alone is not: labels
+are written with the same RBAC as annotations, so such a rule is the annotation
+under another name, and gpm logs a warning for it (it stays valid; requiring a
+namespace on every rule would break label-only rules in use). It also
 inverts the ergonomics: the operator has to maintain a rule table that mirrors
 the cluster's shape, and every new service needs a settings commit before it can
 be published, which is most of the toil discovery exists to remove. **Shipped**

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog/log"
 
@@ -94,7 +95,8 @@ func (r *logRing) add(e AccessEntry) {
 func (r *logRing) clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.buf = r.buf[:0]
+	// A fresh slice, so the cleared entries are no longer reachable.
+	r.buf = nil
 	r.n = 0
 }
 
@@ -221,8 +223,11 @@ func (hs *handlerSwitch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dataHandler builds one listener's swappable chain: the plain dispatch handler
 // and its observed wrapper are constructed once, and SetAccessLog picks the
-// active side at runtime.
+// active side at runtime. Both sides count requests against the per-client
+// in-flight limit (see limitInFlight), inside the observer so a refusal is
+// logged and counted like any other response.
 func (s *Server) dataHandler(dispatch http.HandlerFunc) *handlerSwitch {
+	dispatch = s.limitInFlight(dispatch)
 	return newHandlerSwitch(dispatch, s.observe(dispatch), s.observeActive())
 }
 
@@ -373,14 +378,18 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			}
 		}
 
+		// Client-sized strings are clipped for the ring and the log line alike.
+		method, host, path := logMethod(r.Method), logHost(r.Host), logPath(r.URL.Path)
+
 		// Capture into the in-memory ring for the /api/logs viewer. Only when access
-		// logging is on, so the default (off) path stays allocation-free.
+		// logging is on, so the default (off) path stays allocation-free. The
+		// strings are copied so an entry does not keep the request line alive.
 		if accessLog && s.logBuf != nil {
 			s.logBuf.add(AccessEntry{
 				Time:    start,
-				Method:  r.Method,
-				Host:    hostOnly(r.Host),
-				Path:    r.URL.Path,
+				Method:  strings.Clone(method),
+				Host:    strings.Clone(host),
+				Path:    strings.Clone(path),
 				Status:  status,
 				Bytes:   obs.bytes,
 				DurMs:   dur.Milliseconds(),
@@ -395,9 +404,9 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			ev = log.Warn()
 		}
 		ev = ev.Str("component", "access").
-			Str("method", r.Method).
-			Str("host", hostOnly(r.Host)).
-			Str("path", r.URL.Path).
+			Str("method", method).
+			Str("host", host).
+			Str("path", path).
 			Int("status", status).
 			Int64("bytes", obs.bytes).
 			Dur("dur", dur).
@@ -458,6 +467,38 @@ func peerAddr(r *http.Request) string {
 	}
 	return r.RemoteAddr
 }
+
+// Length bounds for request strings stored in the access-log ring or written
+// to a log line. The request line and headers may be up to the listener's
+// header limit long; a value over its bound is cut and marked with "...".
+const (
+	logMethodMax = 16
+	logHostMax   = 253
+	logPathMax   = 2048
+)
+
+func clipLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	// Cut at a rune boundary so a clipped value never ends in a partial
+	// UTF-8 sequence. A sequence that crosses n starts at most utf8.UTFMax-1
+	// bytes back; when none does, the input is not valid UTF-8 there and is
+	// cut at n.
+	for i := n; i >= 0 && n-i < utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			if _, size := utf8.DecodeRuneInString(s[i:]); size > n-i {
+				return s[:i] + "..."
+			}
+			break
+		}
+	}
+	return s[:n] + "..."
+}
+
+func logMethod(m string) string { return clipLog(m, logMethodMax) }
+func logHost(h string) string   { return clipLog(hostOnly(h), logHostMax) }
+func logPath(p string) string   { return clipLog(p, logPathMax) }
 
 func hostOnly(h string) string {
 	if i := strings.IndexByte(h, ':'); i >= 0 {

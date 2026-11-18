@@ -16,7 +16,7 @@ There are two ways to get one, and the UI presents them as the either/or they ar
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="client-ca-ca-pem"></span>  `caPEM` | string | yes | PEM CA bundle (one or more certificates). Public material, so it may be inline; a `${FILE:...}` / `${ENV:...}` placeholder also works. Must parse to at least one certificate at load. |
+| <span id="client-ca-ca-pem"></span>  `caPEM` | string | yes | PEM CA bundle (one or more certificates). Public material, so it may be inline; a `${FILE:...}` / `${ENV:...}` placeholder also works. Must parse to at least one certificate: an inline bundle is checked when the object is written (unless the CA is disabled), a placeholder when it is loaded. |
 | <span id="client-ca-crl-file"></span>  `crlFile` | string | no | Certificate revocation list, PEM or DER, **relative to the cert store** (absolute paths and `..` are rejected, like a custom certificate's files). Re-read on every config reload and within 5 minutes of the file's mtime changing. |
 | <span id="client-ca-crl-pem"></span>  `crlPEM` | string | no | Inline PEM CRL, for a small list kept in git. Mutually exclusive with `crlFile`; changes only on a config reload. |
 | <span id="client-ca-crl-policy"></span>  `crlPolicy` | string | no | `fail-closed` (default) or `fail-open`: what happens when a configured CRL is unusable. Only valid alongside `crlFile`/`crlPEM`. |

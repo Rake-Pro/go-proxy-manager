@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // ErrPathNotInCommit is returned by RestorePath when the requested path does not
@@ -41,7 +42,23 @@ type Author struct {
 }
 
 func (a Author) normalised() Author {
-	if a.Name == "" {
+	// The fields come from the principal (an IdP claim, a token name) and end
+	// up in git's environment and commit header: drop control characters,
+	// which make exec refuse the environment (NUL) or split history parsing,
+	// and the angle brackets that delimit the email in the header.
+	clean := func(s string) string {
+		return strings.TrimSpace(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || r == '<' || r == '>' {
+				return -1
+			}
+			return r
+		}, s))
+	}
+	a.Name, a.Email = clean(a.Name), clean(a.Email)
+	// git refuses a name made only of the characters it strips from an
+	// ident's ends (spaces and . , : ; < > " \ '), so such a name gets the
+	// default instead of failing the commit.
+	if strings.TrimFunc(a.Name, func(r rune) bool { return r <= ' ' || strings.ContainsRune(".,:;<>\"\\'", r) }) == "" {
 		a.Name = "go-proxy-manager"
 	}
 	if a.Email == "" {
@@ -125,9 +142,12 @@ func (g *execGit) run(ctx context.Context, env []string, args ...string) (string
 	// Fixed argv (no shell): literal git binary, repo dir from server config,
 	// args are internal literals from the GitRepo methods.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
-	if env != nil {
-		cmd.Env = env
+	// Every call runs under execEnv, so no git invocation reads the system
+	// config or prompts.
+	if env == nil {
+		env = execEnv()
 	}
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -175,7 +195,10 @@ func (g *execGit) CommitAll(ctx context.Context, message string, author Author) 
 }
 
 func (g *execGit) Log(ctx context.Context, path string, limit int) ([]Commit, error) {
-	args := []string{"log", fmt.Sprintf("-n%d", limit), "--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s"}
+	// NUL separates fields (%x00) and commits (-z): git can store neither in
+	// an author, email or subject, so no stored value can shift the fields or
+	// hide a commit, as a control byte in an older commit's author could.
+	args := []string{"log", "-z", fmt.Sprintf("-n%d", limit), "--pretty=format:%H%x00%an%x00%ae%x00%aI%x00%s"}
 	if path != "" {
 		args = append(args, "--", path)
 	}
@@ -184,16 +207,13 @@ func (g *execGit) Log(ctx context.Context, path string, limit int) ([]Commit, er
 		return nil, err
 	}
 	var commits []Commit
-	for _, line := range strings.Split(out, "\n") {
-		if line == "" {
-			continue
-		}
-		f := strings.Split(line, "\x1f")
-		if len(f) != 5 {
-			continue
-		}
-		when, _ := time.Parse(time.RFC3339, f[3])
-		commits = append(commits, Commit{Hash: f[0], Author: f[1], Email: f[2], When: when, Message: f[4]})
+	if out == "" {
+		return commits, nil
+	}
+	f := strings.Split(out, "\x00")
+	for i := 0; i+5 <= len(f); i += 5 {
+		when, _ := time.Parse(time.RFC3339, f[i+3])
+		commits = append(commits, Commit{Hash: strings.TrimSpace(f[i]), Author: f[i+1], Email: f[i+2], When: when, Message: f[i+4]})
 	}
 	return commits, nil
 }
@@ -223,6 +243,7 @@ func (g *execGit) Diff(ctx context.Context, from, to string) (string, error) {
 	// Not run(): a patch keeps its final newline (a trimmed one is not a valid
 	// patch), and stdout is capped rather than buffered whole.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //noaikido
+	cmd.Env = execEnv()
 	var stderr bytes.Buffer
 	out := &cappedBuffer{max: MaxDiffBytes}
 	cmd.Stdout = out

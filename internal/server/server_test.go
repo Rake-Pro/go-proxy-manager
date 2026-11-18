@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +16,28 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 )
+
+func TestAPIResponsesAreNotStored(t *testing.T) {
+	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/assets/app.js" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	for path, want := range map[string]string{
+		"/api/me":         "no-store",
+		"/api/settings":   "no-store",
+		"/assets/app.js":  "no-cache",
+		"/auth/login":     "",
+		"/apidocs/readme": "",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("%s: Cache-Control = %q, want %q", path, got, want)
+		}
+	}
+}
 
 func TestSecurityHeaders(t *testing.T) {
 	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +79,7 @@ func TestPprofDisabledByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sessStore.Close() })
-	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
+	authn := localLoginAuthenticator(auth.Options{Store: sessStore})
 
 	s := New(":0", nil, authn, nil, nil, nil, false)
 	rec := httptest.NewRecorder()
@@ -70,7 +95,7 @@ func TestPprofEnabledIsAdminGated(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sessStore.Close() })
-	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
+	authn := localLoginAuthenticator(auth.Options{Store: sessStore})
 
 	s := New(":0", nil, authn, nil, nil, nil, true)
 
@@ -114,7 +139,7 @@ func TestPprofRequiresAdminScopeForTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authn := auth.NewAuthenticator(auth.Options{Store: sessStore})
+	authn := localLoginAuthenticator(auth.Options{Store: sessStore})
 	authn.SetTokenSource(func() []model.APIToken {
 		return []model.APIToken{
 			{ObjectMeta: model.ObjectMeta{Name: "reader"}, TokenHash: scopedHash, Scopes: []string{"proxy-hosts:read"}},
@@ -143,4 +168,51 @@ func TestPprofRequiresAdminScopeForTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The admin server bounds reading a request, body included: a request whose
+// declared body never arrives is ended by the server rather than held for as
+// long as the client keeps the socket open.
+func TestAdminServerEndsARequestWhoseBodyNeverArrives(t *testing.T) {
+	e := newTestEnv(t, envOpts{})
+	if e.srv.http.ReadTimeout <= 0 {
+		t.Fatal("admin server has no ReadTimeout")
+	}
+	e.srv.http.ReadTimeout = 500 * time.Millisecond // shortened so the test is fast
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = e.srv.http.Serve(ln) }()
+	t.Cleanup(func() { _ = e.srv.http.Close() })
+
+	for _, head := range []string{
+		"POST /auth/local HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 5\r\n\r\n",
+		"POST /api/proxy-hosts HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n",
+	} {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(c, head); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.ReadAll(c)
+		c.Close()
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("%q: the server held the request with its body outstanding", head)
+		}
+	}
+}
+
+// localLoginAuthenticator is an authenticator with local login configured and
+// allowed, so a test can create "local" sessions directly: a session is only
+// honoured while the sign-in method it came from is allowed.
+func localLoginAuthenticator(o auth.Options) *auth.Authenticator {
+	o.LocalUser, o.LocalHash = "admin", "$2a$10$placeholder"
+	a := auth.NewAuthenticator(o)
+	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{LocalLoginEnabled: true}})
+	return a
 }

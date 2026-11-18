@@ -60,6 +60,15 @@ type router struct {
 	// ever apply). A proxy host uses its own merged hostHandler.securityHeaders
 	// instead. nil when settings.securityHeaders is empty.
 	securityHeaders *scopedHeaders
+
+	// clientCAs are this build's client-CA anchors. Reload publishes them to
+	// the CRL watch only once the build is the live router (registerCRLAnchors).
+	clientCAs map[string]*clientCAAnchor
+
+	// live returns the owning Server's current router; set by Reload. Upgraded
+	// connections are tracked against it (see tunnels.go). nil for a router
+	// built outside a Server, which tracks none.
+	live func() *router
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -86,11 +95,9 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 	if err != nil {
 		return nil, err
 	}
-	// Publish the file-backed CRLs of THIS build to the mtime watch, so the watch
-	// loop started once at listener start always polls the live set.
-	registerCRLAnchors(clientCAs)
 	reg := buildRegistry(cfg)
 	reg.health = health
+	reg.states = chainStatesFor(health)
 
 	fleetFloor := currentTLSFleetFloor()
 	rt := &router{
@@ -105,6 +112,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		// Settings-level default headers for host-less responses (404/421) and
 		// redirect/parked hosts. A proxy host composes its own merge below.
 		securityHeaders: partitionSecurityHeaders(currentSecurityHeaders()),
+		clientCAs:       clientCAs,
 	}
 	// Only a raised fleet floor needs a config of its own: at 1.2 the listener's
 	// own TLSConfig already is the default, so nil keeps the zero-overhead path.
@@ -172,6 +180,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		// identity header. Compiled here so dispatch can derive the client IP once
 		// per request, before the chain runs (see clientip.go).
 		hh.trustedProxies = hostTrustedProxies(h)
+		hh.chainKey = hostChainKey(h, cfg, hh.trustedProxies)
 		// Client-certificate passthrough headers ride the same strip model: the
 		// fixed names are in the baseline denylist, and a custom subject header is
 		// added to this host's strip set, so no untrusted peer can assert either -
@@ -661,7 +670,7 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		// gpm-generated response below never marks it and keeps the generated subset.
 		r = requestWithSecurityWriter(r, w)
 		handler, _ := hh.route(r.URL.Path)
-		handler.ServeHTTP(w, r)
+		rt.serveRoute(handler, w, r, name, hh)
 		return
 	}
 	if rh, ok := rt.redirects[name]; ok {
@@ -673,6 +682,16 @@ func (rt *router) serveHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "no such host", http.StatusNotFound)
+}
+
+// serveRoute runs a proxy host's route handler; an upgrade request is served
+// so that the tunnel it may open is tracked (see serveTracked).
+func (rt *router) serveRoute(handler http.Handler, w http.ResponseWriter, r *http.Request, name string, hh *hostHandler) {
+	if rt.live != nil && isUpgradeRequest(r) {
+		serveTracked(handler, w, r, rt.live, name, hh.chainKey)
+		return
+	}
+	handler.ServeHTTP(w, r)
 }
 
 // originFormTarget reports false for a request target not in origin form
@@ -691,6 +710,15 @@ func originFormTarget(r *http.Request) bool {
 func validHostHeader(h string) bool {
 	if h == "" {
 		return false
+	}
+	// Visible ASCII only. hostKey trims whitespace, so a name with a tab or
+	// other control byte would route as the trimmed name while the upstream
+	// is sent the raw value (which the outbound transport replaces with an
+	// empty Host). Internationalized names arrive as punycode.
+	for i := 0; i < len(h); i++ {
+		if c := h[i]; c <= 0x20 || c >= 0x7f {
+			return false
+		}
 	}
 	host, port := h, ""
 	if strings.HasPrefix(h, "[") {
@@ -783,7 +811,7 @@ func (rt *router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w = withHostResponseHeaders(w, "", hh.robots)
 		r = requestWithSecurityWriter(r, w) // see serveHTTPS
 		handler, _ := hh.route(r.URL.Path)
-		handler.ServeHTTP(w, r)
+		rt.serveRoute(handler, w, r, name, hh)
 		return
 	}
 	if rh, ok := rt.redirects[name]; ok {

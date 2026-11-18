@@ -14,9 +14,10 @@
 //     multicast destinations, so a source URL cannot be aimed at a metadata
 //     service or an internal endpoint (SSRF),
 //   - the body is capped at 1 MiB,
-//   - a non-200, an empty result, a result over the source's maxEntries, or a
-//     SINGLE unparseable line refuses the fetch and KEEPS the previously fetched
-//     set, rather than replacing it with something gpm does not understand.
+//   - a non-200, an empty result, a result over the source's maxEntries or
+//     maxCoverage (when set), or a SINGLE unparseable line refuses the fetch and
+//     KEEPS the previously fetched set, rather than replacing it with
+//     something gpm does not understand.
 package accesssync
 
 import (
@@ -160,7 +161,7 @@ func New(load func(context.Context) (model.Config, model.Settings, error), ledge
 // nonPublicRanges are the address blocks that are never legitimately part of a
 // public monitoring feed, and never a legitimate place to FETCH one from. One
 // table serves both jobs: the SSRF guard (refuseInternalDest, which decides
-// where gpm will connect) and the entry filter (refuseEntry, which decides what
+// where gpm will connect) and the entry filter (RefuseEntry, which decides what
 // a feed may contain). They are the same question asked in two directions, and
 // keeping two lists in step by hand is how one of them ends up short.
 //
@@ -184,7 +185,7 @@ var nonPublicRanges = func() []*net.IPNet {
 }()
 
 // predicateRanges are the blocks net.IP's predicates in isNonPublic match,
-// spelled out as networks. isNonPublic answers for one address; refuseEntry
+// spelled out as networks. isNonPublic answers for one address; RefuseEntry
 // also needs to know whether a feed network merely overlaps one of them (a
 // 172.0.0.0/8 entry starts at a public address but covers 172.16.0.0/12).
 var predicateRanges = func() []*net.IPNet {
@@ -250,7 +251,9 @@ const (
 	minEntryBitsV6 = 32
 )
 
-// refuseEntry reports why one parsed network may not appear in a feed, or nil.
+// RefuseEntry reports why one parsed network may not appear in a feed, or nil.
+// The data plane applies it again to every stored entry when it compiles the
+// ledger, so an entry stored before a guard existed is not served.
 //
 // This is the guard that matters most in the whole subsystem: a source rule
 // WITHOUT paths grants its networks unrestricted access to the host, so a single
@@ -260,7 +263,7 @@ const (
 // refused, and so is anything inside a range a public feed can never legitimately
 // contain - which would otherwise let a feed hand an attacker a foothold on the
 // LAN side of the proxy.
-func refuseEntry(n *net.IPNet) error {
+func RefuseEntry(n *net.IPNet) error {
 	ones, bits := n.Mask.Size()
 	if bits == 0 {
 		return fmt.Errorf("%s has a non-contiguous mask", n)
@@ -287,6 +290,48 @@ func refuseEntry(n *net.IPNet) error {
 	}
 	if nonPublic {
 		return fmt.Errorf("%s is not a public address range, or overlaps one (loopback, link-local, private, ULA, CGNAT, multicast, reserved or documentation space)", n)
+	}
+	return nil
+}
+
+// CheckCoverage reports, or nil, why a set of networks covers more address space
+// than src's coverage budget allows (see model.AccessListSource.MaxCoverage). A
+// source without maxCoverage has no budget.
+func CheckCoverage(nets []*net.IPNet, src model.AccessListSource) error {
+	limV4, limV6, ok := src.CoverageLimits()
+	if !ok {
+		return nil
+	}
+	return checkCoverage(nets, limV4, limV6)
+}
+
+// checkCoverage sums each family on its own; overlapping entries count twice,
+// which only errs toward refusing. IPv6 is counted in /64 units, an entry
+// longer than /64 counting as one.
+func checkCoverage(nets []*net.IPNet, limV4, limV6 int) error {
+	budget4, budget6 := uint64(1)<<(32-limV4), uint64(1)<<(64-limV6)
+	var sum4, sum6 uint64
+	for _, n := range nets {
+		ones, bits := n.Mask.Size()
+		if bits == 32 {
+			size := uint64(1) << (32 - ones)
+			if size > budget4-sum4 {
+				return fmt.Errorf("IPv4 entries cover more than the /%d-equivalent (%d addresses) coverage budget for this source", limV4, budget4)
+			}
+			sum4 += size
+			continue
+		}
+		size := uint64(1)
+		if ones < 64 {
+			if ones < 1 {
+				return fmt.Errorf("%s exceeds the IPv6 coverage budget for this source", n)
+			}
+			size = uint64(1) << (64 - ones)
+		}
+		if size > budget6-sum6 {
+			return fmt.Errorf("IPv6 entries cover more than the /%d-equivalent coverage budget for this source", limV6)
+		}
+		sum6 += size
 	}
 	return nil
 }
@@ -497,12 +542,16 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 				st.Refused++
 				ss.LastError = err.Error()
 				st.Sources = append(st.Sources, ss)
-				log.Warn().Err(err).Str("accessList", al.Name).Str("source", src.Name).Str("url", src.URL).
+				log.Warn().Err(err).Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
 					Msg("accesssync: refused a source fetch; keeping the previously fetched set")
 				continue
 			}
 			// Success: this is what starts the interval clock (see due()).
 			s.markAttempt(key, now)
+			if src.MaxCoverage == nil && checkCoverage(entryNets(fetched), model.BroadAccessListSourceCoverageV4, model.BroadAccessListSourceCoverageV6) != nil {
+				log.Warn().Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
+					Msg("accesssync: access-list source is broad (more than one /8 of IPv4 or one /24 of IPv6 in total) and has no maxCoverage; set maxCoverage on the source to bound it")
+			}
 			hash := model.AccessListSourceHash(key, src.URL, fetched)
 			if prevEntry, ok := next[key]; ok && prevEntry.SHA256 == hash {
 				// Unchanged. fetchedAt is deliberately NOT advanced: doing so would
@@ -610,6 +659,12 @@ func (s *Syncer) fetch(ctx context.Context, src model.AccessListSource) ([]strin
 	req.Header.Set("Accept", "text/plain")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// The *url.Error text repeats the full source URL, whose query may
+		// carry a token; the log line and status keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("fetch from %s: %w", u.Host, ue.Err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -625,7 +680,35 @@ func (s *Syncer) fetch(ctx context.Context, src model.AccessListSource) ([]strin
 	if len(body) > maxBodyBytes {
 		return nil, fmt.Errorf("source body exceeds the %d byte limit", maxBodyBytes)
 	}
-	return parseEntries(string(body), src.EntryLimit())
+	entries, err := parseEntries(string(body), src.EntryLimit())
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckCoverage(entryNets(entries), src); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// sourceHost is the host part of a source URL, for log lines: the path and
+// query of a feed URL may carry a token.
+func sourceHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// entryNets parses parseEntries' normalised CIDR strings.
+func entryNets(entries []string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(entries))
+	for _, e := range entries {
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
 }
 
 // parseEntries reads the fixed source format: one IP or CIDR per line, "#"
@@ -650,7 +733,7 @@ func parseEntries(body string, max int) ([]string, error) {
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		n := parseEntry(t)
+		n := ParseEntry(t)
 		if n == nil {
 			return nil, fmt.Errorf("line %d: %q is not an IP or CIDR", line, t)
 		}
@@ -658,7 +741,7 @@ func parseEntries(body string, max int) ([]string, error) {
 		// network refuses the WHOLE body and keeps the previous set. A feed that
 		// has started naming ranges no monitoring provider owns is a feed gpm has
 		// no business acting on, however plausible the rest of it looks.
-		if err := refuseEntry(n); err != nil {
+		if err := RefuseEntry(n); err != nil {
 			return nil, fmt.Errorf("line %d: %v", line, err)
 		}
 		c := n.String()
@@ -681,9 +764,9 @@ func parseEntries(body string, max int) ([]string, error) {
 	return out, nil
 }
 
-// parseEntry normalises one line to a masked network, or nil when it is neither
+// ParseEntry normalises one line to a masked network, or nil when it is neither
 // an IP nor a CIDR. A bare IP becomes a /32 or /128.
-func parseEntry(s string) *net.IPNet {
+func ParseEntry(s string) *net.IPNet {
 	if _, n, err := net.ParseCIDR(s); err == nil {
 		if v4 := n.IP.To4(); v4 != nil && len(n.Mask) == net.IPv6len {
 			// An IPv4-mapped prefix (::ffff:a.b.c.d/k) matches IPv4 clients as

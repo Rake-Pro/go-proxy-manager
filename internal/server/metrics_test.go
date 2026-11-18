@@ -22,7 +22,7 @@ func metricsAuthenticator(t *testing.T) (*auth.Authenticator, *session.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sessStore.Close() })
-	return auth.NewAuthenticator(auth.Options{Store: sessStore}), sessStore
+	return localLoginAuthenticator(auth.Options{Store: sessStore}), sessStore
 }
 
 // With metrics off the route must 404, not fall through to the SPA catch-all

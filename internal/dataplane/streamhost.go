@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -33,8 +34,9 @@ const (
 //     new (possibly spoofed) sources cannot close sessions that are in use.
 //   - udpEvictIdle is above common UDP keepalive intervals (25 s) and below
 //     the udpSessionIdle expiry.
-//   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /64)
-//     may hold inside it, so a single source cannot fill the table.
+//   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /56,
+//     see udpSourceKey) may hold inside it, so a single source cannot fill
+//     the table.
 var (
 	streamTLSHandshakeTimeout = 10 * time.Second
 	maxUDPSessions            = 4096
@@ -150,6 +152,11 @@ type streamTarget struct {
 	// tlsConf carries the server-side handshake config in terminate mode.
 	tlsMode string
 	tlsConf *tls.Config
+
+	// idle and maxPerSource are the host's TCP idleTimeout and
+	// maxConnsPerSource; 0 means no limit.
+	idle         time.Duration
+	maxPerSource int
 }
 
 // allow evaluates every attached access list against the client IP. All lists
@@ -239,6 +246,11 @@ func buildStreamRoutes(cfg model.Config, certs *certResolver) (map[int]*streamRo
 			addr:       net.JoinHostPort(h.Target.Host, strconv.Itoa(h.Target.Port)),
 			geoCountry: geoCountry,
 			geoLoaded:  geoLoaded,
+
+			maxPerSource: h.MaxConnsPerSource,
+		}
+		if d, err := time.ParseDuration(h.IdleTimeout); err == nil && d > 0 {
+			target.idle = d
 		}
 		unresolved := false
 		for _, name := range h.AccessLists {
@@ -358,6 +370,12 @@ type tcpForwarder struct {
 	port   int
 	ln     net.Listener
 	routes atomic.Pointer[streamRoutes] // swappable on reload
+
+	// perSource counts open connections per stream host and source
+	// (host + "\x00" + udpSourceKey) for maxConnsPerSource. It lives on the
+	// forwarder, so connections opened before a reload still count after it.
+	mu        sync.Mutex
+	perSource map[string]int
 }
 
 func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyProtoConfig, lc *net.ListenConfig) (*tcpForwarder, error) {
@@ -368,7 +386,7 @@ func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyP
 	if err != nil {
 		return nil, err
 	}
-	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto)}
+	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto), perSource: map[string]int{}}
 	f.routes.Store(routes)
 	go f.acceptLoop()
 	log.Info().Int("port", port).Bool("sniRouted", routes.sni).Msg("stream: tcp listener started")
@@ -378,12 +396,28 @@ func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyP
 func (f *tcpForwarder) setRoutes(r *streamRoutes) { f.routes.Store(r) }
 func (f *tcpForwarder) stop()                     { _ = f.ln.Close() }
 
+// acceptLoop serves the listener until it is closed. Any other Accept error
+// (EMFILE, ENFILE, ECONNABORTED and the like) is retried with the backoff
+// net/http uses, 5ms doubling to 1s, so a passing descriptor shortage does not
+// leave the port bound with nobody accepting.
 func (f *tcpForwarder) acceptLoop() {
+	var delay time.Duration
 	for {
 		c, err := f.ln.Accept()
 		if err != nil {
-			return // listener closed
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else {
+				delay = min(2*delay, time.Second)
+			}
+			log.Warn().Int("port", f.port).Err(err).Dur("retryIn", delay).Msg("stream: tcp accept failed; retrying")
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go f.handle(c)
 	}
 }
@@ -429,6 +463,15 @@ func (f *tcpForwarder) handle(client net.Conn) {
 			Msg("stream: access list denied the connection")
 		return
 	}
+	if target.maxPerSource > 0 {
+		key := target.name + "\x00" + udpSourceKey(clientIP)
+		if !f.acquireSource(key, target.maxPerSource) {
+			log.Debug().Int("port", f.port).Str("streamHost", target.name).Str("client", peerKey(clientIP)).
+				Msg("stream: source is at maxConnsPerSource; connection closed")
+			return
+		}
+		defer f.releaseSource(key)
+	}
 
 	var front net.Conn = client
 	if len(prefix) > 0 {
@@ -460,12 +503,54 @@ func (f *tcpForwarder) handle(client net.Conn) {
 		mh.StreamOpened(target.name)
 		defer mh.StreamClosed(target.name)
 	}
+	if target.idle > 0 {
+		front, backend = idleConn{front, target.idle}, idleConn{backend, target.idle}
+	}
 	// Bidirectional copy. When either side ends, the deferred Close on both conns
 	// unblocks the other io.Copy so the goroutine exits.
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(backend, front); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(front, backend); done <- struct{}{} }()
 	<-done
+}
+
+// acquireSource takes one of the max connection slots of key, reporting false
+// when they are all in use.
+func (f *tcpForwarder) acquireSource(key string, max int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.perSource[key] >= max {
+		return false
+	}
+	f.perSource[key]++
+	return true
+}
+
+func (f *tcpForwarder) releaseSource(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.perSource[key]--; f.perSource[key] <= 0 {
+		delete(f.perSource, key)
+	}
+}
+
+// idleConn moves a connection's read and write deadline d ahead on every Read
+// and Write, so a connection that carries no data either way for d fails its
+// pending I/O and the copy loop ends. Activity in either direction keeps both
+// directions alive.
+type idleConn struct {
+	net.Conn
+	d time.Duration
+}
+
+func (c idleConn) Read(p []byte) (int, error) {
+	_ = c.Conn.SetDeadline(time.Now().Add(c.d))
+	return c.Conn.Read(p)
+}
+
+func (c idleConn) Write(p []byte) (int, error) {
+	_ = c.Conn.SetDeadline(time.Now().Add(c.d))
+	return c.Conn.Write(p)
 }
 
 // --- UDP ---------------------------------------------------------------------
@@ -477,7 +562,7 @@ type udpForwarder struct {
 	closed   atomic.Bool
 	mu       sync.Mutex
 	sessions map[string]*udpSession // client addr -> backend session
-	// perSource counts the sessions of each source (ipBucketKey), guarded by mu.
+	// perSource counts the sessions of each source (udpSourceKey), guarded by mu.
 	perSource map[string]int
 }
 
@@ -590,13 +675,13 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 		// dialled, so a denied source never causes an upstream socket to exist.
 		if !target.allow(addrIP(clientAddr)) {
 			f.mu.Unlock()
-			if udpDeniedPeers.first(strconv.Itoa(f.port) + "/" + peerKey(addrIP(clientAddr))) {
+			if udpDeniedPeers.first(strconv.Itoa(f.port) + "/" + ipBucketKey(addrIP(clientAddr))) {
 				log.Warn().Int("port", f.port).Str("streamHost", target.name).Str("client", key).
 					Msg("stream: access list denied the udp source")
 			}
 			return
 		}
-		src := ipBucketKey(addrIP(clientAddr))
+		src := udpSourceKey(addrIP(clientAddr))
 		if f.perSource[src] >= maxUDPSessionsPerSource {
 			f.mu.Unlock()
 			return // this source already holds its share of the table
@@ -624,6 +709,16 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 	f.mu.Unlock()
 	s.last.Store(time.Now().UnixNano())
 	_, _ = s.backend.Write(data)
+}
+
+// udpSourceKey is the per-source session-cap key: an IPv4 address, or the
+// IPv6 /56 around the address. One subscriber is commonly delegated a /56 (256
+// /64s), so a /64 key would let one site take 256 shares of the table.
+func udpSourceKey(ip net.IP) string {
+	if ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(56, 128)).String() + "/56"
+	}
+	return ipBucketKey(ip)
 }
 
 func (f *udpForwarder) backendToClient(clientAddr net.Addr, key string, s *udpSession) {

@@ -43,7 +43,15 @@ type stubCA struct {
 	acceptedType string
 	acceptedTok  string
 	csrDNSNames  []string
+	csrKey       any
 	authzValid   bool
+
+	// signOtherKey makes the CA return a leaf for a key other than the CSR's,
+	// and leafNames, when set, replaces the names the leaf is issued for.
+	signOtherKey bool
+	leafNames    []string
+	// authzName, when set, replaces the identifier the authorization names.
+	authzName string
 }
 
 func newStubCA(t *testing.T, offer []string) *stubCA {
@@ -149,8 +157,12 @@ func (c *stubCA) handler() http.Handler {
 				"status": status,
 			})
 		}
+		name := "app.example.com"
+		if c.authzName != "" {
+			name = c.authzName
+		}
 		writeJSON(c.t, w, map[string]any{
-			"identifier": map[string]string{"type": "dns", "value": "app.example.com"},
+			"identifier": map[string]string{"type": "dns", "value": name},
 			"status":     status,
 			"challenges": challenges,
 		})
@@ -183,6 +195,7 @@ func (c *stubCA) handler() http.Handler {
 			c.t.Fatalf("parse csr: %v", err)
 		}
 		c.csrDNSNames = csr.DNSNames
+		c.csrKey = csr.PublicKey
 		writeJSON(c.t, w, map[string]any{"status": "valid", "certificate": c.url("/cert/1")})
 	})
 
@@ -207,13 +220,20 @@ func nonceMiddleware(h http.Handler) http.Handler {
 // issueChain signs a leaf for the CSR's names and returns leaf + CA as PEM.
 func (c *stubCA) issueChain() []byte {
 	c.t.Helper()
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		c.t.Fatal(err)
+	pub := c.csrKey
+	if pub == nil || c.signOtherKey {
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		pub = &leafKey.PublicKey
 	}
 	names := c.csrDNSNames
 	if len(names) == 0 {
 		names = []string{"app.example.com"}
+	}
+	if c.leafNames != nil {
+		names = c.leafNames
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
@@ -224,7 +244,7 @@ func (c *stubCA) issueChain() []byte {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, &leafKey.PublicKey, c.caKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, pub, c.caKey)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -407,6 +427,75 @@ func TestEnsureAllDNS01EndToEnd(t *testing.T) {
 	// No HTTP-01 token is ever registered on a dns-01 order.
 	if n := m.HTTP01Challenges().Len(); n != 0 {
 		t.Errorf("http-01 store holds %d tokens on a dns-01 order", n)
+	}
+}
+
+func TestOrderRefusesAnAuthorizationNotRequested(t *testing.T) {
+	for _, chal := range []string{"http-01", "dns-01"} {
+		t.Run(chal, func(t *testing.T) {
+			ca := newStubCA(t, []string{chal})
+			ca.authzName = "other.example.net"
+			solver := newRecordingSolver()
+			m := NewManager(Options{
+				CertDir:   t.TempDir(),
+				NewSolver: func(model.DNSProvider) (DNSSolver, error) { return solver, nil },
+			})
+			m.resolver = stubTXTLookuper{solver}
+			m.propagationInterval = time.Millisecond
+			stored := false
+			ca.onAccept = func(string, string) error { return nil }
+			spec := &model.ACMESpec{Email: "admin@example.com", DirectoryURL: ca.url("/directory"), Challenge: chal}
+			cfg := model.Config{Certificates: []model.Certificate{{
+				ObjectMeta: model.ObjectMeta{Name: "app"},
+				Type:       model.CertTypeACME,
+				Domains:    []string{"app.example.com"},
+				ACME:       spec,
+			}}}
+			if chal == "dns-01" {
+				spec.DNSProvider = "cf"
+				cfg.DNSProviders = []model.DNSProvider{{
+					ObjectMeta: model.ObjectMeta{Name: "cf"},
+					Provider:   "cloudflare",
+					Config:     map[string]model.Secret{"apiToken": "t"},
+				}}
+			}
+			changed, _ := m.EnsureAll(context.Background(), cfg)
+			if _, err := os.Stat(IssuedCertPath(m.certDir, "app")); err == nil {
+				stored = true
+			}
+			if changed || stored {
+				t.Errorf("certificate issued for an order whose authorization names another domain")
+			}
+			if ca.acceptedType != "" {
+				t.Errorf("challenge %q accepted for an authorization that was not requested", ca.acceptedType)
+			}
+			if len(solver.presented) != 0 {
+				t.Errorf("TXT records provisioned for an authorization that was not requested: %v", solver.presented)
+			}
+			if n := m.HTTP01Challenges().Len(); n != 0 {
+				t.Errorf("http-01 store holds %d tokens after the refused order", n)
+			}
+		})
+	}
+}
+
+func TestRequestedAuthz(t *testing.T) {
+	domains := []string{"Example.com", "*.example.com", "app.example.com."}
+	cases := []struct {
+		value    string
+		wildcard bool
+		want     bool
+	}{
+		{"example.com", false, true},
+		{"example.com", true, true},
+		{"APP.example.com", false, true},
+		{"app.example.com", true, false},
+		{"other.example.net", false, false},
+	}
+	for _, tc := range cases {
+		if got := requestedAuthz(domains, tc.value, tc.wildcard); got != tc.want {
+			t.Errorf("requestedAuthz(%q, wildcard=%v) = %v, want %v", tc.value, tc.wildcard, got, tc.want)
+		}
 	}
 }
 

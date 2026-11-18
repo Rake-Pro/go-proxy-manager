@@ -157,6 +157,31 @@ func TestUnreadableSecretFileFailsClosed(t *testing.T) {
 	})
 }
 
+// A named secret file that holds only whitespace is an error like an unreadable
+// one, so an empty TOTP file refuses local login instead of dropping the second
+// factor.
+func TestEmptySecretFileFailsClosed(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH", "$2a$10$example")
+	t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE", "")
+	t.Setenv("GPM_LOCAL_ADMIN_TOTP_SECRET_FILE", empty)
+	if _, err := secretFromEnv("GPM_LOCAL_ADMIN_TOTP_SECRET"); err == nil {
+		t.Fatal("an empty _FILE must be reported as an error")
+	}
+	if hash, totp := localAdminSecrets(); hash != "" || totp != "" {
+		t.Fatalf("localAdminSecrets() = (%q, %q), want both empty so local login is refused", hash, totp)
+	}
+
+	t.Setenv("GPM_LOCAL_ADMIN_TOTP_SECRET_FILE", "")
+	t.Setenv("GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE", empty)
+	if hash, _ := localAdminSecrets(); hash != "" {
+		t.Fatalf("an empty hash file must leave no usable hash, got %q", hash)
+	}
+}
+
 // The startup warning fires only for an enabled admin edge whose loopback hop
 // is not a trusted proxy.
 func TestAdminEdgeHopUntrusted(t *testing.T) {

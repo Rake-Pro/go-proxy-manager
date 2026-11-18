@@ -14,6 +14,13 @@ twenty against one username from any clients, within 15 minutes lock that IP
 or that username for the window with the same 429 page; a successful sign-in
 clears both counters. Not configurable.
 
+**Existing sessions follow the policy.** A panel session is refused on its
+next request once the method it signed in with is no longer allowed: its
+provider was removed from `providers` or deleted, or (for a password session)
+local login was turned off or the local admin credential is no longer
+configured. To end every session regardless, an admin calls
+`POST /api/sessions/revoke`, which keeps only the caller's own.
+
 **Anti-lockout rules on `adminAuth`.** A settings write is refused when:
 
 - no login method is left at all (`localLoginEnabled: false` and no `providers`), or

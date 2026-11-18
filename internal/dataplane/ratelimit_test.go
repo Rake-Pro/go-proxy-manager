@@ -4,6 +4,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -591,5 +593,206 @@ func TestRateLimitHandlerAccessListExemption(t *testing.T) {
 	serveRL(h, "198.51.100.5:1", "http://c/public")
 	if rec := serveRL(h, "198.51.100.5:1", "http://c/public"); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("a client outside the list must still be limited, got %d", rec.Code)
+	}
+}
+
+// chainStateUpstream is a reachable upstream for chain-state tests.
+func chainStateUpstream(t *testing.T) model.Upstream {
+	t.Helper()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(up.Close)
+	u, _ := url.Parse(up.URL)
+	port, _ := strconv.Atoi(u.Port())
+	return model.Upstream{Scheme: "http", Host: u.Hostname(), Port: port}
+}
+
+func chainStateDo(serve func(http.ResponseWriter, *http.Request), host, path, pass string) int {
+	r := httptest.NewRequest(http.MethodGet, "http://"+host+path, nil)
+	r.RemoteAddr = "203.0.113.9:1000"
+	if pass != "" {
+		r.SetBasicAuth("admin", pass)
+	}
+	rec := httptest.NewRecorder()
+	serve(rec, r)
+	return rec.Code
+}
+
+// The basic-auth failure gate of a host is one budget per client across all of
+// the host's routes, for the auth middleware and for an access list's
+// basicAuth alike: failures on one location lock the client out of the others.
+func TestBasicAuthFailureGateSharedAcrossHostRoutes(t *testing.T) {
+	upstream := chainStateUpstream(t)
+	mw := basicMW(t, "admin", "hunter2", "")
+	locs := []model.Location{{Path: "/a"}, {Path: "/b"}}
+	cfg := model.Config{
+		Middlewares: []model.Middleware{{ObjectMeta: model.ObjectMeta{Name: "pw"}, Type: model.MWTypeAuth, Auth: &mw}},
+		AccessLists: []model.AccessList{{ObjectMeta: model.ObjectMeta{Name: "acl-pw"}, BasicAuth: mw.Basic.Users}},
+		ProxyHosts: []model.ProxyHost{
+			{ObjectMeta: model.ObjectMeta{Name: "mw-host"}, Domains: []string{"mw.example.com"}, Upstream: upstream,
+				Middlewares: []string{"pw"}, Locations: locs},
+			{ObjectMeta: model.ObjectMeta{Name: "inline-host"}, Domains: []string{"inline.example.com"}, Upstream: upstream,
+				Auth: &mw, Locations: locs},
+			{ObjectMeta: model.ObjectMeta{Name: "acl-host"}, Domains: []string{"acl.example.com"}, Upstream: upstream,
+				AccessLists: []string{"acl-pw"}, Locations: locs},
+		},
+	}
+	rt, err := buildRouter(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("buildRouter: %v", err)
+	}
+	for _, host := range []string{"mw.example.com", "inline.example.com", "acl.example.com"} {
+		for i := 0; i < maxBasicAuthFails; i++ {
+			chainStateDo(rt.serveHTTP, host, "/", "wrong")
+		}
+		for _, p := range []string{"/", "/a", "/b"} {
+			if got := chainStateDo(rt.serveHTTP, host, p, "hunter2"); got != http.StatusUnauthorized {
+				t.Errorf("%s%s after %d failures on /: correct password -> %d, want 401 (locked out on every route)", host, p, maxBasicAuthFails, got)
+			}
+		}
+	}
+	// Another host keeps its own budget.
+	if got := chainStateDo(rt.serveHTTP, "inline.example.com", "/", ""); got != http.StatusUnauthorized {
+		t.Fatalf("challenge without credentials: %d", got)
+	}
+}
+
+// A reload keeps a client's basic-auth lockout and rate-limit block when the
+// spec that built them is unchanged, also when another host changed. A changed
+// spec starts fresh, and two data planes never share state.
+func TestReloadKeepsLockoutAndRateLimitState(t *testing.T) {
+	upstream := chainStateUpstream(t)
+	mw := basicMW(t, "admin", "hunter2", "")
+	mk := func(other string, burst int, users []model.BasicAuthUser) model.Config {
+		auth := mw
+		auth.Basic = &model.BasicAuthSpec{Users: users}
+		return model.Config{ProxyHosts: []model.ProxyHost{
+			{ObjectMeta: model.ObjectMeta{Name: "basic"}, Domains: []string{"basic.example.com"}, Upstream: upstream, Auth: &auth,
+				Locations: []model.Location{{Path: "/a"}}},
+			{ObjectMeta: model.ObjectMeta{Name: "limited"}, Domains: []string{"limited.example.com"}, Upstream: upstream,
+				RateLimit: &model.RateLimitMiddleware{RequestsPerSecond: 0.001, Burst: burst, BlockFor: "24h"},
+				Locations: []model.Location{{Path: "/a"}}},
+			{ObjectMeta: model.ObjectMeta{Name: "tenant"}, Domains: []string{other}, Upstream: upstream},
+		}}
+	}
+	users := mw.Basic.Users
+	s := New(Config{})
+	if err := s.Reload(mk("t1.example.com", 1, users)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxBasicAuthFails; i++ {
+		chainStateDo(s.dispatchHTTP, "basic.example.com", "/", "wrong")
+	}
+	chainStateDo(s.dispatchHTTP, "limited.example.com", "/", "")
+	chainStateDo(s.dispatchHTTP, "limited.example.com", "/a", "")
+	if got := chainStateDo(s.dispatchHTTP, "limited.example.com", "/", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited host before reload: %d, want 429", got)
+	}
+
+	if err := s.Reload(mk("t2.example.com", 1, users)); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC() // the previous router is unreachable now; its state must not be needed
+	if got := chainStateDo(s.dispatchHTTP, "basic.example.com", "/a", "hunter2"); got != http.StatusUnauthorized {
+		t.Fatalf("after an unrelated reload: correct password -> %d, want 401 (lockout kept)", got)
+	}
+	for _, p := range []string{"/", "/a"} {
+		if got := chainStateDo(s.dispatchHTTP, "limited.example.com", p, ""); got != http.StatusTooManyRequests {
+			t.Fatalf("after an unrelated reload: rate-limited route %s -> %d, want 429 (block kept)", p, got)
+		}
+	}
+
+	// Another data plane with the same config starts empty.
+	other := New(Config{})
+	if err := other.Reload(mk("t2.example.com", 1, users)); err != nil {
+		t.Fatal(err)
+	}
+	if got := chainStateDo(other.dispatchHTTP, "basic.example.com", "/", "hunter2"); got != http.StatusOK {
+		t.Fatalf("second data plane: correct password -> %d, want 200", got)
+	}
+
+	// A changed spec builds fresh state.
+	extra := basicMW(t, "ops", "s3cret", "").Basic.Users
+	if err := s.Reload(mk("t2.example.com", 2, append(append([]model.BasicAuthUser{}, users...), extra...))); err != nil {
+		t.Fatal(err)
+	}
+	if got := chainStateDo(s.dispatchHTTP, "basic.example.com", "/", "hunter2"); got != http.StatusOK {
+		t.Fatalf("after a credential change: correct password -> %d, want 200 (fresh gate)", got)
+	}
+	if got := chainStateDo(s.dispatchHTTP, "limited.example.com", "/", ""); got != http.StatusOK {
+		t.Fatalf("after a limit change: %d, want 200 (fresh limiter)", got)
+	}
+}
+
+// Entries whose instance is no longer referenced by any chain are dropped.
+func TestChainStatesDropUnreferencedEntries(t *testing.T) {
+	var w weakMap[rateLimiter]
+	keep := w.get("keep", func() *rateLimiter { return &rateLimiter{} })
+	for i := 0; i < 500; i++ {
+		w.get("gone"+strconv.Itoa(i), func() *rateLimiter { return &rateLimiter{} })
+	}
+	runtime.GC()
+	w.sweepAt = 0
+	w.get("new", func() *rateLimiter { return &rateLimiter{} })
+	if len(w.m) > 2 {
+		t.Fatalf("map holds %d entries after the unreferenced ones were collected, want 2", len(w.m))
+	}
+	if got := w.get("keep", func() *rateLimiter { return &rateLimiter{} }); got != keep {
+		t.Fatal("a referenced instance was replaced")
+	}
+	runtime.KeepAlive(keep)
+}
+
+// A rate limit with scope: host is one budget per client across the host route
+// and all of its locations, for an inline block and a referenced middleware
+// alike, and the shared budget survives a reload with an unchanged spec. The
+// default scope keeps one budget per route.
+func TestRateLimitScopeHostSharedAcrossLocations(t *testing.T) {
+	upstream := chainStateUpstream(t)
+	locs := []model.Location{{Path: "/a"}, {Path: "/b"}}
+	limit := func(scope string) *model.RateLimitMiddleware {
+		return &model.RateLimitMiddleware{RequestsPerSecond: 0.001, Burst: 1, Scope: scope}
+	}
+	mk := func(other string) model.Config {
+		return model.Config{
+			Middlewares: []model.Middleware{{ObjectMeta: model.ObjectMeta{Name: "rl"}, Type: model.MWTypeRateLimit, RateLimit: limit(model.RateLimitScopeHost)}},
+			ProxyHosts: []model.ProxyHost{
+				{ObjectMeta: model.ObjectMeta{Name: "inline-host"}, Domains: []string{"inline.example.com"}, Upstream: upstream,
+					RateLimit: limit(model.RateLimitScopeHost), Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "mw-host"}, Domains: []string{"mw.example.com"}, Upstream: upstream,
+					Middlewares: []string{"rl"}, Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "route-host"}, Domains: []string{"route.example.com"}, Upstream: upstream,
+					RateLimit: limit(""), Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "tenant"}, Domains: []string{other}, Upstream: upstream},
+			},
+		}
+	}
+	s := New(Config{})
+	if err := s.Reload(mk("t1.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"inline.example.com", "mw.example.com"} {
+		if got := chainStateDo(s.dispatchHTTP, host, "/", ""); got != http.StatusOK {
+			t.Fatalf("%s first request: %d, want 200", host, got)
+		}
+		for _, p := range []string{"/a", "/b", "/"} {
+			if got := chainStateDo(s.dispatchHTTP, host, p, ""); got != http.StatusTooManyRequests {
+				t.Fatalf("%s%s after the host budget is spent: %d, want 429", host, p, got)
+			}
+		}
+	}
+	for _, p := range []string{"/", "/a", "/b"} {
+		if got := chainStateDo(s.dispatchHTTP, "route.example.com", p, ""); got != http.StatusOK {
+			t.Fatalf("default scope: first request on route %s -> %d, want 200 (one budget per route)", p, got)
+		}
+	}
+
+	if err := s.Reload(mk("t2.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	for _, host := range []string{"inline.example.com", "mw.example.com"} {
+		if got := chainStateDo(s.dispatchHTTP, host, "/b", ""); got != http.StatusTooManyRequests {
+			t.Fatalf("%s/b after an unrelated reload: %d, want 429 (shared budget kept)", host, got)
+		}
 	}
 }

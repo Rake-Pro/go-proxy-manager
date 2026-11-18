@@ -167,7 +167,7 @@ func (c *proxyProtoConn) readHeader() error {
 		// address stands. Warned once per peer because with the feature on, a
 		// direct connection is either a misconfigured route or an attempt to
 		// assert a source address.
-		if untrustedProxyPeers.first(peerKey(peer)) {
+		if untrustedProxyPeers.first(ipBucketKey(peer)) {
 			log.Warn().Str("peer", peerKey(peer)).
 				Msg("proxy protocol: connection from a peer outside trustedCIDRs; no header accepted, the peer address is the client IP")
 		}
@@ -192,7 +192,7 @@ func (c *proxyProtoConn) readHeader() error {
 		// balancers commonly health-check the port with a bare connection. The
 		// bytes stay in buf and are delivered as payload, with the peer address
 		// as the client IP.
-		if headerlessProxyPeers.first(peerKey(peer)) {
+		if headerlessProxyPeers.first(ipBucketKey(peer)) {
 			log.Warn().Str("peer", peerKey(peer)).
 				Msg("proxy protocol: trusted peer sent no PROXY header; treating the bytes as payload and using the peer address as the client IP")
 		}
@@ -366,7 +366,8 @@ func peerKey(ip net.IP) string {
 }
 
 // peerWarnSet remembers which peers have already produced a given warning, so a
-// steady stream of connections logs once rather than once per connection.
+// steady stream of connections logs once rather than once per connection. It is
+// keyed by ipBucketKey, so one IPv6 /64 logs once rather than once per address.
 type peerWarnSet struct {
 	mu   sync.Mutex
 	seen map[string]struct{}

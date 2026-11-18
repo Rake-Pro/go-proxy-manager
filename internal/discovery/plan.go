@@ -22,6 +22,9 @@
 //     offline; the exceptions are an unresolvable profile, and a resolved
 //     profile whose chain differs from the stored host's, which both fail
 //     CLOSED by disabling the host so a retired chain cannot be pinned forever.
+//     An existing host skipped for a domain conflict is held to the same rule:
+//     a stale chain is restamped on its current domains, a domain its profile
+//     no longer allows disables it.
 //
 // Writing those rules twice would mean maintaining two copies of the one part
 // of discovery that has security consequences. The source-specific half - how
@@ -42,7 +45,6 @@ import (
 	"maps"
 	"reflect"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -129,11 +131,12 @@ type Item struct {
 	// UnknownProfile marks Err as "the named profile does not resolve", the one
 	// failure that fails CLOSED (disable) rather than freezing.
 	UnknownProfile bool
-	// Resolved is the profile the item resolved to when Err is a failure AFTER
-	// profile resolution (no usable hostname, no usable upstream). The plan then
+	// Resolved is the profile the item resolved to. When Err is a failure AFTER
+	// profile resolution (no usable hostname, no usable upstream), the plan
 	// freezes the existing host only while its stored chain still matches this
-	// profile, and disables it otherwise. nil when Err is nil or the profile did
-	// not resolve.
+	// profile, and disables it otherwise. When Err is nil and the existing host
+	// is skipped for a domain conflict, the same comparison decides whether the
+	// stored host is restamped or disabled. nil when the profile did not resolve.
 	Resolved *model.IngressHostTemplate
 }
 
@@ -229,6 +232,44 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 	// names a profile that no longer resolves, so the chain they are still
 	// serving is one nobody can point at any more.
 	disable := map[string]model.ProxyHost{}
+	// resolved records the profile each desired host resolved to, for the
+	// domain-conflict skip below.
+	resolved := map[string]*model.IngressHostTemplate{}
+
+	// staleFor reports whether a stored managed host differs from what tmpl
+	// renders today: in its chain, or in a stored domain tmpl no longer allows.
+	staleFor := func(cur model.ProxyHost, tmpl model.IngressHostTemplate) (chain, domain bool) {
+		chain = ChainDiffers(cur, tmpl)
+		for _, d := range cur.Domains {
+			if own.DomainAllowed != nil && !own.DomainAllowed(tmpl, model.NormalizeHostname(d)) {
+				domain = true
+			}
+		}
+		return chain, domain
+	}
+	// failClosed returns cur disabled and marked as discovery's own disable.
+	failClosed := func(cur model.ProxyHost) model.ProxyHost {
+		off := cur
+		off.Disabled = true
+		// Mark the disable as DISCOVERY's own, so the next reconcile that
+		// resolves cleanly is free to clear it - an operator's own disable
+		// (no label, or a different one) never gets this treatment.
+		// off.Labels aliases cur.Labels (off := cur is a shallow copy), so it
+		// is cloned before being written to, or this would mutate cur - and,
+		// through it, the config the caller still holds - out from under the
+		// read.
+		off.Labels = cloneLabels(cur.Labels)
+		// During a prefix migration, cur may only carry a STALE prefix's
+		// labels (that is how it got into managed[] above); strip them so the
+		// host ends up with exactly the current prefix's pair, rather than old
+		// and new keys both lingering.
+		if own.Migrate && own.StripStale != nil {
+			own.StripStale(off.Labels)
+		}
+		off.Labels[own.ManagedByKey] = own.Value
+		off.Labels[own.DisabledByKey] = own.Value
+		return off
+	}
 
 	for _, it := range items {
 		p.Discovered++
@@ -263,34 +304,11 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// freezing would keep serving it under that profile.
 			stale := false
 			if cur, ok := managed[it.Name]; ok && !it.UnknownProfile && it.Resolved != nil {
-				stale = ChainDiffers(cur, *it.Resolved)
-				for _, d := range cur.Domains {
-					if own.DomainAllowed != nil && !own.DomainAllowed(*it.Resolved, model.NormalizeHostname(d)) {
-						stale = true
-					}
-				}
+				chain, domain := staleFor(cur, *it.Resolved)
+				stale = chain || domain
 			}
 			if cur, ok := managed[it.Name]; ok && (it.UnknownProfile || stale) && !cur.Disabled {
-				off := cur
-				off.Disabled = true
-				// Mark the disable as DISCOVERY's own, so the next reconcile that
-				// resolves cleanly is free to clear it - an operator's own disable
-				// (no label, or a different one) never gets this treatment.
-				// off.Labels aliases cur.Labels (off := cur is a shallow copy), so it
-				// is cloned before being written to, or this would mutate cur - and,
-				// through it, the config the caller still holds - out from under the
-				// read.
-				off.Labels = cloneLabels(cur.Labels)
-				// During a prefix migration, cur may only carry a STALE prefix's
-				// labels (that is how it got into managed[] above); strip them so the
-				// host ends up with exactly the current prefix's pair, rather than old
-				// and new keys both lingering.
-				if own.Migrate && own.StripStale != nil {
-					own.StripStale(off.Labels)
-				}
-				off.Labels[own.ManagedByKey] = own.Value
-				off.Labels[own.DisabledByKey] = own.Value
-				disable[it.Name] = off
+				disable[it.Name] = failClosed(cur)
 				p.Updated++
 				reason := "disabled (fails closed rather than keep serving a chain that no longer resolves): "
 				msg := ": profile no longer resolves; disabling the derived host rather than leaving it serving the old chain"
@@ -319,6 +337,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		desired[it.Name] = it.Host
 		source[it.Name] = it.Ref
 		profile[it.Name] = it.Profile
+		resolved[it.Name] = it.Resolved
 	}
 
 	// Which managed hosts this run would remove. Needed before the domain gate
@@ -504,6 +523,41 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			if mine(holder) {
 				reason = fmt.Sprintf("domain %q is already claimed by proxy host %q, also managed by %s, which holds it after this reconcile", conflict, holder.name, own.Subsystem)
 			}
+			// A refused existing host keeps its stored object, so it gets the same
+			// rule as a source that cannot be derived: it is frozen only while its
+			// stored chain and domains are what its profile renders today. A stale
+			// chain is restamped from the profile on the domains it already holds
+			// (which cannot conflict, they are its own); a stored domain the profile
+			// no longer allows disables it.
+			if tmpl := resolved[name]; exists && own.Managed(cur) && tmpl != nil && !cur.Disabled {
+				chain, domain := staleFor(cur, *tmpl)
+				if chain || domain {
+					claim(name, cur.Domains)
+					p.Updated++
+					msg := ": domain conflict on a host whose stored chain differs from its profile; restamping its chain on its current domains"
+					hr := "kept its current domains, chain restamped from its profile: " + reason
+					if domain {
+						disable[name] = failClosed(cur)
+						msg = ": domain conflict on a host that serves a domain its profile no longer allows; disabling it rather than leaving it serving that domain"
+						hr = "disabled (fails closed rather than keep serving a chain or domain its profile no longer renders): " + reason
+					} else {
+						upd := cur
+						upd.TLS = want.TLS
+						upd.Middlewares = want.Middlewares
+						upd.AccessLists = want.AccessLists
+						upd.AccessListsMode = want.AccessListsMode
+						upd.Locations = want.Locations
+						upd.StripResponseHeaders = want.StripResponseHeaders
+						upd.SecurityHeaders = want.SecurityHeaders
+						p.Upserts = append(p.Upserts, upd)
+					}
+					p.Hosts = append(p.Hosts, HostResult{Name: name, Ref: source[name], Domains: cur.Domains,
+						Action: ActionUpdated, Profile: profile[name], Reason: hr})
+					log.Warn().Str("host", name).Str("source", source[name]).
+						Str("domain", conflict).Str("owner", holder.name).Msg(own.Subsystem + msg)
+					continue
+				}
+			}
 			skip(reason)
 			log.Warn().Str("host", name).Str("source", source[name]).
 				Str("domain", conflict).Str("owner", holder.name).Str("ownerKind", holder.kind).
@@ -637,8 +691,8 @@ func cloneLabels(m map[string]string) map[string]string {
 }
 
 // DomainKey normalises a configured domain for comparison, matching the key the
-// config validator and the router's per-domain maps use.
-func DomainKey(d string) string { return strings.ToLower(strings.TrimSpace(d)) }
+// config validator and the router's per-domain maps use (model.DomainKey).
+func DomainKey(d string) string { return model.DomainKey(d) }
 
 // claimant is a domain's holder during planning: an object kind, as the config
 // validator names it, and an object name.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"strings"
 	"sync/atomic"
@@ -307,5 +308,239 @@ func TestProgressWriterLeavesNoDeadlineOnReusedConnection(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: status %d", path, resp.StatusCode)
 		}
+	}
+}
+
+// TestResponseFlushedUnderDeadlineAfterHandlerReturns: a response is flushed
+// under a write deadline after the handler returns, on every data-plane
+// listener. A client that has not accepted the rest of a generated response
+// once the deadline passes has its stream ended, and a client that reads
+// normally gets the whole body.
+func TestResponseFlushedUnderDeadlineAfterHandlerReturns(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	withWriteIdleTimeout(t, idle)
+	body := strings.Repeat("x", 2048) // fits the server's per-stream write buffer
+	returned := make(chan struct{}, 2)
+	addr := h2Listener(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+		returned <- struct{}{}
+	}))
+
+	resp, err := h2Client(t, 0).Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || string(got) != body {
+		t.Fatalf("normal client: read %d bytes, err %v; want the whole body", len(got), err)
+	}
+	<-returned
+
+	// A one-byte receive window: the server can send only the first byte of
+	// the body before the handler has returned.
+	resp, err = h2Client(t, 1).Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	<-returned
+	time.Sleep(5 * idle)
+	got, err = io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("read the whole body (%d bytes) %v after the handler returned: the final flush had no write deadline", len(got), 5*idle)
+	}
+}
+
+// deadlineRecorder is a ResponseWriter that records write deadlines and can
+// be hijacked.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+func (d *deadlineRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, peer := net.Pipe()
+	_ = peer.Close()
+	return c, bufio.NewReadWriter(bufio.NewReader(c), bufio.NewWriter(c)), nil
+}
+
+// The listener bounds each write the handler makes and arms the write deadline
+// again once the handler has returned. No deadline is left set between writes,
+// a hijacked connection is left alone, and the HTTP/2 stream limit is
+// advertised.
+func TestListenerArmsWriteDeadlineAfterHandler(t *testing.T) {
+	withWriteIdleTimeout(t, time.Minute)
+	var during int
+	var rec *deadlineRecorder
+	srv := newListenerServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		during = len(rec.deadlines)
+		if r.URL.Path == "/hijack" {
+			c, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack through the listener wrapper: %v", err)
+				return
+			}
+			_ = c.Close()
+			return
+		}
+		if _, ok := w.(http.Flusher); !ok {
+			t.Error("the listener wrapper hides http.Flusher")
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	if srv.HTTP2 == nil || srv.HTTP2.MaxConcurrentStreams != http2MaxConcurrentStreams {
+		t.Fatalf("HTTP2 config = %+v, want MaxConcurrentStreams %d", srv.HTTP2, http2MaxConcurrentStreams)
+	}
+
+	rec = &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	start := time.Now()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if during != 0 {
+		t.Fatalf("a write deadline was set before the handler ran: %v", rec.deadlines)
+	}
+	// One armed/cleared pair for the write, then the deadline for the flush
+	// after the handler returned.
+	d := rec.deadlines
+	if len(d) != 3 || d[0].Before(start.Add(time.Minute)) || !d[1].IsZero() || d[2].Before(start.Add(time.Minute)) {
+		t.Fatalf("deadlines = %v, want armed and cleared around the write, then one at least %v ahead", d, time.Minute)
+	}
+
+	rec = &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/hijack", nil))
+	if len(rec.deadlines) != 0 {
+		t.Fatalf("a hijacked connection got write deadlines %v", rec.deadlines)
+	}
+}
+
+// generatedResponseServer serves cfg through the full data-plane chain on an
+// h2 listener and counts the requests whose handler has not returned yet.
+func generatedResponseServer(t *testing.T, cfg model.Config) (string, *atomic.Int64) {
+	t.Helper()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config does not validate: %v", err)
+	}
+	s := New(Config{})
+	if err := s.Reload(cfg); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	t.Cleanup(s.health.stopAll)
+	inner := s.dataHandler(s.dispatchHTTPS)
+	var inHandler atomic.Int64
+	addr := h2Listener(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inHandler.Add(1)
+		defer inHandler.Add(-1)
+		inner.ServeHTTP(w, r)
+	}))
+	return addr, &inHandler
+}
+
+// stallGenerated opens n requests for url on one HTTP/2 connection whose
+// receive window is a single byte and never reads the bodies.
+func stallGenerated(t *testing.T, addr, host, path string, n int) {
+	t.Helper()
+	client := h2Client(t, 1)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for i := 0; i < n; i++ {
+		req, _ := http.NewRequest("GET", "https://"+addr+path, nil)
+		req.Host = host
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+	}
+}
+
+// TestGeneratedResponseWritesUnderDeadline: a response gpm writes itself
+// (a configured error page, a redirect) is written under the same per-write
+// progress deadline as a proxied one, however large its body. A client that
+// does not accept the body ends the write once the deadline passes, and the
+// handler returns. A client that reads normally gets the whole page.
+func TestGeneratedResponseWritesUnderDeadline(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	withWriteIdleTimeout(t, idle)
+
+	t.Run("error page larger than the stream buffer", func(t *testing.T) {
+		// The output, not the source, is larger than the stream buffer: an
+		// error page template is at most 32 KiB.
+		src := "<html><body>" + strings.Repeat(`{{printf "%999d" .Status}}`, 40) + "</body></html>"
+		page := "<html><body>" + strings.Repeat(strings.Repeat(" ", 996)+"403", 40) + "</body></html>"
+		if err := SetErrorPages(model.ErrorPagesConfig{Inline: map[string]string{"403": src}}, ""); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = SetErrorPages(model.ErrorPagesConfig{}, "") })
+		addr, inHandler := generatedResponseServer(t, model.Config{
+			AccessLists: []model.AccessList{{ObjectMeta: model.ObjectMeta{Name: "nobody"}, DefaultAction: "deny"}},
+			ProxyHosts: []model.ProxyHost{{ObjectMeta: model.ObjectMeta{Name: "closed"}, Domains: []string{"closed.example.com"},
+				Upstream: model.Upstream{Scheme: "http", Host: "127.0.0.1", Port: 9}, AccessLists: []string{"nobody"}}},
+		})
+
+		req, _ := http.NewRequest("GET", "https://"+addr+"/", nil)
+		req.Host = "closed.example.com"
+		resp, err := h2Client(t, 0).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || err != nil || string(got) != page {
+			t.Fatalf("normal client: status %d, %d of %d bytes, err %v", resp.StatusCode, len(got), len(page), err)
+		}
+
+		stallGenerated(t, addr, "closed.example.com", "/", 5)
+		if !waitFor(t, 10*idle, func() bool { return inHandler.Load() == 0 }) {
+			t.Fatalf("%d error-page writes still in progress %v after the deadline", inHandler.Load(), 10*idle)
+		}
+	})
+
+	t.Run("redirect echoing a long path", func(t *testing.T) {
+		addr, inHandler := generatedResponseServer(t, model.Config{
+			RedirectHosts: []model.RedirectHost{{ObjectMeta: model.ObjectMeta{Name: "moved"}, Domains: []string{"old.example.com"},
+				TargetDomain: "new.example.com", PreservePath: true}},
+		})
+		stallGenerated(t, addr, "old.example.com", "/"+strings.Repeat("a", 8<<10), 5)
+		if !waitFor(t, 10*idle, func() bool { return inHandler.Load() == 0 }) {
+			t.Fatalf("%d redirect writes still in progress %v after the deadline", inHandler.Load(), 10*idle)
+		}
+	})
+}
+
+// A proxied response behind the listener is bounded by one progress deadline
+// per write: every armed deadline is cleared before the next is armed, apart
+// from the final one for the flush after the handler returned.
+func TestProxiedResponseWritesBoundOnce(t *testing.T) {
+	withWriteIdleTimeout(t, time.Minute)
+	up, closeFn := backendUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "proxied")
+	}))
+	t.Cleanup(closeFn)
+	srv := newListenerServer("", newReverseProxy(up, "app", nil, nil, nil, nil))
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "http://app.example.com/", nil))
+	if rec.Body.String() != "proxied" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+	d := rec.deadlines
+	if len(d) < 3 || d[len(d)-1].IsZero() {
+		t.Fatalf("deadlines = %v, want armed/cleared pairs and a final armed one", d)
+	}
+	for i := 0; i < len(d)-1; i++ {
+		if d[i].IsZero() != (i%2 == 1) {
+			t.Fatalf("deadlines = %v: a write was bounded by more than one progress deadline", d)
+		}
+	}
+}
+
+// Each proxied response holds one copy buffer for as long as its client takes
+// to read it, so the buffer is kept at the size of one progress-bounded write.
+func TestProxyCopyBufferSize(t *testing.T) {
+	if n := len((&bufferPool{}).Get()); n != progressWriteChunk {
+		t.Fatalf("proxy copy buffer = %d bytes, want %d", n, progressWriteChunk)
 	}
 }

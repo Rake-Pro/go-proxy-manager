@@ -1,14 +1,21 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/api"
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
+	"github.com/Rake-Pro/go-proxy-manager/internal/ha"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
 )
 
@@ -110,6 +117,47 @@ func TestBouncerSecretDestinationNeedsAdmin(t *testing.T) {
 	}
 }
 
+// An ACME certificate that sets acme.directoryURL or acme.eab, or changes
+// either, is written by an admin only; other certificate writes, edits that
+// keep both and edits that clear them stay on certificates:write.
+func TestCertificateACMEDestinationNeedsAdmin(t *testing.T) {
+	const (
+		plain    = `{"name":"c","type":"acme","domains":["c.example.com"],"acme":{"email":"a@example.com","challenge":"http-01"}}`
+		withDir  = `{"name":"c","type":"acme","domains":["c.example.com"],"acme":{"email":"a@example.com","challenge":"http-01","directoryURL":"https://ca.example.com/dir","eab":{"kid":"k","hmacKey":"${ENV:EAB_KEY}"}}}`
+		keepBoth = `{"name":"c","type":"acme","domains":["c.example.com","d.example.com"],"acme":{"email":"a@example.com","challenge":"http-01","directoryURL":"https://ca.example.com/dir","eab":{"kid":"k","hmacKey":"${ENV:EAB_KEY}"}}}`
+		movedDir = `{"name":"c","type":"acme","domains":["c.example.com"],"acme":{"email":"a@example.com","challenge":"http-01","directoryURL":"http://192.0.2.10/dir","eab":{"kid":"k","hmacKey":"${ENV:EAB_KEY}"}}}`
+		newKey   = `{"name":"c","type":"acme","domains":["c.example.com"],"acme":{"email":"a@example.com","challenge":"http-01","directoryURL":"https://ca.example.com/dir","eab":{"kid":"k","hmacKey":"${ENV:OTHER}"}}}`
+	)
+	st := sharedStore(t)
+	admin := scopedHandlerOn(t, st, model.ScopeAdmin)
+	writer := scopedHandlerOn(t, st, "certificates:write")
+
+	if w := do(t, writer, "PUT", "/certificates/c", withDir); w.Code != http.StatusForbidden {
+		t.Fatalf("create with directoryURL and eab on certificates:write: %d %s, want 403", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", plain); w.Code != http.StatusOK {
+		t.Fatalf("a certificate on the default CA stays on certificates:write: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", withDir); w.Code != http.StatusForbidden {
+		t.Fatalf("setting directoryURL and eab on certificates:write: %d %s, want 403", w.Code, w.Body.String())
+	}
+	if w := do(t, admin, "PUT", "/certificates/c", withDir); w.Code != http.StatusOK {
+		t.Fatalf("admin sets directoryURL and eab: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", keepBoth); w.Code != http.StatusOK {
+		t.Fatalf("edit keeping directoryURL and eab: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", movedDir); w.Code != http.StatusForbidden {
+		t.Fatalf("changing directoryURL on certificates:write: %d %s, want 403", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", newKey); w.Code != http.StatusForbidden {
+		t.Fatalf("changing the eab key on certificates:write: %d %s, want 403", w.Code, w.Body.String())
+	}
+	if w := do(t, writer, "PUT", "/certificates/c", plain); w.Code != http.StatusOK {
+		t.Fatalf("clearing directoryURL and eab stays on certificates:write: %d %s", w.Code, w.Body.String())
+	}
+}
+
 // GET /settings shows a caller below admin the webhook and notification
 // target URLs with their path and query removed: for Discord, Slack and ntfy
 // the path is the credential.
@@ -135,5 +183,97 @@ func TestSettingsRedactsDeliveryURLsBelowAdmin(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "https://discord.example/(redacted)") || !strings.Contains(w.Body.String(), "https://ntfy.example/(redacted)") {
 		t.Fatalf("redaction should keep scheme and host: %s", w.Body.String())
+	}
+}
+
+// The restore upload lifts the admin server's read deadline for its own
+// request, so an archive that arrives slower than the server-wide ReadTimeout
+// is still read whole.
+func TestRestoreLiftsTheReadDeadline(t *testing.T) {
+	h := scopedHandlerOn(t, sharedStore(t), model.ScopeAdmin)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/backup", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup: %d", rec.Code)
+	}
+	archive := rec.Body.Bytes()
+
+	ts := httptest.NewUnstartedServer(h)
+	ts.Config.ReadTimeout = 200 * time.Millisecond
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	pr, pw := io.Pipe()
+	go func() {
+		half := len(archive) / 2
+		_, _ = pw.Write(archive[:half])
+		time.Sleep(600 * time.Millisecond)
+		_, _ = pw.Write(archive[half:])
+		_ = pw.Close()
+	}()
+	req, err := http.NewRequest("POST", ts.URL+"/restore", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = int64(len(archive))
+	res, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || bytes.Contains(body, []byte("timeout")) {
+		t.Fatalf("restore over a slow upload: %d %s", res.StatusCode, body)
+	}
+}
+
+// POST /sessions/revoke ends every admin session but the caller's own, and
+// works on an HA follower, whose sessions are its own.
+func TestRevokeAdminSessionsRoute(t *testing.T) {
+	for _, role := range []ha.Role{ha.RoleLeader, ha.RoleFollower} {
+		t.Run(role.String(), func(t *testing.T) {
+			sessions, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { sessions.Close() })
+			authn := auth.NewAuthenticator(auth.Options{Store: sessions, LocalUser: "admin", LocalHash: "$2a$10$placeholder"})
+			authn.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{LocalLoginEnabled: true}})
+			h := authn.RequireRole(auth.RoleAdmin, api.New(api.Deps{
+				Store: sharedStore(t), Role: role, RevokeAdminSessions: authn.RevokeAllSessions,
+			}))
+			var all []*session.Session
+			for i := 0; i < 3; i++ {
+				s := &session.Session{Subject: "admin", Roles: []string{string(auth.RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(time.Hour)}
+				if err := sessions.Create(context.Background(), s); err != nil {
+					t.Fatal(err)
+				}
+				all = append(all, s)
+			}
+			req := httptest.NewRequest("POST", "/sessions/revoke", nil)
+			req.AddCookie(&http.Cookie{Name: "gpm_session", Value: all[0].ID})
+			req.Header.Set("X-CSRF-Token", all[0].CSRFToken)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"revoked": 2`) {
+				t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
+			}
+			if _, err := sessions.Get(context.Background(), all[0].ID); err != nil {
+				t.Fatalf("the caller's own session was ended: %v", err)
+			}
+			for _, s := range all[1:] {
+				if _, err := sessions.Get(context.Background(), s.ID); err == nil {
+					t.Fatal("another session survived the revoke")
+				}
+			}
+		})
+	}
+}
+
+// Ending every admin session is admin-scope only.
+func TestRevokeAdminSessionsNeedsAdmin(t *testing.T) {
+	h := scopedHandlerOn(t, sharedStore(t), "*:write")
+	if w := do(t, h, "POST", "/sessions/revoke", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("*:write token: %d, want 403", w.Code)
 	}
 }

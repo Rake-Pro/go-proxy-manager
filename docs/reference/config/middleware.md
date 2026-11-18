@@ -10,7 +10,7 @@ object carries exactly one `type` and its matching spec.
 | `auth` | AuthMiddleware | Require authentication. |
 | `headers` | HeadersMiddleware | Add/remove request/response headers. |
 | `guard` | GuardMiddleware | Conditionally deny requests. |
-| `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
+| `rate-limit` | RateLimitMiddleware | Per-client rate limiting, per route or per host (`scope`). |
 | `rewrite` | RewriteMiddleware | Request-path replacement (upstream-facing): exact, prefix or regex rules. |
 | `bouncer` | BouncerMiddleware | Deny hook: ask an external bouncer (CrowdSec LAPI or any HTTP endpoint) whether the client IP is banned. |
 
@@ -61,7 +61,10 @@ Generate a hash with `htpasswd -nbB admin 'hunter2'` (the part after the colon),
 or POST a plaintext `password` field instead of `passwordHash` and gpm hashes it
 server-side, on a `type: auth` middleware and on an inline `auth` block on a
 proxy host or one of its locations alike. A password is never stored and never
-returned: only the hash reaches the git-backed config and the API response.
+returned: only the hash reaches the git-backed config and the API response. One
+write may carry at most 64 plaintext passwords in total, counted across a
+host's own block and all of its locations; users that keep their stored
+`passwordHash` do not count.
 
 The gate behaves exactly like the deprecated access-list basic auth it replaces:
 same `401` and `WWW-Authenticate` challenge, same per-client-IP lockout after 5
@@ -69,7 +72,20 @@ failures for 15 minutes (answered identically to a wrong password, so the respon
 is no oracle; an IPv6 client counts per /56; at most 5 password checks per
 client run at once, further parallel requests wait for one to finish, so a
 parallel burst of guesses shares the same 5 and a page load with many
-sub-resources is not refused), same bounded bcrypt work. What it adds is the treatment every other
+sub-resources is not refused), same bounded bcrypt work. The failure count is
+one budget per client for every route of the host that uses the same gate
+spec (credentials, realm, `allowFrom`): the host route and every location with
+that gate share it, so spreading guesses over location prefixes gains nothing.
+A route whose gate spec differs, or a deprecated access-list `basicAuth` next to
+the gate, has its own budget. It also
+survives a config reload as long as the gate's own spec (credentials, realm,
+`allowFrom`) is unchanged; a changed spec, a restart or removing the host starts
+it fresh. The failure table tracks at most 65536 clients per gate. While it is
+full of clients with recent failures, a client it does not track is refused
+(fail closed), except a client that authenticated successfully through this
+gate in the last 24 hours (the gate remembers the 1024 most recent): it is
+still checked and its failures still count, and reaching the lockout drops it
+from that list. What it adds is the treatment every other
 auth mode has: it sits at the auth position of the chain (so a rate limit, an
 access list and a bouncer all still run outside it), the host's custom error pages
 render the refusal, denials are counted, and `allowFrom` exempts trusted networks.
@@ -116,6 +132,21 @@ the IdP. The signing key is auto-generated and persisted at
 `<cert-dir>/sso_signing.key` (0600) on first use, so sessions survive restarts
 without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
 own key (useful when rotating or sharing a key across instances).
+
+After a login the upstream receives `X-Forwarded-User` (the `email` claim, or the
+subject when the token has no email), `X-Forwarded-Email` and
+`X-Forwarded-Groups`. By default the email is asserted whether or not the IdP
+verified it. If an upstream keys accounts on either header and the IdP lets
+users change their own email, set the provider's
+[`oidc.requireVerifiedEmail`](identity-provider.md#identity-provider-oidc-require-verified-email):
+a login whose ID token lacks `email_verified: true` is then refused at the
+callback with `401` and the message "sign-in refused: the identity provider has
+not verified the email address of this account", so no session is issued and no
+unverified email reaches the upstream. A gate session issued without a
+verified email (before the option was turned on, or by an earlier release) is
+not accepted while the option is on: the user goes back through sign-in. The
+setting is per provider and also applies to admin sign-in through that
+provider.
 
 ## HeadersMiddleware (`headers`)
 
@@ -167,6 +198,13 @@ that is legal and occasionally what you want behind an `allowFrom`.
 > Rather than evaluate a query it cannot read the same way the upstream will, the
 > guard fails closed. This mirrors the same rule for `;` in request paths. Guards
 > with no `queryEquals` trigger are unaffected, as is every other middleware.
+
+> **`queryEquals` and key spellings.** A trigger key also matches a query
+> parameter whose name a lenient backend reads as that key: leading spaces are
+> dropped, the name ends at a NUL byte or before an `[...]` suffix, and a space,
+> `.` or unmatched `[` reads as `_` (so `?%20direct=1`, `?direct[]=1` and
+> `?a.b=1` count as `direct` and `a_b`). A request that carries the key under
+> more than one spelling counts as matching, like a repeated key (fail closed).
 
 ## RewriteMiddleware (`rewrite`)
 
@@ -245,11 +283,16 @@ rewrite:
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 | <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
 | <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
+| <span id="middleware-rate-limit-scope"></span>  `scope` | string | `route` | no | `route` or `host`. Which requests share one budget per client: `route` gives the host route and every location its own; `host` makes the host route and all of its locations draw on one. Not allowed on a location's own inline block. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
-Enforced as a per-host, per-client-IP token bucket (capacity = `burst`, refill
-= `requests`/`window` in tokens/sec). Over-limit requests get `429 Too Many
+Enforced as a per-route, per-client-IP token bucket (capacity = `burst`, refill
+= `requests`/`window` in tokens/sec). By default every route of a host (the
+host route and each location prefix) has its own bucket per client, so a client
+spreading requests over N location prefixes gets up to N+1 times the rate; set
+`scope: host` to make one bucket per client cover the host and all of its
+locations. A location's own extra limit always applies to that location only. Over-limit requests get `429 Too Many
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
 request is not proxied. The bucket is keyed on the derived client IP, with an
@@ -291,7 +334,10 @@ immediately.
   that served a 4 minute block and then behaves for 4 more minutes starts over
   at `blockFor`.
 - The streak lives in the same per-client bucket as the tokens, so it is lost
-  with the bucket on an LRU eviction or a reload, exactly like the block itself.
+  with the bucket on an LRU eviction, a restart, or a reload that changes this
+  limit's spec, exactly like the block itself. A reload that leaves the limit's
+  spec unchanged (including one that only changes another host) keeps the
+  buckets, blocks and streaks.
 
 With `blockFor: 1m`, `blockBackoff: 2`, `blockMax: 1h` a scanner that keeps
 coming back is blocked for 1m, 2m, 4m, 8m, 16m, 32m, then 1h per round.
@@ -341,8 +387,17 @@ query covers those too.
 pulls the whole decision set once
 (`GET {url}/v1/decisions/stream?startup=true`) and then deltas every `cacheTTL`,
 keeping the banned IPs and CIDR ranges in memory, so the request hot path never
-calls the LAPI at all. Only the very first request waits on the startup pull;
-refreshes happen in the background while the current set keeps serving, and a
+calls the LAPI at all. The startup pull runs again for each config reload
+(the set is rebuilt with the chain). One request runs it, and every request
+that arrives meanwhile waits for it, at most `timeout`, and then gets the real
+verdict; a request still waiting after `timeout` takes the `onError` path,
+and that verdict is not cached. When the startup pull itself fails (the LAPI
+errors or does not answer within `timeout`), the requests that waited for it
+take `onError` too, and that verdict is cached like any error verdict (at most
+`5s`). A failed startup pull, including one that panicked, is retried after a
+backoff (1s, doubling up to `cacheTTL`), and requests inside the backoff take
+`onError` at once.
+Refreshes happen in the background while the current set keeps serving, and a
 failed refresh logs and keeps the previous set rather than dropping it. Use it
 on a busy edge or with a large decision set; leave it off for the simpler
 live-lookup mode.
@@ -355,6 +410,10 @@ X-Forwarded-For: <client>          # the RESOLVED client IP, not the inbound hea
 X-Original-URL: <absolute request URL>
 X-Api-Key: <apiKey>                # only when apiKey is set
 ```
+
+`path` carries at most the first 1024 bytes of the request path and
+`X-Original-URL` at most the first 2048 bytes of the URL, so a long client URL
+cannot push the lookup past the hook server's request-line or header limits.
 
 `2xx` = allow, `403` = deny, **anything else** = no usable answer, so `onError`
 governs. The contract is deliberately trivial: a shell script, a fail2ban shim
@@ -372,6 +431,9 @@ at `cacheMaxEntries` with LRU eviction (so a rotating-source-IP flood cannot
 grow it without bound). A verdict derived from an **error** rather than a real
 answer is capped at **5s** regardless of `cacheTTL`, so an outage cannot pin a
 minute of guessed verdicts and keep guessing long after the bouncer recovered.
+For the `http` provider a `fail-open` verdict derived from an error is not
+cached at all (the hook's answer depends on the request, so its error can be
+specific to one request); a `fail-closed` one is cached for the 5s.
 
 `denyWith: error-page` (the default) renders the host's configured custom error
 page for `denyStatus`, falling back to the plain status body when none is

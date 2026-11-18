@@ -376,6 +376,9 @@ func apiErrorMessage(body []byte) string {
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &st); err == nil && st.Message != "" {
+		if len(st.Message) > 512 {
+			return strings.ToValidUTF8(st.Message[:512], "") + "..."
+		}
 		return st.Message
 	}
 	s := strings.TrimSpace(string(body))

@@ -10,8 +10,10 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"text/template/parse"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -696,6 +698,11 @@ func StripResponseHeaderRefused(name string) bool {
 	return hopByHopHeaders[lk] || unstrippableHeaders[lk]
 }
 
+// MaxInlineErrorPageBytes bounds one inline error-page template source. The
+// data plane separately caps a rendered page at 1 MiB and serves the built-in
+// response when a template exceeds it.
+const MaxInlineErrorPageBytes = 256 << 10
+
 func (e ErrorPagesConfig) validate() error {
 	if f := e.Dir; f != "" {
 		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
@@ -710,6 +717,9 @@ func (e ErrorPagesConfig) validate() error {
 				return fmt.Errorf(`errorPages.inline: key %q must be a 3-digit status code or "default"`, k)
 			}
 		}
+		if len(src) > MaxInlineErrorPageBytes {
+			return fmt.Errorf("errorPages.inline: template %q is %d bytes, over the %d-byte limit", k, len(src), MaxInlineErrorPageBytes)
+		}
 		// Parse-check at WRITE time. Without it a broken inline template commits
 		// cleanly, the running instance keeps its previously compiled pages (the
 		// reload path is fail-safe), and the NEXT restart is where it surfaces -
@@ -722,6 +732,318 @@ func (e ErrorPagesConfig) validate() error {
 	for _, s := range e.InterceptUpstream {
 		if s < 400 || s > 599 {
 			return fmt.Errorf("errorPages.interceptUpstream: %d must be a 4xx/5xx status code", s)
+		}
+	}
+	return nil
+}
+
+// The data of an error page is four short scalar fields, so its template is
+// checked against an allow-list in which every action has a small fixed upper
+// bound on the value it builds: the size-capped output writer only sees a value
+// once its action has built it whole, so the bound per action plus that cap is
+// what bounds one render. Allowed: text, the documented fields, dot inside a
+// with on a field (where dot is that field), if/else/with, the comparison and
+// boolean functions on fields and short literals, one field through a print or
+// escape function, and printf with a short format and up to four fields.
+// Anything else (a loop, a template call, a variable, a nested pipeline,
+// index/slice/call, an unknown node) is refused. The number of actions that
+// print is capped too: html/template drops what an action prints inside an
+// HTML, JS or CSS comment and shortens an unsafe URL or CSS value to a fixed
+// marker, so there the output cap never sees what the action built, and only
+// the count bounds the page.
+var (
+	errorPageFields       = map[string]bool{"Status": true, "StatusText": true, "Host": true, "RequestID": true}
+	errorPageCompareFuncs = map[string]bool{"eq": true, "ne": true, "lt": true, "le": true, "gt": true, "ge": true, "and": true, "or": true, "not": true}
+	errorPagePrintFuncs   = map[string]bool{"html": true, "js": true, "urlquery": true, "print": true, "len": true}
+)
+
+// Limits of the error-page allow-list: the bytes of a printf format and of any
+// other string literal, the arguments of one call (after a printf format), the
+// width and precision digits of a printf verb, the actions that print a value,
+// the if/with conditions and their nesting depth (an else if or else with is
+// one level deeper) in one template, and the template's source bytes.
+// html/template's escaper takes time quadratic in some text, and every level
+// of nesting holds stack for the whole render, so neither may grow with the
+// 256 KiB that validation allows for an inline page.
+const (
+	maxErrorPageLiteralBytes  = 64
+	maxErrorPageArgs          = 4
+	maxErrorPageFormatDigits  = 3
+	maxErrorPageActions       = 128
+	maxErrorPageConditions    = 512
+	maxErrorPageDepth         = 16
+	MaxErrorPageTemplateBytes = 32 << 10
+)
+
+// errorPageWalk carries the counts of one template's check.
+type errorPageWalk struct {
+	actions, conditions int
+	end                 int // source offset past the last node seen
+}
+
+// CheckErrorPageTemplate reports the first construct in a parsed error-page
+// template that is not on the allow-list above, or nil when there is none.
+// The source size is taken from the parse tree's offsets, so it covers
+// everything up to the end of the last text or action.
+func CheckErrorPageTemplate(t *template.Template) error {
+	for _, tt := range t.Templates() {
+		if tt.Name() != t.Name() {
+			return fmt.Errorf("{{define %q}} is not allowed in an error page template", tt.Name())
+		}
+		if tt.Tree == nil {
+			continue
+		}
+		var w errorPageWalk
+		if err := checkErrorPageList(tt.Tree.Root, false, 0, &w); err != nil {
+			return err
+		}
+		if w.end > MaxErrorPageTemplateBytes {
+			return fmt.Errorf("an error page template over %d bytes is not allowed", MaxErrorPageTemplateBytes)
+		}
+	}
+	return nil
+}
+
+func errorPageRefusal(n parse.Node, why string) error {
+	return fmt.Errorf("%q is not allowed in an error page template: %s", n.String(), why)
+}
+
+// checkErrorPageList checks the nodes of a list at nesting depth. scalarDot is
+// set inside a with on a field, where dot is that one field; elsewhere dot is
+// the whole page data and may not be used.
+func checkErrorPageList(l *parse.ListNode, scalarDot bool, depth int, w *errorPageWalk) error {
+	if l == nil {
+		return nil
+	}
+	for _, n := range l.Nodes {
+		var err error
+		switch n := n.(type) {
+		case *parse.TextNode:
+			w.end = max(w.end, int(n.Pos)+len(n.Text))
+		case *parse.CommentNode:
+		case *parse.ActionNode:
+			w.end = max(w.end, int(n.Pos)+len(n.String()))
+			if w.actions++; w.actions > maxErrorPageActions {
+				return fmt.Errorf("more than %d actions that print a value are not allowed in an error page template", maxErrorPageActions)
+			}
+			err = checkErrorPagePipe(n.Pipe, false, scalarDot)
+		case *parse.IfNode:
+			err = checkErrorPageBranch(&n.BranchNode, scalarDot, scalarDot, depth, w)
+		case *parse.WithNode:
+			// Dot inside is the with's value: one field when the pipeline is
+			// one field, a bool for a comparison.
+			p := n.Pipe
+			inner := len(p.Cmds) == 1 && len(p.Cmds[0].Args) == 1 && isErrorPageField(p.Cmds[0].Args[0], scalarDot)
+			err = checkErrorPageBranch(&n.BranchNode, scalarDot, inner, depth, w)
+		default:
+			err = errorPageRefusal(n, "only text, fields, if/else/with and the documented functions are allowed")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkErrorPageBranch(b *parse.BranchNode, scalarDot, innerDot bool, depth int, w *errorPageWalk) error {
+	w.end = max(w.end, int(b.Pos)+len(b.Pipe.String()))
+	if w.conditions++; w.conditions > maxErrorPageConditions {
+		return fmt.Errorf("more than %d if or with conditions are not allowed in an error page template", maxErrorPageConditions)
+	}
+	if depth++; depth > maxErrorPageDepth {
+		return fmt.Errorf("if or with nested more than %d levels deep (an else if or else with counts as a level) is not allowed in an error page template", maxErrorPageDepth)
+	}
+	if err := checkErrorPagePipe(b.Pipe, true, scalarDot); err != nil {
+		return err
+	}
+	if err := checkErrorPageList(b.List, innerDot, depth, w); err != nil {
+		return err
+	}
+	return checkErrorPageList(b.ElseList, scalarDot, depth, w)
+}
+
+// checkErrorPagePipe allows one command, or one field piped into one function
+// (.Host | html, the same as html .Host). cond is set for the pipeline of an if
+// or with, which may only be a field or a comparison or boolean function.
+func checkErrorPagePipe(p *parse.PipeNode, cond, scalarDot bool) error {
+	if len(p.Decl) > 0 {
+		return errorPageRefusal(p, "variables are not allowed")
+	}
+	cmds, piped := p.Cmds, 0
+	if len(cmds) == 2 && len(cmds[0].Args) == 1 && isErrorPageField(cmds[0].Args[0], scalarDot) {
+		cmds, piped = cmds[1:], 1
+	}
+	if len(cmds) != 1 || len(cmds[0].Args) == 0 {
+		return errorPageRefusal(p, "a pipeline may only pass one field to one function")
+	}
+	c := cmds[0]
+	fn, ok := c.Args[0].(*parse.IdentifierNode)
+	if !ok {
+		if piped > 0 || len(c.Args) != 1 || !isErrorPageField(c.Args[0], scalarDot) {
+			return errorPageRefusal(c, "only the fields .Status, .StatusText, .Host and .RequestID (and dot inside a with on one of them) can be printed")
+		}
+		return nil
+	}
+	args := c.Args[1:]
+	switch {
+	case errorPageCompareFuncs[fn.Ident]:
+		if len(args)+piped > maxErrorPageArgs {
+			return errorPageRefusal(c, fmt.Sprintf("%s takes at most %d arguments here", fn.Ident, maxErrorPageArgs))
+		}
+		for _, a := range args {
+			if !isErrorPageField(a, scalarDot) && !isErrorPageLiteral(a) {
+				return errorPageRefusal(c, fmt.Sprintf("comparison arguments must be fields or literals of at most %d bytes", maxErrorPageLiteralBytes))
+			}
+		}
+		return nil
+	case cond:
+		return errorPageRefusal(c, "a condition must be a field or a comparison or boolean function")
+	case fn.Ident == "printf":
+		var format *parse.StringNode
+		if len(args) > 0 {
+			format, _ = args[0].(*parse.StringNode)
+		}
+		if format == nil {
+			return errorPageRefusal(c, "the printf format must be a string literal")
+		}
+		if err := checkErrorPageFormat(format.Text); err != nil {
+			return errorPageRefusal(c, err.Error())
+		}
+		args = args[1:]
+	case errorPagePrintFuncs[fn.Ident]:
+		if len(args)+piped != 1 {
+			return errorPageRefusal(c, fn.Ident+" takes exactly one field here")
+		}
+	default:
+		return errorPageRefusal(c, "function "+fn.Ident+" is not allowed")
+	}
+	if len(args)+piped > maxErrorPageArgs {
+		return errorPageRefusal(c, fmt.Sprintf("%s takes at most %d fields here", fn.Ident, maxErrorPageArgs))
+	}
+	for _, a := range args {
+		if !isErrorPageField(a, scalarDot) {
+			return errorPageRefusal(c, "the arguments of "+fn.Ident+" must be fields")
+		}
+	}
+	return nil
+}
+
+// isErrorPageField reports whether n is one of the documented fields, or dot
+// where dot is one field (scalarDot).
+func isErrorPageField(n parse.Node, scalarDot bool) bool {
+	switch n := n.(type) {
+	case *parse.DotNode:
+		return scalarDot
+	case *parse.FieldNode:
+		return len(n.Ident) == 1 && errorPageFields[n.Ident[0]]
+	}
+	return false
+}
+
+func isErrorPageLiteral(n parse.Node) bool {
+	switch n := n.(type) {
+	case *parse.StringNode:
+		return len(n.Text) <= maxErrorPageLiteralBytes
+	case *parse.NumberNode:
+		return len(n.Text) <= maxErrorPageLiteralBytes
+	case *parse.BoolNode:
+		return true
+	}
+	return false
+}
+
+// checkErrorPageFormat bounds a printf format: its length, and the width and
+// precision of each verb to maxErrorPageFormatDigits digits. A width or
+// precision taken from an argument (*), explicit argument indexes and the '#'
+// and ' ' flags are refused.
+func checkErrorPageFormat(f string) error {
+	if len(f) > maxErrorPageLiteralBytes {
+		return fmt.Errorf("the printf format is over %d bytes", maxErrorPageLiteralBytes)
+	}
+	for i := 0; i < len(f); i++ {
+		if f[i] != '%' {
+			continue
+		}
+		i++
+		for i < len(f) && strings.IndexByte("+-# 0", f[i]) >= 0 {
+			// '#' and ' ' widen hex and other verbs well past their width.
+			if f[i] == '#' || f[i] == ' ' {
+				return fmt.Errorf("the printf flag %q is not allowed", f[i])
+			}
+			i++
+		}
+		for part := 0; part < 2; part++ { // width, then precision
+			n := 0
+			for i < len(f) && f[i] >= '0' && f[i] <= '9' {
+				i++
+				n++
+			}
+			if n > maxErrorPageFormatDigits {
+				return fmt.Errorf("a printf width or precision is over %d digits", maxErrorPageFormatDigits)
+			}
+			if i < len(f) && (f[i] == '*' || f[i] == '[') {
+				return fmt.Errorf("printf %q is not allowed", f[i])
+			}
+			if part == 1 || i >= len(f) || f[i] != '.' {
+				break
+			}
+			i++
+		}
+	}
+	return nil
+}
+
+// CheckNewTemplates refuses, at write time, an inline template in e that fails
+// CheckErrorPageTemplate unless stored holds the same source under the same
+// key. A stored template that fails it keeps loading: the data plane skips it
+// with a warning and serves the next fallback page instead, so an existing
+// config is never turned into one that fails to load or build. stored may be
+// nil.
+func (e ErrorPagesConfig) CheckNewTemplates(stored *ErrorPagesConfig) error {
+	keys := make([]string, 0, len(e.Inline))
+	for k := range e.Inline {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		src := e.Inline[k]
+		if stored != nil && stored.Inline[k] == src {
+			continue
+		}
+		t, err := template.New(k).Parse(src)
+		if err != nil {
+			continue // validate reports a parse error
+		}
+		if err := CheckErrorPageTemplate(t); err != nil {
+			return fmt.Errorf("errorPages.inline: template %q: %w", k, err)
+		}
+	}
+	return nil
+}
+
+// ErrorPagesByHost maps each proxy host that sets errorPages to that block, so
+// a write can compare its result against the stored config
+// (CheckNewErrorPageTemplates).
+func (c Config) ErrorPagesByHost() map[string]*ErrorPagesConfig {
+	out := map[string]*ErrorPagesConfig{}
+	for _, h := range c.ProxyHosts {
+		if h.ErrorPages != nil {
+			out[h.Name] = h.ErrorPages
+		}
+	}
+	return out
+}
+
+// CheckNewErrorPageTemplates runs CheckNewTemplates on every proxy host's
+// errorPages against the same host's block in stored (ErrorPagesByHost of the
+// stored config).
+func (c Config) CheckNewErrorPageTemplates(stored map[string]*ErrorPagesConfig) error {
+	for _, h := range c.ProxyHosts {
+		if h.ErrorPages == nil {
+			continue
+		}
+		if err := h.ErrorPages.CheckNewTemplates(stored[h.Name]); err != nil {
+			return fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
 	}
 	return nil
@@ -817,6 +1139,11 @@ type Settings struct {
 	// another.
 	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
 
+	// ClientLimits bounds how many requests one client address may have in
+	// progress at once on the HTTP and HTTPS listeners (see
+	// ClientLimitsSettings). nil (the default) sets no limit.
+	ClientLimits *ClientLimitsSettings `json:"clientLimits,omitempty" yaml:"clientLimits,omitempty"`
+
 	// IngressDiscovery configures the optional read-only Kubernetes Ingress
 	// reconciler that derives managed proxy hosts from annotated cluster
 	// Ingresses, which then feed DNSSync above.
@@ -888,6 +1215,32 @@ type Settings struct {
 	//
 	// Empty (the default) strips nothing.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
+}
+
+// ClientLimitsSettings is the per-client in-flight request limit of the
+// data-plane listeners. The client address is the one every IP control
+// compares (trustedProxies applies); IPv6 addresses count per /64.
+type ClientLimitsSettings struct {
+	// MaxInFlight is how many requests one client address may have in progress
+	// at a time, across every host and both listeners. An open upgraded
+	// connection (WebSocket) counts as one for as long as it is open. A request
+	// over the limit is refused with 429. 0 sets no limit.
+	MaxInFlight int `json:"maxInFlight,omitempty" yaml:"maxInFlight,omitempty"`
+	// AllowFrom lists CIDRs or bare IPs that are not limited.
+	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+}
+
+// MaxClientInFlightLimit is the largest maxInFlight accepted.
+const MaxClientInFlightLimit = 1 << 20
+
+func (c *ClientLimitsSettings) validate() error {
+	if c == nil {
+		return nil
+	}
+	if c.MaxInFlight < 0 || c.MaxInFlight > MaxClientInFlightLimit {
+		return fmt.Errorf("clientLimits.maxInFlight: must be between 0 and %d, got %d", MaxClientInFlightLimit, c.MaxInFlight)
+	}
+	return ValidateTrustedProxies("clientLimits.allowFrom", c.AllowFrom)
 }
 
 // Access-list source fetch-loop defaults. PollInterval is only how often the
@@ -1043,6 +1396,9 @@ func (s Settings) Validate() error {
 		return err
 	}
 	if err := ValidateTrustedProxies("settings.trustedProxies", s.TrustedProxies); err != nil {
+		return err
+	}
+	if err := s.ClientLimits.validate(); err != nil {
 		return err
 	}
 	if err := s.DNSSync.Validate(); err != nil {

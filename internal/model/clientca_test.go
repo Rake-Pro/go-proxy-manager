@@ -6,6 +6,7 @@ import (
 )
 
 func TestClientCAValidate(t *testing.T) {
+	caPEM, _ := testCA(t, "corp-ca", true)
 	tests := []struct {
 		name    string
 		ca      ClientCA
@@ -13,7 +14,21 @@ func TestClientCAValidate(t *testing.T) {
 	}{
 		{
 			name: "valid inline pem",
-			ca:   ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"},
+			ca:   ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM},
+		},
+		{
+			name:    "inline pem with no certificate rejected",
+			ca:      ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"},
+			wantErr: "caPEM: contains no PEM certificate",
+		},
+		{
+			name:    "inline text that is not pem rejected",
+			ca:      ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "not a certificate"},
+			wantErr: "caPEM: contains no PEM certificate",
+		},
+		{
+			name: "disabled CA is not parsed",
+			ca:   ClientCA{ObjectMeta: ObjectMeta{Name: "corp", Disabled: true}, CAPEM: "not a certificate"},
 		},
 		{
 			name: "valid file placeholder",
@@ -47,7 +62,8 @@ func TestClientCAValidate(t *testing.T) {
 }
 
 func TestClientAuthValidation(t *testing.T) {
-	clientCA := ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x"}
+	caPEM, _ := testCA(t, "corp-ca", true)
+	clientCA := ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM}
 
 	tests := []struct {
 		name    string
@@ -143,20 +159,21 @@ func TestClientAuthValidation(t *testing.T) {
 // confined to the cert store like a custom certificate's, the two sources are
 // mutually exclusive, and a policy without a source is a configuration error.
 func TestClientCARevocationValidation(t *testing.T) {
+	caPEM, _ := testCA(t, "corp-ca", true)
 	tests := []struct {
 		name    string
 		ca      ClientCA
 		wantErr string
 	}{
-		{"no revocation configured", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x"}, ""},
-		{"relative crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "corp.crl"}, ""},
-		{"inline crlPEM", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLPEM: "-----BEGIN X509 CRL-----"}, ""},
-		{"fail-open policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: CRLPolicyFailOpen}, ""},
-		{"both sources", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPEM: "p"}, "not both"},
-		{"absolute crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "/etc/shadow"}, "must be relative to the cert store"},
-		{"traversal crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "../../etc/shadow"}, "must be relative to the cert store"},
-		{"unknown policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLFile: "c.crl", CRLPolicy: "maybe"}, "crlPolicy: must be"},
-		{"policy without a source", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: "x", CRLPolicy: CRLPolicyFailOpen}, "no crlFile or crlPEM"},
+		{"no revocation configured", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM}, ""},
+		{"relative crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "corp.crl"}, ""},
+		{"inline crlPEM", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLPEM: "-----BEGIN X509 CRL-----"}, ""},
+		{"fail-open policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "c.crl", CRLPolicy: CRLPolicyFailOpen}, ""},
+		{"both sources", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "c.crl", CRLPEM: "p"}, "not both"},
+		{"absolute crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "/etc/shadow"}, "must be relative to the cert store"},
+		{"traversal crlFile", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "../../etc/shadow"}, "must be relative to the cert store"},
+		{"unknown policy", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLFile: "c.crl", CRLPolicy: "maybe"}, "crlPolicy: must be"},
+		{"policy without a source", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CRLPolicy: CRLPolicyFailOpen}, "no crlFile or crlPEM"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

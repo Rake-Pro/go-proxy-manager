@@ -221,8 +221,8 @@ guard is strictly tighter than `dnssync`'s: `https` only, and the dialer refuses
 loopback, link-local, RFC1918/ULA and multicast destinations post-DNS at connect
 time; `dnssync` deliberately permits private targets (a LAN Pi-hole is the
 point), while nothing legitimate here is internal. The body is capped at 1 MiB,
-and a non-200, an empty result, a result over `maxEntries`, or a **single**
-unparseable line refuses the fetch and keeps the previously fetched set; a feed
+and a non-200, an empty result, a result over `maxEntries` or its total
+coverage budget (`maxCoverage`, when set), or a **single** unparseable line refuses the fetch and keeps the previously fetched set; a feed
 that changed shape is one gpm no longer understands, and serving the subset it
 still parses would be a silent, partial allow list. Each entry carries a sha256
 over its network set, validated on load, so a hand-pasted network fails the load
@@ -767,7 +767,12 @@ Optional `stream` mode pulls the whole decision set once and then deltas on the
 cache interval, so the hot path is a local IP/CIDR lookup with no per-request
 LAPI call: refreshes run in the background off a request that finds the set
 stale (rather than a per-chain ticker, which would leak one poller per config
-reload), and a failed refresh keeps serving the previous set. Verdicts are
+reload), and a failed refresh keeps serving the previous set. Until the first
+pull succeeds one request runs it while the others wait for it (at most the
+bouncer `timeout`, so a hung LAPI never queues them one after another), and a
+failed first pull is retried after a backoff. Range decisions are
+indexed by prefix, and each pull is folded into a copy that is swapped in, so
+lookups never wait on a large set. Verdicts are
 cached per client IP with a bounded LRU; a verdict derived from an *error* is
 capped at 5s so an outage cannot pin a long TTL of guesses. `onError` decides
 what an unanswerable lookup means and defaults to **fail-open**: an unreachable

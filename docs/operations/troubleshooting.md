@@ -34,6 +34,7 @@ below map each row's wording to its cause and fix.
 | Login page answers "Wrong username or password." every time | `GPM_LOCAL_ADMIN_USER` is set but the hash is missing or unreadable | Generate it with `gpm hashpw` and mount it as `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE` |
 | Login page has no buttons and no password form | `ssoOnly: true` with a provider name that does not resolve to an `oidc` provider | Recover by editing `config/settings.yaml` and restarting ([Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery)) |
 | Login "does nothing" over `http://127.0.0.1:8081` | `GPM_COOKIE_SECURE=1` forces `Secure`, and a browser refuses to store a `Secure` cookie received over plain HTTP: the POST succeeds and the next request is anonymous | Leave `GPM_COOKIE_SECURE` at its `auto` default, which issues the cookie without `Secure` on a plain-HTTP request and turns `Secure` on by itself under TLS ([Hardening](hardening.md)) |
+| Login over the plain-HTTP admin port does not stick while `externalBaseURL` is `https://...` | In `auto` mode an `https` `externalBaseURL` marks the session and login-state cookies `Secure`, which a browser does not store over plain HTTP, and the OIDC callback returns to the `externalBaseURL` host | Sign in through the HTTPS admin hostname; for break-glass on the plain-HTTP port, restart with `GPM_COOKIE_SECURE=0` for the repair and restore `auto` afterwards ([Break-glass recovery](../reference/config/settings/admin-auth.md#break-glass-recovery), [Environment variables and flags](../reference/env-vars-and-flags.md)) |
 | The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin panel with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
 | Process exits at startup naming the config directory | The config dir is not writable by the `gpm` user | Fix ownership on the mounted volume |
 | Startup fails on an unmigrated config tree | `config/dead-hosts/` still holds objects, or a stream host still uses `forwardHost`/`forwardPort` | Apply both renames in the config repo first ([Upgrading](upgrading.md)) |
@@ -49,6 +50,7 @@ below map each row's wording to its cause and fix.
 | Locked out with no authenticator | The secret is the only enrolment | Unset `GPM_LOCAL_ADMIN_TOTP_SECRET*`, restart, sign in, enrol a new secret |
 | Login says too many attempts, but this client never failed | The username is locked by guesses from other clients (twenty in 15 minutes) | Wait out the window, or sign in through an SSO provider; the log names the locked username |
 | A guarded path answers 403 on a request that repeats a query key (`?k=0&k=1`) | A repeated `queryEquals` key counts as matching the trigger (fail closed) | Send the key once, or come from an `allowFrom` network |
+| A guarded path answers 403 on a key spelled differently (`?%20k=1`, `?k[]=1`, `?k.x=1` for `k_x`) | A `queryEquals` key also matches the spellings a lenient backend reads as that key (fail closed) | Send the key as the trigger names it, or come from an `allowFrom` network |
 | Restore did not bring back the API tokens in the archive | Restore keeps the live tokens and ignores the archive's, like Revert | Re-create the token you need; the ignored files are listed in the log |
 
 ## Certificates
@@ -73,6 +75,9 @@ below map each row's wording to its cause and fix.
 |---|---|---|
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check `domains` and `disabled`; two enabled hosts cannot share a domain |
 | Config write refused: `domains: <name> is already claimed by proxy host "<other>"` | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
+| Config write refused, or a config warning: `domain <name> is claimed by ...: the router serves it from only one of them` | Two hosts list spellings of one name, such as `<name>` and `<name>:8443`; the router drops the port | Remove the port (or the duplicate) from one host ([Domains are exclusive](../concepts/config-model.md#domains-are-exclusive)) |
+| Config write refused: `the data plane cannot build the resulting config: ...` | The object validates but the proxy listeners could not load it (certificate files, `errorPages.dir`, a client CA bundle) | Fix what the message names; see [Writes must compile](../concepts/config-model.md#writes-must-compile) |
+| Config warning: `object name "<n>" does not match the file name` | A file in the config repo was renamed or restored under another name | Save the object once (it moves to `<n>.yaml` in the same commit), or rename the file in the config repo |
 | `503` on every request to one host | The host references a middleware or access list that does not exist | Fix the reference; the proxy listeners fail that one host closed |
 | The backend receives the wrong path | Location match, `stripPrefix`, rewrite rules and the upstream base `path` compose in a fixed order | See [Path composition](../concepts/request-pipeline.md#path-composition) |
 | A guard answers `400` on a URL containing `;` | A guard with a `queryEquals` trigger fails closed on legacy `;` separators | Remove the `;`, or drop the `queryEquals` trigger |
@@ -131,7 +136,7 @@ below map each row's wording to its cause and fix.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `refused > 0` in the source status | A feed answered non-`200`, was empty, over `maxEntries`, or held one unparseable line | Fix the feed; the previously fetched set keeps serving ([Remote IP feeds](../how-to/access-list-sources.md)) |
+| `refused > 0` in the source status | A feed answered non-`200`, was empty, over `maxEntries` or `maxCoverage`, or held one unparseable line | Fix the feed; the previously fetched set keeps serving ([Remote IP feeds](../how-to/access-list-sources.md)) |
 | A source rule matches nothing | The source has never been fetched, so it resolves to the empty set | Trigger a reconcile and check the status |
 | A source rule grants more than intended | A `source` rule without `paths` is an ordinary allow rule | Pair every `source` rule with `paths` |
 

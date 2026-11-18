@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"container/list"
 	"context"
 	"net"
 	"net/http"
@@ -33,6 +34,10 @@ type accessList struct {
 	users   basicAuthUsers
 	hasIP   bool
 	hasAuth bool
+	// gate is the basic-auth failure gate a router build shares across the
+	// host's routes and across rebuilds (see registry.authGateFor); nil means
+	// a fresh gate per handler.
+	gate *authGate
 
 	// Geo rules, evaluated after nets and before defaultAllow (see ipAllowed).
 	hasGeo            bool
@@ -100,7 +105,7 @@ func compileAccessList(al model.AccessList) accessList {
 			// rule is still kept, so the list keeps its IP dimension and a
 			// default-deny list stays closed rather than losing its only rule and
 			// turning into a list with nothing to match on.
-			nr.nets = sources[model.AccessListSourceKey(al.Name, r.Source)]
+			nr.nets = sourceNets(sources, al, r.Source)
 		} else {
 			var ipnet *net.IPNet
 			_, ipnet, err := net.ParseCIDR(r.CIDR)
@@ -248,7 +253,12 @@ const (
 	// fails this many times inside the window is locked out for the rest of it.
 	maxBasicAuthFails = 5
 	basicAuthLockout  = 15 * time.Minute
-	maxBasicAuthKeys  = 4096
+	maxBasicAuthKeys  = 65536
+
+	// maxBasicAuthKnown / basicAuthKnownTTL bound the gate's list of keys that
+	// recently authenticated successfully (see authGate.known).
+	maxBasicAuthKnown = 1024
+	basicAuthKnownTTL = 24 * time.Hour
 
 	// maxBcryptConcurrent bounds how many bcrypt comparisons run at once across
 	// the whole data plane. bcrypt is deliberately expensive (~50-100ms of CPU at
@@ -270,12 +280,33 @@ var bcryptSem = make(chan struct{}, maxBcryptConcurrent)
 // is capped (maxKeys) and fails CLOSED when saturated with live entries, so a
 // flood of distinct keys becomes a lockout rather than an unthrottled
 // brute-force path.
+//
+// known is a small LRU of keys that authenticated successfully within knownTTL.
+// Such a key is still tracked while the map is saturated, so returning clients
+// keep working through a flood of other keys. The map can then grow past
+// maxKeys by the known keys that have an entry in the window; each such key
+// needs a correct password first, so the growth stays small, but it is not a
+// hard bound. Its failures count as usual, and a key that reaches the failure
+// limit is dropped from known.
 type authGate struct {
 	mu      sync.Mutex
 	entries map[string]*authGateEntry
 	window  time.Duration
 	limit   int
 	maxKeys int
+	// nextSweep is the earliest time a sweep of a saturated map can free an
+	// entry; until then saturatedLocked answers without scanning.
+	nextSweep time.Time
+
+	known    map[string]*list.Element // value: *authGateKnown
+	knownLRU *list.List               // front = most recently authenticated
+	maxKnown int
+	knownTTL time.Duration
+}
+
+type authGateKnown struct {
+	key     string
+	expires time.Time
 }
 
 type authGateEntry struct {
@@ -290,7 +321,10 @@ type authGateEntry struct {
 const authGateWaitMax = 10 * time.Second
 
 func newAuthGate(window time.Duration, limit, maxKeys int) *authGate {
-	return &authGate{entries: map[string]*authGateEntry{}, window: window, limit: limit, maxKeys: maxKeys}
+	return &authGate{
+		entries: map[string]*authGateEntry{}, window: window, limit: limit, maxKeys: maxKeys,
+		known: map[string]*list.Element{}, knownLRU: list.New(), maxKnown: maxBasicAuthKnown, knownTTL: basicAuthKnownTTL,
+	}
 }
 
 // begin admits one password check for key and returns the function that
@@ -303,7 +337,7 @@ func newAuthGate(window time.Duration, limit, maxKeys int) *authGate {
 // Authorization header on every sub-resource) is queued, not refused. A
 // success clears the key's failures and wakes its waiters. An untracked key
 // while the map is full of live entries is refused (fail closed under
-// saturation).
+// saturation), unless it recently authenticated successfully (see known).
 func (g *authGate) begin(ctx context.Context, key string) (finish func(ok bool), admitted bool) {
 	timeout := time.NewTimer(authGateWaitMax)
 	defer timeout.Stop()
@@ -319,7 +353,7 @@ func (g *authGate) begin(ctx context.Context, key string) (finish func(ok bool),
 			}
 		}
 		if e == nil {
-			if g.saturatedLocked(now) {
+			if !g.knownLocked(key, now) && g.saturatedLocked(now) {
 				g.mu.Unlock()
 				return nil, false
 			}
@@ -357,11 +391,16 @@ func (g *authGate) finish(key string, e *authGateEntry, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e.inflight--
+	now := time.Now()
 	if ok {
 		e.fails = 0
+		g.rememberLocked(key, now)
 	} else {
 		e.fails++
-		e.resetAt = time.Now().Add(g.window)
+		e.resetAt = now.Add(g.window)
+		if e.fails >= g.limit {
+			g.forgetLocked(key)
+		}
 	}
 	if e.wake != nil {
 		close(e.wake)
@@ -376,16 +415,71 @@ func (g *authGate) finish(key string, e *authGateEntry, ok bool) {
 // expired ones first: a map full of dead entries must not keep every new
 // client locked out until a config reload. An entry with a check in flight is
 // live. Called with g.mu held.
+//
+// A sweep records the earliest resetAt of the entries it kept that have no
+// check in flight, and the next sweep waits until then: no kept entry can
+// expire sooner (an in-flight entry ends with a fresh resetAt or is deleted,
+// and a new entry expires a full window later), so a saturated map answers
+// in O(1) between sweeps.
 func (g *authGate) saturatedLocked(now time.Time) bool {
 	if len(g.entries) < g.maxKeys {
 		return false
 	}
+	if now.Before(g.nextSweep) {
+		return true
+	}
+	next := now.Add(g.window)
 	for k, ev := range g.entries {
-		if ev.inflight == 0 && now.After(ev.resetAt) {
+		if ev.inflight != 0 {
+			continue
+		}
+		if now.After(ev.resetAt) {
 			delete(g.entries, k)
+		} else if ev.resetAt.Before(next) {
+			next = ev.resetAt
 		}
 	}
+	g.nextSweep = next
 	return len(g.entries) >= g.maxKeys
+}
+
+// knownLocked reports whether key authenticated successfully within knownTTL,
+// dropping an expired record. Called with g.mu held.
+func (g *authGate) knownLocked(key string, now time.Time) bool {
+	el := g.known[key]
+	if el == nil {
+		return false
+	}
+	if now.After(el.Value.(*authGateKnown).expires) {
+		g.forgetLocked(key)
+		return false
+	}
+	return true
+}
+
+// rememberLocked records a successful authentication for key, evicting the
+// least recently authenticated key past maxKnown. Called with g.mu held.
+func (g *authGate) rememberLocked(key string, now time.Time) {
+	if g.maxKnown <= 0 {
+		return
+	}
+	if el := g.known[key]; el != nil {
+		el.Value.(*authGateKnown).expires = now.Add(g.knownTTL)
+		g.knownLRU.MoveToFront(el)
+		return
+	}
+	g.known[key] = g.knownLRU.PushFront(&authGateKnown{key: key, expires: now.Add(g.knownTTL)})
+	for g.knownLRU.Len() > g.maxKnown {
+		g.forgetLocked(g.knownLRU.Back().Value.(*authGateKnown).key)
+	}
+}
+
+// forgetLocked removes key from the known list. Called with g.mu held.
+func (g *authGate) forgetLocked(key string) {
+	if el := g.known[key]; el != nil {
+		g.knownLRU.Remove(el)
+		delete(g.known, key)
+	}
 }
 
 // authOK verifies the request's basic-auth credentials against the list's
@@ -404,11 +498,10 @@ func (c accessList) authOK(r *http.Request) bool { return c.users.verify(r) }
 // challenge is left as plain text - it is a credential prompt, not a
 // gpm-generated error page.
 func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
-	// One gate per compiled list. A config reload rebuilds the chain and so
-	// resets the counters, which is acceptable: a reload is operator-driven (an
-	// admin write or a certificate renewal) and cannot be provoked by the client
-	// being throttled.
-	gate := newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	gate := c.gate
+	if gate == nil {
+		gate = newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A list with no IP, auth, or geo dimension has nothing to match on.
 		// Honor an explicit defaultAction: deny (a deliberate "deny all") rather
@@ -539,7 +632,7 @@ func anyAccessListHandler(lists []accessList, names []string, ipOf func(*http.Re
 		}
 		countDenial(r, reason)
 		log.Debug().Str("host", host).Str("accessListsMode", "any").Strs("accessLists", names).
-			Str("client", ip.String()).Str("path", r.URL.Path).
+			Str("client", ip.String()).Str("path", logPath(r.URL.Path)).
 			Msg("dataplane: no access list in the group allowed the request")
 		serveErrorPage(w, http.StatusForbidden, ep, host, func() {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -593,7 +686,7 @@ func accessListAllowNets(al model.AccessList) []*net.IPNet {
 			continue
 		}
 		if r.Source != "" {
-			nets = append(nets, sources[model.AccessListSourceKey(al.Name, r.Source)]...)
+			nets = append(nets, sourceNets(sources, al, r.Source)...)
 			continue
 		}
 		if n := parseNet(r.CIDR); n != nil {

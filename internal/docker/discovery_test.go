@@ -207,6 +207,78 @@ func TestDerive(t *testing.T) {
 			wantErr:  "no usable IP address",
 		},
 		{
+			name: "loopback address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("loopback", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "127.0.0.1"}}
+			}),
+			wantName: "dkr-loopback",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "loopback address with no configured network",
+			conf: testConf(nil),
+			container: container("loopback", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "127.0.0.1"}}
+			}),
+			wantName: "dkr-loopback",
+			wantErr:  "no usable IP address",
+		},
+		{
+			name: "unspecified address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("unspecified", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "0.0.0.0"}}
+			}),
+			wantName: "dkr-unspecified",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "unspecified address with no configured network",
+			conf: testConf(nil),
+			container: container("unspecified", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "0.0.0.0"}}
+			}),
+			wantName: "dkr-unspecified",
+			wantErr:  "no usable IP address",
+		},
+		{
+			name: "multicast address on the configured network",
+			conf: testConf(func(s *model.Settings) {
+				s.DockerDiscovery.Network = "bridge"
+			}),
+			container: container("multicast", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "224.0.0.1"}}
+			}),
+			wantName: "dkr-multicast",
+			wantErr:  "unusable IP address",
+		},
+		{
+			name: "multicast address with no configured network",
+			conf: testConf(nil),
+			container: container("multicast", enabled(nil), func(c *Container) {
+				c.NetworkSettings.Networks = map[string]struct {
+					IPAddress string `json:"IPAddress"`
+				}{"bridge": {IPAddress: "224.0.0.1"}}
+			}),
+			wantName: "dkr-multicast",
+			wantErr:  "no usable IP address",
+		},
+		{
 			// "<name>.yaml" must fit a 255-byte file name; no name is returned so
 			// it is a plain skip.
 			name:      "derived name longer than the store can write",
@@ -715,5 +787,27 @@ func TestEmptyListsInATemplateLocationDoNotDisableAFrozenHost(t *testing.T) {
 	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stored}}, conf, []Container{noAddress}, nil)
 	if len(p.Upserts) != 0 || len(p.Deletes) != 0 || p.Skipped != 1 {
 		t.Fatalf("plan %+v, want the host frozen (one skip, no write)", p)
+	}
+}
+
+// Docker discovery shares the planner, so a container whose existing host is
+// refused for a domain conflict gets the profile's current chain restamped on
+// the domain it already serves, rather than keeping the stored chain.
+func TestDomainConflictSkipRestampsAStaleChain(t *testing.T) {
+	conf := testConf(nil)
+	stale := managedHostFixture("dkr-app", func(h *model.ProxyHost) { h.AccessLists = nil })
+	operator := model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: "operator-www"},
+		Domains:    []string{"www.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "192.0.2.41", Port: 80},
+	}
+	ct := container("app", enabled(map[string]string{"gpm.rake.pro/domains": "app.example.com,www.example.com"}), nil)
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale, operator}}, conf, []Container{ct}, nil)
+	if len(p.Upserts) != 1 {
+		t.Fatalf("plan %+v, want one restamp", p)
+	}
+	u := p.Upserts[0]
+	if u.Name != "dkr-app" || u.Disabled || len(u.AccessLists) != 1 || len(u.Domains) != 1 || u.Domains[0] != "app.example.com" {
+		t.Fatalf("upsert = %+v, want dkr-app with the profile chain on app.example.com only", u)
 	}
 }

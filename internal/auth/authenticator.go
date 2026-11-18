@@ -414,7 +414,23 @@ func (a *Authenticator) oidcClient(ctx context.Context, idpName string) (*oidc.C
 // callback can confirm the flow was started by this same browser
 // (CSRF/login-fixation binding). It is short-lived and scoped to the auth
 // endpoints.
-const oidcStateCookie = "gpm_oidc_state"
+//
+// On a Secure request it is oidcStateCookieSecure with Path=/ instead: a
+// __Host- cookie can only be set by this host itself, so a sibling host under
+// the same parent domain cannot plant one to break or hijack the callback.
+const (
+	oidcStateCookie       = "gpm_oidc_state"
+	oidcStateCookieSecure = "__Host-gpm_oidc_state"
+)
+
+// loginStateCookieName is the login-state cookie's name and path for a request
+// whose cookies are (or are not) Secure.
+func loginStateCookieName(secure bool) (name, path string) {
+	if secure {
+		return oidcStateCookieSecure, "/"
+	}
+	return oidcStateCookie, "/auth"
+}
 
 // loginStateTTL bounds an OIDC login from its start to its callback.
 const loginStateTTL = 10 * time.Minute
@@ -422,6 +438,12 @@ const loginStateTTL = 10 * time.Minute
 // maxLoginReturnLen caps the return path carried in the login-state cookie, so
 // the cookie stays well inside browser size limits.
 const maxLoginReturnLen = 1024
+
+// maxLoginStateCookieLen caps the signed login-state value. The return path is
+// capped before JSON escaping, which can grow it several times over; a value
+// past what a browser stores would leave the login without its state cookie,
+// so such a login returns to "/" instead.
+const maxLoginStateCookieLen = 4000
 
 // macLabelLoginState is mixed into the login-state MAC so the key cannot be
 // used to forge any other token type.
@@ -502,10 +524,15 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string
 	if len(returnTo) > maxLoginReturnLen {
 		returnTo = "/"
 	}
-	cookie, err := a.signLoginState(loginState{
+	st := loginState{
 		State: state, Nonce: nonce, Verifier: verifier, IdP: idpName, Return: returnTo,
 		Exp: time.Now().Add(loginStateTTL).Unix(),
-	})
+	}
+	cookie, err := a.signLoginState(st)
+	if err == nil && len(cookie) > maxLoginStateCookieLen {
+		st.Return = "/"
+		cookie, err = a.signLoginState(st)
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -517,33 +544,44 @@ func (a *Authenticator) BeginLogin(ctx context.Context, idpName, returnTo string
 // IdP). The callback hands it to CompleteLogin, which checks it against the
 // state query parameter to bind the flow.
 func (a *Authenticator) SetLoginStateCookie(w http.ResponseWriter, r *http.Request, value string) {
+	secure := a.cookieSecure(r)
+	name, path := loginStateCookieName(secure)
 	http.SetCookie(w, &http.Cookie{
-		Name:     oidcStateCookie,
+		Name:     name,
 		Value:    value,
-		Path:     "/auth",
+		Path:     path,
 		HttpOnly: true,
-		Secure:   a.cookieSecure(r),
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(loginStateTTL.Seconds()),
 	})
 }
 
-// LoginStateCookie returns the login-state cookie value, or "" if absent.
-func (a *Authenticator) LoginStateCookie(r *http.Request) string {
-	if c, err := r.Cookie(oidcStateCookie); err == nil {
-		return c.Value
+// LoginStateCookie returns the login-state cookie value that verifies, is
+// unexpired and carries state, or "" when none does. Every cookie of the name
+// is tried, so another cookie of the same name sent first cannot hide the
+// real one.
+func (a *Authenticator) LoginStateCookie(r *http.Request, state string) string {
+	name, _ := loginStateCookieName(a.secureFor(r))
+	for _, c := range r.CookiesNamed(name) {
+		if st, ok := a.readLoginState(c.Value); ok && st.Exp >= time.Now().Unix() && state != "" &&
+			subtle.ConstantTimeCompare([]byte(st.State), []byte(state)) == 1 {
+			return c.Value
+		}
 	}
 	return ""
 }
 
 // ClearLoginStateCookie expires the login-state cookie (single use).
 func (a *Authenticator) ClearLoginStateCookie(w http.ResponseWriter, r *http.Request) {
+	secure := a.secureFor(r)
+	name, path := loginStateCookieName(secure)
 	http.SetCookie(w, &http.Cookie{
-		Name:     oidcStateCookie,
+		Name:     name,
 		Value:    "",
-		Path:     "/auth",
+		Path:     path,
 		HttpOnly: true,
-		Secure:   a.secureFor(r),
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
@@ -885,8 +923,33 @@ func (a *Authenticator) authenticate(w http.ResponseWriter, r *http.Request) (Pr
 		_ = a.store.Delete(r.Context(), sess.ID)
 		return Principal{}, false
 	}
+	// The sign-in policy is checked only at login, so a session is refused once
+	// the method it was created with is no longer allowed.
+	if !a.sessionMethodAllowed(sess.IdP) {
+		return Principal{}, false
+	}
 	a.maybeSlide(w, r.Context(), sess, secure)
 	return principalOf(sess), true
+}
+
+// sessionMethodAllowed reports whether a session created through idp ("local"
+// or an OIDC provider name) could still be created now: local login still
+// allowed and configured, or the provider still listed in adminAuth.providers
+// and still an OIDC provider.
+func (a *Authenticator) sessionMethodAllowed(idp string) bool {
+	if idp == "local" {
+		return a.localAllowed() && a.localUser != "" && a.localHash != ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	p, ok := a.idps[idp]
+	return ok && p.Type == model.IdPTypeOIDC && p.OIDC != nil && slices.Contains(a.settings.Providers, idp)
+}
+
+// RevokeAllSessions ends every admin session except keepID (the caller's own;
+// "" ends all) and returns how many were ended.
+func (a *Authenticator) RevokeAllSessions(ctx context.Context, keepID string) (int, error) {
+	return a.store.DeleteAllExcept(ctx, keepID)
 }
 
 // sessionCookie returns the session cookie r presents, preferring the __Host-

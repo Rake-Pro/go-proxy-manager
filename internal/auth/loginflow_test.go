@@ -226,6 +226,39 @@ func TestBeginAndCompleteLogin(t *testing.T) {
 	}
 }
 
+func TestBeginLoginKeepsLoginStateCookieInsideBrowserLimits(t *testing.T) {
+	idp := newAuthIdP(t)
+	a := oidcAuthenticator(t, idp, &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, ret, want string
+	}{
+		{"escaping-heavy return path", "/" + strings.Repeat("<", maxLoginReturnLen-1), "/"},
+		{"ordinary return path", "/hosts?q=" + strings.Repeat("a", 500), "/hosts?q=" + strings.Repeat("a", 500)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authURL, cookie, err := a.BeginLogin(ctx, "acme", tc.ret)
+			if err != nil {
+				t.Fatalf("BeginLogin: %v", err)
+			}
+			if len(cookie) > maxLoginStateCookieLen {
+				t.Fatalf("login-state cookie is %d bytes, want at most %d", len(cookie), maxLoginStateCookieLen)
+			}
+			idp.setClaims(map[string]any{
+				"nonce": nonceOf(t, authURL), "email": "a@example.test", "name": "A",
+				"groups": []string{"proxy-admins"},
+			})
+			_, returnTo, err := a.CompleteLogin(ctx, cookie, stateOf(t, authURL), "the-code")
+			if err != nil {
+				t.Fatalf("CompleteLogin: %v", err)
+			}
+			if returnTo != tc.want {
+				t.Errorf("returnTo = %q, want %q", returnTo, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompleteLoginFailures(t *testing.T) {
 	t.Run("unsigned state cookie", func(t *testing.T) {
 		a := oidcAuthenticator(t, newAuthIdP(t), &model.RoleMapping{AdminGroups: []string{"proxy-admins"}})
@@ -529,32 +562,47 @@ func TestLoginStateCookieRoundTrip(t *testing.T) {
 			}
 			a := NewAuthenticator(Options{Store: testStore(t), SecureMode: mode})
 			r := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+			value, err := a.signLoginState(loginState{State: "st", Exp: time.Now().Add(time.Minute).Unix()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A Secure cookie is __Host- named with Path=/, so a sibling host
+			// cannot set one.
+			wantName, wantPath := oidcStateCookie, "/auth"
+			if secure {
+				wantName, wantPath = oidcStateCookieSecure, "/"
+			}
 
 			rec := httptest.NewRecorder()
-			a.SetLoginStateCookie(rec, r, "state-value")
-			c := findCookie(t, rec.Result(), oidcStateCookie)
-			if c.Value != "state-value" {
+			a.SetLoginStateCookie(rec, r, value)
+			c := findCookie(t, rec.Result(), wantName)
+			if c.Value != value {
 				t.Fatalf("value = %q", c.Value)
 			}
-			if c.Path != "/auth" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.MaxAge != 600 {
+			if c.Path != wantPath || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.MaxAge != 600 {
 				t.Fatalf("attributes: %+v", c)
 			}
 			if c.Secure != secure {
 				t.Fatalf("Secure = %v, want %v", c.Secure, secure)
 			}
 
-			// The handler reads it straight back.
+			// The handler reads it straight back, also when another cookie of
+			// the same name is sent first.
 			req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+			req.AddCookie(&http.Cookie{Name: wantName, Value: "planted"})
 			req.AddCookie(c)
-			if got := a.LoginStateCookie(req); got != "state-value" {
+			if got := a.LoginStateCookie(req, "st"); got != value {
 				t.Fatalf("LoginStateCookie = %q", got)
+			}
+			if got := a.LoginStateCookie(req, "other"); got != "" {
+				t.Fatalf("LoginStateCookie for another state = %q, want empty", got)
 			}
 
 			// Clearing expires it in place.
 			rec2 := httptest.NewRecorder()
 			a.ClearLoginStateCookie(rec2, r)
-			cleared := findCookie(t, rec2.Result(), oidcStateCookie)
-			if cleared.Value != "" || cleared.MaxAge != -1 || cleared.Path != "/auth" {
+			cleared := findCookie(t, rec2.Result(), wantName)
+			if cleared.Value != "" || cleared.MaxAge != -1 || cleared.Path != wantPath {
 				t.Fatalf("cleared cookie: %+v", cleared)
 			}
 			if cleared.Secure != secure {
@@ -566,7 +614,7 @@ func TestLoginStateCookieRoundTrip(t *testing.T) {
 
 func TestLoginStateCookieAbsent(t *testing.T) {
 	a := NewAuthenticator(Options{Store: testStore(t)})
-	if got := a.LoginStateCookie(httptest.NewRequest(http.MethodGet, "/auth/callback", nil)); got != "" {
+	if got := a.LoginStateCookie(httptest.NewRequest(http.MethodGet, "/auth/callback", nil), "st"); got != "" {
 		t.Fatalf("LoginStateCookie = %q, want empty", got)
 	}
 }
@@ -726,8 +774,8 @@ func TestSlidingExpiryLeavesFreshSessionsAlone(t *testing.T) {
 // past that lifetime.
 func TestSessionAbsoluteLifetime(t *testing.T) {
 	st := testStore(t)
-	a := NewAuthenticator(Options{Store: st, SessionTTL: time.Hour})
-	a.Configure(model.Config{}, model.Settings{})
+	a := NewAuthenticator(withLocalAdmin(Options{Store: st, SessionTTL: time.Hour}))
+	a.Configure(model.Config{}, localLoginOn(model.Settings{}))
 	h := a.RequireRole(RoleAdmin, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	call := func(id string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()

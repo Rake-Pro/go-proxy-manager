@@ -518,6 +518,124 @@ func TestAuthGateFailsClosedWhenSaturated(t *testing.T) {
 	}
 }
 
+// passOnce runs one attempt for key through g that ends in a correct password,
+// reporting whether the gate admitted it.
+func passOnce(g *authGate, key string) bool {
+	finish, admitted := g.begin(context.Background(), key)
+	if admitted {
+		finish(true)
+	}
+	return admitted
+}
+
+// A key that recently authenticated successfully is still checked while the
+// map is saturated by other keys; its failures still count and lock it out,
+// and the lockout drops it from the known list.
+func TestAuthGateKnownKeyPassesSaturation(t *testing.T) {
+	g := newAuthGate(time.Minute, 2, 4)
+	if !passOnce(g, "known") {
+		t.Fatal("first attempt refused")
+	}
+	for i := range 4 {
+		failOnce(g, net.IPv4(10, 0, 0, byte(i)).String())
+	}
+	if failOnce(g, "stranger") {
+		t.Fatal("an untracked key must still be refused while the map is saturated")
+	}
+	if !passOnce(g, "known") {
+		t.Fatal("a recently authenticated key must be admitted while the map is saturated")
+	}
+	for i := range 2 {
+		if !failOnce(g, "known") {
+			t.Fatalf("known key failure %d refused below the limit", i)
+		}
+	}
+	if passOnce(g, "known") {
+		t.Fatal("a known key that reached the failure limit must be locked out")
+	}
+	if _, ok := g.known["known"]; ok {
+		t.Fatal("a locked-out key must be dropped from the known list")
+	}
+	if len(g.entries) > g.maxKeys+g.maxKnown {
+		t.Fatalf("gate holds %d entries, more than maxKeys+maxKnown", len(g.entries))
+	}
+}
+
+// A saturated map is scanned only once an entry can have expired: a refused
+// attempt does not rescan before the earliest expiry the last sweep saw, and a
+// known key's check never scans. An expired entry planted after a sweep shows
+// whether a scan ran (a scan deletes it).
+func TestAuthGateSaturatedMapScansOnlyWhenEntriesCanExpire(t *testing.T) {
+	g := newAuthGate(time.Minute, 2, 4)
+	if !passOnce(g, "known") {
+		t.Fatal("first attempt refused")
+	}
+	for i := range 4 {
+		failOnce(g, net.IPv4(10, 0, 0, byte(i)).String())
+	}
+	if failOnce(g, "stranger") {
+		t.Fatal("an untracked key must be refused while the map is saturated")
+	}
+	plant := func() {
+		g.mu.Lock()
+		g.entries["stale"] = &authGateEntry{resetAt: time.Now().Add(-time.Second)}
+		g.mu.Unlock()
+	}
+	planted := func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.entries["stale"] != nil
+	}
+	plant()
+	if failOnce(g, "stranger2") {
+		t.Fatal("an untracked key must be refused while the map is saturated")
+	}
+	if !planted() {
+		t.Fatal("a refused attempt rescanned the map before any entry could expire")
+	}
+	if !passOnce(g, "known") {
+		t.Fatal("a known key must be admitted while the map is saturated")
+	}
+	if !planted() {
+		t.Fatal("a known key's check scanned the map")
+	}
+
+	// Once the recorded expiry is reached the next refusal sweeps again.
+	g.mu.Lock()
+	g.nextSweep = time.Time{}
+	g.mu.Unlock()
+	if failOnce(g, "stranger3") {
+		t.Fatal("an untracked key must be refused while the map is saturated")
+	}
+	if planted() {
+		t.Fatal("the sweep due after the earliest expiry did not run")
+	}
+}
+
+// The known list is bounded (least recently authenticated evicted first) and
+// its records expire.
+func TestAuthGateKnownListBoundedAndTimeLimited(t *testing.T) {
+	g := newAuthGate(time.Minute, 2, 16)
+	g.maxKnown = 2
+	for _, k := range []string{"a", "b", "c"} {
+		passOnce(g, k)
+	}
+	if g.knownLRU.Len() != 2 || g.known["a"] != nil {
+		t.Fatalf("known list holds %d keys (a present: %v), want 2 without the oldest", g.knownLRU.Len(), g.known["a"] != nil)
+	}
+	g.knownTTL = 10 * time.Millisecond
+	passOnce(g, "d")
+	time.Sleep(20 * time.Millisecond)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.knownLocked("d", time.Now()) {
+		t.Fatal("a known record must expire after knownTTL")
+	}
+	if g.known["d"] != nil {
+		t.Fatal("an expired known record must be dropped")
+	}
+}
+
 // A map full of expired entries is not saturated: they are swept before
 // saturation is reported, so a past burst of distinct keys does not keep every
 // new client locked out until a reload.

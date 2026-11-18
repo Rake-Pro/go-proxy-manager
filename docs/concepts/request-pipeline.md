@@ -162,7 +162,18 @@ repairing a client that mangles an upstream path, e.g. adding the trailing
 slash a mobile OIDC client strips off Authentik's `/application/o/token`
 endpoint, which Django would otherwise answer `405`. The reverse proxy sets `X-Forwarded-*`, preserves the client `Host` (unless the
 upstream sets `hostHeader` to `upstream` or an explicit hostname), and
-carries WebSocket upgrades transparently. Redirects that an upstream emits to its
+carries WebSocket upgrades transparently. An open upgraded connection is
+closed when the decision that admitted it no longer holds: a reload removes or
+disables its host or changes the host's access configuration (its access
+lists, its access middlewares (`auth`, `guard`, `rate-limit`, `bouncer`),
+inline auth or rate limit, client-certificate settings, the identity providers
+and client CAs those name, or its trusted proxies), the SSO session that
+admitted it expires or is revoked, or a CRL update revokes the client
+certificate it was opened with. A reload that leaves all of that unchanged
+leaves the connection open, including one that only edits a `headers` or
+`rewrite` middleware the host uses. At most 65536 upgraded connections are
+open at a time across all hosts; an upgrade beyond that is refused with `502`
+before the connection is switched. Redirects that an upstream emits to its
 own address are rewritten to the public scheme/host.
 
 ## Client IP and the three trust tiers

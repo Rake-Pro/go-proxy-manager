@@ -270,6 +270,8 @@ func TestCRLReloadOnMTimeChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reload publishes a successful build's anchors to the CRL watch.
+	registerCRLAnchors(rt.clientCAs)
 	sc := serverCfgFor(t, rt)
 	cert, _ := clientCertSerial(t, caCert, caKey, 60, "later-revoked")
 	if err := tlsHandshake(sc, forceClientCert(cert)); err != nil {
@@ -287,7 +289,7 @@ func TestCRLReloadOnMTimeChange(t *testing.T) {
 	}
 	watched := crlAnchors.Load()
 	if watched == nil || len(*watched) != 1 {
-		t.Fatalf("the router build must register its file-backed CRL anchors, got %v", watched)
+		t.Fatalf("the published build must register its file-backed CRL anchors, got %v", watched)
 	}
 	for _, a := range *watched {
 		a.reloadIfChanged()

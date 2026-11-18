@@ -446,7 +446,30 @@ type groupTransport struct {
 // groupRetryBufBytes caps how much of a request body is buffered to keep a
 // failover retry possible. Beyond it (large uploads) the body streams and the
 // request gets exactly one attempt.
-const groupRetryBufBytes = 1 << 20
+const groupRetryBufBytes = 64 << 10
+
+// Retry buffering is bounded process-wide and in time as well as per request.
+// Each growth of a request's buffer is reserved from the shared budget before
+// it is made, so the budget counts buffer memory actually held. A request
+// whose next growth the budget cannot cover, or whose body has not ended
+// groupRetryBufWait after buffering started, is sent on a single attempt
+// instead, like a body over the size cap. The time bound is checked as each
+// read returns. Vars only so tests can shrink them.
+var (
+	groupRetryBudgetBytes int64 = 32 << 20
+	groupRetryBufWait           = 5 * time.Second
+)
+
+// groupRetryBufInUse is the part of groupRetryBudgetBytes currently reserved.
+var groupRetryBufInUse atomic.Int64
+
+func reserveRetryBuf(n int64) bool {
+	if groupRetryBufInUse.Add(n) > groupRetryBudgetBytes {
+		groupRetryBufInUse.Add(-n)
+		return false
+	}
+	return true
+}
 
 func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	cands := t.gh.candidates(clientKey(req))
@@ -461,6 +484,7 @@ func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer body.done()
 	if !retriable && len(cands) > 1 {
 		cands = cands[:1]
 	}
@@ -645,48 +669,160 @@ func countBody(body io.ReadCloser, u *upstreamHealth) io.ReadCloser {
 // closes the body it is given, even on a dial error, so attempts cannot share
 // one reader).
 type bodySource struct {
-	buf    []byte
-	stream io.ReadCloser // non-nil when the body exceeded the buffer (single attempt)
-	none   bool
+	buf     []byte        // the complete body, replayed on every attempt
+	single  io.ReadCloser // non-nil for a body that gets exactly one attempt
+	none    bool
+	release func() // returns the budget reservation; nil when nothing is reserved
+	// refs counts the holders of buf: the source until done, plus every
+	// attempt body the transport has not closed yet. The transport may still
+	// be writing an attempt body after RoundTrip returns, so the reservation
+	// is returned only when the last holder lets go.
+	refs atomic.Int32
 }
 
 // newBodySource prepares req's body for (possibly repeated) sending. The bool
 // reports whether the request is safe to retry: bodiless and fully-buffered
-// bodies are; an overflowing body is not (its remainder can stream only once).
+// bodies are; a body over the size cap, one still arriving after
+// groupRetryBufWait, or one that found the retry budget exhausted is not (its
+// remainder can stream only once).
 func newBodySource(req *http.Request) (*bodySource, bool, error) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return &bodySource{none: true}, true, nil
 	}
-	data, err := io.ReadAll(io.LimitReader(req.Body, groupRetryBufBytes+1))
+	data, held, complete, err := readRetryPrefix(req.Body)
+	release := retryBufRelease(held)
 	if err != nil {
+		release()
 		_ = req.Body.Close()
 		return nil, false, err
 	}
-	if len(data) <= groupRetryBufBytes {
-		_ = req.Body.Close()
-		return &bodySource{buf: data}, true, nil
+	if data == nil {
+		return &bodySource{single: req.Body}, false, nil
 	}
-	return &bodySource{buf: data, stream: req.Body}, false, nil
+	if complete {
+		_ = req.Body.Close()
+		src := &bodySource{buf: data, release: release}
+		src.refs.Store(1)
+		return src, true, nil
+	}
+	// The prefix is referenced only by the attempt body, which drops it once
+	// it has been read, so a body that keeps arriving slowly holds no buffered
+	// bytes for the rest of the request.
+	return &bodySource{single: &prefixBody{prefix: data, rest: req.Body, release: release}, release: release}, false, nil
+}
+
+// readRetryPrefix reads body until it ends (complete), passes
+// groupRetryBufBytes, is still arriving groupRetryBufWait after the first read
+// started, or needs a buffer growth the retry budget cannot cover. The buffer
+// never grows past groupRetryBufBytes+1. held is the budget reserved for the
+// buffer, its capacity, on every return; data is nil when not even the first
+// allocation could be reserved.
+func readRetryPrefix(body io.Reader) (data []byte, held int64, complete bool, err error) {
+	const limit = groupRetryBufBytes + 1
+	deadline := time.Now().Add(groupRetryBufWait)
+	for {
+		if len(data) == cap(data) {
+			grow := min(max(2*cap(data), 512), limit)
+			if !reserveRetryBuf(int64(grow - cap(data))) {
+				return data, held, false, nil
+			}
+			held += int64(grow - cap(data))
+			nb := make([]byte, len(data), grow)
+			copy(nb, data)
+			data = nb
+		}
+		n, err := body.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			return data, held, true, nil
+		}
+		if err != nil {
+			return nil, held, false, err
+		}
+		if len(data) == limit || time.Now().After(deadline) {
+			return data, held, false, nil
+		}
+	}
+}
+
+func retryBufRelease(n int64) func() {
+	var once sync.Once
+	return func() { once.Do(func() { groupRetryBufInUse.Add(-n) }) }
+}
+
+// done drops RoundTrip's hold on the buffered body. A replay buffer's
+// reservation is returned once no attempt body still references it; a
+// single-attempt body handed to the transport returns its own (see prefixBody).
+func (b *bodySource) done() {
+	if b.buf != nil {
+		b.unref()
+		return
+	}
+	if b.release != nil {
+		b.release()
+	}
+}
+
+func (b *bodySource) unref() {
+	if b.refs.Add(-1) == 0 && b.release != nil {
+		b.release()
+	}
 }
 
 func (b *bodySource) next() io.ReadCloser {
 	if b.none {
 		return nil
 	}
-	if b.stream != nil {
-		return &joinedBody{Reader: io.MultiReader(bytes.NewReader(b.buf), b.stream), closer: b.stream}
+	if b.single != nil {
+		// The transport closes the body it is given, so from here the attempt
+		// body owns the reservation.
+		b.release = nil
+		return b.single
 	}
-	return io.NopCloser(bytes.NewReader(b.buf))
+	b.refs.Add(1)
+	return &replayBody{Reader: bytes.NewReader(b.buf), src: b}
 }
 
-// joinedBody streams a buffered prefix followed by the original body, closing
-// the original when the transport closes the attempt body.
-type joinedBody struct {
-	io.Reader
-	closer io.Closer
+// replayBody is one attempt's view of a replay buffer; Close drops its hold.
+type replayBody struct {
+	*bytes.Reader
+	src  *bodySource
+	once sync.Once
 }
 
-func (j *joinedBody) Close() error { return j.closer.Close() }
+func (r *replayBody) Close() error {
+	r.once.Do(r.src.unref)
+	return nil
+}
+
+// prefixBody is a single-attempt body: the buffered prefix, then the rest of
+// the client's body. Read drops the prefix and returns its reservation as soon
+// as the prefix has been consumed; Close returns it in any case.
+type prefixBody struct {
+	prefix  []byte
+	rest    io.ReadCloser
+	release func()
+}
+
+func (p *prefixBody) Read(b []byte) (int, error) {
+	if p.prefix != nil {
+		n := copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		if len(p.prefix) == 0 {
+			p.prefix = nil
+			p.release()
+		}
+		if n > 0 || len(b) == 0 {
+			return n, nil
+		}
+	}
+	return p.rest.Read(b)
+}
+
+func (p *prefixBody) Close() error {
+	p.release()
+	return p.rest.Close()
+}
 
 // isConnectError reports whether err happened while establishing the upstream
 // connection - dial (refused / no route / dial timeout) or TLS handshake - i.e.

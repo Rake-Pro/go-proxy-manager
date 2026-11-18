@@ -63,7 +63,7 @@ func newRoleEnvWith(t *testing.T, apiHandler http.Handler) *roleEnv {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	authn := auth.NewAuthenticator(auth.Options{Store: st, SessionTTL: time.Hour})
+	authn := localLoginAuthenticator(auth.Options{Store: st, SessionTTL: time.Hour})
 	return &roleEnv{srv: New(":0", nil, authn, apiHandler, nil, nil, false), store: st}
 }
 
@@ -74,7 +74,7 @@ func (e *roleEnv) login(t *testing.T, role auth.Role) (string, string) {
 	sess := &session.Session{
 		Subject:   "someone@example.com",
 		Roles:     []string{string(role)},
-		IdP:       "test",
+		IdP:       "local",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	if err := e.store.Create(context.Background(), sess); err != nil {

@@ -8,8 +8,10 @@ import (
 
 // Report builds the analytics report for q from the memory window (1h, 6h,
 // 24h) or from the hourly rollups plus the running hours (7d, 30d). The store
-// is read without holding the collector lock, and a long-range report is
-// cached for longReportCacheTTL so repeated readers do not re-scan the file.
+// is read without holding the collector lock. Reports are built one at a time
+// and cached (shortReportCacheTTL for the memory ranges, longReportCacheTTL
+// for the long ones), so repeated or concurrent readers cannot keep the
+// collector lock, which the ingest worker needs for every event, held.
 func (c *Collector) Report(q Query) (Report, error) {
 	dur, bucket, ok := ParseRange(q.Range)
 	if !ok {
@@ -35,30 +37,53 @@ func (c *Collector) Report(q Query) (Report, error) {
 		return Report{}, fmt.Errorf("%w %q", ErrUnknownHost, q.Host)
 	}
 	long := dur > 24*time.Hour
-	key := q.Range + "|" + q.Host + "|" + q.Scope
+	ttl := shortReportCacheTTL
 	if long {
+		ttl = longReportCacheTTL
+	}
+	key := q.Range + "|" + q.Host + "|" + q.Scope
+	cached := func() (Report, bool) {
 		c.cacheMu.Lock()
-		if e, ok := c.cache[key]; ok && now.Sub(e.at) < longReportCacheTTL {
-			c.cacheMu.Unlock()
-			e.rep.GeneratedAt = now
-			e.rep.Dropped = rep.Dropped
-			return e.rep, nil
+		defer c.cacheMu.Unlock()
+		e, ok := c.cache[key]
+		if !ok || now.Sub(e.at) >= ttl {
+			return Report{}, false
 		}
-		c.cacheMu.Unlock()
+		e.rep.GeneratedAt = now
+		e.rep.Dropped = rep.Dropped
+		return e.rep, true
+	}
+	if r, ok := cached(); ok {
+		return r, nil
+	}
+	// One build at a time: concurrent readers queue here rather than on c.mu,
+	// and a reader that waited for the same report takes the cached copy.
+	c.buildMu.Lock()
+	defer c.buildMu.Unlock()
+	if r, ok := cached(); ok {
+		return r, nil
 	}
 	end := now.Truncate(bucket).Add(bucket)
 	start := end.Add(-dur)
 	var agg, prev *window
 	var err error
 	if !long {
+		// The previous day of a 24h report is read from the rollups when they
+		// exist, so its memory walk is only done as the fallback.
+		prevFromStore := dur == 24*time.Hour && c.opts.Store != nil
 		c.mu.Lock()
 		agg = c.memoryWindow(start, end, bucket, q.Host, q.Scope)
-		prev = c.memoryWindow(start.Add(-dur), start, bucket, q.Host, q.Scope)
+		if !prevFromStore {
+			prev = c.memoryWindow(start.Add(-dur), start, bucket, q.Host, q.Scope)
+		}
 		c.mu.Unlock()
-		if dur == 24*time.Hour && c.opts.Store != nil {
-			// The previous day is not in memory; read it from the rollups.
+		if prevFromStore {
 			if pw, perr := c.storeWindow(start.Add(-dur), start, bucket, q.Host, q.Scope); perr == nil {
 				prev = pw
+			} else {
+				c.mu.Lock()
+				prev = c.memoryWindow(start.Add(-dur), start, bucket, q.Host, q.Scope)
+				c.mu.Unlock()
 			}
 		}
 	} else {
@@ -73,11 +98,14 @@ func (c *Collector) Report(q Query) (Report, error) {
 	}
 	rep.Previous = prev.totals()
 	agg.fill(&rep, q.Host == "", c.clients.Load().(string) != "off")
-	if long {
-		c.cacheMu.Lock()
-		c.cache[key] = cachedReport{at: now, rep: rep}
-		c.cacheMu.Unlock()
+	c.cacheMu.Lock()
+	for k, e := range c.cache {
+		if now.Sub(e.at) >= longReportCacheTTL {
+			delete(c.cache, k)
+		}
 	}
+	c.cache[key] = cachedReport{at: now, rep: rep}
+	c.cacheMu.Unlock()
 	return rep, nil
 }
 

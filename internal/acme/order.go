@@ -6,16 +6,37 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/acme"
 )
+
+// requestedAuthz reports whether an authorization identifier belongs to one of
+// the order's domains. A wildcard authorization carries the base name, so it
+// matches the domain "*." + value.
+func requestedAuthz(domains []string, value string, wildcard bool) bool {
+	norm := func(v string) string { return strings.ToLower(strings.TrimSuffix(v, ".")) }
+	want := norm(value)
+	if wildcard {
+		want = "*." + want
+	}
+	for _, d := range domains {
+		if norm(d) == want {
+			return true
+		}
+	}
+	return false
+}
 
 // issue runs a full order (dns-01 or http-01) for cert's domains and persists
 // the result. For dns-01 solver provisions the TXT records; for http-01 the
@@ -49,6 +70,10 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		authz, err := client.GetAuthorization(ctx, authzURL)
 		if err != nil {
 			return fmt.Errorf("get authorization: %w", err)
+		}
+		if authz.Identifier.Type != "dns" || !requestedAuthz(domains, authz.Identifier.Value, authz.Wildcard) {
+			m.http01.Delete(httpTokens...)
+			return fmt.Errorf("authorization for %q was not requested by this order", authz.Identifier.Value)
 		}
 		if authz.Status == acme.StatusValid {
 			continue // already authorized
@@ -123,6 +148,11 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 	}
 
 	chainPEM := encodeChain(chainDER)
+	if err := checkIssuedChain(chainDER, chainPEM, certKey, domains, time.Now()); err != nil {
+		// Nothing is stored: the current certificate keeps serving and the
+		// failure is recorded for the next attempt.
+		return fmt.Errorf("issued certificate refused: %w", err)
+	}
 	notAfter, err := leafNotAfter(chainPEM)
 	if err != nil {
 		return err
@@ -163,4 +193,46 @@ func encodeChain(chainDER [][]byte) []byte {
 		_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
 	}
 	return buf.Bytes()
+}
+
+// checkIssuedChain verifies what a CA returned before it is stored: the leaf is
+// for the key gpm generated, covers every requested name, has not expired, and
+// the pair loads exactly as the data plane loads it. A pair that fails here
+// would otherwise be saved as issued, fail every reload and the next start, and
+// count as fresh until its expiry window. NotBefore is not checked: with a local
+// clock behind the CA's, every fresh leaf would be refused and renewal would
+// stop, while clients with a correct clock accept the certificate.
+func checkIssuedChain(chainDER [][]byte, chainPEM []byte, key *ecdsa.PrivateKey, domains []string, now time.Time) error {
+	if len(chainDER) == 0 {
+		return errors.New("the CA returned an empty chain")
+	}
+	leaf, err := x509.ParseCertificate(chainDER[0])
+	if err != nil {
+		return fmt.Errorf("parse leaf: %w", err)
+	}
+	if !key.PublicKey.Equal(leaf.PublicKey) {
+		return errors.New("the leaf is not for the requested key")
+	}
+	for _, d := range domains {
+		if strings.HasPrefix(d, "*.") {
+			if !slices.ContainsFunc(leaf.DNSNames, func(n string) bool { return strings.EqualFold(n, d) }) {
+				return fmt.Errorf("the leaf does not cover %q", d)
+			}
+			continue
+		}
+		if err := leaf.VerifyHostname(d); err != nil {
+			return fmt.Errorf("the leaf does not cover %q", d)
+		}
+	}
+	if now.After(leaf.NotAfter) {
+		return fmt.Errorf("the leaf has expired (valid until %s)", leaf.NotAfter.Format(time.RFC3339))
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return err
+	}
+	if _, err := tls.X509KeyPair(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+		return fmt.Errorf("load the certificate and key pair: %w", err)
+	}
+	return nil
 }

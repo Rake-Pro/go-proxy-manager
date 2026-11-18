@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -249,7 +252,191 @@ func TestUDPFullTableEvictsOnlyIdleSession(t *testing.T) {
 	if f.sessions[src(1).String()] == nil || f.sessions[src(3).String()] == nil {
 		t.Fatal("active sessions must be kept")
 	}
-	if f.perSource[ipBucketKey(src(2).IP)] != 0 {
+	if f.perSource[udpSourceKey(src(2).IP)] != 0 {
 		t.Fatalf("the evicted session's source slot was not released: %v", f.perSource)
+	}
+}
+
+// UDP sources are capped per IPv4 address or per IPv6 /56: addresses from
+// different /64s of one /56 draw on one share of the session table.
+func TestUDPPerSourceCapGroupsIPv6By56(t *testing.T) {
+	a := udpSourceKey(net.ParseIP("2001:db8:0:1::10"))
+	b := udpSourceKey(net.ParseIP("2001:db8:0:ff::1"))
+	c := udpSourceKey(net.ParseIP("2001:db8:0:100::1"))
+	if a != b || a != "2001:db8::/56" {
+		t.Fatalf("two /64s of one /56 must share a key: %q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("different /56s must not share a key: %q", a)
+	}
+	if got := udpSourceKey(net.ParseIP("192.0.2.10")); got != "192.0.2.10" {
+		t.Fatalf("IPv4 key = %q", got)
+	}
+
+	prev := maxUDPSessionsPerSource
+	maxUDPSessionsPerSource = 4
+	t.Cleanup(func() { maxUDPSessionsPerSource = prev })
+	f, err := startUDPForwarder(0, streamTarget{name: "s", addr: silentUDPBackend(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	for i := 1; i <= 8; i++ {
+		f.forward(&net.UDPAddr{IP: net.ParseIP(fmt.Sprintf("2001:db8:0:%x::1", i)), Port: 40000}, []byte("x"))
+	}
+	if n := udpSessionCount(f); n != 4 {
+		t.Fatalf("eight /64s of one /56 opened %d sessions, want the per-source cap 4", n)
+	}
+}
+
+// failingListener returns errs from Accept, in order, before accepting for real.
+type failingListener struct {
+	net.Listener
+	mu   sync.Mutex
+	errs []error
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+// An Accept error other than a closed listener (a descriptor shortage) is
+// retried, so the stream port keeps serving afterwards; closing the listener
+// still ends the loop.
+func TestTCPAcceptLoopRetriesTemporaryErrors(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emfile := &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", syscall.EMFILE)}
+	f := &tcpForwarder{ln: &failingListener{Listener: ln, errs: []error{emfile, emfile, emfile}}}
+	f.routes.Store(&streamRoutes{def: &streamTarget{name: "s", addr: backend}})
+	done := make(chan struct{})
+	go func() { f.acceptLoop(); close(done) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("after accept errors the port must still serve: %q, %v", buf, err)
+	}
+
+	f.stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("acceptLoop did not return after the listener closed")
+	}
+}
+
+// echoOnce writes msg on c and reports whether it came back within wait.
+func echoOnce(c net.Conn, msg string, wait time.Duration) bool {
+	if _, err := c.Write([]byte(msg)); err != nil {
+		return false
+	}
+	buf := make([]byte, len(msg))
+	_ = c.SetReadDeadline(time.Now().Add(wait))
+	_, err := io.ReadFull(c, buf)
+	return err == nil && string(buf) == msg
+}
+
+// closedWithin reports whether the forwarder closed c within wait.
+func closedWithin(c net.Conn, wait time.Duration) bool {
+	_ = c.SetReadDeadline(time.Now().Add(wait))
+	_, err := c.Read(make([]byte, 1))
+	return err == io.EOF
+}
+
+// idleTimeout closes a TCP stream connection that carried no data for that
+// long; traffic keeps it open. Without the key a silent connection stays open.
+func TestTCPStreamIdleTimeout(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	dial := func(target *streamTarget) net.Conn {
+		f, err := startTCPForwarder(0, &streamRoutes{def: target}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(f.stop)
+		c, err := net.Dial("tcp", f.ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+
+	c := dial(&streamTarget{name: "s", addr: backend, idle: 300 * time.Millisecond})
+	for i := 0; i < 4; i++ { // 4 x 150 ms of traffic: past the timeout in total
+		if !echoOnce(c, "ping", time.Second) {
+			t.Fatalf("active connection: echo %d failed", i)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !closedWithin(c, 2*time.Second) {
+		t.Fatal("a silent connection must be closed after idleTimeout")
+	}
+
+	c = dial(&streamTarget{name: "s", addr: backend})
+	if !echoOnce(c, "ping", time.Second) {
+		t.Fatal("echo failed without idleTimeout")
+	}
+	if closedWithin(c, 600*time.Millisecond) {
+		t.Fatal("without idleTimeout a silent connection must stay open")
+	}
+}
+
+// maxConnsPerSource closes a connection over the cap before the backend is
+// dialled, and a closed connection frees its slot.
+func TestTCPStreamMaxConnsPerSource(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	f, err := startTCPForwarder(0, &streamRoutes{def: &streamTarget{name: "s", addr: backend, maxPerSource: 2}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", f.ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	a, b := dial(), dial()
+	if !echoOnce(a, "a", time.Second) || !echoOnce(b, "b", time.Second) {
+		t.Fatal("connections within the cap must be forwarded")
+	}
+	if over := dial(); !closedWithin(over, 2*time.Second) {
+		t.Fatal("a connection over maxConnsPerSource must be closed")
+	}
+	a.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c := dial()
+		if echoOnce(c, "c", 300*time.Millisecond) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing a connection must free its slot")
+		}
 	}
 }

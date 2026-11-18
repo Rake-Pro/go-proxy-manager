@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -20,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // newSocketServer starts an httptest server on a unix socket inside t.TempDir()
@@ -546,5 +548,22 @@ func TestCompareAPIVersion(t *testing.T) {
 		if got := compareAPIVersion(tc.a, tc.b); got != tc.want {
 			t.Errorf("compareAPIVersion(%q,%q) = %d, want %d", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+func TestAPIErrorMessageIsBounded(t *testing.T) {
+	body, err := json.Marshal(map[string]string{"message": strings.Repeat("\u00e9", 1<<19)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := apiErrorMessage(body)
+	if len(got) > 600 {
+		t.Errorf("error message is %d bytes, want at most 600", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("clipped message is not valid UTF-8: %q", got)
+	}
+	if got := apiErrorMessage([]byte(`{"message":"no such container"}`)); got != "no such container" {
+		t.Errorf("short message = %q, want it unchanged", got)
 	}
 }

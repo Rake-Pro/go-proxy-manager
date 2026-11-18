@@ -105,6 +105,11 @@ func (s *Store) allowedRestorePath(name string) bool {
 	if filepath.Ext(file) != ".yaml" {
 		return false
 	}
+	// The store finds an object by "<name>.yaml", so a file named anything
+	// else could never be saved, deleted or reverted through the API.
+	if model.ValidateName(strings.TrimSuffix(file, ".yaml")) != nil {
+		return false
+	}
 	for _, sub := range kindDir {
 		if dir == sub {
 			return true
@@ -147,6 +152,7 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 	if err != nil {
 		return "", err
 	}
+	cur, curSettings, curErr := s.loadLocked()
 
 	// Like Revert, a restore must not roll back api-tokens: an archive would
 	// otherwise revive revoked or rotated-away digests. The live tokens survive
@@ -212,7 +218,21 @@ func (s *Store) Restore(ctx context.Context, archive []byte, author Author) (str
 		}
 		return "", fmt.Errorf("restore refused, archive carries literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
-	return s.git.CommitAll(ctx, "Restore configuration from archive", author)
+	if err := s.checkRestoredLocked(restored, restoredSettings, cur, curSettings, curErr); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("restore refused: %w", err)
+	}
+	sha, err := s.git.CommitAll(ctx, "Restore configuration from archive", author)
+	if err != nil {
+		// Never leave the restored tree uncommitted for a later write to sweep in.
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", err
+	}
+	return sha, nil
 }
 
 // readArchive decompresses and reads the tar entries into a path->content map,

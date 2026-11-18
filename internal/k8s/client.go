@@ -56,13 +56,21 @@ const (
 	// listKind is the kind a LIST of ingresses must announce. A 200 whose body is
 	// not an IngressList is an ERROR, never an empty list - see ListIngresses.
 	listKind = "IngressList"
-	// maxListPages / maxListItems bound a paginated LIST so a misbehaving or
-	// hostile endpoint cannot stream unbounded data into memory. Exceeding either
-	// is an ERROR, never a silent truncation: a truncated list read as complete is
-	// exactly the input that would make the reconciler delete managed hosts it
-	// should have kept.
-	maxListPages = 100
-	maxListItems = 10000
+	// maxListItems / maxListBytes bound a paginated LIST so a misbehaving or
+	// hostile endpoint cannot stream unbounded data into memory. They count
+	// objects and the bytes of the pages kept, not requests, so a list whose
+	// objects only fit a small page costs requests, not the list. maxListRequests
+	// bounds an endpoint that answers with empty pages and a continue token; a
+	// list within the object bound stays under it even at one object per page.
+	// Exceeding any of them is an ERROR, never a silent truncation: a truncated
+	// list read as complete is exactly the input that would make the reconciler
+	// delete managed hosts it should have kept.
+	maxListItems    = 10000
+	maxListBytes    = 100 * maxRespBody
+	maxListRequests = 2 * maxListItems
+	// listPageRegrow is how many pages in a row must succeed at a reduced limit
+	// before the next larger limit is tried again.
+	listPageRegrow = 10
 	// maxRespBody caps how much of one response is read.
 	maxRespBody = 8 << 20
 	// tokenTTL is how long a bearer token read from disk is reused before being
@@ -71,8 +79,8 @@ const (
 	tokenTTL = 5 * time.Minute
 )
 
-// listPageLimits are the page sizes tried in turn for one page whose response
-// overflows maxRespBody (see ListIngresses).
+// listPageLimits are the page sizes stepped down through when a page's
+// response overflows maxRespBody (see ListIngresses).
 var listPageLimits = []int{listPageSize, 10, 1}
 
 // Ingress is the subset of a networking.k8s.io/v1 Ingress this package consumes.
@@ -291,11 +299,12 @@ func (c *Client) dropToken() {
 	c.mu.Unlock()
 }
 
-// get performs one authenticated GET and decodes the JSON body into out.
-func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
+// get performs one authenticated GET and decodes the JSON body into out. It
+// returns the size of the body it decoded.
+func (c *Client) get(ctx context.Context, path string, query url.Values, out any) (int, error) {
 	token, err := c.bearer()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	full := c.base + path
 	if len(query) > 0 {
@@ -303,35 +312,35 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return fmt.Errorf("kubernetes: build request: %w", err)
+		return 0, fmt.Errorf("kubernetes: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("kubernetes: GET %s: %w", path, err)
+		return 0, fmt.Errorf("kubernetes: GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 	// Read one byte past the cap so an oversized response is reported as such
 	// rather than surfacing as an opaque JSON syntax error on a truncated body.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody+1))
 	if err != nil {
-		return fmt.Errorf("kubernetes: GET %s: read body: %w", path, err)
+		return 0, fmt.Errorf("kubernetes: GET %s: read body: %w", path, err)
 	}
 	if len(body) > maxRespBody {
-		return fmt.Errorf("kubernetes: GET %s: %w (lower the page size, or trim oversized annotations on the listed objects)", path, errBodyCap)
+		return 0, fmt.Errorf("kubernetes: GET %s: %w (lower the page size, or trim oversized annotations on the listed objects)", path, errBodyCap)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized {
 			c.dropToken()
 		}
-		return &statusError{Code: resp.StatusCode, Message: apiErrorMessage(body)}
+		return 0, &statusError{Code: resp.StatusCode, Message: apiErrorMessage(body)}
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("kubernetes: GET %s: decode response: %w", path, err)
+		return 0, fmt.Errorf("kubernetes: GET %s: decode response: %w", path, err)
 	}
-	return nil
+	return len(body), nil
 }
 
 // errBodyCap marks a response that was larger than maxRespBody.
@@ -345,6 +354,9 @@ func apiErrorMessage(body []byte) string {
 		Reason  string `json:"reason"`
 	}
 	if err := json.Unmarshal(body, &st); err == nil && st.Message != "" {
+		if len(st.Message) > 512 {
+			return strings.ToValidUTF8(st.Message[:512], "") + "..."
+		}
 		return st.Message
 	}
 	s := strings.TrimSpace(string(body))
@@ -372,18 +384,24 @@ func (c *Client) ListIngresses(ctx context.Context) ([]Ingress, error) {
 	}
 	var out []Ingress
 	cont := ""
-	for page := 1; ; page++ {
-		if page > maxListPages {
-			return nil, fmt.Errorf("kubernetes: ingress list exceeded %d pages; refusing to treat a truncated list as complete", maxListPages)
-		}
+	// level indexes listPageLimits. It stays reduced for the following pages
+	// after an overflow, so large objects do not cost a full-size and a mid-size
+	// overflow on every page, and steps back up after listPageRegrow pages in a
+	// row succeed.
+	level, fits, requests, kept := 0, 0, 0, 0
+	for {
 		var list ingressList
 		// A page that overflows the body cap is asked for again with a smaller
 		// limit, from the same continue token. One object is bounded by the API
 		// server's own request size limit, far below the cap, so a page of one
 		// always fits; a few large objects then cost requests, not the whole list.
-		for _, limit := range listPageLimits {
+		for {
+			requests++
+			if requests > maxListRequests {
+				return nil, fmt.Errorf("kubernetes: ingress list exceeded %d requests; refusing to treat a truncated list as complete", maxListRequests)
+			}
 			q := url.Values{}
-			q.Set("limit", fmt.Sprint(limit))
+			q.Set("limit", fmt.Sprint(listPageLimits[level]))
 			if c.labelSelector != "" {
 				q.Set("labelSelector", c.labelSelector)
 			}
@@ -391,12 +409,19 @@ func (c *Client) ListIngresses(ctx context.Context) ([]Ingress, error) {
 				q.Set("continue", cont)
 			}
 			list = ingressList{}
-			err := c.get(ctx, path, q, &list)
+			n, err := c.get(ctx, path, q, &list)
 			if err == nil {
+				kept += n
 				break
 			}
-			if !errors.Is(err, errBodyCap) || limit == listPageLimits[len(listPageLimits)-1] {
+			if !errors.Is(err, errBodyCap) || level == len(listPageLimits)-1 {
 				return nil, err
+			}
+			level, fits = level+1, 0
+		}
+		if level > 0 {
+			if fits++; fits >= listPageRegrow {
+				level, fits = level-1, 0
 			}
 		}
 		// Shape assertion. A LIST reply from a Kubernetes API server always carries
@@ -413,6 +438,9 @@ func (c *Client) ListIngresses(ctx context.Context) ([]Ingress, error) {
 		out = append(out, *list.Items...)
 		if len(out) > maxListItems {
 			return nil, fmt.Errorf("kubernetes: ingress list exceeded %d items; refusing to treat a truncated list as complete", maxListItems)
+		}
+		if kept > maxListBytes {
+			return nil, fmt.Errorf("kubernetes: ingress list exceeded %d bytes; refusing to treat a truncated list as complete", maxListBytes)
 		}
 		cont = list.Metadata.Continue
 		if cont == "" {

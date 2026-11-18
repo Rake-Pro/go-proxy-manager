@@ -231,6 +231,7 @@ func refreshSSOWatermark() {
 	}
 	for v > cur {
 		if ssoNotBefore.CompareAndSwap(cur, v) {
+			recheckTunnels()
 			log.Info().Int64("notBefore", v).Msg("data-plane SSO: revocation watermark advanced from disk")
 			return
 		}
@@ -254,6 +255,7 @@ func RevokeAllSSOSessions() error {
 		now = cur
 	}
 	ssoNotBefore.Store(now)
+	recheckTunnels()
 	log.Info().Int64("notBefore", now).Msg("data-plane SSO: all sessions revoked")
 	d := ssoKeyDir.Load()
 	if d == nil || *d == "" {
@@ -333,6 +335,11 @@ type oidcSession struct {
 	// RevokeAllSSOSessions). Pre-watermark sessions - including legacy cookies
 	// without the field - are rejected once a revocation is on record.
 	Iat int64 `json:"iat,omitempty"`
+	// EmailVerified records the provider's email_verified claim at sign-in. A
+	// gate whose provider sets requireVerifiedEmail accepts only a session that
+	// carries it, so one minted before the option was turned on (or by an older
+	// build, which lacks the field) goes back through sign-in.
+	EmailVerified bool `json:"ev,omitempty"`
 }
 
 // oidcLoginState is the signed, short-lived state cookie binding a login to this
@@ -392,6 +399,9 @@ const maxOIDCClients = 64
 // not one of the gated host's configured domains. The gate answers 404 rather
 // than starting a login for a name it does not serve.
 var errOIDCHostNotConfigured = errors.New("request host is not a configured domain of this host")
+
+// oidcDiscoveryTimeout bounds one shared OIDC discovery.
+const oidcDiscoveryTimeout = 30 * time.Second
 
 // oidcClientEntry is one cache slot. ready is closed when discovery for this key
 // has finished; concurrent callers wait on it instead of repeating the discovery
@@ -503,7 +513,11 @@ func (d *dataOIDC) client(ctx context.Context, host string) (*oidc.Client, error
 	if !cached {
 		cfg := d.cfgTmpl
 		cfg.RedirectURL = "https://" + key + oidcCallbackPath
-		e.client, e.err = oidc.New(ctx, cfg)
+		// Detached from the first caller: waiters share this result, so that
+		// caller hanging up must not fail it for them. The timeout bounds it.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), oidcDiscoveryTimeout)
+		e.client, e.err = oidc.New(dctx, cfg)
+		cancel()
 		close(e.ready)
 		if e.err != nil {
 			d.mu.Lock()
@@ -541,7 +555,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		// fires for a request that reached the gate some other way - and it is
 		// what makes the per-Host client cache bounded by the config.
 		if _, ok := d.domains[hostKey(r.Host)]; !ok {
-			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).
+			log.Warn().Str("host", d.hostName).Str("requestHost", clipLog(r.Host, logHostMax)).
 				Msg("oidc: request host is not a configured domain of this host")
 			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
@@ -552,14 +566,15 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		}
 		var sess oidcSession
 		if readSignedCookie(r, oidcSessionCookie, macLabelSSOSession, &sess) && sess.Exp > time.Now().Unix() && sess.Host == d.hostName &&
-			sess.IdP == d.idpName && sess.Iat >= ssoRevokedAt() {
+			sess.IdP == d.idpName && sess.Iat >= ssoRevokedAt() && (sess.EmailVerified || !d.cfgTmpl.RequireVerifiedEmail) {
 			if !d.authorized(sess.Groups) {
 				countDenial(r, "auth-oidc")
 				refuse(w, http.StatusForbidden, d.ep, d.hostName, "forbidden")
 				return
 			}
 			injectSSOIdentity(r, sess)
-			next.ServeHTTP(w, r)
+			noteTunnelSession(r, sess.Exp, sess.Iat)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ssoGateAdmittedKey{}, true)))
 			return
 		}
 		d.beginLogin(w, r)
@@ -570,7 +585,7 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	client, err := d.client(r.Context(), r.Host)
 	if err != nil {
 		if errors.Is(err, errOIDCHostNotConfigured) {
-			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).Msg("oidc: refusing login for an unconfigured request host")
+			log.Warn().Str("host", d.hostName).Str("requestHost", clipLog(r.Host, logHostMax)).Msg("oidc: refusing login for an unconfigured request host")
 			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}
@@ -583,7 +598,11 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError, d.ep, d.hostName, "authentication unavailable")
 		return
 	}
-	nonce, _ := oidc.NewNonce()
+	nonce, err := oidc.NewNonce()
+	if err != nil {
+		refuse(w, http.StatusInternalServerError, d.ep, d.hostName, "authentication unavailable")
+		return
+	}
 	verifier := oidc.GenerateVerifier()
 	setSignedCookie(w, oidcStateCookie, macLabelSSOState, oidcLoginState{
 		State: state, Nonce: nonce, Verifier: verifier,
@@ -596,7 +615,10 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
-		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "login error: "+e)
+		// The error text comes from the query string, so it is logged, not
+		// echoed in the response.
+		log.Warn().Str("host", d.hostName).Str("error", clipLog(e, 200)).Msg("oidc: identity provider returned a login error")
+		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "login failed")
 		return
 	}
 	code, state := q.Get("code"), q.Get("state")
@@ -621,6 +643,12 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Warn().Str("host", d.hostName).Err(err).Msg("oidc exchange failed")
 		countDenial(r, "auth-oidc")
+		if errors.Is(err, oidc.ErrEmailNotVerified) {
+			// The provider's requireVerifiedEmail is set: an unverified email is
+			// never asserted upstream as X-Forwarded-User / X-Forwarded-Email.
+			refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "sign-in refused: the identity provider has not verified the email address of this account")
+			return
+		}
 		refuse(w, http.StatusUnauthorized, d.ep, d.hostName, "authentication failed")
 		return
 	}
@@ -633,7 +661,7 @@ func (d *dataOIDC) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Sub: claims.Subject, Email: claims.Email, Name: claims.Name,
 		Groups: claims.Groups, Host: d.hostName, IdP: d.idpName,
 		Exp: time.Now().Add(oidcSessionTTL).Unix(),
-		Iat: time.Now().Unix(),
+		Iat: time.Now().Unix(), EmailVerified: claims.EmailVerified,
 	}, oidcSessionTTL)
 	http.Redirect(w, r, sanitizeSSOReturn(st.Return), http.StatusFound)
 }
@@ -653,6 +681,46 @@ func injectSSOIdentity(r *http.Request, s oidcSession) {
 	if len(s.Groups) > 0 {
 		r.Header.Set("X-Forwarded-Groups", strings.Join(s.Groups, ","))
 	}
+}
+
+// ssoGateAdmittedKey marks a request this gpm's SSO gate admitted on its own
+// session cookie (see dropGateCookies).
+type ssoGateAdmittedKey struct{}
+
+// dropGateCookies removes the SSO gate's own cookies from an outbound request
+// that the gate admitted: the upstream has no use for them, and the session
+// cookie is a bearer credential for this host. The gates read the
+// inbound request, and auth subrequests copy the inbound Cookie header, so
+// neither is affected. The header is rewritten only when a cookie was removed.
+func dropGateCookies(in *http.Request, out http.Header) {
+	if admitted, _ := in.Context().Value(ssoGateAdmittedKey{}).(bool); !admitted {
+		return
+	}
+	vals := out["Cookie"]
+	var kept []string
+	dropped := false
+	for _, v := range vals {
+		var parts []string
+		for _, part := range strings.Split(v, ";") {
+			name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
+			if name == oidcSessionCookie || name == oidcStateCookie {
+				dropped = true
+				continue
+			}
+			parts = append(parts, strings.TrimSpace(part))
+		}
+		if len(parts) > 0 {
+			kept = append(kept, strings.Join(parts, "; "))
+		}
+	}
+	if !dropped {
+		return
+	}
+	if len(kept) == 0 {
+		out.Del("Cookie")
+		return
+	}
+	out["Cookie"] = kept
 }
 
 // sanitizeSSOReturn keeps the post-login redirect on this site: only a rooted,

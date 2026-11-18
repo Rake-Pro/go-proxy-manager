@@ -99,10 +99,16 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 			break
 		}
 		u, err := url.Parse(next)
-		if err != nil {
+		// Only the path and query of the next link are used, so the request
+		// stays on the configured API base; an opaque or relative link ends
+		// the paging.
+		if err != nil || u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
 			break
 		}
-		path = u.RequestURI()
+		path = u.EscapedPath()
+		if u.RawQuery != "" {
+			path += "?" + u.RawQuery
+		}
 	}
 
 	zone, ok = zoneFromList(name, names)

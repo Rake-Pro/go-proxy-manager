@@ -8,18 +8,54 @@ two proxy listener ports, and keep the admin panel off the internet.
 Every image pushed by the release workflow (including the `latest` tag, which
 shares the same manifest digest as the version tags built alongside it) is
 signed keylessly with [cosign](https://docs.sigstore.dev/cosign/) via GitHub
-Actions OIDC: no key material to manage or leak. Verify before you deploy:
+Actions OIDC: no key material to manage or leak. The signing identity is the
+`release.yml` workflow at the git ref that started the run, so it depends on
+how the release was made:
+
+| Release path | Signing identity ends in |
+|---|---|
+| A merge to `main` mints the tag (the normal path) | `release.yml@refs/heads/main` |
+| A `vX.Y.Z` tag pushed by hand on the current head of `main` | `release.yml@refs/tags/vX.Y.Z` |
+
+- A pushed tag is released only when its commit is the head of `main` at the
+  time the run fetches `main`. A tag on any other commit, including an older
+  `main` commit, stops the run before anything is built, pushed, tagged
+  `latest` or signed. If `main` moves on before the run starts, push the tag
+  again on the new head, or let the next merge to `main` mint the release.
+- This check lives in the `release.yml` of the tagged commit, because a tag
+  push runs the workflow file of that commit. A tag on a commit whose
+  `release.yml` predates the check runs the older file. Restricting who may
+  create `v*` tags (a tag ruleset in the repository settings) closes that
+  path.
+
+Verify the version you are about to deploy (`X.Y.Z`) against the exact
+identity, never a pattern. For a release minted on `main`:
 
 ```
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/Rake-Pro/go-proxy-manager/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$' \
+  --certificate-identity https://github.com/Rake-Pro/go-proxy-manager/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/rake-pro/go-proxy-manager:latest
+  ghcr.io/rake-pro/go-proxy-manager:X.Y.Z
 ```
 
-A successful verification prints the signature payload and confirms the image
-was built by the `release.yml` workflow in this repository from a `v*` tag,
-not from a fork, a different workflow, or a hand-pushed image.
+For a release made from a pushed tag, name that exact tag:
+
+```
+cosign verify \
+  --certificate-identity https://github.com/Rake-Pro/go-proxy-manager/.github/workflows/release.yml@refs/tags/vX.Y.Z \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/rake-pro/go-proxy-manager:X.Y.Z
+```
+
+- A successful verification prints the signature payload and confirms the
+  image was built by the `release.yml` workflow in this repository, not from a
+  fork, a different workflow, or a hand-pushed image.
+- Try the `main` command first. An image released from a pushed tag fails it
+  and passes the tag command for its own version only.
+- Do not widen the identity to a pattern such as `refs/tags/v.*`: a run started
+  by any pushed `v*` tag, on any commit, signs with a matching identity, so the
+  pattern would accept a signature for an image that was never a release of
+  that version.
 
 ### Dev builds
 

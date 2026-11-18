@@ -599,7 +599,9 @@ func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, contain
 			Err:            err,
 			UnknownProfile: isUnknownProfile(err),
 		}
-		if err != nil && name != "" && !it.UnknownProfile {
+		// The resolved profile is carried for clean derives too: the planner
+		// checks a host it skips for a domain conflict against it.
+		if name != "" && !it.UnknownProfile {
 			if tmpl, _, ok := conf.ResolveProfile(ct.Labels[conf.LabelProfile()]); ok {
 				it.Resolved = &tmpl
 			}
@@ -899,7 +901,7 @@ func containerIP(ct Container, conf model.DockerDiscoverySettings) (string, erro
 		if n.IPAddress == "" {
 			return "", fmt.Errorf("container has no IP address on network %q (is it running?)", conf.Network)
 		}
-		if net.ParseIP(n.IPAddress) == nil {
+		if !usableContainerIP(n.IPAddress) {
 			return "", fmt.Errorf("container reports an unusable IP address on network %q", conf.Network)
 		}
 		return n.IPAddress, nil
@@ -908,11 +910,19 @@ func containerIP(ct Container, conf model.DockerDiscoverySettings) (string, erro
 		if name == "host" || name == "none" {
 			continue
 		}
-		if ip := nets[name].IPAddress; ip != "" && net.ParseIP(ip) != nil {
+		if ip := nets[name].IPAddress; ip != "" && usableContainerIP(ip) {
 			return ip, nil
 		}
 	}
 	return "", errors.New("container has no usable IP address on any Docker network; set dockerDiscovery.network, or usePublishedPorts when gpm runs on the host")
+}
+
+// usableContainerIP reports whether a reported container address parses and
+// is a real per-container destination: a loopback, unspecified or multicast
+// address would point the proxy at gpm's own host or nowhere.
+func usableContainerIP(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast()
 }
 
 func networkNames(nets map[string]struct {

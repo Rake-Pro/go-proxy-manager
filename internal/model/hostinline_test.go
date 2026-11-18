@@ -309,3 +309,33 @@ func TestInlineBlocksAreOmittedWhenUnset(t *testing.T) {
 		t.Fatalf("a location with no inline blocks must have nil auth/rateLimit, got %+v / %+v", l.Auth, l.RateLimit)
 	}
 }
+
+// rateLimit.scope accepts route and host; host is refused on a location's own
+// block, which applies to that location only.
+func TestRateLimitScopeValidation(t *testing.T) {
+	base := func() ProxyHost {
+		return ProxyHost{ObjectMeta: ObjectMeta{Name: "h"}, Domains: []string{"h.example.com"},
+			Upstream: Upstream{Scheme: "http", Host: "192.0.2.10", Port: 80}}
+	}
+	for _, scope := range []string{"", RateLimitScopeRoute, RateLimitScopeHost} {
+		h := base()
+		h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, Scope: scope}
+		if err := h.Validate(); err != nil {
+			t.Fatalf("scope %q on the host block: %v", scope, err)
+		}
+	}
+	h := base()
+	h.RateLimit = &RateLimitMiddleware{RequestsPerSecond: 1, Scope: "global"}
+	if err := h.Validate(); err == nil || !strings.Contains(err.Error(), "rateLimit.scope") {
+		t.Fatalf("unknown scope: err = %v, want a rateLimit.scope error", err)
+	}
+	h = base()
+	h.Locations = []Location{{Path: "/a", RateLimit: &RateLimitMiddleware{RequestsPerSecond: 1, Scope: RateLimitScopeHost}}}
+	if err := h.Validate(); err == nil || !strings.Contains(err.Error(), "rateLimit.scope") {
+		t.Fatalf("scope host on a location block: err = %v, want a rateLimit.scope error", err)
+	}
+	h.Locations[0].RateLimit.Scope = RateLimitScopeRoute
+	if err := h.Validate(); err != nil {
+		t.Fatalf("scope route on a location block: %v", err)
+	}
+}

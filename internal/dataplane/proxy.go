@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -32,6 +33,9 @@ var dataplaneTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+	// Upstream response headers are capped like the listeners' request
+	// headers (1 MiB) rather than at the 10 MiB transport default.
+	MaxResponseHeaderBytes: 1 << 20,
 	// The reverse proxy must not transparently gunzip upstream bodies (CPU cost,
 	// and it strips Content-Length, forcing the flush-per-write chunked path).
 	DisableCompression: true,
@@ -71,10 +75,11 @@ func transportFor(t *model.HostTimeouts) http.RoundTripper {
 // proxyBufBytes is the fixed size of every buffer proxyBufPool hands out. A
 // larger copy buffer cuts the per-write flush count for unknown-length
 // (chunked) upstream responses, which the stdlib reverse proxy flushes after
-// every write.
-const proxyBufBytes = 512 << 10
+// every write; a smaller one bounds what each in-flight response holds while a
+// slow client reads it. 64 KiB matches progressWriteChunk.
+const proxyBufBytes = 64 << 10
 
-// proxyBufPool is a sync.Pool-backed httputil.BufferPool of fixed 512KiB
+// proxyBufPool is a sync.Pool-backed httputil.BufferPool of fixed 64KiB
 // buffers, used by the main data-plane reverse proxy.
 var proxyBufPool httputil.BufferPool = &bufferPool{}
 
@@ -216,7 +221,7 @@ func confineUpstreamPath(base, p string) string {
 	if out == base || strings.HasPrefix(out, base+"/") {
 		return out
 	}
-	log.Error().Str("path", p).Str("base", base).
+	log.Error().Str("path", logPath(p)).Str("base", base).
 		Msg("dataplane: composed upstream path escaped the upstream base path; sending the base path instead")
 	return base + "/"
 }
@@ -284,13 +289,14 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 				pr.Out.URL.RawPath = ""
 			}
 			reapplySetRequest(pr)
+			dropGateCookies(pr.In, pr.Out.Header)
 			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
 			setForwardedClient(pr)
 			applyHostHeader(pr.Out, hostHeader, pr.In.Host)
 			reassertIdentity(pr, identityHeaders)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Warn().Str("host", hostName).Str("path", r.URL.Path).Err(err).Msg("upstream error")
+			log.Warn().Str("host", hostName).Str("path", logPath(r.URL.Path)).Err(err).Msg("upstream error")
 			if mh := metricsHook(); mh != nil {
 				mh.UpstreamError(hostName)
 			}
@@ -369,11 +375,9 @@ func longLivedProxy(next http.Handler) http.Handler {
 			_ = rc.SetReadDeadline(time.Time{})
 			_ = rc.SetWriteDeadline(time.Time{})
 			// The upstream may answer without upgrading; that body is bounded
-			// like any other. A real upgrade hijacks through Unwrap with the
+			// like any other. A real upgrade hijacks the connection with the
 			// deadline already cleared, and finish has no body to flush.
-			pw := &progressWriter{ResponseWriter: w, rc: rc}
-			next.ServeHTTP(pw, r)
-			pw.finish()
+			serveWithProgress(next, w, r, rc)
 			return
 		}
 		if r.ContentLength != 0 {
@@ -388,10 +392,28 @@ func longLivedProxy(next http.Handler) http.Handler {
 				r.Body = &idleBody{ReadCloser: r.Body, rc: rc}
 			}
 		}
-		pw := &progressWriter{ResponseWriter: w, rc: http.NewResponseController(w)}
-		next.ServeHTTP(pw, r)
-		pw.finish()
+		serveWithProgress(next, w, r, http.NewResponseController(w))
 	})
+}
+
+// serveWithProgress runs next with every write bounded by a progressWriter.
+// Behind a data-plane listener w already writes through one (see
+// flushDeadlineHandler), so a second would only repeat its deadlines.
+func serveWithProgress(next http.Handler, w http.ResponseWriter, r *http.Request, rc *http.ResponseController) {
+	for u := w; ; {
+		if _, ok := u.(*progressWriter); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		uw, ok := u.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		u = uw.Unwrap()
+	}
+	pw := &progressWriter{ResponseWriter: w, rc: rc}
+	next.ServeHTTP(pw, r)
+	pw.finish()
 }
 
 // responseWriteIdleTimeout is the longest one response write may make no
@@ -409,18 +431,35 @@ const progressWriteChunk = 64 << 10
 // and Flush and clears it again afterwards, so the deadline bounds only a write
 // that is in progress: an idle stream (server-sent events between events, a
 // handler waiting for upstream trailers) holds no deadline that could expire,
-// and nothing stale is left on a reused connection.
+// and nothing stale is left on a reused connection. Once the connection has
+// been hijacked through it, it sets no deadline: the connection belongs to the
+// handler that took it.
 type progressWriter struct {
 	http.ResponseWriter
 	rc        *http.ResponseController
 	wroteBody bool
+	hijacked  bool
 }
 
 func (p *progressWriter) arm() {
-	_ = p.rc.SetWriteDeadline(time.Now().Add(responseWriteIdleTimeout))
+	if !p.hijacked {
+		_ = p.rc.SetWriteDeadline(time.Now().Add(responseWriteIdleTimeout))
+	}
 }
 
-func (p *progressWriter) disarm() { _ = p.rc.SetWriteDeadline(time.Time{}) }
+func (p *progressWriter) disarm() {
+	if !p.hijacked {
+		_ = p.rc.SetWriteDeadline(time.Time{})
+	}
+}
+
+func (p *progressWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := p.rc.Hijack()
+	if err == nil {
+		p.hijacked = true
+	}
+	return c, brw, err
+}
 
 func (p *progressWriter) WriteHeader(code int) {
 	p.arm()
@@ -633,6 +672,10 @@ type hostHandler struct {
 	// serveErrorPage). Threaded into the middleware chain and the terminal proxy
 	// at build time (see buildRouter/hostProxy).
 	errorPages *compiledErrorPages
+
+	// chainKey digests the host's access configuration (see hostChainKey). An
+	// open upgraded connection is closed when a reload changes it.
+	chainKey string
 }
 
 // route returns the handler and upstream label for a request path: the

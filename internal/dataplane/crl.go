@@ -168,6 +168,7 @@ func (a *clientCAAnchor) reloadIfChanged() {
 		return
 	}
 	log.Info().Str("clientCA", a.name).Str("path", a.crlFile).Msg("crl: revocation list reloaded")
+	recheckTunnels()
 }
 
 // verifyResumed is wired to tls.Config.VerifyConnection. A resumed handshake

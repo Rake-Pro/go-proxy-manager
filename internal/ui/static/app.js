@@ -2893,6 +2893,8 @@ function wireRateLimitBlock(p, rl) {
         if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
         spec.blockMax = blockMax;
       }
+      // The form has no scope control; keep a scope set through the API or YAML.
+      if (rl.scope) spec.scope = rl.scope;
       return spec;
     },
   };
@@ -3232,7 +3234,10 @@ async function route() {
   const parts = raw.split('/').filter(Boolean);
   if (!parts.length) { location.hash = '#/overview'; return; }
   const section = parts[0];
-  const sub = parts[1] ? decodeURIComponent(parts[1]) : null;
+  // A malformed escape in the hash keeps the raw segment rather than throwing
+  // before any view renders.
+  let sub = null;
+  if (parts[1]) { try { sub = decodeURIComponent(parts[1]); } catch (e) { sub = parts[1]; } }
 
   setActiveNav(section);
   pendingHead = null;
@@ -7708,6 +7713,11 @@ async function streamEditor(c, name) {
     }
     const als = $$('#ed-stream-al input:checked').map((i) => i.value);
     if (als.length) body.accessLists = als;
+    // The form has no controls for the TCP limits; keep values set through the API or YAML.
+    if (proto !== 'udp') {
+      if (o.idleTimeout) body.idleTimeout = o.idleTimeout;
+      if (o.maxConnsPerSource) body.maxConnsPerSource = o.maxConnsPerSource;
+    }
     return body;
   });
   wireCloneButton('streams', o);
@@ -8029,6 +8039,8 @@ async function accessEditor(c, name) {
       <input class="field mono src-interval" data-hint="accessList.sources.interval" style="flex:0 1 90px" value="${esc(s.interval || '')}" placeholder="24h" aria-label="Interval" />
       <input class="field mono src-maxentries" data-hint="accessList.sources.maxEntries" type="number" min="0" style="flex:0 1 110px" value="${s.maxEntries ? esc(s.maxEntries) : ''}" placeholder="10000" aria-label="Max entries" />
       <button class="icon-btn src-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    // maxCoverage has no field here; carry it through so a save keeps it.
+    if (s.maxCoverage) d._maxCoverage = s.maxCoverage;
     d.querySelector('.src-del').addEventListener('click', () => { d.remove(); refreshSourceSelects(); });
     d.querySelector('.src-name').addEventListener('input', refreshSourceSelects);
     sourcesWrap.appendChild(d);
@@ -8159,6 +8171,7 @@ async function accessEditor(c, name) {
         if (!Number.isFinite(n) || n < 0) { srcErr = markRowError(r, `Source "${nm}": max entries must be a non-negative number.`); return; }
         if (n) src.maxEntries = n;
       }
+      if (r._maxCoverage) src.maxCoverage = r._maxCoverage;
       sources.push(src);
     });
     if (srcErr) { showInvalid('Source invalid', srcErr, $('#ed-sources .row-bad')); return null; }
@@ -10948,6 +10961,9 @@ async function viewSettings(c, tab) {
     if (s.notifications && Object.keys(s.notifications).length) body.notifications = s.notifications;
     // Saved list filters are edited from each list's Saved menu; carried forward.
     if (arr(s.savedFilters).length) body.savedFilters = s.savedFilters;
+    // The per-client in-flight limit has no control yet (settings.yaml or the
+    // API); carried forward.
+    if (s.clientLimits && Object.keys(s.clientLimits).length) body.clientLimits = s.clientLimits;
 
     btn.disabled = true;
     try {

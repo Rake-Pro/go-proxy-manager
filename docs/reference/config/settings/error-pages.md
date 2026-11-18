@@ -59,11 +59,52 @@ back to its own `default` template, then to the settings-level pages) so a host
 override always wins; a host with no override of its own uses the
 settings-level pages outright.
 
+## Allowed template constructs
+
+An error page prints a few short scalar fields, so a template may use only the
+constructs below, each with a fixed limit. Anything else is refused on write
+and skipped at load (see the next table).
+
+| Construct | Limit | Example |
+|---|---|---|
+| The whole template (text and actions) | At most 32 KiB, for an `inline` page and a `dir` file alike | |
+| Text and the four fields | | `<h1>{{.Status}} {{.StatusText}}</h1>` |
+| `if`, `else`, `else if` on a field or a comparison | At most 16 levels of `if`/`with` nesting (each `else if` or `else with` is one level deeper) and at most 512 conditions per template | `{{if .RequestID}}<p>request {{.RequestID}}</p>{{end}}` |
+| `with`, `else with` on a field or a comparison | Inside a `with` on a field, `.` is that field. Anywhere else `.` (the whole page data) is refused. | `{{with .Host}}{{.}}{{end}}` |
+| `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`, `or`, `not` | At most 4 arguments, each a field or a literal of at most 64 bytes | `{{if eq .Status 502 504}}...{{end}}`, `{{or .RequestID "none"}}` |
+| `html`, `js`, `urlquery`, `print`, `len` | Exactly one argument, a field | `{{urlquery .Host}}`, `{{len .RequestID}}` |
+| `printf` | A literal format of at most 64 bytes, width and precision at most 3 digits, no `*`, no `[n]`, no `#` or space flag; at most 4 arguments, each a field | `{{printf "%s (%d)" .Host .Status}}` |
+| Actions that print a value | At most 128 per template (conditions do not count) | |
+| Comments and trim markers | | `{{/* note */}}`, `{{- .Host -}}` |
+
+A field may also be piped into one of these functions: `{{.Host | html}}`
+counts as `{{html .Host}}`.
+
+Refused: `range`, `template`, `block`, `define`, variables (`{{$x := ...}}`,
+`{{$x = ...}}`, `$`), parenthesized calls (`{{len (print .Host)}}`), a
+pipeline with more than one function (`{{.Host | html | js}}`), a printing
+function inside a condition (`{{if len .Host}}`), a literal printed on its own
+(`{{"x"}}`), `index`, `slice`, `call` and any other function. Combine
+conditions by nesting `if` blocks instead of `and (eq ...) (ne ...)`.
+
+What these limits bound: the fields are short (`Host` is an object name of at
+most 253 bytes, the others are shorter), so one action builds a few KB at
+most, a template has at most 128 printing actions, and the nesting limit keeps
+the render's stack small. Measured on the largest templates that pass, in every
+HTML, CSS, JS and comment context: one render allocates at most about 7 MiB of
+heap (the pages that reach the 1 MiB output cap; the rest stay under 4 MiB) and
+grows its stack by at most 32 KiB. Each template is also executed once when the
+config is built, so html/template's one-time escaping work (up to about half a
+second for 32 KiB of text full of `<`) is paid at reload, never by a request.
+
 **When a broken template is caught:**
 
 | Moment | Behaviour |
 |---|---|
-| Settings write | An `inline` template that does not parse is **rejected**, so it never commits. |
+| Settings write | An `inline` template that does not parse, or whose source is over 256 KiB, is **rejected**, so it never commits. |
+| Settings or proxy-host write | A new or changed `inline` template that uses a construct outside the [allowed constructs](#allowed-template-constructs) is **rejected**. A template stored before this rule, kept unchanged, does not block the write. |
+| Reload and startup | A stored `inline` template or a `dir` file that uses a construct outside the allowed ones, or is over 32 KiB, is **skipped** with a `WARN` naming it, as if it were not configured: the next fallback (the host's `default`, the settings-level pages, then the built-in response) is served. Every accepted template is executed once with sample values; one that fails to execute is skipped the same way. None of this fails a reload, the pre-write build check or the start. |
+| Request | A page whose rendered output would pass 1 MiB stops rendering at that size; gpm serves its built-in response instead (for `interceptUpstream`, the upstream's own body passes through) and logs the template error. |
 | Config reload | A parse error (or an unreadable `dir`) **fails the reload** with a clear message; the previously compiled pages stay installed. |
 | Startup | A `dir` template that broke out of band is logged as a **warning** and gpm starts with its built-in error output; it never refuses to boot over an error page. |
 
