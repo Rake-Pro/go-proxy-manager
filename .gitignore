@@ -9,10 +9,18 @@
 
 # Local runtime data (git-backed config dir, certs, db, etc.)
 /data/
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime state written by test/stream (the stream-hosts fixtures stay tracked)
+/test/stream/config/*
+!/test/stream/config/stream-hosts/
 
 # Secrets (compose env files) - never commit; .env.example is tracked
 .env
 deploy/.env
+/secrets/
 
 # Real test values - never commit; test/local.env.example is tracked
 test/local.env

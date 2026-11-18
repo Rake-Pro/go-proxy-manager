@@ -98,6 +98,7 @@ nav:
               - General: reference/config/settings/general.md
               - Admin authentication: reference/config/settings/admin-auth.md
               - Trusted proxies: reference/config/settings/trusted-proxies.md
+              - Client limits: reference/config/settings/client-limits.md
               - TLS: reference/config/settings/tls.md
               - Security headers: reference/config/settings/security-headers.md
               - Error pages: reference/config/settings/error-pages.md
