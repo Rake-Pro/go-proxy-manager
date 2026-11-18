@@ -599,7 +599,9 @@ func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, contain
 			Err:            err,
 			UnknownProfile: isUnknownProfile(err),
 		}
-		if err != nil && name != "" && !it.UnknownProfile {
+		// The resolved profile is carried for clean derives too: the planner
+		// checks a host it skips for a domain conflict against it.
+		if name != "" && !it.UnknownProfile {
 			if tmpl, _, ok := conf.ResolveProfile(ct.Labels[conf.LabelProfile()]); ok {
 				it.Resolved = &tmpl
 			}

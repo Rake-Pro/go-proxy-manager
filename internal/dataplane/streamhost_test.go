@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -249,7 +252,96 @@ func TestUDPFullTableEvictsOnlyIdleSession(t *testing.T) {
 	if f.sessions[src(1).String()] == nil || f.sessions[src(3).String()] == nil {
 		t.Fatal("active sessions must be kept")
 	}
-	if f.perSource[ipBucketKey(src(2).IP)] != 0 {
+	if f.perSource[udpSourceKey(src(2).IP)] != 0 {
 		t.Fatalf("the evicted session's source slot was not released: %v", f.perSource)
+	}
+}
+
+// UDP sources are capped per IPv4 address or per IPv6 /56: addresses from
+// different /64s of one /56 draw on one share of the session table.
+func TestUDPPerSourceCapGroupsIPv6By56(t *testing.T) {
+	a := udpSourceKey(net.ParseIP("2001:db8:0:1::10"))
+	b := udpSourceKey(net.ParseIP("2001:db8:0:ff::1"))
+	c := udpSourceKey(net.ParseIP("2001:db8:0:100::1"))
+	if a != b || a != "2001:db8::/56" {
+		t.Fatalf("two /64s of one /56 must share a key: %q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("different /56s must not share a key: %q", a)
+	}
+	if got := udpSourceKey(net.ParseIP("192.0.2.10")); got != "192.0.2.10" {
+		t.Fatalf("IPv4 key = %q", got)
+	}
+
+	prev := maxUDPSessionsPerSource
+	maxUDPSessionsPerSource = 4
+	t.Cleanup(func() { maxUDPSessionsPerSource = prev })
+	f, err := startUDPForwarder(0, streamTarget{name: "s", addr: silentUDPBackend(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	for i := 1; i <= 8; i++ {
+		f.forward(&net.UDPAddr{IP: net.ParseIP(fmt.Sprintf("2001:db8:0:%x::1", i)), Port: 40000}, []byte("x"))
+	}
+	if n := udpSessionCount(f); n != 4 {
+		t.Fatalf("eight /64s of one /56 opened %d sessions, want the per-source cap 4", n)
+	}
+}
+
+// failingListener returns errs from Accept, in order, before accepting for real.
+type failingListener struct {
+	net.Listener
+	mu   sync.Mutex
+	errs []error
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+// An Accept error other than a closed listener (a descriptor shortage) is
+// retried, so the stream port keeps serving afterwards; closing the listener
+// still ends the loop.
+func TestTCPAcceptLoopRetriesTemporaryErrors(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emfile := &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", syscall.EMFILE)}
+	f := &tcpForwarder{ln: &failingListener{Listener: ln, errs: []error{emfile, emfile, emfile}}}
+	f.routes.Store(&streamRoutes{def: &streamTarget{name: "s", addr: backend}})
+	done := make(chan struct{})
+	go func() { f.acceptLoop(); close(done) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("after accept errors the port must still serve: %q, %v", buf, err)
+	}
+
+	f.stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("acceptLoop did not return after the listener closed")
 	}
 }

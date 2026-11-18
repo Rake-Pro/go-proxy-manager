@@ -122,14 +122,19 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	if uiHandler != nil {
 		mux.Handle("/", uiHandler)
 	}
-	// No server-wide ReadTimeout or WriteTimeout: backup restores, pprof
-	// profiles and reconcile calls legitimately run long. IdleTimeout closes
+	// ReadTimeout bounds reading one request, body included, so a request
+	// whose declared body never arrives is closed instead of held. It does not
+	// cancel a handler that has finished reading, so pprof profiles and
+	// reconcile calls still run long; the restore upload, the one handler that
+	// reads a large body, lifts it for its own request. There is no
+	// WriteTimeout for the same long-runner reason. IdleTimeout closes
 	// keep-alive connections that send nothing, which ReadHeaderTimeout does
 	// not cover once a first request has been served.
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	return s

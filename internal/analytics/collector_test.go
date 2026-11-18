@@ -1,11 +1,14 @@
 package analytics
 
 import (
+	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func testCollector(t *testing.T, now *time.Time, store *Rollup) *Collector {
@@ -568,5 +571,78 @@ func TestIsInternalIP(t *testing.T) {
 	}
 	if IsInternalIP(nil, extra) {
 		t.Error("nil address must not be internal")
+	}
+}
+
+// A table filled with one-hit addresses at the top of the hour does not keep a
+// later heavy client out of Top clients: at the cap a new address replaces the
+// lowest-count entry.
+func TestTopClientsCannotBeFilledWithOneHitAddresses(t *testing.T) {
+	now := time.Date(2026, 10, 26, 10, 0, 5, 0, time.UTC)
+	c := testCollector(t, &now, nil)
+	for i := 0; i < maxClientsPerHost; i++ {
+		c.ingest(Event{Time: now, Host: "app", Status: 404, Client: net.ParseIP(fmt.Sprintf("2001:db8::%x", i+1)), Path: "/"})
+	}
+	heavy := net.ParseIP("198.51.100.66")
+	for i := 0; i < 200; i++ {
+		c.ingest(Event{Time: now, Host: "app", Status: 401, Deny: "auth-basic", Client: heavy, Path: "/login"})
+		// More one-hit addresses keep arriving meanwhile.
+		c.ingest(Event{Time: now, Host: "app", Status: 404, Client: net.ParseIP(fmt.Sprintf("2001:db8::1:%x", i)), Path: "/"})
+	}
+	hh := c.hours[(now.Unix()/3600)%hourSlots].hosts[aggKey{"app", SourceExternal}]
+	if len(hh.clients) > maxClientsPerHost {
+		t.Fatalf("clients %d > cap", len(hh.clients))
+	}
+	rep, err := c.Report(Query{Range: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Clients) == 0 || rep.Clients[0].IP != heavy.String() || rep.Clients[0].Requests != 200 {
+		t.Fatalf("top client = %+v, want %s with 200 requests", rep.Clients[:1], heavy)
+	}
+}
+
+// A queued event keeps only clipped copies of the request strings, so a
+// stalled worker cannot pin full request lines in the queue.
+func TestRecordKeepsClippedCopiesOfRequestStrings(t *testing.T) {
+	now := time.Now()
+	c := testCollector(t, &now, nil)
+	line := "GET /" + strings.Repeat("a", 1<<20) + "?" + strings.Repeat("q", 1<<16) + " HTTP/1.1"
+	path := line[4:strings.IndexByte(line, '?')]
+	query := line[strings.IndexByte(line, '?')+1 : len(line)-9]
+	c.Record(Event{Time: now, Host: "app", Method: line[:3], Path: path, RawQuery: query, UserAgent: strings.Repeat("u", 1<<16)})
+	ev := <-c.queue
+	if len(ev.Path) > maxSigPath || len(ev.RawQuery) > maxSigQuery || len(ev.UserAgent) > maxSigUA {
+		t.Fatalf("queued lengths path=%d query=%d ua=%d", len(ev.Path), len(ev.RawQuery), len(ev.UserAgent))
+	}
+	start, end := uintptr(unsafe.Pointer(unsafe.StringData(line))), uintptr(unsafe.Pointer(unsafe.StringData(line)))+uintptr(len(line))
+	for _, s := range []string{ev.Method, ev.Path, ev.RawQuery} {
+		if p := uintptr(unsafe.Pointer(unsafe.StringData(s))); p >= start && p < end {
+			t.Fatalf("queued string %q... still points into the request line", s[:min(len(s), 8)])
+		}
+	}
+	if ev.Method != "GET" || !strings.HasPrefix(ev.Path, "/aaa") {
+		t.Fatalf("queued method=%q path=%q...", ev.Method, ev.Path[:8])
+	}
+}
+
+// Memory-range reports are cached briefly (and built one at a time), so a
+// reader looping on one report does not rebuild it, holding the collector lock,
+// on every call.
+func TestShortRangeReportIsCachedBriefly(t *testing.T) {
+	now := time.Date(2026, 10, 26, 10, 30, 0, 0, time.UTC)
+	c := testCollector(t, &now, nil)
+	c.ingest(Event{Time: now, Host: "app", Status: 200, Client: net.ParseIP("203.0.113.9"), Path: "/"})
+	first, err := c.Report(Query{Range: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ingest(Event{Time: now, Host: "app", Status: 200, Client: net.ParseIP("203.0.113.9"), Path: "/"})
+	if again, _ := c.Report(Query{Range: "1h"}); again.Totals.Requests != first.Totals.Requests {
+		t.Fatalf("report within the cache TTL was rebuilt: %d then %d", first.Totals.Requests, again.Totals.Requests)
+	}
+	now = now.Add(shortReportCacheTTL)
+	if later, _ := c.Report(Query{Range: "1h"}); later.Totals.Requests != first.Totals.Requests+1 {
+		t.Fatalf("report after the TTL = %d requests, want %d", later.Totals.Requests, first.Totals.Requests+1)
 	}
 }

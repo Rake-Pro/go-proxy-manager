@@ -33,6 +33,10 @@ type accessList struct {
 	users   basicAuthUsers
 	hasIP   bool
 	hasAuth bool
+	// gate is the basic-auth failure gate a router build shares across the
+	// host's routes and across rebuilds (see registry.authGateFor); nil means
+	// a fresh gate per handler.
+	gate *authGate
 
 	// Geo rules, evaluated after nets and before defaultAllow (see ipAllowed).
 	hasGeo            bool
@@ -100,7 +104,7 @@ func compileAccessList(al model.AccessList) accessList {
 			// rule is still kept, so the list keeps its IP dimension and a
 			// default-deny list stays closed rather than losing its only rule and
 			// turning into a list with nothing to match on.
-			nr.nets = sources[model.AccessListSourceKey(al.Name, r.Source)]
+			nr.nets = sourceNets(sources, al, r.Source)
 		} else {
 			var ipnet *net.IPNet
 			_, ipnet, err := net.ParseCIDR(r.CIDR)
@@ -404,11 +408,10 @@ func (c accessList) authOK(r *http.Request) bool { return c.users.verify(r) }
 // challenge is left as plain text - it is a credential prompt, not a
 // gpm-generated error page.
 func accessListHandler(c accessList, ipOf func(*http.Request) net.IP, geoLookup func(net.IP) (string, bool), geoLoaded func() bool, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
-	// One gate per compiled list. A config reload rebuilds the chain and so
-	// resets the counters, which is acceptable: a reload is operator-driven (an
-	// admin write or a certificate renewal) and cannot be provoked by the client
-	// being throttled.
-	gate := newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	gate := c.gate
+	if gate == nil {
+		gate = newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A list with no IP, auth, or geo dimension has nothing to match on.
 		// Honor an explicit defaultAction: deny (a deliberate "deny all") rather
@@ -539,7 +542,7 @@ func anyAccessListHandler(lists []accessList, names []string, ipOf func(*http.Re
 		}
 		countDenial(r, reason)
 		log.Debug().Str("host", host).Str("accessListsMode", "any").Strs("accessLists", names).
-			Str("client", ip.String()).Str("path", r.URL.Path).
+			Str("client", ip.String()).Str("path", logPath(r.URL.Path)).
 			Msg("dataplane: no access list in the group allowed the request")
 		serveErrorPage(w, http.StatusForbidden, ep, host, func() {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -593,7 +596,7 @@ func accessListAllowNets(al model.AccessList) []*net.IPNet {
 			continue
 		}
 		if r.Source != "" {
-			nets = append(nets, sources[model.AccessListSourceKey(al.Name, r.Source)]...)
+			nets = append(nets, sourceNets(sources, al, r.Source)...)
 			continue
 		}
 		if n := parseNet(r.CIDR); n != nil {

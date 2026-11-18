@@ -717,3 +717,25 @@ func TestEmptyListsInATemplateLocationDoNotDisableAFrozenHost(t *testing.T) {
 		t.Fatalf("plan %+v, want the host frozen (one skip, no write)", p)
 	}
 }
+
+// Docker discovery shares the planner, so a container whose existing host is
+// refused for a domain conflict gets the profile's current chain restamped on
+// the domain it already serves, rather than keeping the stored chain.
+func TestDomainConflictSkipRestampsAStaleChain(t *testing.T) {
+	conf := testConf(nil)
+	stale := managedHostFixture("dkr-app", func(h *model.ProxyHost) { h.AccessLists = nil })
+	operator := model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: "operator-www"},
+		Domains:    []string{"www.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "192.0.2.41", Port: 80},
+	}
+	ct := container("app", enabled(map[string]string{"gpm.rake.pro/domains": "app.example.com,www.example.com"}), nil)
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale, operator}}, conf, []Container{ct}, nil)
+	if len(p.Upserts) != 1 {
+		t.Fatalf("plan %+v, want one restamp", p)
+	}
+	u := p.Upserts[0]
+	if u.Name != "dkr-app" || u.Disabled || len(u.AccessLists) != 1 || len(u.Domains) != 1 || u.Domains[0] != "app.example.com" {
+		t.Fatalf("upsert = %+v, want dkr-app with the profile chain on app.example.com only", u)
+	}
+}

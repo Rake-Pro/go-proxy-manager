@@ -133,6 +133,10 @@ type Discoverer struct {
 	clientMu  sync.Mutex
 	client    *Client
 	clientKey string
+
+	// rulesWarned is the last set of profile-rule warnings logged, so the same
+	// warnings are not repeated on every poll. Guarded by single.
+	rulesWarned string
 }
 
 // New returns a Discoverer. load is called on every reconcile so a settings
@@ -371,6 +375,12 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 	if err := conf.Validate(); err != nil {
 		return d.fail(now, true, fmt.Errorf("ingress discovery: %w", err))
 	}
+	if warn := conf.ProfileRuleWarnings(); strings.Join(warn, "\n") != d.rulesWarned {
+		d.rulesWarned = strings.Join(warn, "\n")
+		for _, w := range warn {
+			log.Warn().Msg("ingress discovery: " + w)
+		}
+	}
 	client, err := d.clientFor(conf)
 	if err != nil {
 		return d.fail(now, true, fmt.Errorf("ingress discovery: %w", err))
@@ -514,7 +524,9 @@ func planReconcile(cfg model.Config, conf model.IngressDiscoverySettings, ingres
 			Err:            err,
 			UnknownProfile: isUnknownProfile(err),
 		}
-		if err != nil && name != "" && !it.UnknownProfile {
+		// The resolved profile is carried for clean derives too: the planner
+		// checks a host it skips for a domain conflict against it.
+		if name != "" && !it.UnknownProfile {
 			if tmpl, _, ok := conf.ResolveProfileFor(ing.Metadata.Namespace, ing.Metadata.Labels, ing.Metadata.Annotations[conf.AnnotationProfile()]); ok {
 				it.Resolved = &tmpl
 			}

@@ -4,10 +4,13 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -141,35 +144,145 @@ func (c *verdictCache) len() int {
 // purpose: a chain is rebuilt on every config reload and certificate renewal, so
 // a per-bouncer goroutine would leak one poller per reload. A stale set triggers
 // ONE short-lived refresh goroutine and keeps serving the current decisions
-// meanwhile; only the very first (startup) pull blocks a request.
+// meanwhile. Until the first startup pull succeeds, exactly one request runs it;
+// every other request waits for that pull, at most the bouncer timeout, and a
+// failed startup pull is retried only after a backoff.
 type streamState struct {
 	mu       sync.RWMutex
-	ips      map[string]struct{}
-	scen     map[string]string // decision value -> scenario, for the analytics label
-	nets     []*net.IPNet
-	ready    bool      // a startup pull has succeeded at least once
-	next     time.Time // when the next delta pull is due
-	inFlight bool      // a refresh goroutine is running
+	set      *decisionSet // published whole by apply, never modified afterwards
+	ready    bool         // a startup pull has succeeded at least once
+	next     time.Time    // when the next delta pull is due
+	inFlight bool         // a refresh goroutine is running
 
-	startupMu sync.Mutex // serializes the blocking startup pull
+	startupDone    chan struct{} // closed when the running startup pull ends; nil when none runs
+	startupRetryAt time.Time     // no startup pull before this, after a failure
+	startupBackoff time.Duration // the wait after the last failed startup pull
+
+	applyMu sync.Mutex // serializes apply, so each set is built from the latest one
 }
 
+// errStreamNotLoaded is the verdict error after a failed startup pull, until
+// the next one succeeds.
+var errStreamNotLoaded = errors.New("crowdsec stream: decision set not loaded yet")
+
+// errStreamPullPending is the verdict error for a request that waited the
+// bouncer timeout for another request's startup pull without it ending. It
+// says nothing about the client, so it is never cached.
+var errStreamPullPending = errors.New("crowdsec stream: startup pull still running")
+
+// streamStartupBackoffMin is the wait after the first failed startup pull. It
+// doubles after each further failure, up to the cacheTTL (never below this).
+const streamStartupBackoffMin = time.Second
+
 func newStreamState() *streamState {
-	return &streamState{ips: map[string]struct{}{}, scen: map[string]string{}}
+	return &streamState{set: newDecisionSet()}
+}
+
+// decisionSet is one snapshot of the stream decisions. Ranges are indexed by
+// canonical prefix, so adding or removing one is O(1) and a lookup is one map
+// probe per prefix length in use rather than a scan of every range.
+type decisionSet struct {
+	ips    map[string]string       // decision value -> scenario ("" when unknown)
+	ranges map[netip.Prefix]string // canonical prefix -> scenario
+	v4Lens [33]int                 // number of IPv4 ranges per prefix length
+	v6Lens [129]int                // number of IPv6 ranges per prefix length
+}
+
+func newDecisionSet() *decisionSet {
+	return &decisionSet{ips: map[string]string{}, ranges: map[netip.Prefix]string{}}
+}
+
+func (d *decisionSet) clone() *decisionSet {
+	c := *d
+	c.ips = maps.Clone(d.ips)
+	c.ranges = maps.Clone(d.ranges)
+	return &c
+}
+
+func (d *decisionSet) lenCount(p netip.Prefix) *int {
+	if p.Addr().Is4() {
+		return &d.v4Lens[p.Bits()]
+	}
+	return &d.v6Lens[p.Bits()]
+}
+
+// addRange stores p; an empty scenario does not overwrite a known one.
+func (d *decisionSet) addRange(p netip.Prefix, scen string) {
+	if old, ok := d.ranges[p]; ok {
+		if scen == "" {
+			scen = old
+		}
+		d.ranges[p] = scen
+		return
+	}
+	d.ranges[p] = scen
+	*d.lenCount(p)++
+}
+
+func (d *decisionSet) removeRange(p netip.Prefix) {
+	if _, ok := d.ranges[p]; !ok {
+		return
+	}
+	delete(d.ranges, p)
+	*d.lenCount(p)--
+}
+
+// decisionPrefix parses a decision value (CIDR or bare IP) into its canonical
+// prefix. An IPv4-mapped IPv6 range is stored as the IPv4 range it covers,
+// which is what net.IPNet.Contains matched for it.
+func decisionPrefix(v string) (netip.Prefix, bool) {
+	n := parseNet(v)
+	if n == nil {
+		return netip.Prefix{}, false
+	}
+	addr, ok := netip.AddrFromSlice(n.IP)
+	ones, bits := n.Mask.Size()
+	if !ok || bits == 0 {
+		return netip.Prefix{}, false
+	}
+	switch {
+	case addr.Is4() || addr.Is4In6():
+		addr = addr.Unmap()
+		if bits == 128 {
+			ones = max(ones-96, 0)
+		}
+	case bits != 128:
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr, ones).Masked(), true
 }
 
 // lookup reports whether ip is in the current decision set, and the scenario
 // of the decision that matched (for the analytics label; "" when unknown).
 func (s *streamState) lookup(ip net.IP) (bool, string) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	key := ip.String()
-	if _, ok := s.ips[key]; ok {
-		return true, s.scen[key]
+	d := s.set
+	s.mu.RUnlock()
+	if scen, ok := d.ips[ip.String()]; ok {
+		return true, scen
 	}
-	for _, n := range s.nets {
-		if n.Contains(ip) {
-			return true, s.scen[n.String()]
+	if len(d.ranges) == 0 {
+		return false, ""
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false, ""
+	}
+	addr = addr.Unmap()
+	counts := d.v6Lens[:]
+	if addr.Is4() {
+		counts = d.v4Lens[:]
+	}
+	for bits := len(counts) - 1; bits >= 0; bits-- {
+		if counts[bits] == 0 {
+			continue
+		}
+		p, err := addr.Prefix(bits)
+		if err != nil {
+			continue
+		}
+		if scen, ok := d.ranges[p]; ok {
+			return true, scen
 		}
 	}
 	return false, ""
@@ -177,69 +290,52 @@ func (s *streamState) lookup(ip net.IP) (bool, string) {
 
 // apply folds one stream response into the set. On a startup pull the previous
 // set is replaced outright; on a delta the new decisions are added and the
-// deleted ones removed.
+// deleted ones removed. The new set is built on a copy without holding s.mu
+// and published in one swap, so lookups never wait for a large pull to fold.
 func (s *streamState) apply(resp crowdsecStream, startup bool, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	var d *decisionSet
 	if startup {
-		s.ips = map[string]struct{}{}
-		s.nets = nil
-		s.scen = map[string]string{}
+		d = newDecisionSet()
+	} else {
+		s.mu.RLock()
+		d = s.set.clone()
+		s.mu.RUnlock()
 	}
-	for _, d := range resp.Deleted {
-		if v := strings.TrimSpace(d.Value); v != "" {
-			delete(s.ips, v)
-			delete(s.scen, v)
-			if n := parseNet(v); n != nil {
-				delete(s.scen, n.String())
+	for _, dec := range resp.Deleted {
+		if v := strings.TrimSpace(dec.Value); v != "" {
+			delete(d.ips, v)
+			if p, ok := decisionPrefix(v); ok {
+				d.removeRange(p)
 			}
-			s.nets = removeNet(s.nets, v)
 		}
 	}
-	for _, d := range resp.New {
-		if !d.isDeny() {
+	for _, dec := range resp.New {
+		if !dec.isDeny() {
 			continue
 		}
-		v := strings.TrimSpace(d.Value)
+		v := strings.TrimSpace(dec.Value)
 		if v == "" {
 			continue
 		}
-		scen := scenarioLabel(d.Scenario)
-		if strings.EqualFold(d.Scope, "range") || strings.Contains(v, "/") {
-			if n := parseNet(v); n != nil {
-				s.nets = removeNet(s.nets, v)
-				s.nets = append(s.nets, n)
-				if scen != "" {
-					s.scen[n.String()] = scen
-				}
+		scen := scenarioLabel(dec.Scenario)
+		if strings.EqualFold(dec.Scope, "range") || strings.Contains(v, "/") {
+			if p, ok := decisionPrefix(v); ok {
+				d.addRange(p, scen)
 			}
 			continue
 		}
-		s.ips[v] = struct{}{}
-		if scen != "" {
-			s.scen[v] = scen
+		if old, ok := d.ips[v]; ok && scen == "" {
+			scen = old
 		}
+		d.ips[v] = scen
 	}
+	s.mu.Lock()
+	s.set = d
 	s.ready = true
 	s.next = time.Now().Add(ttl)
-}
-
-// removeNet drops the entry for the CIDR/IP text v from nets. Ranges are few
-// relative to single IPs, so a linear scan is the right shape here.
-func removeNet(nets []*net.IPNet, v string) []*net.IPNet {
-	n := parseNet(v)
-	if n == nil {
-		return nets
-	}
-	want := n.String()
-	out := nets[:0]
-	for _, existing := range nets {
-		if existing.String() == want {
-			continue
-		}
-		out = append(out, existing)
-	}
-	return out
+	s.mu.Unlock()
 }
 
 // crowdsecStream is the /v1/decisions/stream response envelope.
@@ -412,9 +508,9 @@ func (b *bouncer) crowdsecVerdict(ctx context.Context, ip net.IP) (bool, string,
 }
 
 // streamVerdict answers from the local decision set, pulling it if needed. The
-// first call blocks on the startup pull (there is nothing to answer from yet);
-// afterwards a stale set is refreshed in the background while the current one
-// keeps serving, so no request ever waits on a delta.
+// first requests wait for the startup pull (there is nothing to answer from
+// yet; see startupPull); afterwards a stale set is refreshed in the background
+// while the current one keeps serving, so no request ever waits on a delta.
 func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, string, error) {
 	s := b.stream
 	s.mu.RLock()
@@ -422,18 +518,8 @@ func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, string, e
 	s.mu.RUnlock()
 
 	if !ready {
-		s.startupMu.Lock()
-		s.mu.RLock()
-		ready = s.ready
-		s.mu.RUnlock()
-		if !ready {
-			err := b.pullStream(ctx, true)
-			s.startupMu.Unlock()
-			if err != nil {
-				return false, "", err
-			}
-		} else {
-			s.startupMu.Unlock()
+		if err := b.startupPull(ctx); err != nil {
+			return false, "", err
 		}
 		d, sc := s.lookup(ip)
 		return d, sc, nil
@@ -473,6 +559,61 @@ func (b *bouncer) streamVerdict(ctx context.Context, ip net.IP) (bool, string, e
 	return d, sc, nil
 }
 
+// startupPull runs the first full pull for the request that claims it and
+// returns its result. Every other request that arrives while it runs waits for
+// it, at most the bouncer timeout and never past its own context, and then
+// answers from the loaded set; none of them starts a pull of its own, so a
+// LAPI that does not answer costs each request at most one timeout, in
+// parallel. While a failed pull backs off, requests get errStreamNotLoaded at
+// once. The pull is detached from the request context, so a client that
+// disconnects does not abort it for everyone.
+func (b *bouncer) startupPull(ctx context.Context) error {
+	s := b.stream
+	s.mu.Lock()
+	if s.ready {
+		s.mu.Unlock()
+		return nil
+	}
+	if done := s.startupDone; done != nil {
+		s.mu.Unlock()
+		t := time.NewTimer(b.timeout)
+		defer t.Stop()
+		select {
+		case <-done:
+		case <-t.C:
+			return errStreamPullPending
+		case <-ctx.Done():
+			return errStreamPullPending
+		}
+		s.mu.RLock()
+		ready := s.ready
+		s.mu.RUnlock()
+		if !ready {
+			return errStreamNotLoaded
+		}
+		return nil
+	}
+	if time.Now().Before(s.startupRetryAt) {
+		s.mu.Unlock()
+		return errStreamNotLoaded
+	}
+	done := make(chan struct{})
+	s.startupDone = done
+	s.mu.Unlock()
+
+	err := b.pullStream(context.Background(), true)
+
+	s.mu.Lock()
+	s.startupDone = nil
+	if err != nil {
+		s.startupBackoff = min(max(2*s.startupBackoff, streamStartupBackoffMin), max(b.ttl, streamStartupBackoffMin))
+		s.startupRetryAt = time.Now().Add(s.startupBackoff)
+	}
+	s.mu.Unlock()
+	close(done)
+	return err
+}
+
 // pullStream fetches the decision stream and folds it into the local set.
 func (b *bouncer) pullStream(ctx context.Context, startup bool) error {
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
@@ -508,6 +649,30 @@ func (b *bouncer) pullStream(ctx context.Context, startup bool) error {
 	return nil
 }
 
+// The client-supplied parts of a generic hook lookup are bounded, so the lookup
+// stays small enough for any hook server's request-line and header limits
+// (8 KiB per line is a common default) whatever URL the client sent. The path
+// is query-escaped after truncation, so it is at most 3 KiB on the wire; the
+// X-Original-URL value is already escaped. A hook that judges by path sees a
+// prefix of a very long URL.
+const (
+	maxHookPathBytes = 1024
+	maxHookURLBytes  = 2048
+)
+
+// truncateHookValue cuts s to at most n bytes, dropping a percent escape the
+// cut would leave incomplete.
+func truncateHookValue(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[:n]
+	if i := strings.LastIndexByte(s, '%'); i >= 0 && i > len(s)-3 {
+		s = s[:i]
+	}
+	return s
+}
+
 // httpVerdict calls the generic deny hook:
 //
 //	GET {url}?ip=<client>&host=<host>&path=<path>
@@ -528,7 +693,7 @@ func (b *bouncer) httpVerdict(r *http.Request, ip net.IP) (bool, error) {
 	q := u.Query()
 	q.Set("ip", ip.String())
 	q.Set("host", r.Host)
-	q.Set("path", r.URL.Path)
+	q.Set("path", truncateHookValue(r.URL.Path, maxHookPathBytes))
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -538,7 +703,7 @@ func (b *bouncer) httpVerdict(r *http.Request, ip net.IP) (bool, error) {
 	// The resolved client IP, not the inbound header: whatever the client sent is
 	// untrusted, and the bouncer must judge the peer gpm actually resolved.
 	req.Header.Set("X-Forwarded-For", ip.String())
-	req.Header.Set("X-Original-URL", absoluteURL(r))
+	req.Header.Set("X-Original-URL", truncateHookValue(absoluteURL(r), maxHookURLBytes))
 	if b.apiKey != "" {
 		req.Header.Set("X-Api-Key", b.apiKey)
 	}
@@ -591,6 +756,15 @@ func bouncerHandler(b *bouncer, hostName string, ipOf func(*http.Request) net.IP
 			if err != nil {
 				deny, scenario = !b.failOpen, ""
 				ttl = b.errCacheTTL()
+				// A generic hook's answer depends on the request, so its error can be
+				// specific to this request. A fail-open verdict from such an error
+				// admits this request only and is not cached for the client IP.
+				if b.failOpen && b.provider == model.BouncerProviderHTTP {
+					ttl = 0
+				}
+				if errors.Is(err, errStreamPullPending) {
+					ttl = 0
+				}
 				log.Warn().Str("middleware", b.name).Str("host", hostName).Str("client", key).
 					Bool("failOpen", b.failOpen).Err(err).Msg("bouncer: verdict unavailable, applying onError policy")
 			}

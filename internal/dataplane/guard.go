@@ -82,17 +82,51 @@ func (t guardTrigger) matches(r *http.Request) bool {
 	}
 	for k, v := range t.queryEquals {
 		vals := q[k]
+		// A key a backend reads as k (see normalizeQueryKey) counts as k too.
+		nk := normalizeQueryKey(k)
+		for qk, qv := range q {
+			if qk != k && normalizeQueryKey(qk) == nk {
+				vals = append(vals[:len(vals):len(vals)], qv...)
+			}
+		}
 		// A repeated key is a matcher/backend divergence: Get reads the first
 		// value while a backend may read the last (or any). Fail closed and
 		// treat it as matching the trigger rather than guess which one wins.
 		if len(vals) > 1 {
 			continue
 		}
-		if q.Get(k) != v {
+		got := ""
+		if len(vals) == 1 {
+			got = vals[0]
+		}
+		if got != v {
 			return false
 		}
 	}
 	return true
+}
+
+// normalizeQueryKey maps a decoded query parameter name to the name a
+// lenient backend registers it under: the name ends at a NUL byte, leading
+// spaces are dropped, a "[...]" suffix makes it an array of the part before
+// it, and space, '.' and an unmatched '[' become '_' (PHP's rules, the most
+// permissive in common use). A trigger compares on both the exact and the
+// normalized name, so a spelling the backend folds onto a trigger key cannot
+// pass the trigger.
+func normalizeQueryKey(k string) string {
+	if i := strings.IndexByte(k, 0); i >= 0 {
+		k = k[:i]
+	}
+	k = strings.TrimLeft(k, " ")
+	if i := strings.IndexByte(k, '['); i >= 0 && strings.IndexByte(k[i:], ']') >= 0 {
+		k = k[:i]
+	}
+	return strings.Map(func(c rune) rune {
+		if c == ' ' || c == '.' || c == '[' {
+			return '_'
+		}
+		return c
+	}, k)
 }
 
 // guardHandler denies a matching request with denyStatus unless ipOf(r) is in

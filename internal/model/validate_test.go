@@ -644,6 +644,8 @@ func TestErrorPagesConfigValidate(t *testing.T) {
 		{name: "traversal dir is rejected", e: ErrorPagesConfig{Dir: "../secrets"}, wantErr: "relative"},
 		{name: "inline default key is valid", e: ErrorPagesConfig{Inline: map[string]string{"default": "<p>x</p>"}}},
 		{name: "inline status key is valid", e: ErrorPagesConfig{Inline: map[string]string{"502": "<p>x</p>"}}},
+		{name: "inline template at the size limit is valid", e: ErrorPagesConfig{Inline: map[string]string{"default": strings.Repeat("x", MaxInlineErrorPageBytes)}}},
+		{name: "inline template over the size limit is rejected", e: ErrorPagesConfig{Inline: map[string]string{"default": strings.Repeat("x", MaxInlineErrorPageBytes+1)}}, wantErr: "byte limit"},
 		{name: "inline non-numeric key is rejected", e: ErrorPagesConfig{Inline: map[string]string{"oops": "<p>x</p>"}}, wantErr: "status code"},
 		{name: "interceptUpstream 4xx/5xx is valid", e: ErrorPagesConfig{InterceptUpstream: []int{404, 502}}},
 		{name: "interceptUpstream out of range is rejected", e: ErrorPagesConfig{InterceptUpstream: []int{200}}, wantErr: "4xx/5xx"},

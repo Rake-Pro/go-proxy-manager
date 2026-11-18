@@ -107,6 +107,15 @@ const (
 	DefaultAccessListSourceInterval   = 24 * time.Hour
 	MinAccessListSourceInterval       = time.Hour
 	DefaultAccessListSourceMaxEntries = 10000
+	// Broad-feed thresholds, as prefix-length equivalents: one /8 of IPv4
+	// (16,777,216 addresses) and one /24 of IPv6 (256 /32s). A source without
+	// maxCoverage has no coverage budget; one covering more than this is
+	// logged as broad. With maxCoverage set, a family left at 0 is bounded by
+	// this value. Monitoring feeds are a few hundred single addresses, and the
+	// largest published CDN edge lists cover a few million IPv4 addresses and
+	// a few dozen IPv6 /32s, so both stay well under.
+	BroadAccessListSourceCoverageV4 = 8
+	BroadAccessListSourceCoverageV6 = 24
 )
 
 // AccessListSource is a remote allow-list feed: a published, plain-text list of
@@ -130,6 +139,20 @@ type AccessListSource struct {
 	// body with more is refused whole, so a compromised or replaced feed cannot
 	// quietly become an allow-the-internet rule.
 	MaxEntries int `json:"maxEntries,omitempty" yaml:"maxEntries,omitempty"`
+	// MaxCoverage, when set, bounds the total address space the feed's entries
+	// may cover per family. A body over either budget is refused whole, so a
+	// feed made of many individually acceptable prefixes cannot allow most of
+	// the internet. Absent means no budget (the per-entry rules still apply).
+	MaxCoverage *AccessListSourceCoverage `json:"maxCoverage,omitempty" yaml:"maxCoverage,omitempty"`
+}
+
+// AccessListSourceCoverage is a per-family coverage budget, each written as the
+// prefix length whose size the summed entries may not exceed: ipv4: 6 allows up
+// to four /8s worth of IPv4 addresses. 0 bounds that family at one /8 of IPv4
+// or one /24 of IPv6 (the broad-feed thresholds).
+type AccessListSourceCoverage struct {
+	IPv4 int `json:"ipv4,omitempty" yaml:"ipv4,omitempty"`
+	IPv6 int `json:"ipv6,omitempty" yaml:"ipv6,omitempty"`
 }
 
 // FetchInterval is the configured re-fetch interval, or the 24h default.
@@ -150,6 +173,24 @@ func (s AccessListSource) EntryLimit() int {
 		return DefaultAccessListSourceMaxEntries
 	}
 	return s.MaxEntries
+}
+
+// CoverageLimits returns the IPv4 and IPv6 coverage budgets as prefix-length
+// equivalents, with a family left at 0 filled in. ok is false when the source
+// sets no maxCoverage and so has no budget.
+func (s AccessListSource) CoverageLimits() (v4, v6 int, ok bool) {
+	c := s.MaxCoverage
+	if c == nil {
+		return 0, 0, false
+	}
+	v4, v6 = BroadAccessListSourceCoverageV4, BroadAccessListSourceCoverageV6
+	if c.IPv4 > 0 {
+		v4 = c.IPv4
+	}
+	if c.IPv6 > 0 {
+		v6 = c.IPv6
+	}
+	return v4, v6, true
 }
 
 // AccessListGeo adds country-based allow/deny rules over the same resolved
@@ -267,6 +308,16 @@ func (a AccessList) Validate() error {
 		}
 		if src.MaxEntries < 0 {
 			return fmt.Errorf("access list %q: sources: source %q maxEntries must not be negative, got %d", a.Name, src.Name, src.MaxEntries)
+		}
+		if c := src.MaxCoverage; c != nil {
+			if c.IPv4 < 0 || c.IPv4 > 32 {
+				return fmt.Errorf("access list %q: sources: source %q maxCoverage.ipv4 must be a prefix length from 1 to 32 (0 = the broad-feed threshold), got %d", a.Name, src.Name, c.IPv4)
+			}
+			// IPv6 coverage is counted in /64 units, so a budget narrower than
+			// one /64 cannot be expressed.
+			if c.IPv6 < 0 || c.IPv6 > 64 {
+				return fmt.Errorf("access list %q: sources: source %q maxCoverage.ipv6 must be a prefix length from 1 to 64 (0 = the broad-feed threshold), got %d", a.Name, src.Name, c.IPv6)
+			}
 		}
 	}
 	for _, r := range a.Rules {

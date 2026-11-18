@@ -259,3 +259,47 @@ func TestRestorePreservesLiveAPITokens(t *testing.T) {
 		t.Fatalf("restore must leave a clean tree (clean=%v err=%v)", clean, err)
 	}
 }
+
+// TestRestoreRefusesFileNameThatIsNotAnObjectName proves a restore archive may
+// only carry kind files named "<valid object name>.yaml", the path every save,
+// delete and revert derives.
+func TestRestoreRefusesFileNameThatIsNotAnObjectName(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	head := headOf(t, st)
+	host := []byte("name: bar\ndomains: [bar.example.com]\nupstream: {scheme: http, host: 127.0.0.1, port: 9}\n")
+	_, err := st.Restore(ctx, archiveWith(t, map[string][]byte{"proxy-hosts/Not A Name!!.yaml": host}), Author{})
+	if err == nil || !strings.Contains(err.Error(), "not an allowed config path") {
+		t.Fatalf("restore of a file whose base name is not an object name: err = %v", err)
+	}
+	if h := headOf(t, st); h != head {
+		t.Fatalf("a refused restore committed %s", h)
+	}
+}
+
+// TestLoadWarnsOnFileNameObjectNameMismatch proves a file whose object name
+// differs from its file name still loads and is reported as a warning.
+func TestLoadWarnsOnFileNameObjectNameMismatch(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	host := []byte("name: bar\ndomains: [bar.example.com]\nupstream: {scheme: http, host: 127.0.0.1, port: 9}\n")
+	if err := os.WriteFile(filepath.Join(st.Dir(), "proxy-hosts", "foo.yaml"), host, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := st.Load(ctx)
+	if err != nil {
+		t.Fatalf("a misnamed file must still load: %v", err)
+	}
+	if len(cfg.ProxyHosts) != 1 || cfg.ProxyHosts[0].Name != "bar" {
+		t.Fatalf("hosts = %+v, want the one named bar", cfg.ProxyHosts)
+	}
+	warned := false
+	for _, w := range cfg.Warnings() {
+		if strings.Contains(w, `proxy-hosts/foo.yaml: object name "bar" does not match the file name`) {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a file-name mismatch warning, got %v", cfg.Warnings())
+	}
+}

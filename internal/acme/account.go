@@ -12,9 +12,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"golang.org/x/crypto/acme"
@@ -119,7 +122,7 @@ func newClient(ctx context.Context, certDir, directoryURL, email string, eab *ac
 	if err != nil {
 		return nil, fmt.Errorf("account key: %w", err)
 	}
-	client := &acme.Client{Key: key, DirectoryURL: directoryURL}
+	client := &acme.Client{Key: key, DirectoryURL: directoryURL, HTTPClient: acmeHTTPClient}
 
 	acct := &acme.Account{ExternalAccountBinding: eab}
 	if email != "" {
@@ -130,3 +133,53 @@ func newClient(ctx context.Context, certDir, directoryURL, email string, eab *ac
 	}
 	return client, nil
 }
+
+// Bounds for every exchange with an ACME CA. A real CA answers each request in
+// well under the timeout and with bodies of a few KiB (a certificate chain is
+// the largest); the caps keep a slow, redirecting or oversized answer from
+// stalling an order or growing memory with the CA's response.
+const (
+	acmeHTTPTimeout = 30 * time.Second
+	maxACMEBody     = 1 << 20
+)
+
+var errACMERedirect = errors.New("acme: the CA answered with a redirect, which is not followed")
+
+// acmeHTTPClient is the HTTP client of every acme.Client. It keeps the default
+// transport (so proxy settings from the environment still apply), does not
+// follow redirects and caps each response body at maxACMEBody.
+var acmeHTTPClient = &http.Client{
+	Timeout:       acmeHTTPTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return errACMERedirect },
+	Transport:     cappedTransport{base: http.DefaultTransport},
+}
+
+// cappedTransport wraps every response body in a reader that fails once the
+// body exceeds maxACMEBody.
+type cappedTransport struct{ base http.RoundTripper }
+
+func (t cappedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	res, err := t.base.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	res.Body = &cappedBody{r: io.LimitReader(res.Body, maxACMEBody+1), c: res.Body}
+	return res, nil
+}
+
+type cappedBody struct {
+	r io.Reader
+	c io.Closer
+	n int64
+}
+
+func (b *cappedBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.n += int64(n)
+	if b.n > maxACMEBody {
+		return n - int(b.n-maxACMEBody), fmt.Errorf("acme: response body exceeds %d bytes", maxACMEBody)
+	}
+	return n, err
+}
+
+func (b *cappedBody) Close() error { return b.c.Close() }

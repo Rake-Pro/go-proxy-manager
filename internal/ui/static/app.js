@@ -8029,6 +8029,8 @@ async function accessEditor(c, name) {
       <input class="field mono src-interval" data-hint="accessList.sources.interval" style="flex:0 1 90px" value="${esc(s.interval || '')}" placeholder="24h" aria-label="Interval" />
       <input class="field mono src-maxentries" data-hint="accessList.sources.maxEntries" type="number" min="0" style="flex:0 1 110px" value="${s.maxEntries ? esc(s.maxEntries) : ''}" placeholder="10000" aria-label="Max entries" />
       <button class="icon-btn src-del" type="button" aria-label="Remove">${ICON.x}</button>`;
+    // maxCoverage has no field here; carry it through so a save keeps it.
+    if (s.maxCoverage) d._maxCoverage = s.maxCoverage;
     d.querySelector('.src-del').addEventListener('click', () => { d.remove(); refreshSourceSelects(); });
     d.querySelector('.src-name').addEventListener('input', refreshSourceSelects);
     sourcesWrap.appendChild(d);
@@ -8159,6 +8161,7 @@ async function accessEditor(c, name) {
         if (!Number.isFinite(n) || n < 0) { srcErr = markRowError(r, `Source "${nm}": max entries must be a non-negative number.`); return; }
         if (n) src.maxEntries = n;
       }
+      if (r._maxCoverage) src.maxCoverage = r._maxCoverage;
       sources.push(src);
     });
     if (srcErr) { showInvalid('Source invalid', srcErr, $('#ed-sources .row-bad')); return null; }

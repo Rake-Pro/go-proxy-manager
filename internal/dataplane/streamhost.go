@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -33,8 +34,9 @@ const (
 //     new (possibly spoofed) sources cannot close sessions that are in use.
 //   - udpEvictIdle is above common UDP keepalive intervals (25 s) and below
 //     the udpSessionIdle expiry.
-//   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /64)
-//     may hold inside it, so a single source cannot fill the table.
+//   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /56,
+//     see udpSourceKey) may hold inside it, so a single source cannot fill
+//     the table.
 var (
 	streamTLSHandshakeTimeout = 10 * time.Second
 	maxUDPSessions            = 4096
@@ -378,12 +380,28 @@ func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyP
 func (f *tcpForwarder) setRoutes(r *streamRoutes) { f.routes.Store(r) }
 func (f *tcpForwarder) stop()                     { _ = f.ln.Close() }
 
+// acceptLoop serves the listener until it is closed. Any other Accept error
+// (EMFILE, ENFILE, ECONNABORTED and the like) is retried with the backoff
+// net/http uses, 5ms doubling to 1s, so a passing descriptor shortage does not
+// leave the port bound with nobody accepting.
 func (f *tcpForwarder) acceptLoop() {
+	var delay time.Duration
 	for {
 		c, err := f.ln.Accept()
 		if err != nil {
-			return // listener closed
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else {
+				delay = min(2*delay, time.Second)
+			}
+			log.Warn().Int("port", f.port).Err(err).Dur("retryIn", delay).Msg("stream: tcp accept failed; retrying")
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go f.handle(c)
 	}
 }
@@ -477,7 +495,7 @@ type udpForwarder struct {
 	closed   atomic.Bool
 	mu       sync.Mutex
 	sessions map[string]*udpSession // client addr -> backend session
-	// perSource counts the sessions of each source (ipBucketKey), guarded by mu.
+	// perSource counts the sessions of each source (udpSourceKey), guarded by mu.
 	perSource map[string]int
 }
 
@@ -596,7 +614,7 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 			}
 			return
 		}
-		src := ipBucketKey(addrIP(clientAddr))
+		src := udpSourceKey(addrIP(clientAddr))
 		if f.perSource[src] >= maxUDPSessionsPerSource {
 			f.mu.Unlock()
 			return // this source already holds its share of the table
@@ -624,6 +642,16 @@ func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 	f.mu.Unlock()
 	s.last.Store(time.Now().UnixNano())
 	_, _ = s.backend.Write(data)
+}
+
+// udpSourceKey is the per-source session-cap key: an IPv4 address, or the
+// IPv6 /56 around the address. One subscriber is commonly delegated a /56 (256
+// /64s), so a /64 key would let one site take 256 shares of the table.
+func udpSourceKey(ip net.IP) string {
+	if ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(56, 128)).String() + "/56"
+	}
+	return ipBucketKey(ip)
 }
 
 func (f *udpForwarder) backendToClient(clientAddr net.Addr, key string, s *udpSession) {

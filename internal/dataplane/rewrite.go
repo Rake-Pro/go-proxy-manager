@@ -123,7 +123,7 @@ func rewriteHandler(spec model.RewriteMiddleware, next http.Handler) http.Handle
 		if to, ok := c.rewritePath(r.URL.Path); ok {
 			clean, safe := safeRewritten(to)
 			if !safe {
-				log.Warn().Str("path", r.URL.Path).Msg("dataplane: rewritten path carries a path separator an upstream could re-interpret; refusing the request")
+				log.Warn().Str("path", logPath(r.URL.Path)).Msg("dataplane: rewritten path carries a path separator an upstream could re-interpret; refusing the request")
 				http.Error(w, "Bad Request", http.StatusBadRequest)
 				return
 			}

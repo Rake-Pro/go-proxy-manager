@@ -259,7 +259,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state, code := q.Get("state"), q.Get("code")
 	// The state cookie is single use whatever happens next.
-	cookieState := s.authn.LoginStateCookie(r)
+	cookieState := s.authn.LoginStateCookie(r, state)
 	s.authn.ClearLoginStateCookie(w, r)
 	// The IdP's error code goes to the log, trimmed, not to the page: it is
 	// attacker-supplied text on a URL anyone can send.

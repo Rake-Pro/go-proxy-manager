@@ -3022,3 +3022,107 @@ func TestAllowedHostnamesDisablesAnExistingHostOnAnUnlistedName(t *testing.T) {
 		t.Fatalf("upserts = %+v, want the existing host disabled", rec.upserts)
 	}
 }
+
+// An existing host refused for a domain conflict is held to the same rule as a
+// source that cannot be derived: a stored chain the profile no longer renders
+// is restamped on the domains the host already serves, a stored domain the
+// profile no longer allows disables it, and a current chain is left alone.
+func TestDomainConflictSkipDoesNotFreezeAStaleChain(t *testing.T) {
+	conf := model.IngressDiscoverySettings{
+		Enabled:               true,
+		AllowedDomainSuffixes: []string{"example.com"},
+		Template: model.IngressHostTemplate{
+			Upstream:    model.Upstream{Scheme: "http", Host: "192.0.2.40", Port: 80},
+			TLS:         model.TLSSettings{CertificateRef: "wildcard"},
+			AccessLists: []string{"lan"},
+			Middlewares: []string{"sso"},
+		},
+	}
+	ann := map[string]string{model.AnnotationManaged: "true"}
+	ing := func(name string, hosts ...string) Ingress {
+		var i Ingress
+		i.Metadata.Namespace, i.Metadata.Name = "apps", name
+		i.Metadata.Annotations = ann
+		for _, h := range hosts {
+			i.Spec.Rules = append(i.Spec.Rules, struct {
+				Host string `json:"host"`
+			}{Host: h})
+		}
+		return i
+	}
+	stored := func(name, dom string, current bool) model.ProxyHost {
+		h := model.ProxyHost{
+			ObjectMeta: model.ObjectMeta{Name: name, Labels: map[string]string{model.ManagedByLabel: model.ManagedByIngressDiscovery}},
+			Domains:    []string{dom},
+			Upstream:   model.Upstream{Scheme: "http", Host: "192.0.2.40", Port: 80},
+			TLS:        model.TLSSettings{CertificateRef: "wildcard"},
+		}
+		if current {
+			h.AccessLists, h.Middlewares = []string{"lan"}, []string{"sso"}
+		}
+		return h
+	}
+	operator := model.ProxyHost{
+		ObjectMeta: model.ObjectMeta{Name: "operator-www"},
+		Domains:    []string{"www.example.com"},
+		Upstream:   model.Upstream{Scheme: "http", Host: "192.0.2.41", Port: 80},
+	}
+	find := func(p reconcilePlan, name string) (model.ProxyHost, bool) {
+		for _, u := range p.upserts {
+			if u.Name == name {
+				return u, true
+			}
+		}
+		return model.ProxyHost{}, false
+	}
+
+	t.Run("held by an operator host: stale chain restamped on current domains", func(t *testing.T) {
+		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", false), operator}}
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		u, ok := find(p, "ing-x.apps")
+		if !ok {
+			t.Fatalf("upserts = %+v, want ing-x.apps restamped", p.upserts)
+		}
+		if u.Disabled || len(u.AccessLists) != 1 || len(u.Middlewares) != 1 || len(u.Domains) != 1 || u.Domains[0] != "x.example.com" {
+			t.Fatalf("restamped host = %+v, want the profile chain on x.example.com only", u)
+		}
+		if _, touched := find(p, "operator-www"); touched {
+			t.Fatal("operator host was rewritten")
+		}
+		// The restamped host is stable: the next poll writes nothing.
+		cfg.ProxyHosts[0] = u
+		if again := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil); len(again.upserts) != 0 || again.skipped != 1 {
+			t.Fatalf("second poll = %+v, want one skip and no write", again)
+		}
+	})
+
+	t.Run("held by another discovered host: stale chain restamped", func(t *testing.T) {
+		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", false), stored("ing-y.apps", "y.example.com", false)}}
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "y.example.com"), ing("y", "y.example.com")}, nil)
+		for _, name := range []string{"ing-x.apps", "ing-y.apps"} {
+			u, ok := find(p, name)
+			if !ok || u.Disabled || len(u.AccessLists) != 1 {
+				t.Fatalf("%s = %+v (found %v), want the profile chain", name, u, ok)
+			}
+		}
+	})
+
+	t.Run("stored domain no longer allowed: disabled", func(t *testing.T) {
+		c := conf
+		c.Template.AllowedHostnames = []string{"www.example.com", "y.example.com"}
+		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", true), operator}}
+		p := planReconcile(cfg, c, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		u, ok := find(p, "ing-x.apps")
+		if !ok || !u.Disabled || u.Labels[model.DisabledByLabel] != model.DisabledByIngressDiscovery {
+			t.Fatalf("ing-x.apps = %+v (found %v), want it disabled by discovery", u, ok)
+		}
+	})
+
+	t.Run("current chain: still a plain skip", func(t *testing.T) {
+		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", true), operator}}
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		if len(p.upserts) != 0 || p.skipped != 1 {
+			t.Fatalf("plan = %+v, want one skip and no write", p)
+		}
+	})
+}

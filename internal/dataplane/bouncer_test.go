@@ -1,11 +1,13 @@
 package dataplane
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -591,4 +593,316 @@ func mustIP(s string) net.IP { return net.ParseIP(s) }
 func streamHas(s *streamState, ip net.IP) bool {
 	ok, _ := s.lookup(ip)
 	return ok
+}
+
+// The generic hook lookup carries bounded copies of the client path and URL,
+// so a long request target (in the path or in the query) still gets a real
+// answer from a hook whose server has small request-line and header limits.
+func TestHTTPHookLookupBoundsClientURL(t *testing.T) {
+	var lookups, maxPath, maxURL int32
+	hook := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&lookups, 1)
+		if n := int32(len(r.URL.Query().Get("path"))); n > atomic.LoadInt32(&maxPath) {
+			atomic.StoreInt32(&maxPath, n)
+		}
+		if n := int32(len(r.Header.Get("X-Original-URL"))); n > atomic.LoadInt32(&maxURL) {
+			atomic.StoreInt32(&maxURL, n)
+		}
+		if r.URL.Query().Get("ip") == "198.51.100.66" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	hook.Config.MaxHeaderBytes = 8 << 10
+	hook.Start()
+	defer hook.Close()
+
+	for _, target := range []string{
+		"http://app.example.com/" + strings.Repeat("!", 12<<10),
+		"http://app.example.com/?q=" + strings.Repeat("%21", 12<<10),
+	} {
+		var reached int32
+		b := compileBouncer("hook", model.BouncerMiddleware{Provider: model.BouncerProviderHTTP, URL: hook.URL})
+		h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(&reached))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "198.51.100.66:51000"
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden || reached != 0 {
+			t.Fatalf("banned client with a %d-byte target: status %d, reached %d; want 403 and no upstream", len(target), rec.Code, reached)
+		}
+	}
+	if got := atomic.LoadInt32(&lookups); got != 2 {
+		t.Fatalf("hook lookups = %d, want 2", got)
+	}
+	if maxPath > maxHookPathBytes || maxURL > maxHookURLBytes {
+		t.Fatalf("hook saw path %d bytes, X-Original-URL %d bytes; want at most %d and %d", maxPath, maxURL, maxHookPathBytes, maxHookURLBytes)
+	}
+}
+
+func TestTruncateHookValue(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"/abc", 10, "/abc"},
+		{"/abcdef", 4, "/abc"},
+		{"/a%21b", 3, "/a"},
+		{"/a%21b", 4, "/a"},
+		{"/a%21b", 5, "/a%21"},
+	} {
+		if got := truncateHookValue(tc.in, tc.n); got != tc.want {
+			t.Errorf("truncateHookValue(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
+	}
+}
+
+// A generic hook error admits the request under fail-open, but that verdict is
+// not cached for the client IP: the next request asks the hook again. Under
+// fail-closed the error verdict is still cached for errCacheTTL.
+func TestHTTPHookFailOpenErrorIsNotCached(t *testing.T) {
+	for _, tc := range []struct {
+		onError   string
+		wantCodes []int
+		wantCalls int32
+	}{
+		{onError: model.BouncerOnErrorFailOpen, wantCodes: []int{http.StatusOK, http.StatusForbidden}, wantCalls: 2},
+		{onError: model.BouncerOnErrorFailClosed, wantCodes: []int{http.StatusForbidden, http.StatusForbidden}, wantCalls: 1},
+	} {
+		var calls int32
+		hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		b := compileBouncer("hook", model.BouncerMiddleware{Provider: model.BouncerProviderHTTP, URL: hook.URL, OnError: tc.onError})
+		h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+		for i, want := range tc.wantCodes {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, bouncerReq("198.51.100.66"))
+			if rec.Code != want {
+				t.Errorf("%s: request %d status = %d, want %d", tc.onError, i+1, rec.Code, want)
+			}
+		}
+		if got := atomic.LoadInt32(&calls); got != tc.wantCalls {
+			t.Errorf("%s: hook calls = %d, want %d", tc.onError, got, tc.wantCalls)
+		}
+		hook.Close()
+	}
+}
+
+// While the stream startup pull hangs, one request runs it and the others take
+// the onError path at once instead of each waiting for its own pull in turn.
+// A failed startup pull is not retried before its backoff has passed.
+func TestCrowdSecStreamStartupSinglePullAndBackoff(t *testing.T) {
+	var pulls int32
+	release := make(chan struct{})
+	lapi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&pulls, 1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer lapi.Close()
+	defer close(release)
+
+	b := compileBouncer("cs", model.BouncerMiddleware{URL: lapi.URL, APIKey: model.Secret("k"), Timeout: "300ms", Stream: true})
+	h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, bouncerReq(fmt.Sprintf("203.0.113.%d", i+1)))
+			if rec.Code != http.StatusOK {
+				t.Errorf("client %d: status %d, want 200 (fail-open)", i, rec.Code)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("10 new clients took %v with a 300ms timeout; the startup pull must not be queued per request", el)
+	}
+	if got := atomic.LoadInt32(&pulls); got != 1 {
+		t.Fatalf("startup pulls = %d, want 1", got)
+	}
+	// Inside the backoff a new client is answered at once, with no pull.
+	start = time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, bouncerReq("203.0.113.99"))
+	if rec.Code != http.StatusOK || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("request inside the backoff: status %d after %v; want an immediate 200", rec.Code, time.Since(start))
+	}
+	if got := atomic.LoadInt32(&pulls); got != 1 {
+		t.Fatalf("startup pulls inside the backoff = %d, want still 1", got)
+	}
+}
+
+// TestCrowdSecStreamStartupPullGivesRealVerdicts: with a healthy LAPI, the
+// requests that arrive during a startup pull (the first one, and the one each
+// reload starts with its fresh decision set) wait for it and get the real
+// verdict under either onError policy. A request that stops waiting before the
+// pull has ended takes onError, and that verdict is not cached for its client.
+func TestCrowdSecStreamStartupPullGivesRealVerdicts(t *testing.T) {
+	const (
+		banned, clean         = "203.0.113.66", "203.0.113.7"
+		goneBanned, goneClean = "203.0.113.67", "203.0.113.9"
+	)
+	var pulls atomic.Int32
+	lapi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pulls.Add(1)
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"new":[{"value":%q,"type":"ban","scope":"Ip"},{"value":%q,"type":"ban","scope":"Ip"}],"deleted":[]}`, banned, goneBanned)
+	}))
+	defer lapi.Close()
+
+	for _, onErr := range []string{model.BouncerOnErrorFailOpen, model.BouncerOnErrorFailClosed} {
+		t.Run(onErr, func(t *testing.T) {
+			errCode := http.StatusOK
+			if onErr == model.BouncerOnErrorFailClosed {
+				errCode = http.StatusForbidden
+			}
+			spec := model.BouncerMiddleware{URL: lapi.URL, APIKey: model.Secret("k"), Timeout: "2s", Stream: true, OnError: onErr}
+			for _, phase := range []string{"first pull", "after a reload"} {
+				pulls.Store(0)
+				h := bouncerHandler(compileBouncer("cs", spec), "app", clientIPResolver(nil), nil, bouncerNext(nil))
+				serve := func(ip string, ctx context.Context) int {
+					rec := httptest.NewRecorder()
+					h.ServeHTTP(rec, bouncerReq(ip).WithContext(ctx))
+					return rec.Code
+				}
+				var wg sync.WaitGroup
+				var mu sync.Mutex
+				during := map[string]int{}
+				run := func(ip string, ctx context.Context) {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						code := serve(ip, ctx)
+						mu.Lock()
+						during[ip] = code
+						mu.Unlock()
+					}()
+				}
+				run("203.0.113.1", context.Background()) // claims the pull
+				time.Sleep(50 * time.Millisecond)
+				gone, cancel := context.WithCancel(context.Background())
+				cancel()
+				run(banned, context.Background())
+				run(clean, context.Background())
+				run(goneBanned, gone)
+				run(goneClean, gone)
+				wg.Wait()
+
+				want := map[string]int{"203.0.113.1": 200, banned: 403, clean: 200, goneBanned: errCode, goneClean: errCode}
+				for ip, code := range want {
+					if during[ip] != code {
+						t.Errorf("%s, during the pull: %s got %d, want %d", phase, ip, during[ip], code)
+					}
+				}
+				for ip, code := range map[string]int{banned: 403, clean: 200, goneBanned: 403, goneClean: 200} {
+					if got := serve(ip, context.Background()); got != code {
+						t.Errorf("%s, after the pull: %s got %d, want %d", phase, ip, got, code)
+					}
+				}
+				if got := pulls.Load(); got != 1 {
+					t.Errorf("%s: %d startup pulls, want 1", phase, got)
+				}
+			}
+		})
+	}
+}
+
+// Range decisions are indexed by canonical prefix: overlapping and nested
+// ranges, IPv6 ranges and IPv4-mapped ranges match, deletes remove exactly the
+// named range, and a large set folds in well under a second.
+func TestStreamDecisionSetRanges(t *testing.T) {
+	s := newStreamState()
+	s.apply(crowdsecStream{New: []crowdsecDecision{
+		{Type: "ban", Scope: "Range", Value: "198.51.100.0/24", Scenario: "wide"},
+		{Type: "ban", Scope: "Range", Value: "198.51.100.128/25", Scenario: "narrow"},
+		{Type: "ban", Scope: "Range", Value: "2001:db8::/32"},
+		{Type: "ban", Scope: "Range", Value: "::ffff:192.0.2.0/120"},
+		{Type: "ban", Scope: "Range", Value: "203.0.113.5/32"},
+		{Type: "ban", Scope: "Ip", Value: "203.0.113.9"},
+	}}, true, time.Hour)
+	for _, tc := range []struct {
+		ip   string
+		want bool
+		scen string
+	}{
+		{"198.51.100.1", true, "wide"},
+		{"198.51.100.200", true, "narrow"},
+		{"2001:db8:1::1", true, ""},
+		{"2001:db9::1", false, ""},
+		{"192.0.2.77", true, ""},
+		{"::ffff:192.0.2.77", true, ""},
+		{"203.0.113.5", true, ""},
+		{"203.0.113.9", true, ""},
+		{"203.0.113.10", false, ""},
+	} {
+		got, scen := s.lookup(net.ParseIP(tc.ip))
+		if got != tc.want || scen != tc.scen {
+			t.Errorf("lookup(%s) = %v %q, want %v %q", tc.ip, got, scen, tc.want, tc.scen)
+		}
+	}
+	s.apply(crowdsecStream{Deleted: []crowdsecDecision{
+		{Value: "198.51.100.128/25"}, {Value: "203.0.113.5"}, {Value: "192.0.2.0/24"},
+	}}, false, time.Hour)
+	for _, tc := range []struct {
+		ip   string
+		want bool
+		scen string
+	}{
+		{"198.51.100.200", true, "wide"},
+		{"203.0.113.5", false, ""},
+		{"192.0.2.77", false, ""},
+		{"2001:db8:1::1", true, ""},
+	} {
+		got, scen := s.lookup(net.ParseIP(tc.ip))
+		if got != tc.want || scen != tc.scen {
+			t.Errorf("after delete: lookup(%s) = %v %q, want %v %q", tc.ip, got, scen, tc.want, tc.scen)
+		}
+	}
+
+	var big crowdsecStream
+	for i := 0; i < 20000; i++ {
+		big.New = append(big.New, crowdsecDecision{Type: "ban", Scope: "Range", Value: fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)})
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // lookups run concurrently with the fold
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.lookup(net.ParseIP("10.1.2.3"))
+			}
+		}
+	}()
+	start := time.Now()
+	s.apply(big, true, time.Hour)
+	el := time.Since(start)
+	close(stop)
+	wg.Wait()
+	if el > 2*time.Second {
+		t.Fatalf("folding 20000 ranges took %v", el)
+	}
+	if ok, _ := s.lookup(net.ParseIP("10.78.31.200")); !ok {
+		t.Fatal("an address inside a folded range does not match")
+	}
+	if ok, _ := s.lookup(net.ParseIP("10.200.0.1")); ok {
+		t.Fatal("an address outside every range matches")
+	}
 }

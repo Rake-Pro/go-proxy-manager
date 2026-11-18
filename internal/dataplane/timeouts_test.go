@@ -103,12 +103,13 @@ func hijackEcho(t *testing.T) (model.Upstream, func()) {
 	}))
 }
 
-// A protocol upgrade proxied through gpm must outlive the listener's read and
-// idle timeouts: the tunnel is long-lived by definition, and a deadline left on
+// A protocol upgrade proxied through gpm must outlive the listener's read,
+// idle and write-progress timeouts: the tunnel is long-lived by definition, and a deadline left on
 // the socket would cut it mid-session.
 func TestUpgradeSurvivesListenerTimeouts(t *testing.T) {
 	const short = 200 * time.Millisecond
 	withShortTimeouts(t, short, short)
+	withWriteIdleTimeout(t, short)
 
 	up, closeFn := hijackEcho(t)
 	defer closeFn()

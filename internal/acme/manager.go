@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
@@ -116,14 +117,35 @@ func (m *Manager) recordExpiry(name string, notAfter time.Time) {
 // itself) routes through here, so wiring one callback covers all of them.
 func (m *Manager) recordFailure(name string, err error) {
 	m.obsMu.Lock()
+	msg := truncateError(err.Error())
 	o := m.observation(name)
 	o.RenewFailures++
-	o.LastError = err.Error()
+	o.LastError = msg
 	m.obsMu.Unlock()
 
 	if m.onRenewFailure != nil {
+		if msg != err.Error() {
+			err = errors.New(msg)
+		}
 		m.onRenewFailure(name, err)
 	}
+}
+
+// maxStoredError bounds the error text kept as LastError and handed to the
+// failure notification: a CA's error body becomes part of the error, and its
+// size is the CA's choice.
+const maxStoredError = 2048
+
+// truncateError cuts s to maxStoredError bytes on a UTF-8 boundary.
+func truncateError(s string) string {
+	if len(s) <= maxStoredError {
+		return s
+	}
+	cut := maxStoredError
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + " ... (truncated)"
 }
 
 // recordAttempt notes that an issue/renew attempt for a certificate is starting

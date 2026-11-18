@@ -49,7 +49,8 @@ func authHandler(a model.AuthMiddleware, reg *registry, hostName string, domains
 		return clientCertGate(a, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next, domains...)
 	}
 	if a.Mode == model.AuthModeBasic {
-		return basicAuthGate(a, hostName, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
+		gate := reg.authGateFor(hostName+"\x00basic", a)
+		return basicAuthGateWith(gate, a, hostName, clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
 	}
 	idpName := a.IdentityProvider
 	idp, ok := reg.idps[idpName]

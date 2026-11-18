@@ -144,10 +144,32 @@ func resolveTemplate(hostEP *compiledErrorPages, status int) *template.Template 
 	return lookupTemplate(currentErrorPages(), status)
 }
 
+// maxErrorPageBytes bounds one rendered error page. Execution stops at the
+// first write past it and the caller falls back to the built-in response, so a
+// template that expands without limit cannot grow a buffer per request.
+const maxErrorPageBytes = 1 << 20
+
+var errErrorPageTooLarge = fmt.Errorf("error page template output exceeds %d bytes", maxErrorPageBytes)
+
+// cappedBuffer is a bytes.Buffer that refuses a write that would take it past
+// max bytes.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errErrorPageTooLarge
+	}
+	return b.Buffer.Write(p)
+}
+
 // renderTemplate executes tmpl into a buffer first (never partially written on
-// a template error) and returns the rendered bytes.
+// a template error) and returns the rendered bytes. Output past
+// maxErrorPageBytes is an error.
 func renderTemplate(tmpl *template.Template, status int, host, requestID string) ([]byte, error) {
-	var buf bytes.Buffer
+	buf := cappedBuffer{max: maxErrorPageBytes}
 	data := errorPageData{Status: status, StatusText: http.StatusText(status), Host: host, RequestID: requestID}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, err

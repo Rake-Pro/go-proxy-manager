@@ -208,6 +208,21 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteAllExcept removes every session but keepID ("" keeps none) and returns
+// how many were removed.
+func (s *Store) DeleteAllExcept(ctx context.Context, keepID string) (int, error) {
+	const q = `DELETE FROM sessions WHERE id <> ?`
+	res, err := s.db.ExecContext(ctx, q, keepID)
+	if err != nil {
+		return 0, fmt.Errorf("session: delete all: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("session: delete all rows: %w", err)
+	}
+	return int(n), nil
+}
+
 // Touch updates the session's expiry (sliding expiration).
 func (s *Store) Touch(ctx context.Context, id string, expiresAt time.Time) error {
 	const q = `UPDATE sessions SET expires_at = ? WHERE id = ?`

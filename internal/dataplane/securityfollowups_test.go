@@ -40,7 +40,10 @@ func TestIPBucketKeyGroupsIPv6ByPrefix(t *testing.T) {
 
 func TestValidHostHeader(t *testing.T) {
 	ok := []string{"app.example.com", "app.example.com:443", "app.example.com:8080", "[2001:db8::1]", "[2001:db8::1]:443", "[fe80::1%25eth0]:443", "[fe80::1%eth0]", "localhost:1", "a:65535", "App.Example.COM.", "192.0.2.1:80"}
-	bad := []string{"", ":443", "app.example.com:", "app.example.com:0", "app.example.com:65536", "app.example.com:443x", "app.example.com:4 43", "app/evil.example.com", "[2001:db8::1", "[2001:db8::1]x", "[2001:db8::1]:", "[not-an-ip]", "[192.0.2.1]", "app.example.com:0443", "app.example.com:443:1", "a b.example.com", "app.example.com?x=1", "app.example.com#f", "user@app.example.com"}
+	bad := []string{"", ":443", "app.example.com:", "app.example.com:0", "app.example.com:65536", "app.example.com:443x", "app.example.com:4 43", "app/evil.example.com", "[2001:db8::1", "[2001:db8::1]x", "[2001:db8::1]:", "[not-an-ip]", "[192.0.2.1]", "app.example.com:0443", "app.example.com:443:1", "a b.example.com", "app.example.com?x=1", "app.example.com#f", "user@app.example.com",
+		// Control, whitespace and non-ASCII bytes: hostKey trims whitespace, so these
+		// would route as a different name than the one forwarded.
+		"app.example.com\t", "\tapp.example.com", "app.example.com\t:443", "app.\x00example.com", "app.example.com\x7f", "app.ex\xc3\xa4mple.com", "app.example.com\r", "app.example.com\v"}
 	for _, h := range ok {
 		if !validHostHeader(h) {
 			t.Errorf("%q must be accepted", h)
