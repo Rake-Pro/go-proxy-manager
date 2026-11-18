@@ -116,10 +116,33 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 The proxy listeners route by hostname, so **at most one enabled host may claim a
 given domain**. Two enabled proxy, redirect or parked hosts listing the same domain
 are rejected at load time (`proxy host "b": domains: x.example.com is already claimed by proxy host "a"`)
-rather than resolved by whichever file happens to be read last. *Disabled* hosts
+rather than resolved by whichever file happens to be read last. Domains are compared
+the way the router matches them: case and surrounding space are ignored and
+everything from the first `:` is dropped, so `x.example.com:8443` claims
+`x.example.com`. A write that adds such a pair, or adds a host to one already
+stored, is refused. A pair already stored still loads and is reported as a config
+warning until one domain is changed, and edits that keep or shrink it (an
+unrelated field, disabling one of the hosts, removing the colliding domain) are
+allowed. *Disabled* hosts
 are exempt: they are excluded from the running proxy listeners entirely, so staging a
 replacement host beside the live one stays legal: enable the new one in the same
 change that disables the old one.
+
+## Writes must compile
+
+Every write that can add or change an object (save, batch, discovery apply,
+settings, revert, scoped revert, restore) is compiled the way a reload compiles
+it before it is committed, and refused when the proxy listeners could not load
+the result: for example a custom certificate whose files do not load, or an
+`errorPages.dir` that cannot be read. The check builds and discards the result
+and changes nothing that is running.
+
+- **Repair stays possible.** When the stored config already fails to compile,
+  writes are accepted with a logged warning, so the edit that fixes it can land.
+- **Deletes are never refused** by this check.
+- **File names.** An object file whose `name` is not its file name still loads
+  and is reported as a config warning; rename the file to `<name>.yaml`. A
+  restore archive may only carry kind files named after a valid object name.
 
 ## Secrets
 

@@ -72,7 +72,7 @@ UDP session limits apply independently of any access list:
 | Limit | Value | When reached |
 |-------|-------|--------------|
 | Sessions per listener | 4096 | A new source takes the slot of the session whose client was silent the longest, if that session has had no client traffic for at least 30 s; otherwise the new source is dropped. |
-| Sessions per source address (IPv6 by /64) | 64 | Datagrams that would open another session from that source are dropped until one of its sessions ends. |
+| Sessions per source address (IPv6 by /56) | 64 | Datagrams that would open another session from that source are dropped until one of its sessions ends. |
 
 ## StreamTLS (`tls`)
 

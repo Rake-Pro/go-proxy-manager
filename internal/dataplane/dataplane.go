@@ -51,15 +51,48 @@ var (
 func newListenerServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           h,
+		Handler:           flushDeadlineHandler(h),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		IdleTimeout:       idleTimeout,
-		// Closes an HTTP/2 connection that has data to send and makes no write
-		// progress; per-stream writes are bounded by progressWriter.
-		HTTP2:       &http.HTTP2Config{WriteByteTimeout: responseWriteIdleTimeout},
+		// WriteByteTimeout closes an HTTP/2 connection that has data to send and
+		// makes no write progress; per-stream writes are bounded by the
+		// progressWriter flushDeadlineHandler installs, while the handler runs
+		// and after it returns. MaxConcurrentStreams bounds the requests one
+		// connection can have in flight at a time.
+		HTTP2: &http.HTTP2Config{
+			WriteByteTimeout:     responseWriteIdleTimeout,
+			MaxConcurrentStreams: http2MaxConcurrentStreams,
+		},
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context { return withConnAnchorCache(ctx) },
 	}
+}
+
+// http2MaxConcurrentStreams is the per-connection stream limit the data-plane
+// listeners advertise (the stdlib default is 250).
+const http2MaxConcurrentStreams = 100
+
+// flushDeadlineHandler bounds every write of a response by progress, whoever
+// writes it: next gets a progressWriter, so a response gpm generates itself
+// (an error page, a redirect) is written under the same per-write deadline as
+// a proxied one, and the proxy adds no second one (see longLivedProxy). Once
+// next has returned the deadline is armed again for what the server still has
+// to write (the buffered tail, an HTTP/2 stream's final DATA frames). Between
+// writes no deadline is set, so a long download, an event stream or a slow
+// upload is never cut short. A hijacked connection belongs to its handler and
+// is left alone. HTTP/1.1 clears the deadline itself before the next request
+// on the connection; on HTTP/2 the deadline belongs to the stream.
+func flushDeadlineHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pw := &progressWriter{ResponseWriter: w, rc: http.NewResponseController(w)}
+		next.ServeHTTP(pw, r)
+		// An HTTP/2 stream the client already reset has nothing left to
+		// write; a deadline there would only keep the stream's state
+		// reachable until its timer fired.
+		if r.ProtoMajor != 2 || r.Context().Err() == nil {
+			pw.arm()
+		}
+	})
 }
 
 // Server runs the reverse-proxy data plane. The compiled router is held in an
@@ -304,6 +337,9 @@ func (s *Server) Reload(cfg model.Config) error {
 	}
 	stage.commit()
 	s.cur.Store(rt)
+	// Published only now: a build that failed above never replaces the anchors
+	// the live router checks revocation against.
+	registerCRLAnchors(rt.clientCAs)
 	s.streams.reload(cfg, rt.certs)
 	log.Info().
 		Int("proxyHosts", len(rt.hosts)).
@@ -311,6 +347,22 @@ func (s *Server) Reload(cfg model.Config) error {
 		Int("parkedHosts", len(rt.parked)).
 		Int("streamHosts", len(cfg.StreamHosts)).
 		Msg("data plane reloaded")
+	return nil
+}
+
+// CheckConfig compiles cfg and the settings-level error pages exactly as a
+// reload would and discards the result, so a config write can be refused
+// before it is committed. It changes no live state: the router is not swapped,
+// the CRL watch keeps the live anchors, upstream-group probers are neither
+// started nor stopped (the health stage is never committed), stream listeners
+// are untouched and the installed error pages stay in place.
+func (s *Server) CheckConfig(cfg model.Config, errorPages model.ErrorPagesConfig) error {
+	if _, err := compileErrorPages(errorPages, s.certDir); err != nil {
+		return fmt.Errorf("settings errorPages: %w", err)
+	}
+	if _, err := buildRouter(cfg, s.certDir, s.health.stage(cfg.UpstreamGroups)); err != nil {
+		return fmt.Errorf("compile data plane: %w", err)
+	}
 	return nil
 }
 

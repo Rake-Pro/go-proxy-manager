@@ -218,15 +218,32 @@ When no rule matches, `profileSelection` decides what happens next:
 - `"rules-only"`: the annotation is **never read at all**. An Ingress that
   matches no rule gets the default `template`, exactly as if it carried no
   annotation, even if its own `gpm.rake.pro/profile` names a real profile. Use
-  this when the Ingress author should have no say in profile selection
-  whatsoever.
+  this when profile selection should follow your rules rather than the
+  annotation.
 
-`profileRules` is strictly stronger than the annotation (the Ingress author
-cannot see, match or influence a rule) at the cost of a settings commit per new
-namespace/label combination rather than per new service. Named profiles (and the
-template) remain the substrate either mode selects from; the vocabulary an
-Ingress or a rule can reach is always one the operator authored in
-`ingressDiscovery.template`/`.profiles`.
+What the Ingress author still controls:
+
+| Rule matches on | Who decides whether an Ingress matches |
+|---|---|
+| `namespace` | you: the author cannot move an Ingress into another namespace |
+| `matchLabels` | the author: labels are written by whoever can edit the Ingress, with the same RBAC as annotations |
+| both | you, for the namespace; the author, for the labels within it |
+
+- A rule with `matchLabels` and no `namespace` is selectable by **any** author in
+  the listed scope who adds the label, in `rules-only` mode too. It is the
+  annotation under another name, so treat its profile like one any author may
+  pick.
+- gpm logs a warning for each such rule (`ingressDiscovery.profileRules[N]
+  selects profile ... by matchLabels without a namespace`) when the reconciler
+  reads the settings; the rule stays valid.
+- To take the choice away from the author, set `namespace` on the rule, and bind
+  the profile to its names with `allowedHostnames` (below).
+
+`profileRules` with `namespace` is strictly stronger than the annotation, at the
+cost of a settings commit per new namespace/label combination rather than per
+new service. Named profiles (and the template) remain the substrate either mode
+selects from; the vocabulary an Ingress or a rule can reach is always one the
+operator authored in `ingressDiscovery.template`/`.profiles`.
 
 ## Per-profile `allowedDomainSuffixes`
 
@@ -245,7 +262,8 @@ knob only, never a second way to grant a wider set of names.
 
 `allowedDomainSuffixes` cannot bind a profile to one name when that name is
 itself a suffix of others (the zone apex, say), and every profile is selectable
-by every annotating Ingress unless `profileRules` with `rules-only` decide. A
+by every annotating Ingress unless namespace-bound `profileRules` with
+`rules-only` decide. A
 profile (or the template) may set `allowedHostnames` to list the **exact** names
 it may be used for:
 
@@ -381,6 +399,13 @@ Ownership covers the **domain** as well as the name:
   already claimed by a host discovery does not own (proxy, redirect or parked,
   enabled *or* disabled) is skipped, with that host and its kind named in the
   `reason`.
+- **A skipped existing host is not frozen on an old chain.** When the derived
+  host already exists and is skipped for a domain conflict, it keeps the domains
+  it serves, but the same test as for a derive failure applies: a stored chain
+  that differs from the resolved profile is restamped from the profile on those
+  domains (status `updated`), and a stored domain the profile no longer allows
+  disables the host. Adding a contested hostname to an Ingress therefore cannot
+  keep a host on a chain you have since tightened.
 - **Why.** Without that rule a tenant who can annotate an `Ingress` in their own
   namespace could claim `sso.example.com`, and because the router fills its
   per-domain maps in config load order, a derived name sorting after the
@@ -448,13 +473,17 @@ than holding the reconciler for the page limit times the per-request timeout.
 
 | List bound | Value | When exceeded |
 |---|---|---|
-| Response body per page | 8 MiB | the same page is asked for again with `limit` 10, then 1; only a single object over the cap fails the list |
-| Pages per list | 100 (pages retried at a smaller `limit` count too) | the list fails and discovery freezes |
+| Response body per page | 8 MiB | the same page is asked for again with `limit` 10, then 1; the reduced limit is kept for the following pages and steps back up after 10 pages in a row succeed; only a single object over the cap fails the list |
 | Objects per list | 10000 (every Ingress in scope, annotated or not) | the list fails and discovery freezes |
+| Page bodies kept per list | 800 MiB | the list fails and discovery freezes |
+| Requests per list | 20000 (a list within the object bound stays under it even at one object per page) | the list fails and discovery freezes |
 
 Anyone who can create Ingress objects in the listed scope can therefore freeze
-discovery by creating enough of them; set `namespace` or `labelSelector` to
-narrow the scope when that matters. A derived name longer than 250 characters
+discovery by creating enough of them. Set `namespace` to narrow the scope when
+that matters, or put a ResourceQuota on `count/ingresses.networking.k8s.io` in
+the namespaces whose users you do not trust. `labelSelector` narrows the list
+but does not stop this: labels are written by the same Ingress author, who can
+put the selected label on every object they create. A derived name longer than 250 characters
 (`ing-<name>.<namespace>`, so that its object file fits a 255-byte file name) is
 skipped like any other underivable Ingress, without protecting a host.
 

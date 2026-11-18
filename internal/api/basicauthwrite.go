@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -23,6 +24,26 @@ type basicAuthShadow struct {
 	} `json:"basic"`
 }
 
+// maxPlaintextPasswordsPerWrite bounds the bcrypt work one write request can
+// ask for across the host block and every location together. It is one full
+// block (model.MaxBasicAuthUsers); a write only carries plaintext for users
+// whose password it sets, so a real host never comes near it.
+const maxPlaintextPasswordsPerWrite = model.MaxBasicAuthUsers
+
+// plaintexts counts the non-empty plaintext passwords in s.
+func (s *basicAuthShadow) plaintexts() int {
+	if s == nil || s.Basic == nil {
+		return 0
+	}
+	n := 0
+	for _, u := range s.Basic.Users {
+		if u.Password != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // middlewareShadow reads the auth block of a `type: auth` middleware body.
 type middlewareShadow struct {
 	Auth *basicAuthShadow `json:"auth"`
@@ -41,24 +62,33 @@ type proxyHostShadow struct {
 
 // applyBasicAuthPasswords hashes plaintext passwords from a middleware write
 // body onto the decoded auth spec.
-func applyBasicAuthPasswords(body []byte, a *model.AuthMiddleware) error {
+func applyBasicAuthPasswords(ctx context.Context, body []byte, a *model.AuthMiddleware) error {
 	var shadow middlewareShadow
 	if err := json.Unmarshal(body, &shadow); err != nil {
 		// The object itself already decoded, so a failure here is a "password"
 		// field of the wrong type. Report it in the caller's vocabulary.
 		return decodeError(err)
 	}
-	return hashInto(shadow.Auth, a, "auth")
+	return hashInto(ctx, shadow.Auth, a, "auth")
 }
 
 // applyHostBasicAuthPasswords does the same for a proxy-host write body: the
 // host's own inline auth block and each location's.
-func applyHostBasicAuthPasswords(body []byte, h *model.ProxyHost) error {
+func applyHostBasicAuthPasswords(ctx context.Context, body []byte, h *model.ProxyHost) error {
 	var shadow proxyHostShadow
 	if err := json.Unmarshal(body, &shadow); err != nil {
 		return decodeError(err)
 	}
-	if err := hashInto(shadow.Auth, h.Auth, "auth"); err != nil {
+	// The per-block user cap in hashInto does not bound the number of
+	// locations, so the request as a whole is counted before any hashing.
+	n := shadow.Auth.plaintexts()
+	for _, l := range shadow.Locations {
+		n += l.Auth.plaintexts()
+	}
+	if n > maxPlaintextPasswordsPerWrite {
+		return fmt.Errorf("the request carries %d plaintext passwords; at most %d may be set in one write", n, maxPlaintextPasswordsPerWrite)
+	}
+	if err := hashInto(ctx, shadow.Auth, h.Auth, "auth"); err != nil {
 		return err
 	}
 	for i := range shadow.Locations {
@@ -68,7 +98,7 @@ func applyHostBasicAuthPasswords(body []byte, h *model.ProxyHost) error {
 			break
 		}
 		owner := fmt.Sprintf("locations[%d].auth", i)
-		if err := hashInto(shadow.Locations[i].Auth, h.Locations[i].Auth, owner); err != nil {
+		if err := hashInto(ctx, shadow.Locations[i].Auth, h.Locations[i].Auth, owner); err != nil {
 			return err
 		}
 	}
@@ -87,7 +117,7 @@ func applyHostBasicAuthPasswords(body []byte, h *model.ProxyHost) error {
 //
 // owner names the block in an error ("auth", "locations[1].auth"), so a failure
 // on a location does not read as if it came from the host.
-func hashInto(shadow *basicAuthShadow, a *model.AuthMiddleware, owner string) error {
+func hashInto(ctx context.Context, shadow *basicAuthShadow, a *model.AuthMiddleware, owner string) error {
 	if shadow == nil || shadow.Basic == nil || a == nil || a.Basic == nil {
 		return nil
 	}
@@ -100,6 +130,10 @@ func hashInto(shadow *basicAuthShadow, a *model.AuthMiddleware, owner string) er
 	for i, u := range shadow.Basic.Users {
 		if u.Password == "" || i >= len(a.Basic.Users) {
 			continue
+		}
+		// A cancelled request (client gone) stops the remaining hashes.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
 		if err != nil {

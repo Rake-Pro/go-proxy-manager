@@ -199,6 +199,22 @@ func TestAccessListSourceAndPathRuleValidation(t *testing.T) {
 			},
 			wantErr: "must not be negative",
 		},
+		{
+			name: "maxCoverage ipv4 beyond a prefix length",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", MaxCoverage: &AccessListSourceCoverage{IPv4: 33}}},
+			},
+			wantErr: "maxCoverage.ipv4",
+		},
+		{
+			name: "maxCoverage ipv6 narrower than a /64",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", MaxCoverage: &AccessListSourceCoverage{IPv6: 65}}},
+			},
+			wantErr: "maxCoverage.ipv6",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"crypto/x509"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -18,8 +19,9 @@ type ClientCA struct {
 	// A CA certificate is public, so it may be stored inline; it may also be a
 	// ${FILE:...} / ${ENV:...} placeholder resolved at load. It is a plain string
 	// (not a Secret) so an inline PEM is not treated as a committable secret. The
-	// "parses to >=1 certificate" check is deferred to data-plane compile, where a
-	// placeholder can actually be resolved.
+	// "parses to >=1 certificate" check runs in Validate for an inline bundle and
+	// is deferred to data-plane compile for a placeholder, where it can actually
+	// be resolved.
 	CAPEM string `json:"caPEM" yaml:"caPEM"`
 
 	// CRLFile is an optional certificate revocation list for this CA, PEM or DER
@@ -104,6 +106,13 @@ func (c ClientCA) Validate() error {
 	}
 	if len(c.CAPEM) == 0 {
 		return fmt.Errorf("client CA %q: caPEM: is required", c.Name)
+	}
+	// An inline bundle is parsed here exactly as the data plane compiles it, so
+	// one that holds no certificate is refused at write time instead of failing
+	// every later reload. A placeholder is resolved at load and checked then;
+	// a disabled CA is not compiled.
+	if !c.Disabled && !secretRefRe.MatchString(c.CAPEM) && !x509.NewCertPool().AppendCertsFromPEM([]byte(c.CAPEM)) {
+		return fmt.Errorf("client CA %q: caPEM: contains no PEM certificate", c.Name)
 	}
 	if c.CRLFile != "" && c.CRLPEM != "" {
 		return fmt.Errorf("client CA %q: crlFile: set crlFile or crlPEM, not both", c.Name)

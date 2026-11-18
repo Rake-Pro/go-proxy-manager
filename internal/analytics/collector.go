@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -152,6 +153,12 @@ const (
 	staleEventAfter    = time.Hour // older events are counted in the current minute
 	longReportCacheTTL = 30 * time.Second
 	closeTimeout       = 5 * time.Second
+	maxEventMethod     = 32 // longer than any method the classifier tells apart
+
+	// shortReportCacheTTL is short enough that the auto-refreshing view
+	// stays live, and long enough that a reader looping on one report rebuilds
+	// it a few times a minute at most.
+	shortReportCacheTTL = 5 * time.Second
 )
 
 // durBounds are the latency histogram upper bounds in milliseconds, the same
@@ -223,6 +230,8 @@ type Collector struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedReport
+	// buildMu serialises report builds (see Report).
+	buildMu sync.Mutex
 
 	done    chan struct{}
 	stopped chan struct{}
@@ -323,6 +332,14 @@ func (c *Collector) Record(ev Event) {
 	if !c.enabled.Load() {
 		return
 	}
+	// A queued event must not keep the request's strings alive: they can be
+	// substrings of a request line of up to the header limit. Keep copies of
+	// what the classifier reads (the path cleaned first, so the clip cuts the
+	// same form Classify sees).
+	ev.Method = strings.Clone(clip(ev.Method, maxEventMethod))
+	ev.Path = strings.Clone(clip(cleanEventPath(ev.Path), maxSigPath))
+	ev.RawQuery = strings.Clone(clip(ev.RawQuery, maxSigQuery))
+	ev.UserAgent = strings.Clone(clip(ev.UserAgent, maxSigUA))
 	select {
 	case c.queue <- ev:
 	default:
@@ -540,12 +557,19 @@ func (c *Collector) ingest(ev Event) {
 		key := ev.Client.String()
 		ca := hh.clients[key]
 		if ca == nil {
-			// Once the per-host cap is reached, further new addresses are not
-			// tracked for this hour: a flood of rotating sources must not cost a
-			// scan per event, and an address that first appears that late is by
-			// definition not a top client of the hour.
+			// At the per-host cap a new address replaces the entry with the
+			// lowest count (the least recently seen among equals), so a table
+			// filled with one-hit addresses cannot keep a later heavy client
+			// from being tracked; only the lowest-count slot churns.
 			if len(hh.clients) >= maxClientsPerHost {
-				return
+				var minKey string
+				var minAgg *clientAgg
+				for k, v := range hh.clients {
+					if minAgg == nil || v.n < minAgg.n || (v.n == minAgg.n && v.lastSeen < minAgg.lastSeen) {
+						minKey, minAgg = k, v
+					}
+				}
+				delete(hh.clients, minKey)
 			}
 			ca = &clientAgg{country: country, persist: mode == "persist"}
 			hh.clients[key] = ca

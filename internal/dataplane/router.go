@@ -60,6 +60,10 @@ type router struct {
 	// ever apply). A proxy host uses its own merged hostHandler.securityHeaders
 	// instead. nil when settings.securityHeaders is empty.
 	securityHeaders *scopedHeaders
+
+	// clientCAs are this build's client-CA anchors. Reload publishes them to
+	// the CRL watch only once the build is the live router (registerCRLAnchors).
+	clientCAs map[string]*clientCAAnchor
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -86,11 +90,9 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 	if err != nil {
 		return nil, err
 	}
-	// Publish the file-backed CRLs of THIS build to the mtime watch, so the watch
-	// loop started once at listener start always polls the live set.
-	registerCRLAnchors(clientCAs)
 	reg := buildRegistry(cfg)
 	reg.health = health
+	reg.states = chainStatesFor(health)
 
 	fleetFloor := currentTLSFleetFloor()
 	rt := &router{
@@ -105,6 +107,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		// Settings-level default headers for host-less responses (404/421) and
 		// redirect/parked hosts. A proxy host composes its own merge below.
 		securityHeaders: partitionSecurityHeaders(currentSecurityHeaders()),
+		clientCAs:       clientCAs,
 	}
 	// Only a raised fleet floor needs a config of its own: at 1.2 the listener's
 	// own TLSConfig already is the default, so nil keeps the zero-overhead path.
@@ -691,6 +694,15 @@ func originFormTarget(r *http.Request) bool {
 func validHostHeader(h string) bool {
 	if h == "" {
 		return false
+	}
+	// Visible ASCII only. hostKey trims whitespace, so a name with a tab or
+	// other control byte would route as the trimmed name while the upstream
+	// is sent the raw value (which the outbound transport replaces with an
+	// empty Host). Internationalized names arrive as punycode.
+	for i := 0; i < len(h); i++ {
+		if c := h[i]; c <= 0x20 || c >= 0x7f {
+			return false
+		}
 	}
 	host, port := h, ""
 	if strings.HasPrefix(h, "[") {

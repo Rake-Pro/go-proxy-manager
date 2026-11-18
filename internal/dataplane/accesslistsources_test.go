@@ -301,3 +301,48 @@ func TestAccessListPathRulesNeverMatchOnAStream(t *testing.T) {
 		t.Fatal("the list's literal rules must still apply on a raw stream")
 	}
 }
+
+// A stored entry the fetcher's entry guard refuses today (stored before the
+// guard existed) is dropped when the ledger is compiled, so it is not served
+// even while refused fetches keep the stored set in the ledger.
+func TestStoredSourceEntriesAreRecheckedAtCompile(t *testing.T) {
+	installSources(t, sourceLedger("l", "feed", "128.0.0.0/1", "172.0.0.0/8", "203.0.113.0/24"))
+	got := currentAccessListSources()["l/feed"]
+	if len(got) != 1 || got[0].String() != "203.0.113.0/24" {
+		t.Fatalf("compiled set = %v, want only 203.0.113.0/24", got)
+	}
+}
+
+// A stored set over the source's maxCoverage resolves to nothing, like an
+// unfetched source; a source without maxCoverage has no budget and serves its
+// set as before, and a raised budget serves a feed that needs more.
+func TestStoredSourceSetOverCoverageBudgetMatchesNothing(t *testing.T) {
+	installSources(t, sourceLedger("l", "feed", "11.0.0.0/8", "12.0.0.0/8"))
+	for _, tc := range []struct {
+		name string
+		cov  *model.AccessListSourceCoverage
+		want int
+	}{
+		{"no maxCoverage", nil, http.StatusOK},
+		{"maxCoverage with no family set", &model.AccessListSourceCoverage{}, http.StatusForbidden},
+		{"raised budget", &model.AccessListSourceCoverage{IPv4: 7}, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			al := model.AccessList{
+				ObjectMeta:    model.ObjectMeta{Name: "l"},
+				DefaultAction: model.ActionDeny,
+				Sources:       []model.AccessListSource{{Name: "feed", URL: "https://example.com/i.txt", MaxCoverage: tc.cov}},
+				Rules:         []model.IPRule{{Action: model.ActionAllow, Source: "feed"}},
+			}
+			h := accessListHandler(compileAccessList(al), ipFrom("11.1.2.3"), nil, nil, "", nil, okHandler())
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+			if rec.Code != tc.want {
+				t.Fatalf("got %d want %d", rec.Code, tc.want)
+			}
+			if n := len(accessListAllowNets(al)); (n > 0) != (tc.want == http.StatusOK) {
+				t.Fatalf("accessListAllowNets returned %d networks", n)
+			}
+		})
+	}
+}

@@ -94,7 +94,8 @@ func (r *logRing) add(e AccessEntry) {
 func (r *logRing) clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.buf = r.buf[:0]
+	// A fresh slice, so the cleared entries are no longer reachable.
+	r.buf = nil
 	r.n = 0
 }
 
@@ -373,14 +374,18 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			}
 		}
 
+		// Client-sized strings are clipped for the ring and the log line alike.
+		method, host, path := logMethod(r.Method), logHost(r.Host), logPath(r.URL.Path)
+
 		// Capture into the in-memory ring for the /api/logs viewer. Only when access
-		// logging is on, so the default (off) path stays allocation-free.
+		// logging is on, so the default (off) path stays allocation-free. The
+		// strings are copied so an entry does not keep the request line alive.
 		if accessLog && s.logBuf != nil {
 			s.logBuf.add(AccessEntry{
 				Time:    start,
-				Method:  r.Method,
-				Host:    hostOnly(r.Host),
-				Path:    r.URL.Path,
+				Method:  strings.Clone(method),
+				Host:    strings.Clone(host),
+				Path:    strings.Clone(path),
 				Status:  status,
 				Bytes:   obs.bytes,
 				DurMs:   dur.Milliseconds(),
@@ -395,9 +400,9 @@ func (s *Server) observe(next http.Handler) http.Handler {
 			ev = log.Warn()
 		}
 		ev = ev.Str("component", "access").
-			Str("method", r.Method).
-			Str("host", hostOnly(r.Host)).
-			Str("path", r.URL.Path).
+			Str("method", method).
+			Str("host", host).
+			Str("path", path).
 			Int("status", status).
 			Int64("bytes", obs.bytes).
 			Dur("dur", dur).
@@ -458,6 +463,26 @@ func peerAddr(r *http.Request) string {
 	}
 	return r.RemoteAddr
 }
+
+// Length bounds for request strings stored in the access-log ring or written
+// to a log line. The request line and headers may be up to the listener's
+// header limit long; a value over its bound is cut and marked with "...".
+const (
+	logMethodMax = 16
+	logHostMax   = 253
+	logPathMax   = 2048
+)
+
+func clipLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func logMethod(m string) string { return clipLog(m, logMethodMax) }
+func logHost(h string) string   { return clipLog(hostOnly(h), logHostMax) }
+func logPath(p string) string   { return clipLog(p, logPathMax) }
 
 func hostOnly(h string) string {
 	if i := strings.IndexByte(h, ':'); i >= 0 {

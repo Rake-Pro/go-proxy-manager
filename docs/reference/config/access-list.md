@@ -82,6 +82,7 @@ geo:
 | <span id="access-list-sources-url"></span>  `url` | string | Absolute **https** URL of a plain-text feed. `http` is refused. |
 | <span id="access-list-sources-interval"></span>  `interval` | string | Go duration between re-fetches. Empty = `24h`; below `1h` is refused. |
 | <span id="access-list-sources-max-entries"></span>  `maxEntries` | int | Cap on the feed's size. `0` = `10000`. |
+| <span id="access-list-sources-max-coverage"></span>  `maxCoverage` | object | Optional. Total address space the feed may cover, per family, as prefix-length equivalents: `ipv4` (1-32; `0` = `8`, one /8 = 16,777,216 addresses) and `ipv6` (1-64; `0` = `24`, 256 /32s). A smaller number allows more. Absent = no total budget; the per-entry rules below still apply. |
 
 The feed format is fixed: one IP or CIDR per line, `#` comment lines and blank
 lines ignored, a bare IP read as a `/32` or `/128`. Fetching is handled by the
@@ -98,6 +99,33 @@ RFC1918, ULA, CGNAT `100.64.0.0/10`, multicast, `192.0.0.0/24`, `198.18.0.0/15`,
 `64:ff9b::/96`) refuses the whole fetch. An IPv4-mapped entry
 (`::ffff:192.0.2.0/120`) is judged and stored as the IPv4 network it matches
 (`192.0.2.0/24`), so the IPv4 limits apply to it.
+
+The feed as a whole can be bounded too, and is not by default: with
+`maxCoverage` set, its entries, summed per family, may cover at most that
+budget, and a fetch over it is refused whole. Without `maxCoverage` there is no
+total budget, only the per-entry rules above. A fetch of a source without
+`maxCoverage` that covers more than one /8 of IPv4 or one /24 of IPv6 in total
+logs a `WARN` that the feed is broad. Monitoring feeds are a few hundred single
+addresses and published CDN edge lists a few million IPv4 addresses, so
+`maxCoverage: {}` (one /8 and one /24) fits them; a feed that publishes a
+provider's whole address space needs a larger budget:
+
+```yaml
+sources:
+  - name: monitors
+    url: https://example.com/monitors.txt
+    maxCoverage: {}                    # one /8 of IPv4 and one /24 of IPv6
+  - name: cloud
+    url: https://example.com/ranges.txt
+    maxCoverage: {ipv4: 4, ipv6: 20}   # up to sixteen /8s and sixteen /24s
+```
+
+Both bounds also apply to the stored set: when the data plane compiles the
+ledger it drops (and logs) any stored entry the entry rules refuse, and a stored
+set over its `maxCoverage` matches nothing, so a set fetched before a bound was
+set is not served while later fetches are refused. A set that matches nothing
+also stops a `deny` rule that references it from denying, so set `maxCoverage`
+on a deny feed only with room for what it publishes.
 
 > **Pair every `source` rule with `paths`.** A source rule *without* `paths` is
 > an ordinary allow rule: it grants every address in the feed full access to the

@@ -2,12 +2,16 @@ package dataplane
 
 import (
 	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"math"
 	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
@@ -192,7 +196,12 @@ func (l *rateLimiter) evictLRULocked() {
 // (nil listNets, or an unknown name, contributes nothing). host and ep resolve
 // the custom error page for the 429 (see serveErrorPage).
 func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listNets func(name string) []*net.IPNet) http.Handler {
-	l := newRateLimiter(rl)
+	return rateLimitHandlerWith(newRateLimiter(rl), rl, ipOf, host, ep, next, listNets)
+}
+
+// rateLimitHandlerWith is rateLimitHandler enforcing rl through the given
+// limiter, which may carry bucket state from an earlier build (see chainStates).
+func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listNets func(name string) []*net.IPNet) http.Handler {
 	var allowNets []*net.IPNet
 	for _, c := range rl.AllowFrom {
 		if name, ok := model.AccessListRef(c); ok {
@@ -229,4 +238,108 @@ func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// chainStates holds the rate-limiter and basic-auth failure-gate instances of
+// the compiled chains, keyed by owner (host, route, middleware) plus a hash of
+// the spec that built them. A router build asks it for each instance, so a
+// rebuilt chain whose spec is unchanged keeps the live buckets, blocks and
+// lockouts instead of starting empty, and the routes of one host share one
+// basic-auth failure gate. Entries are weak: an instance lives exactly as long
+// as a compiled chain (the live router, or a build in progress) refers to it,
+// so a removed host or a changed spec leaves nothing behind once the old router
+// is gone, and a build that fails or is only a trial drops nothing the live
+// router uses.
+type chainStates struct {
+	mu       sync.Mutex
+	limiters weakMap[rateLimiter]
+	gates    weakMap[authGate]
+}
+
+func (c *chainStates) limiter(key string, mk func() *rateLimiter) *rateLimiter {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.limiters.get(key, mk)
+}
+
+func (c *chainStates) gate(key string, mk func() *authGate) *authGate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gates.get(key, mk)
+}
+
+// weakMap is a string-keyed map of weak pointers with amortized removal of
+// collected entries. The caller serializes access.
+type weakMap[T any] struct {
+	m       map[string]weak.Pointer[T]
+	sweepAt int
+}
+
+func (w *weakMap[T]) get(key string, mk func() *T) *T {
+	if v := w.m[key].Value(); v != nil {
+		return v
+	}
+	if w.m == nil {
+		w.m = map[string]weak.Pointer[T]{}
+	}
+	if len(w.m) >= w.sweepAt {
+		for k, p := range w.m {
+			if p.Value() == nil {
+				delete(w.m, k)
+			}
+		}
+		w.sweepAt = 2*len(w.m) + 64
+	}
+	v := mk()
+	w.m[key] = weak.Make(v)
+	return v
+}
+
+// serverChainStates scopes chainStates to a data-plane Server across reloads.
+// The Server's upstream-group health manager is the state that already
+// survives its reloads and reaches every build (as the healthStage passed to
+// buildRouter), so it identifies the Server here. Keys are weak, so a Server
+// that is gone takes its entry with it.
+var serverChainStates struct {
+	mu sync.Mutex
+	m  map[weak.Pointer[healthManager]]*chainStates
+}
+
+// chainStatesFor returns the reload-surviving store of the Server whose health
+// stage drives this build, or a store for this build alone when the build has
+// none (a router built directly, as tests do).
+func chainStatesFor(health groupResolver) *chainStates {
+	st, ok := health.(*healthStage)
+	if !ok || st == nil || st.m == nil {
+		return &chainStates{}
+	}
+	serverChainStates.mu.Lock()
+	defer serverChainStates.mu.Unlock()
+	if serverChainStates.m == nil {
+		serverChainStates.m = map[weak.Pointer[healthManager]]*chainStates{}
+	}
+	for k := range serverChainStates.m {
+		if k.Value() == nil {
+			delete(serverChainStates.m, k)
+		}
+	}
+	key := weak.Make(st.m)
+	cs := serverChainStates.m[key]
+	if cs == nil {
+		cs = &chainStates{}
+		serverChainStates.m[key] = cs
+	}
+	return cs
+}
+
+// specKey is a stable digest of a middleware spec, so a changed spec gets a
+// fresh limiter or gate rather than one built for different parameters. ok is
+// false for a spec that does not encode; such an instance is never shared.
+func specKey(spec any) (key string, ok bool) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), true
 }

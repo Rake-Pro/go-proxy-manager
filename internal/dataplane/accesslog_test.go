@@ -1,10 +1,15 @@
 package dataplane
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/analytics"
 )
@@ -192,5 +197,104 @@ func TestAccessLogToggleKeepsObserverForMetrics(t *testing.T) {
 	hs.ServeHTTP(rec, httptest.NewRequest("GET", "http://x.test/", nil))
 	if got := len(s.RecentLogs()); got != 0 {
 		t.Fatalf("captured %d entries with access log off, want 0", got)
+	}
+}
+
+// captureLog sends the global logger to a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = prev })
+	return &buf
+}
+
+// Method, Host and path are clipped to fixed bounds before they are stored in
+// the access-log ring or written to the access line; ordinary values are kept
+// as they are.
+func TestAccessLogClipsRequestStrings(t *testing.T) {
+	SetMetricsHook(nil)
+	logs := captureLog(t)
+	s := New(Config{AccessLog: true})
+	hs := s.dataHandler(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
+
+	req := httptest.NewRequest("GET", "http://example.test/", nil)
+	req.Method = strings.Repeat("M", 100)
+	req.Host = strings.Repeat("h", 5000) + ".example.test:443"
+	req.URL.Path = "/" + strings.Repeat("a", 100000)
+	hs.ServeHTTP(httptest.NewRecorder(), req)
+
+	entries := s.RecentLogs()
+	if len(entries) != 1 {
+		t.Fatalf("captured %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if len(e.Method) > logMethodMax+3 || len(e.Host) > logHostMax+3 || len(e.Path) > logPathMax+3 {
+		t.Fatalf("entry lengths method=%d host=%d path=%d, want at most %d/%d/%d",
+			len(e.Method), len(e.Host), len(e.Path), logMethodMax+3, logHostMax+3, logPathMax+3)
+	}
+	if !strings.HasSuffix(e.Path, "...") || !strings.HasPrefix(e.Path, "/aaa") {
+		t.Fatalf("clipped path = %.20q...%q, want the start of the path and a marker", e.Path, e.Path[len(e.Path)-5:])
+	}
+	if n := logs.Len(); n > 4096 {
+		t.Fatalf("access line is %d bytes, want it bounded", n)
+	}
+
+	logs.Reset()
+	hs.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "http://app.example.test:8443/a/b", nil))
+	e = s.RecentLogs()[0]
+	if e.Method != "POST" || e.Host != "app.example.test" || e.Path != "/a/b" {
+		t.Fatalf("ordinary request logged as %q %q %q", e.Method, e.Host, e.Path)
+	}
+	if !strings.Contains(logs.String(), `"path":"/a/b"`) {
+		t.Fatalf("access line = %s", logs.String())
+	}
+}
+
+// The upstream-error line carries the clipped path.
+func TestUpstreamErrorLogClipsPath(t *testing.T) {
+	logs := captureLog(t)
+	h := newReverseProxy(deadUpstream(t), "app", nil, nil, nil, nil)
+	req := httptest.NewRequest("GET", "http://app.example.test/", nil)
+	req.URL.Path = "/" + strings.Repeat("a", 100000)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if !strings.Contains(logs.String(), "upstream error") {
+		t.Fatalf("no upstream error line: %s", logs.String())
+	}
+	if n := logs.Len(); n > 4096 {
+		t.Fatalf("upstream error line is %d bytes, want it bounded", n)
+	}
+}
+
+// The line logged for a composed path outside the upstream base path carries
+// the path clipped like every other log line.
+func TestConfinedPathLogClipsPath(t *testing.T) {
+	logs := captureLog(t)
+	if got := confineUpstreamPath("/base", "/other/"+strings.Repeat("a", 100000)); got != "/base/" {
+		t.Fatalf("confined path = %q, want /base/", got[:min(len(got), 32)])
+	}
+	if !strings.Contains(logs.String(), "escaped the upstream base path") {
+		t.Fatalf("no confinement line: %.200s", logs.String())
+	}
+	if n := logs.Len(); n > 4096 {
+		t.Fatalf("confinement line is %d bytes, want it bounded", n)
+	}
+}
+
+// clear drops the old backing array, so cleared entries are not kept
+// reachable until they happen to be overwritten.
+func TestLogRingClearReleasesEntries(t *testing.T) {
+	r := newLogRing(3)
+	for i := 0; i < 3; i++ {
+		r.add(AccessEntry{Path: strings.Repeat("p", 1000)})
+	}
+	r.clear()
+	if cap(r.buf) != 0 {
+		t.Fatalf("ring keeps a backing array of %d entries after clear", cap(r.buf))
 	}
 }

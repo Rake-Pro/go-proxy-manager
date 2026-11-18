@@ -650,5 +650,96 @@ func (c Config) Warnings() []string {
 	// ConfigWarnings and UnknownYAMLKeys) - a config a newer gpm wrote, now
 	// loaded by an older one.
 	out = append(out, c.ConfigWarnings...)
+	collisions := c.DomainKeyCollisions()
+	keys := make([]string, 0, len(collisions))
+	for k := range collisions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, collisions[k]+"; edit the domains so each name is claimed once (new writes with such a collision are refused)")
+	}
 	return out
+}
+
+// DomainKey is the key the data-plane router files a host domain (and looks a
+// request Host up) under: everything from the first ":" is dropped, and the
+// rest is lower-cased and trimmed. It must stay identical to the router's
+// hostKey (internal/dataplane/router.go).
+func DomainKey(d string) string {
+	if i := strings.IndexByte(d, ':'); i >= 0 {
+		d = d[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(d))
+}
+
+// DomainKeyCollisions returns, per router key, a description of the enabled
+// hosts whose domains are spelled differently but route under that same key
+// (for example "app.example.com" and "app.example.com:8443"), so only one of
+// them is ever served. Exact duplicates are already a Validate error; this is
+// reported as a load warning so a stored config keeps loading, and the store
+// refuses a write that adds a new one.
+func (c Config) DomainKeyCollisions() map[string]string {
+	out := map[string]string{}
+	for k, claims := range c.domainKeyClaims() {
+		parts := make([]string, 0, len(claims))
+		for _, cl := range claims {
+			parts = append(parts, fmt.Sprintf("%s %q (%s)", cl.kind, cl.name, cl.domain))
+		}
+		out[k] = fmt.Sprintf("domain %s is claimed by %s: the router serves it from only one of them", k, strings.Join(parts, ", "))
+	}
+	return out
+}
+
+// DomainKeyOwners returns, for every key DomainKeyCollisions reports, the set
+// of hosts claiming it ("<kind>/<name>").
+func (c Config) DomainKeyOwners() map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for k, claims := range c.domainKeyClaims() {
+		out[k] = domainKeyOwners(claims)
+	}
+	return out
+}
+
+type domainKeyClaim struct{ kind, name, domain string }
+
+func domainKeyOwners(claims []domainKeyClaim) map[string]bool {
+	owners := map[string]bool{}
+	for _, cl := range claims {
+		owners[cl.kind+"/"+cl.name] = true
+	}
+	return owners
+}
+
+// domainKeyClaims returns the claims of every router key that two or more
+// enabled hosts claim.
+func (c Config) domainKeyClaims() map[string][]domainKeyClaim {
+	byKey := map[string][]domainKeyClaim{}
+	add := func(kind, name string, disabled bool, domains []string) {
+		if disabled {
+			return
+		}
+		for _, d := range domains {
+			k := DomainKey(d)
+			if k == "" {
+				continue
+			}
+			byKey[k] = append(byKey[k], domainKeyClaim{kind, name, d})
+		}
+	}
+	for _, h := range c.ProxyHosts {
+		add("proxy host", h.Name, h.Disabled, h.Domains)
+	}
+	for _, h := range c.RedirectHosts {
+		add("redirect host", h.Name, h.Disabled, h.Domains)
+	}
+	for _, h := range c.ParkedHosts {
+		add("parked host", h.Name, h.Disabled, h.Domains)
+	}
+	for k, claims := range byKey {
+		if len(domainKeyOwners(claims)) < 2 {
+			delete(byKey, k)
+		}
+	}
+	return byKey
 }

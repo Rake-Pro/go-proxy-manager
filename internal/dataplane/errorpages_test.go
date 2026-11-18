@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -240,5 +241,44 @@ func TestSetErrorPagesFailureLeavesPreviousInstalled(t *testing.T) {
 	}
 	if currentErrorPages() != good {
 		t.Fatal("a failed SetErrorPages must not replace the previously installed pages")
+	}
+}
+
+// A template whose output passes maxErrorPageBytes stops rendering at the cap
+// and the built-in response is served instead, for gpm's own errors and for an
+// intercepted upstream status alike. A page just under the cap still renders.
+func TestErrorPageRenderIsSizeCapped(t *testing.T) {
+	withGlobalErrorPages(t, nil)
+	ep, err := compileErrorPages(model.ErrorPagesConfig{
+		Inline: map[string]string{
+			"default": "{{range 2000}}{{range 1000}}0123456789{{end}}{{end}}",
+			"404":     `{{range 1000}}{{printf "%01000d" 0}}{{end}}`,
+		},
+		InterceptUpstream: []int{502},
+	}, "")
+	if err != nil {
+		t.Fatalf("compileErrorPages: %v", err)
+	}
+	fellBack := false
+	rec := httptest.NewRecorder()
+	serveErrorPage(rec, http.StatusServiceUnavailable, ep, "myhost", func() {
+		fellBack = true
+		http.Error(rec, "Service Unavailable", http.StatusServiceUnavailable)
+	})
+	if !fellBack || rec.Code != http.StatusServiceUnavailable || rec.Body.Len() > 100 {
+		t.Fatalf("oversized page: fellBack=%v status=%d body=%d bytes; want the built-in response", fellBack, rec.Code, rec.Body.Len())
+	}
+
+	rec = httptest.NewRecorder()
+	serveErrorPage(rec, http.StatusNotFound, ep, "myhost", func() { t.Fatal("a page under the cap must render") })
+	if rec.Body.Len() != 1000*1000 {
+		t.Fatalf("page under the cap: body = %d bytes, want %d", rec.Body.Len(), 1000*1000)
+	}
+
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("upstream body"))}
+	interceptUpstreamResponse(resp, ep, "myhost")
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "upstream body" {
+		t.Fatalf("intercepted status with an oversized page: body = %d bytes, want the upstream body", len(body))
 	}
 }

@@ -185,3 +185,48 @@ func TestGuardMethodMatchIgnoresCase(t *testing.T) {
 		}
 	}
 }
+
+// A queryEquals trigger also matches a parameter name a lenient backend folds
+// onto the trigger key (leading spaces dropped, the name cut at NUL or at an
+// array suffix, space and '.' read as '_'), and a request that carries the key
+// under two spellings fails closed like a repeated key.
+func TestGuardQueryKeyMatchesBackendSpellings(t *testing.T) {
+	g := compileGuard(model.GuardMiddleware{
+		Triggers: []model.GuardTrigger{
+			{Paths: []string{"/login"}, QueryEquals: map[string]string{"direct": "1"}},
+			{Paths: []string{"/form"}, QueryEquals: map[string]string{"a_b": "1"}},
+		},
+		AllowFrom: []string{"192.0.2.0/24"},
+	})
+	h := guardHandler(g, peerIP, "", nil, okHandler())
+
+	const external = "198.18.0.9:1"
+	cases := []struct {
+		name, target, remote string
+		want                 int
+	}{
+		{"leading encoded space", "http://c/login?%20direct=1", external, http.StatusForbidden},
+		{"leading plus", "http://c/login?+direct=1", external, http.StatusForbidden},
+		{"name cut at NUL", "http://c/login?direct%00x=1", external, http.StatusForbidden},
+		{"array suffix", "http://c/login?direct[]=1", external, http.StatusForbidden},
+		{"dot read as underscore", "http://c/form?a.b=1", external, http.StatusForbidden},
+		{"space read as underscore", "http://c/form?a%20b=1", external, http.StatusForbidden},
+		{"unmatched bracket read as underscore", "http://c/form?a[b=1", external, http.StatusForbidden},
+		{"two spellings fail closed", "http://c/login?direct=0&%20direct=1", external, http.StatusForbidden},
+		{"normalized spelling, other value", "http://c/login?%20direct=0", external, http.StatusOK},
+		{"normalized spelling allowed from the LAN", "http://c/login?%20direct=1", "192.0.2.5:1", http.StatusOK},
+		{"different name untouched", "http://c/login?directory=1", external, http.StatusOK},
+		{"exact spelling still denied", "http://c/login?direct=1", external, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tc.target, nil)
+			req.RemoteAddr = tc.remote
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("got %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}

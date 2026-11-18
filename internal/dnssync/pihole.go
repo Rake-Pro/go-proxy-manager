@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -155,6 +156,31 @@ func (p *piholeClient) cnameRecords(ctx context.Context) ([]string, error) {
 	return *resp.Config.DNS.CnameRecords, nil
 }
 
+// hostRecords returns the raw "IP HOSTNAME [HOSTNAME ...]" local host records
+// (config.dns.hosts) Pi-hole holds. A name listed there resolves locally
+// already, so it is not free for a CNAME. Decoded the same way as cnameRecords:
+// a missing list is an error, never read as "no host records".
+func (p *piholeClient) hostRecords(ctx context.Context) ([]string, error) {
+	b, err := p.do(ctx, http.MethodGet, "/api/config/dns/hosts", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Config *struct {
+			DNS *struct {
+				Hosts *[]string `json:"hosts"`
+			} `json:"dns"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("pihole: decode hosts: %w", err)
+	}
+	if resp.Config == nil || resp.Config.DNS == nil || resp.Config.DNS.Hosts == nil {
+		return nil, errors.New("pihole: response carries no config.dns.hosts list (unexpected API shape; refusing to treat names as free of local host records)")
+	}
+	return *resp.Config.DNS.Hosts, nil
+}
+
 // escapeRecord encodes a "domain,target" entry for use as a path segment. The
 // comma is escaped explicitly: it is a legal sub-delimiter that url.PathEscape
 // leaves alone, but Pi-hole expects the whole record as one opaque segment.
@@ -193,6 +219,7 @@ func piholeRecordTarget(rec string) (domain, target string, ok bool) {
 type piholeState struct {
 	present map[string]string // domain -> target
 	raw     map[string]string // domain -> raw record entry
+	hosts   map[string]string // domain -> address of a local host record
 }
 
 func readPiholeState(ctx context.Context, c *piholeClient) (piholeState, error) {
@@ -200,7 +227,26 @@ func readPiholeState(ctx context.Context, c *piholeClient) (piholeState, error) 
 	if err != nil {
 		return piholeState{}, err
 	}
-	st := piholeState{present: map[string]string{}, raw: map[string]string{}}
+	hosts, err := c.hostRecords(ctx)
+	if err != nil {
+		return piholeState{}, err
+	}
+	st := piholeState{present: map[string]string{}, raw: map[string]string{}, hosts: map[string]string{}}
+	for _, rec := range hosts {
+		fields := strings.Fields(rec)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, name := range fields[1:] {
+			if strings.HasPrefix(name, "#") {
+				break
+			}
+			name = strings.ToLower(strings.TrimSuffix(name, "."))
+			if _, dup := st.hosts[name]; !dup {
+				st.hosts[name] = fields[0]
+			}
+		}
+	}
 	for _, rec := range records {
 		domain, target, ok := piholeRecordTarget(rec)
 		if !ok {
@@ -275,9 +321,20 @@ func (s *Syncer) warnPlaintextPihole(raw string) {
 // Pi-hole/dnsmasq CNAMEs carry no comment field, so there is no secondary
 // ownership marker to check: the ledger is the ONLY thing that says a record is
 // gpm's, which is why mark is unconditionally true here.
+//
+// A desired name that has no CNAME but a local host record is held by a record
+// gpm does not own: it is entered with a target that can never equal the apex,
+// so decide skips it with a warning instead of creating a CNAME next to it.
 func piholeDecisions(cfg model.Config, apex string, state piholeState, owned map[string]model.DNSClaim) (decisions, []string) {
 	desired := desiredDomains(cfg, func(p model.DNSSyncPolicy) bool { return p.LanDirect }, apex)
-	return decide("pihole", desired, state.present, apex, owned, func(string) bool { return true }), desired
+	present := maps.Clone(state.present)
+	for _, name := range desired {
+		ip, held := state.hosts[name]
+		if _, cname := state.present[name]; held && !cname {
+			present[name] = "host record " + ip
+		}
+	}
+	return decide("pihole", desired, present, apex, owned, func(string) bool { return true }), desired
 }
 
 // planPihole is the read-only preview: it logs in, reads the records and reports

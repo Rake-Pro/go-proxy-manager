@@ -63,6 +63,14 @@ func (u basicAuthUsers) verify(r *http.Request) bool {
 // realm is the challenge realm: the middleware's configured realm, or the owner
 // name (middleware or host) when none is set.
 func basicAuthGate(spec model.AuthMiddleware, realm string, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
+	return basicAuthGateWith(nil, spec, realm, clientIP, allowNets, host, ep, next)
+}
+
+// basicAuthGateWith is basicAuthGate counting failures in gate. A router build
+// passes the host's shared gate (see registry.authGateFor): every route of the
+// host draws on one failure budget per client, and the budget survives a
+// rebuild with an unchanged spec. A nil gate is a fresh one for this handler.
+func basicAuthGateWith(gate *authGate, spec model.AuthMiddleware, realm string, clientIP func(*http.Request) net.IP, allowNets []*net.IPNet, host string, ep *compiledErrorPages, next http.Handler) http.Handler {
 	if spec.Basic == nil {
 		return failClosed(host, "basic mode requires an auth.basic block", ep)
 	}
@@ -74,10 +82,9 @@ func basicAuthGate(spec model.AuthMiddleware, realm string, clientIP func(*http.
 		return failClosed(host, "basic mode has no auth.basic.users", ep)
 	}
 	challenge := `Basic realm="` + spec.Basic.RealmOrDefault(realm) + `"`
-	// One gate per compiled middleware, exactly as the access-list tier does: a
-	// config reload rebuilds the chain and resets the counters, which is operator
-	// driven and cannot be provoked by the client being throttled.
-	gate := newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	if gate == nil {
+		gate = newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The network exemption is decided first, so an exempt client is never
 		// challenged and never costs a bcrypt compare.

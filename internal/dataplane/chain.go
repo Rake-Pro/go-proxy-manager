@@ -6,6 +6,7 @@ import (
 	"net/textproto"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -45,6 +46,32 @@ type registry struct {
 	// internal/geoip.Resolver.Watch). A list with geo rules but no loaded
 	// database still fails CLOSED (deny), never treats every IP as unknown.
 	geoLoaded func() bool
+	// states supplies rate limiters and basic-auth failure gates that survive a
+	// rebuild with an unchanged spec, and one gate per host across its routes.
+	// Set by buildRouter; nil (a fresh instance per compiled step) in chains
+	// built without a router.
+	states *chainStates
+}
+
+// rateLimiterFor returns the limiter for one rate-limit step. owner names the
+// step (host, route, middleware); the spec is part of the key.
+func (reg *registry) rateLimiterFor(owner string, rl model.RateLimitMiddleware) *rateLimiter {
+	spec, ok := specKey(rl)
+	if reg == nil || reg.states == nil || !ok {
+		return newRateLimiter(rl)
+	}
+	return reg.states.limiter(owner+"\x00"+spec, func() *rateLimiter { return newRateLimiter(rl) })
+}
+
+// authGateFor returns the basic-auth failure gate for owner (a host plus the
+// credential source), shared by every route of that host.
+func (reg *registry) authGateFor(owner string, spec any) *authGate {
+	mk := func() *authGate { return newAuthGate(basicAuthLockout, maxBasicAuthFails, maxBasicAuthKeys) }
+	key, ok := specKey(spec)
+	if reg == nil || reg.states == nil || !ok {
+		return mk()
+	}
+	return reg.states.gate(owner+"\x00"+key, mk)
 }
 
 func buildRegistry(cfg model.Config) *registry {
@@ -85,6 +112,11 @@ func warnUnresolvedAccessListSources(cfg model.Config) {
 				continue
 			}
 			seen[r.Source] = true
+			if len(sources[model.AccessListSourceKey(al.Name, r.Source)]) > 0 && len(sourceNets(sources, al, r.Source)) == 0 {
+				log.Warn().Str("accessList", al.Name).Str("source", r.Source).
+					Msg("dataplane: access-list source set is over its coverage budget (maxCoverage); rules referencing it match nothing")
+				continue
+			}
 			if len(sources[model.AccessListSourceKey(al.Name, r.Source)]) == 0 {
 				log.Warn().Str("accessList", al.Name).Str("source", r.Source).
 					Msg("dataplane: access-list source has no fetched entries yet; rules referencing it match nothing until the next successful fetch")
@@ -426,6 +458,10 @@ type inlineChain struct {
 	// a property of the ROUTE and there is no host-level equivalent.
 	stripPrefix string
 
+	// route is the normalized location prefix of a location route, "" for the
+	// host route. It scopes the route's rate-limit state (see rateLimiterFor).
+	route string
+
 	// accessLists and accessListsMode are a location route's OWN access lists:
 	// a second group, composed under the location's mode, wrapped outside the
 	// host's group (host.AccessLists under host.AccessListsMode). Both groups
@@ -461,6 +497,7 @@ func locationInline(h model.ProxyHost, loc model.Location) inlineChain {
 	if loc.StripPrefix {
 		in.stripPrefix = normalizeLocationPrefix(loc.Path)
 	}
+	in.route = normalizeLocationPrefix(loc.Path)
 	in.accessLists = loc.AccessLists
 	in.accessListsMode = loc.AccessListsMode
 	return in
@@ -595,6 +632,10 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 				continue
 			}
 			cal := compileAccessList(al)
+			if cal.hasAuth {
+				//lint:ignore SA1019 compat read of deprecated AccessList.BasicAuth: its failure gate is shared per host like mode: basic
+				cal.gate = reg.authGateFor(host.Name+"\x00acl:"+al.Name, al.BasicAuth)
+			}
 			// geo availability (reg.geoLoaded) is intentionally NOT baked into cal
 			// here: accessListHandler/ipAllowed consult it live, at request time,
 			// so a database that (un)loads after this chain is built takes effect
@@ -616,17 +657,24 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		}
 		return accessListAllowNets(al)
 	}
+	// Limiter state is per route (host route or one location) and per step; a
+	// name referenced twice on one route gets one limiter per reference.
+	route := host.Name + "\x00" + inline.route + "\x00"
+	refs := map[string]int{}
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeRateLimit || mw.RateLimit == nil {
 			continue
 		}
-		h = rateLimitHandler(*mw.RateLimit, clientIP, host.Name, ep, h, listNets)
+		refs[name]++
+		l := reg.rateLimiterFor(route+"mw:"+name+"#"+strconv.Itoa(refs[name]), *mw.RateLimit)
+		h = rateLimitHandlerWith(l, *mw.RateLimit, clientIP, host.Name, ep, h, listNets)
 	}
 	// Inline rate-limit blocks, outside the referenced ones for the same reason:
 	// an inline limit sheds the flood first, and every limit still applies.
-	for _, rl := range inline.rateLimit {
-		h = rateLimitHandler(rl, clientIP, host.Name, ep, h, listNets)
+	for i, rl := range inline.rateLimit {
+		l := reg.rateLimiterFor(route+"inline#"+strconv.Itoa(i), rl)
+		h = rateLimitHandlerWith(l, rl, clientIP, host.Name, ep, h, listNets)
 	}
 
 	return h

@@ -25,6 +25,8 @@ func TestCRLRevocationAppliesToResumedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reload publishes a successful build's anchors to the CRL watch.
+	registerCRLAnchors(rt.clientCAs)
 	sc := serverCfgFor(t, rt)
 	cert, _ := clientCertSerial(t, caCert, caKey, 70, "resumer")
 	cc := forceClientCert(cert)
@@ -57,7 +59,7 @@ func TestCRLRevocationAppliesToResumedSessions(t *testing.T) {
 	}
 	watched := crlAnchors.Load()
 	if watched == nil {
-		t.Fatal("the router build must register its file-backed CRL anchors")
+		t.Fatal("the published build must register its file-backed CRL anchors")
 	}
 	for _, a := range *watched {
 		a.reloadIfChanged()

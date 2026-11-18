@@ -541,7 +541,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		// fires for a request that reached the gate some other way - and it is
 		// what makes the per-Host client cache bounded by the config.
 		if _, ok := d.domains[hostKey(r.Host)]; !ok {
-			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).
+			log.Warn().Str("host", d.hostName).Str("requestHost", clipLog(r.Host, logHostMax)).
 				Msg("oidc: request host is not a configured domain of this host")
 			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
@@ -570,7 +570,7 @@ func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	client, err := d.client(r.Context(), r.Host)
 	if err != nil {
 		if errors.Is(err, errOIDCHostNotConfigured) {
-			log.Warn().Str("host", d.hostName).Str("requestHost", r.Host).Msg("oidc: refusing login for an unconfigured request host")
+			log.Warn().Str("host", d.hostName).Str("requestHost", clipLog(r.Host, logHostMax)).Msg("oidc: refusing login for an unconfigured request host")
 			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}

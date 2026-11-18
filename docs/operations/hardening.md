@@ -28,6 +28,12 @@ The settings to check before an instance faces the internet.
 - If a per-host SSO session may have been exposed (device theft, cookie
   leak), `POST /api/sso/revoke` (or the button under Settings) invalidates
   every outstanding SSO session at once; users re-authenticate at the IdP.
+- If an admin panel session may have been exposed, or you withdrew someone's
+  admin access, `POST /api/sessions/revoke` (admin) ends every admin session
+  on that instance except your own; run it on each HA instance, since sessions
+  are per instance. A session whose sign-in method is no longer allowed (its
+  provider removed from `adminAuth.providers` or deleted, or local login turned
+  off) is refused on its next request without any action.
 - Raise the TLS floor once every client can do 1.3:
   [`settings.tls.minVersion: "1.3"`](../reference/config/settings/tls.md#settings-tls-min-version)
   covers every host, every stream-terminate listener and an unknown SNI in one

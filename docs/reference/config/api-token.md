@@ -43,6 +43,7 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
   - `GET /api/backup`: the archive is the raw on-disk YAML, so unlike the JSON
     reads it carries the api-tokens' stored digests,
   - `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`,
+    `POST /api/sessions/revoke`,
   - `/debug/pprof/*` when profiling is enabled: a heap dump and the process
     command line contain resolved backend credentials in cleartext, and every
     token principal is admin-*role* by construction, so the role gate alone is
@@ -60,6 +61,12 @@ rewrite `adminAuth` outright. `settings:read` still grants `GET /api/settings`
 (reading resolves nothing). `settings:write` remains a valid scope string for
 forward compatibility but grants nothing beyond `settings:read` today; the UI
 greys the box out rather than offering a grant that does nothing.
+
+**`certificates:write` does not set `acme.directoryURL` or `acme.eab`.** A
+certificate write that sets either field, or changes it on a stored
+certificate, needs `admin`: the pair chooses where gpm sends its ACME requests
+and binds a `${ENV:}`/`${FILE:}` HMAC key to that destination. Edits that keep
+both as stored, and edits that clear them, stay on `certificates:write`.
 
 **Reverting an `APIToken` is refused**: scoped (`POST
 /api/api-tokens/{name}/revert`) and whole-config (`POST /api/revert`, which

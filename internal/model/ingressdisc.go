@@ -89,7 +89,9 @@ const (
 	ProfileSelectionAnnotationOrRules = "annotation-or-rules"
 	// ProfileSelectionRulesOnly ignores the annotation entirely. An Ingress that
 	// matches no rule gets the default template, exactly as if it carried no
-	// annotation at all - the Ingress author has no say in profile selection.
+	// annotation at all. The author still chooses the Ingress's labels, so a
+	// rule that matches on labels alone remains the author's choice; only a
+	// rule's namespace is outside the author's control.
 	ProfileSelectionRulesOnly = "rules-only"
 )
 
@@ -326,9 +328,12 @@ type IngressDiscoverySettings struct {
 	Profiles map[string]IngressHostTemplate `json:"profiles,omitempty" yaml:"profiles,omitempty"`
 
 	// ProfileRules let the OPERATOR route an Ingress to a profile by namespace
-	// and/or label, with no say from the Ingress author at all - the escalation
-	// path from named profiles for the one residual risk they carry (every
-	// profile is selectable by every annotating Ingress). Evaluated in ORDER;
+	// and/or label - the escalation path from named profiles for the one
+	// residual risk they carry (every profile is selectable by every annotating
+	// Ingress). Only the namespace is outside the Ingress author's control:
+	// labels are written by the same author as the annotations, so a rule that
+	// matches on labels without a namespace is selectable by any author who adds
+	// the label (see ProfileRuleWarnings). Evaluated in ORDER;
 	// the first matching rule wins and its Profile is used, exactly as if the
 	// Ingress had carried that name in gpm.rake.pro/profile. See
 	// design/ingress-discovery.md section 5a.
@@ -533,8 +538,9 @@ func (d IngressDiscoverySettings) ResolveProfile(raw string) (IngressHostTemplat
 
 // ResolveProfileFor is the entry point derive() uses. It widens ResolveProfile
 // with settings.ingressDiscovery.profileRules, which let the OPERATOR route an
-// Ingress to a profile with no say at all from its author - strictly stronger
-// than the annotation (see design/ingress-discovery.md section 5a, option C).
+// Ingress to a profile by namespace, which its author cannot choose, and by
+// labels, which its author can (see design/ingress-discovery.md section 5a,
+// option C).
 // Rules are evaluated in order; the first match wins and the annotation is
 // never consulted for that Ingress.
 //
@@ -564,6 +570,22 @@ func (d IngressDiscoverySettings) ResolveProfileFor(namespace string, labels map
 		return d.Template, DefaultProfileName, true
 	}
 	return d.ResolveProfile(raw)
+}
+
+// ProfileRuleWarnings lists the profile rules that match on matchLabels without
+// a namespace. Labels are written by the Ingress author, so such a rule lets
+// any author who can edit an Ingress in the listed scope select its profile,
+// in rules-only mode too. The rule stays valid; this is advice for the log.
+func (d IngressDiscoverySettings) ProfileRuleWarnings() []string {
+	var out []string
+	for i, rule := range d.ProfileRules {
+		if rule.Namespace == "" && len(rule.MatchLabels) > 0 {
+			out = append(out, fmt.Sprintf("ingressDiscovery.profileRules[%d] selects profile %q by matchLabels without a namespace: "+
+				"labels are written by the Ingress author, so any author can select this profile by adding the label; "+
+				"set namespace on the rule (and allowedHostnames on the profile) to take the choice away from the author", i, rule.Profile))
+		}
+	}
+	return out
 }
 
 // ProfileNames returns the defined profile names in sorted order, so validation

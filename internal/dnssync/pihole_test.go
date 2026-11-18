@@ -22,6 +22,8 @@ type fakePihole struct {
 	password string
 	sid      string
 	records  []string
+	// hosts are the local host records ("IP HOSTNAME [HOSTNAME ...]").
+	hosts []string
 	// forbidConfig makes every config write answer 403, the shape Pi-hole uses
 	// for a read-only session or an instance without app_sudo.
 	forbidConfig bool
@@ -72,6 +74,17 @@ func (f *fakePihole) handler() http.Handler {
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"config": map[string]any{"dns": map[string]any{"cnameRecords": recs}},
+		})
+	})
+	mux.HandleFunc("GET /api/config/dns/hosts", func(w http.ResponseWriter, r *http.Request) {
+		if !f.checkSID(w, r) {
+			return
+		}
+		f.mu.Lock()
+		hosts := append([]string{}, f.hosts...)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"config": map[string]any{"dns": map[string]any{"hosts": hosts}},
 		})
 	})
 	mux.HandleFunc("PUT /api/config/dns/cnameRecords/{rec}", func(w http.ResponseWriter, r *http.Request) {
@@ -964,5 +977,66 @@ func TestPiholePlaintextURLWarnsOnce(t *testing.T) {
 	}
 	if strings.Contains(out, "pw") {
 		t.Fatalf("the warning must not echo URL credentials, logs:\n%s", out)
+	}
+}
+
+// A name Pi-hole already answers from a local host record is not free: gpm
+// skips it with a warning rather than adding a CNAME next to the record, and
+// still creates the names that are free.
+func TestPiholeSkipsANameHeldByALocalHostRecord(t *testing.T) {
+	fake := &fakePihole{password: "secret", hosts: []string{"192.0.2.5 nas.example.com nas"}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	s := piholeSyncer(t, srv, []model.ProxyHost{lanHost("app", "NAS.example.com", "free.example.com")})
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	want := []string{"free.example.com,edge.example.com"}
+	if got := fake.snapshot(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("records = %v\nwant %v", got, want)
+	}
+	if st := s.Status().Pihole; st.Created != 1 || st.Skipped != 1 {
+		t.Fatalf("status = %+v, want one create and one skip", st)
+	}
+}
+
+// The host-record listing is decoded like the CNAME listing: a body without
+// the list is an error, never "no host records".
+func TestPiholeHostRecordsShapes(t *testing.T) {
+	tests := []struct {
+		name, body string
+		wantErr    bool
+		wantLen    int
+	}{
+		{"well formed", `{"config":{"dns":{"hosts":["192.0.2.5 nas.example.com"]}}}`, false, 1},
+		{"legitimately empty", `{"config":{"dns":{"hosts":[]}}}`, false, 0},
+		{"field null", `{"config":{"dns":{"hosts":null}}}`, true, 0},
+		{"dns section gone", `{"config":{}}`, true, 0},
+		{"envelope gone", `{}`, true, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := newPiholeClient(srv.URL, "secret", srv.Client())
+			c.sid = "sid-123"
+			got, err := c.hostRecords(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%q decoded to %v records instead of failing", tc.body, len(got))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if len(got) != tc.wantLen {
+				t.Fatalf("records = %v, want %d", got, tc.wantLen)
+			}
+		})
 	}
 }

@@ -1156,7 +1156,7 @@
     "doc": "reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules"
   },
   "settings.ingressDiscovery.profileRules": {
-    "text": "Operator-side routing from namespace and labels to a profile, with no say from the Ingress author. Evaluated in order; the first match wins.",
+    "text": "Operator-side routing from namespace and labels to a profile. Labels are written by the Ingress author; only namespace is outside their control, so give a rule a namespace when the profile matters. Evaluated in order; the first match wins.",
     "doc": "reference/config/settings/ingress-discovery.md#operator-side-profile-selection-profilerules"
   },
   "settings.ingressDiscovery.profileRules.namespace": {

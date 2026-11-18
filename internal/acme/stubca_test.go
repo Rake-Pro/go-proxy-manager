@@ -43,7 +43,13 @@ type stubCA struct {
 	acceptedType string
 	acceptedTok  string
 	csrDNSNames  []string
+	csrKey       any
 	authzValid   bool
+
+	// signOtherKey makes the CA return a leaf for a key other than the CSR's,
+	// and leafNames, when set, replaces the names the leaf is issued for.
+	signOtherKey bool
+	leafNames    []string
 }
 
 func newStubCA(t *testing.T, offer []string) *stubCA {
@@ -183,6 +189,7 @@ func (c *stubCA) handler() http.Handler {
 			c.t.Fatalf("parse csr: %v", err)
 		}
 		c.csrDNSNames = csr.DNSNames
+		c.csrKey = csr.PublicKey
 		writeJSON(c.t, w, map[string]any{"status": "valid", "certificate": c.url("/cert/1")})
 	})
 
@@ -207,13 +214,20 @@ func nonceMiddleware(h http.Handler) http.Handler {
 // issueChain signs a leaf for the CSR's names and returns leaf + CA as PEM.
 func (c *stubCA) issueChain() []byte {
 	c.t.Helper()
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		c.t.Fatal(err)
+	pub := c.csrKey
+	if pub == nil || c.signOtherKey {
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		pub = &leafKey.PublicKey
 	}
 	names := c.csrDNSNames
 	if len(names) == 0 {
 		names = []string{"app.example.com"}
+	}
+	if c.leafNames != nil {
+		names = c.leafNames
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
@@ -224,7 +238,7 @@ func (c *stubCA) issueChain() []byte {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, &leafKey.PublicKey, c.caKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, pub, c.caKey)
 	if err != nil {
 		c.t.Fatal(err)
 	}

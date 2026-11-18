@@ -135,6 +135,91 @@ type Store struct {
 	// adminEdgeUpstream is the admin listener's loopback address for the
 	// synthetic admin edge host (see LoadCompiled). Zero = not set.
 	adminEdgeUpstream model.Upstream
+
+	// compileCheck builds a candidate config the way the data plane would and
+	// discards the result (see SetCompileCheck). nil = no check (CLI, tests).
+	compileCheck func(model.Config, model.Settings) error
+}
+
+// ErrNotCompilable is returned by a write whose resulting config passes
+// validation but cannot be built by the data plane, so it would be committed
+// and then fail every reload and the next start.
+var ErrNotCompilable = errors.New("the data plane cannot build the resulting config")
+
+// SetCompileCheck injects the data plane's dry-run build. Every write path that
+// can introduce an object (Save, Create, DryRun, SaveBatch, ApplyBatch,
+// SaveSettings, Revert, RevertObject, Restore) runs it on the resulting config
+// before committing. Passing nil disables the check.
+func (s *Store) SetCompileCheck(check func(model.Config, model.Settings) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compileCheck = check
+}
+
+// checkCompilesLocked refuses a candidate config the data plane cannot build.
+// When the config currently stored already fails to build, the write is let
+// through with a warning: it may be the edit that repairs it, and refusing
+// every write would leave a hand edit of the repo as the only way out. A
+// delete is never checked, so removing the object that fails is always
+// possible. current loads the stored config; it is only called when the
+// candidate fails. Callers hold s.mu.
+func (s *Store) checkCompilesLocked(cand model.Config, candSettings model.Settings, current func() (model.Config, model.Settings, error)) error {
+	if s.compileCheck == nil {
+		return nil
+	}
+	err := s.compileCheck(s.withAdminEdge(cand, candSettings), candSettings)
+	if err == nil {
+		return nil
+	}
+	if cur, curSettings, lerr := current(); lerr == nil && s.compileCheck(s.withAdminEdge(cur, curSettings), curSettings) == nil {
+		return fmt.Errorf("%w: %v", ErrNotCompilable, err)
+	}
+	log.Warn().Err(err).Msg("config store: the stored config already fails to compile; accepting the write so it can be repaired")
+	return nil
+}
+
+// checkDomainKeysLocked refuses a write whose result has a router-key domain
+// collision (model.Config.DomainKeyCollisions) that the stored config does not
+// already have, or that gained a host claiming it. before is the stored
+// config's DomainKeyOwners. An edit that keeps or shrinks an existing collision
+// (a host disabled, a colliding domain removed, an unrelated field changed) is
+// allowed, so a stored collision can be repaired one step at a time.
+func checkDomainKeysLocked(before map[string]map[string]bool, merged model.Config) error {
+	after := merged.DomainKeyOwners()
+	keys := make([]string, 0, len(after))
+	for k := range after {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for owner := range after[k] {
+			if !before[k][owner] {
+				return errors.New(merged.DomainKeyCollisions()[k])
+			}
+		}
+	}
+	return nil
+}
+
+// loadedCollisions is DomainKeyOwners of the stored config, or nil when it
+// does not load (then every collision in the candidate counts as new).
+func loadedCollisions(cfg model.Config, err error) map[string]map[string]bool {
+	if err != nil {
+		return nil
+	}
+	return cfg.DomainKeyOwners()
+}
+
+// checkRestoredLocked runs the domain-key and compile checks for a write that
+// replaced files on disk (Revert, RevertObject, Restore): restored is the new
+// tree, cur the config loaded before the tree changed. Callers hold s.mu.
+func (s *Store) checkRestoredLocked(restored model.Config, restoredSettings model.Settings, cur model.Config, curSettings model.Settings, curErr error) error {
+	if err := checkDomainKeysLocked(loadedCollisions(cur, curErr), restored); err != nil {
+		return err
+	}
+	return s.checkCompilesLocked(restored, restoredSettings, func() (model.Config, model.Settings, error) {
+		return cur, curSettings, curErr
+	})
 }
 
 // New returns a Store rooted at dir using the given GitRepo.
@@ -193,11 +278,22 @@ func (s *Store) LoadCompiled(ctx context.Context) (model.Config, model.Settings,
 			log.Error().Err(err).Msg("config store: admin front door skipped at compile; fix the collision and the next reload enables it")
 			return cfg, settings, nil
 		}
-		if name := model.AdminEdgeHostname(settings.ExternalBaseURL); name != "" && s.adminEdgeUpstream.Port > 0 {
-			cfg.ProxyHosts = append(cfg.ProxyHosts, settings.AdminEdge.Host(name, s.adminEdgeUpstream))
-		}
 	}
-	return cfg, settings, nil
+	return s.withAdminEdge(cfg, settings), settings, nil
+}
+
+// withAdminEdge returns cfg with the synthetic admin edge host appended when
+// settings.adminEdge is on and does not collide (LoadCompiled's rule). The
+// host list is copied, so cfg's backing array is never written.
+func (s *Store) withAdminEdge(cfg model.Config, settings model.Settings) model.Config {
+	if !settings.AdminEdge.Enabled || checkAdminEdge(cfg, settings) != nil {
+		return cfg
+	}
+	if name := model.AdminEdgeHostname(settings.ExternalBaseURL); name != "" && s.adminEdgeUpstream.Port > 0 {
+		hosts := append([]model.ProxyHost{}, cfg.ProxyHosts...)
+		cfg.ProxyHosts = append(hosts, settings.AdminEdge.Host(name, s.adminEdgeUpstream))
+	}
+	return cfg
 }
 
 // checkAdminEdge refuses a config write that would collide with the admin
@@ -260,56 +356,59 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	// once loading has otherwise succeeded. See loadDir and unknownKeysWarning.
 	unknownKeys := map[string][]string{}
 	var w map[string][]string
+	// misnamed collects one warning per file whose object name differs from
+	// its file name (see loadDir).
+	var misnamed []string
 
 	if err = s.checkLegacyKindDirs(); err != nil {
 		return cfg, model.Settings{}, err
 	}
 
-	if cfg.ProxyHosts, w, err = loadDir[model.ProxyHost](s.dir, "proxy-hosts"); err != nil {
+	if cfg.ProxyHosts, w, err = loadDir[model.ProxyHost](s.dir, "proxy-hosts", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.RedirectHosts, w, err = loadDir[model.RedirectHost](s.dir, "redirect-hosts"); err != nil {
+	if cfg.RedirectHosts, w, err = loadDir[model.RedirectHost](s.dir, "redirect-hosts", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.StreamHosts, w, err = loadDir[model.StreamHost](s.dir, "stream-hosts"); err != nil {
+	if cfg.StreamHosts, w, err = loadDir[model.StreamHost](s.dir, "stream-hosts", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.ParkedHosts, w, err = loadDir[model.ParkedHost](s.dir, "parked-hosts"); err != nil {
+	if cfg.ParkedHosts, w, err = loadDir[model.ParkedHost](s.dir, "parked-hosts", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.Certificates, w, err = loadDir[model.Certificate](s.dir, "certificates"); err != nil {
+	if cfg.Certificates, w, err = loadDir[model.Certificate](s.dir, "certificates", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.ClientCAs, w, err = loadDir[model.ClientCA](s.dir, "client-cas"); err != nil {
+	if cfg.ClientCAs, w, err = loadDir[model.ClientCA](s.dir, "client-cas", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.DNSProviders, w, err = loadDir[model.DNSProvider](s.dir, "dns-providers"); err != nil {
+	if cfg.DNSProviders, w, err = loadDir[model.DNSProvider](s.dir, "dns-providers", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.IdentityProviders, w, err = loadDir[model.IdentityProvider](s.dir, "identity-providers"); err != nil {
+	if cfg.IdentityProviders, w, err = loadDir[model.IdentityProvider](s.dir, "identity-providers", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.UpstreamGroups, w, err = loadDir[model.UpstreamGroup](s.dir, "upstream-groups"); err != nil {
+	if cfg.UpstreamGroups, w, err = loadDir[model.UpstreamGroup](s.dir, "upstream-groups", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.AccessLists, w, err = loadDir[model.AccessList](s.dir, "access-lists"); err != nil {
+	if cfg.AccessLists, w, err = loadDir[model.AccessList](s.dir, "access-lists", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.Middlewares, w, err = loadDir[model.Middleware](s.dir, "middlewares"); err != nil {
+	if cfg.Middlewares, w, err = loadDir[model.Middleware](s.dir, "middlewares", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
-	if cfg.APITokens, w, err = loadDir[model.APIToken](s.dir, "api-tokens"); err != nil {
+	if cfg.APITokens, w, err = loadDir[model.APIToken](s.dir, "api-tokens", &misnamed); err != nil {
 		return cfg, model.Settings{}, err
 	}
 	mergeUnknownKeyWarnings(unknownKeys, w)
@@ -352,6 +451,7 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 	for _, path := range paths {
 		cfg.ConfigWarnings = append(cfg.ConfigWarnings, unknownKeysWarning(path, unknownKeys[path]))
 	}
+	cfg.ConfigWarnings = append(cfg.ConfigWarnings, misnamed...)
 
 	return cfg, settings, nil
 }
@@ -394,11 +494,22 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 			return "", nil
 		}
 	}
+	snap, err := snapshotFile(path)
+	if err != nil {
+		return "", err
+	}
 	if err := writeYAML(path, out); err != nil {
 		return "", err
 	}
 	msg := fmt.Sprintf("%s %q: update", obj.Kind(), obj.GetMeta().Name)
-	return s.git.CommitAll(ctx, msg, author)
+	sha, err := s.git.CommitAll(ctx, msg, author)
+	if err != nil {
+		// A write that is on disk but not committed would go live at the next
+		// reload and be swept into the next writer's commit.
+		restoreFiles([]fileState{snap})
+		return "", err
+	}
+	return sha, nil
 }
 
 // unchangedOnDisk reports whether out serializes to the same document as the
@@ -482,6 +593,7 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	// slice's backing array, so cfg itself would otherwise be mutated to look
 	// like the incoming (not-yet-stamped) object by the time it is consulted.
 	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
+	collisions := cfg.DomainKeyOwners()
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
 		return "", nil, false, err
@@ -494,6 +606,13 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", nil, false, fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+	if err := checkDomainKeysLocked(collisions, merged); err != nil {
+		return "", nil, false, err
+	}
+	// The disk still holds the stored config here, so loadLocked is "current".
+	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
+		return "", nil, false, err
 	}
 	return filepath.Join(dir, meta.Name+".yaml"), stampTimes(obj, existing, now), existing != nil, nil
 }
@@ -529,11 +648,20 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
 	}
 
+	snap, err := snapshotFile(path)
+	if err != nil {
+		return "", err
+	}
 	if err := os.Remove(path); err != nil {
 		return "", err
 	}
 	msg := fmt.Sprintf("%s %q: delete", kind, name)
-	return s.git.CommitAll(ctx, msg, author)
+	sha, err := s.git.CommitAll(ctx, msg, author)
+	if err != nil {
+		restoreFiles([]fileState{snap})
+		return "", err
+	}
+	return sha, nil
 }
 
 // SaveBatch writes many objects in a single commit. It merges them onto the
@@ -557,6 +685,7 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	for i, o := range objs {
 		existingByIndex[i], _ = findObject(cfg, o.Kind(), o.GetMeta().Name)
 	}
+	collisions := cfg.DomainKeyOwners()
 	merged := cfg
 	for _, o := range objs {
 		merged = withObject(&merged, o)
@@ -572,6 +701,12 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+	if err := checkDomainKeysLocked(collisions, merged); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 
 	now := time.Now().UTC()
@@ -766,6 +901,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	// is consulted for CreatedAt preservation at write time.
 	appliedExisting := make([]model.Object, 0, len(upserts))
 	var removals []string
+	collisions := cfg.DomainKeyOwners()
 	merged := cfg
 	for _, o := range upserts {
 		if err := o.Validate(); err != nil {
@@ -842,6 +978,12 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+	if err := checkDomainKeysLocked(collisions, merged); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 
 	// Snapshot every path the batch will touch, so any failure below - including a
@@ -1017,6 +1159,10 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 		return "", err
 	}
 
+	// The stored config before the tree changes, for the domain-key and
+	// compile checks below (a load error means there is no baseline).
+	cur, curSettings, curErr := s.loadLocked()
+
 	// Snapshot the never-reverted directories BEFORE the tree changes, and write
 	// them back over the restored tree, so the revert cannot resurrect a rotated
 	// or deleted API token digest (see ErrNotRevertible).
@@ -1067,6 +1213,12 @@ func (s *Store) Revert(ctx context.Context, hash string, author Author) (string,
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", fmt.Errorf("revert refused, config at %q holds literal secret(s): %v", hash, lits)
+	}
+	if err := s.checkRestoredLocked(restored, restoredSettings, cur, curSettings, curErr); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config at %q: %w", hash, err)
 	}
 
 	short := hash
@@ -1120,6 +1272,7 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 	if err != nil {
 		return "", err
 	}
+	cur, curSettings, curErr := s.loadLocked()
 
 	if err := s.git.RestorePath(ctx, hash, rel); err != nil {
 		if errors.Is(err, ErrPathNotInCommit) {
@@ -1154,6 +1307,12 @@ func (s *Store) RevertObject(ctx context.Context, kind, name, hash string, autho
 			_ = s.git.RestoreTree(ctx, head)
 		}
 		return "", fmt.Errorf("revert refused, config at %q holds literal secret(s): %v", hash, lits)
+	}
+	if err := s.checkRestoredLocked(restored, restoredSettings, cur, curSettings, curErr); err != nil {
+		if head != "" {
+			_ = s.git.RestoreTree(ctx, head)
+		}
+		return "", fmt.Errorf("revert refused, config with %s %q at %q: %w", kind, name, hash, err)
 	}
 
 	short := hash
@@ -1207,7 +1366,7 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 	// problem later - it is stamped onto every derived host and rejects the whole
 	// reconcile batch on every poll, dropping unrelated tenants' changes with it.
 	// Cross-check here so the error lands on this write.
-	cfg, _, err := s.loadLocked()
+	cfg, curSettings, err := s.loadLocked()
 	if err != nil {
 		return "", err
 	}
@@ -1235,13 +1394,28 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 	if lits := model.LiteralSecrets(settings); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
+	if err := s.checkCompilesLocked(cfg, settings, func() (model.Config, model.Settings, error) {
+		return cfg, curSettings, nil
+	}); err != nil {
+		return "", err
+	}
 	if settings.SchemaVersion == 0 {
 		settings.SchemaVersion = model.SchemaVersion
 	}
-	if err := writeYAML(filepath.Join(s.dir, settingsFile), settings); err != nil {
+	path := filepath.Join(s.dir, settingsFile)
+	snap, err := snapshotFile(path)
+	if err != nil {
 		return "", err
 	}
-	return s.git.CommitAll(ctx, "Settings: update", author)
+	if err := writeYAML(path, settings); err != nil {
+		return "", err
+	}
+	sha, err := s.git.CommitAll(ctx, "Settings: update", author)
+	if err != nil {
+		restoreFiles([]fileState{snap})
+		return "", err
+	}
+	return sha, nil
 }
 
 // LoadDNSLedger reads the DNS record-ownership ledger, together with the config
@@ -1395,8 +1569,11 @@ func (s *Store) SaveAccessListSourceLedger(ctx context.Context, l model.AccessLi
 // loadDir reads every object file in root/sub and, alongside them, the set of
 // unknown YAML keys found in each (relative path -> keys), so a caller can
 // warn about a key an older struct silently dropped without failing the load.
-// See model.UnknownYAMLKeys and unknownKeysWarning.
-func loadDir[T any](root, sub string) ([]T, map[string][]string, error) {
+// See model.UnknownYAMLKeys and unknownKeysWarning. A file whose object name is
+// not its file name is loaded (identity comes from the YAML name) and reported
+// through misnamed, because save, delete, history and revert all derive the
+// file from the name and would miss it.
+func loadDir[T any](root, sub string, misnamed *[]string) ([]T, map[string][]string, error) {
 	dir := filepath.Join(root, sub)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1425,6 +1602,9 @@ func loadDir[T any](root, sub string) ([]T, map[string][]string, error) {
 				warnings = map[string][]string{}
 			}
 			warnings[rel] = keys
+		}
+		if o, ok := any(v).(model.Object); ok && o.GetMeta().Name+".yaml" != e.Name() {
+			*misnamed = append(*misnamed, fmt.Sprintf("config: %s: object name %q does not match the file name; gpm saves, deletes and reverts it as %s/%s.yaml, so rename the file to match", rel, o.GetMeta().Name, sub, o.GetMeta().Name))
 		}
 		out = append(out, v)
 	}

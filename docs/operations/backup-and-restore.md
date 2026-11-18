@@ -73,7 +73,10 @@ revertible with `POST /api/revert` like any other change.
 - **`certs/`**: a `custom`-type `Certificate` references cert/key files by
   relative path in that directory; restoring config that names one does not
   restore the files themselves. Back up `certs/` alongside the config archive
-  (a plain file copy, it isn't git-backed) if you use custom certificates.
+  (a plain file copy, it isn't git-backed) if you use custom certificates, and
+  **copy it back before `POST /api/restore`**: a restore whose config names
+  custom certificate files that do not load is refused and nothing is
+  committed (see [Writes must compile](../concepts/config-model.md#writes-must-compile)).
   `acme`-type certificates need nothing extra: DNS-01 credentials round-trip
   in the restored `DNSProvider`/`Certificate` objects, and gpm re-issues on
   next load if the on-disk artifact is missing.

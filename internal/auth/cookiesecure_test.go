@@ -17,8 +17,8 @@ import (
 // secureTestAuth builds an authenticator in mode with externalBaseURL base.
 func secureTestAuth(t *testing.T, mode CookieSecureMode, base string) *Authenticator {
 	t.Helper()
-	a := NewAuthenticator(Options{Store: testStore(t), SecureMode: mode, SessionTTL: time.Hour})
-	a.Configure(model.Config{}, model.Settings{ExternalBaseURL: base})
+	a := NewAuthenticator(withLocalAdmin(Options{Store: testStore(t), SecureMode: mode, SessionTTL: time.Hour}))
+	a.Configure(model.Config{}, localLoginOn(model.Settings{ExternalBaseURL: base}))
 	return a
 }
 
@@ -166,13 +166,14 @@ func TestCookieSecureDecision(t *testing.T) {
 			// The OIDC login-state cookie makes the same call.
 			rec2 := httptest.NewRecorder()
 			a.SetLoginStateCookie(rec2, r, "state-value")
-			sc := findCookie(t, rec2.Result(), oidcStateCookie)
+			stateName, _ := loginStateCookieName(tc.want)
+			sc := findCookie(t, rec2.Result(), stateName)
 			if sc.Secure != tc.want {
 				t.Fatalf("login-state cookie Secure = %v, want %v", sc.Secure, tc.want)
 			}
 			rec3 := httptest.NewRecorder()
 			a.ClearLoginStateCookie(rec3, r)
-			cc := findCookie(t, rec3.Result(), oidcStateCookie)
+			cc := findCookie(t, rec3.Result(), stateName)
 			if cc.Secure != tc.want || cc.MaxAge != -1 {
 				t.Fatalf("cleared login-state cookie: %+v", cc)
 			}

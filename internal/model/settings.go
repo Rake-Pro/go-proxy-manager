@@ -696,6 +696,11 @@ func StripResponseHeaderRefused(name string) bool {
 	return hopByHopHeaders[lk] || unstrippableHeaders[lk]
 }
 
+// MaxInlineErrorPageBytes bounds one inline error-page template source. The
+// data plane separately caps a rendered page at 1 MiB and serves the built-in
+// response when a template exceeds it.
+const MaxInlineErrorPageBytes = 256 << 10
+
 func (e ErrorPagesConfig) validate() error {
 	if f := e.Dir; f != "" {
 		// Same confinement as a custom certificate's files / a ClientCA's crlFile.
@@ -709,6 +714,9 @@ func (e ErrorPagesConfig) validate() error {
 			if err != nil || n < 100 || n > 599 {
 				return fmt.Errorf(`errorPages.inline: key %q must be a 3-digit status code or "default"`, k)
 			}
+		}
+		if len(src) > MaxInlineErrorPageBytes {
+			return fmt.Errorf("errorPages.inline: template %q is %d bytes, over the %d-byte limit", k, len(src), MaxInlineErrorPageBytes)
 		}
 		// Parse-check at WRITE time. Without it a broken inline template commits
 		// cleanly, the running instance keeps its previously compiled pages (the

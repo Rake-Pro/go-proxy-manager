@@ -69,7 +69,7 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 			pr.Out.Header.Set("X-Original-URL", absoluteURL(pr.In))
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Warn().Str("path", r.URL.Path).Err(err).Msg("auth outpost proxy error")
+			log.Warn().Str("path", logPath(r.URL.Path)).Err(err).Msg("auth outpost proxy error")
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}

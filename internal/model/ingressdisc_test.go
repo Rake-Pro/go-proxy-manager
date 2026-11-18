@@ -1026,3 +1026,22 @@ func TestOwnsLabelsFollowsTheConfiguredPrefix(t *testing.T) {
 		t.Fatal("during a prefix migration docker discovery must own a host labelled under the previous prefix")
 	}
 }
+
+// A profile rule that matches on labels without a namespace is selectable by
+// the Ingress author, who writes the labels, so it is reported; it stays valid.
+func TestProfileRuleWarningsFlagLabelOnlyRules(t *testing.T) {
+	d := IngressDiscoverySettings{
+		Profiles: map[string]IngressHostTemplate{"public": {}},
+		ProfileRules: []IngressProfileRule{
+			{MatchLabels: map[string]string{"exposure": "public"}, Profile: "public"},
+			{Namespace: "web", MatchLabels: map[string]string{"exposure": "public"}, Profile: "public"},
+			{Namespace: "web", Profile: "public"},
+			{Profile: DefaultProfileName},
+		},
+		ProfileSelection: ProfileSelectionRulesOnly,
+	}
+	w := d.ProfileRuleWarnings()
+	if len(w) != 1 || !strings.Contains(w[0], "profileRules[0]") || !strings.Contains(w[0], `"public"`) {
+		t.Fatalf("warnings = %q, want exactly one for profileRules[0]", w)
+	}
+}

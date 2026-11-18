@@ -85,8 +85,8 @@ func TestLocalLoginNeedsSSOOnlyOff(t *testing.T) {
 
 func TestRequireRoleWithSession(t *testing.T) {
 	st := testStore(t)
-	a := NewAuthenticator(Options{Store: st})
-	a.Configure(model.Config{}, model.Settings{})
+	a := NewAuthenticator(withLocalAdmin(Options{Store: st}))
+	a.Configure(model.Config{}, localLoginOn(model.Settings{}))
 
 	h := a.RequireRole(RoleAdmin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, _ := PrincipalFrom(r.Context())
@@ -149,8 +149,8 @@ func TestRequireRoleRejectsForwardAuthHeaders(t *testing.T) {
 
 func TestRequireRoleEnforcesCSRF(t *testing.T) {
 	st := testStore(t)
-	a := NewAuthenticator(Options{Store: st})
-	a.Configure(model.Config{}, model.Settings{})
+	a := NewAuthenticator(withLocalAdmin(Options{Store: st}))
+	a.Configure(model.Config{}, localLoginOn(model.Settings{}))
 
 	sess := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(time.Hour)}
 	if err := st.Create(context.Background(), sess); err != nil {
@@ -375,8 +375,8 @@ func TestHostPrefixCookieWhenSecure(t *testing.T) {
 
 func TestSlidingSessionExtendsExpiry(t *testing.T) {
 	st := testStore(t)
-	a := NewAuthenticator(Options{Store: st, SessionTTL: time.Hour})
-	a.Configure(model.Config{}, model.Settings{})
+	a := NewAuthenticator(withLocalAdmin(Options{Store: st, SessionTTL: time.Hour}))
+	a.Configure(model.Config{}, localLoginOn(model.Settings{}))
 
 	// A session already past the half-TTL threshold should be extended on use.
 	sess := &session.Session{Subject: "admin", Roles: []string{string(RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(10 * time.Minute)}
@@ -441,5 +441,95 @@ func TestSessionWithoutCSRFRejected(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a session without a CSRF token must force re-login (401), got %d", rec.Code)
+	}
+}
+
+// withLocalAdmin and localLoginOn let a test create "local" sessions directly:
+// a session is only honoured while the sign-in method it came from is allowed.
+func withLocalAdmin(o Options) Options {
+	o.LocalUser, o.LocalHash = "admin", "$2a$10$placeholder"
+	return o
+}
+
+func localLoginOn(s model.Settings) model.Settings {
+	s.AdminAuth.LocalLoginEnabled = true
+	return s
+}
+
+// A session is refused once the sign-in method it was created with is no longer
+// allowed (its provider unlisted or deleted, local login turned off), while a
+// session from a method that is still allowed keeps working.
+func TestSessionRefusedWhenItsSignInMethodIsWithdrawn(t *testing.T) {
+	st := testStore(t)
+	a := NewAuthenticator(withLocalAdmin(Options{Store: st}))
+	idp := func(name string) model.IdentityProvider {
+		return model.IdentityProvider{ObjectMeta: model.ObjectMeta{Name: name}, Type: model.IdPTypeOIDC,
+			OIDC: &model.OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "c"}}
+	}
+	both := model.Config{IdentityProviders: []model.IdentityProvider{idp("kept"), idp("removed")}}
+	a.Configure(both, model.Settings{AdminAuth: model.AdminAuthSettings{Providers: []string{"kept", "removed"}, LocalLoginEnabled: true}})
+
+	ctx := context.Background()
+	mk := func(idp string) *session.Session {
+		s := &session.Session{Subject: "u", Roles: []string{string(RoleAdmin)}, IdP: idp, ExpiresAt: time.Now().Add(time.Hour)}
+		if err := st.Create(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	kept, removed, local := mk("kept"), mk("removed"), mk("local")
+	h := a.RequireRole(RoleAdmin, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	get := func(s *session.Session) int {
+		r := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		r.AddCookie(&http.Cookie{Name: "gpm_session", Value: s.ID})
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for _, s := range []*session.Session{kept, removed, local} {
+		if code := get(s); code != http.StatusOK {
+			t.Fatalf("%s session before the change: %d", s.IdP, code)
+		}
+	}
+
+	// "removed" is unlisted, and local login is switched off by ssoOnly.
+	a.Configure(both, model.Settings{AdminAuth: model.AdminAuthSettings{Providers: []string{"kept"}, LocalLoginEnabled: true, SSOOnly: true}})
+	for s, want := range map[*session.Session]int{kept: http.StatusOK, removed: http.StatusUnauthorized, local: http.StatusUnauthorized} {
+		if code := get(s); code != want {
+			t.Fatalf("%s session after the change: %d, want %d", s.IdP, code, want)
+		}
+	}
+
+	// A provider that is still listed but deleted is withdrawn too.
+	a.Configure(model.Config{}, model.Settings{AdminAuth: model.AdminAuthSettings{Providers: []string{"kept"}}})
+	if code := get(kept); code != http.StatusUnauthorized {
+		t.Fatalf("session of a deleted provider: %d, want 401", code)
+	}
+}
+
+// RevokeAllSessions ends every admin session but the one it is told to keep.
+func TestRevokeAllSessionsKeepsTheCaller(t *testing.T) {
+	st := testStore(t)
+	a := NewAuthenticator(Options{Store: st})
+	ctx := context.Background()
+	var ids []string
+	for i := 0; i < 3; i++ {
+		s := &session.Session{Subject: "u", Roles: []string{string(RoleAdmin)}, IdP: "local", ExpiresAt: time.Now().Add(time.Hour)}
+		if err := st.Create(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, s.ID)
+	}
+	n, err := a.RevokeAllSessions(ctx, ids[0])
+	if err != nil || n != 2 {
+		t.Fatalf("RevokeAllSessions = %d, %v; want 2", n, err)
+	}
+	if _, err := st.Get(ctx, ids[0]); err != nil {
+		t.Fatalf("the kept session is gone: %v", err)
+	}
+	for _, id := range ids[1:] {
+		if _, err := st.Get(ctx, id); err == nil {
+			t.Fatal("a revoked session is still in the store")
+		}
 	}
 }

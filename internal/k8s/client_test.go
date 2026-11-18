@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -576,5 +577,64 @@ func TestOversizedPageIsRetriedWithASmallerLimit(t *testing.T) {
 	}
 	if len(f.requests) < 2 || f.requests[0] != "limit=100" || f.requests[1] != "limit=10" {
 		t.Fatalf("requests = %v, want limit=100 followed by a retry at limit=10", f.requests)
+	}
+}
+
+// After an overflow the reduced limit is kept for the following pages, and the
+// list bound counts objects, not requests: more than a hundred objects that
+// each only fit a page of one still list completely, without a full-size
+// retry on every page.
+func TestReducedPageLimitIsKeptAndObjectsAreCounted(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	big := strings.Repeat("x", 850<<10)
+	var items []string
+	for i := 0; i < 105; i++ {
+		items = append(items, ingressJSON("tenant", fmt.Sprintf("pad-%03d", i), map[string]string{"example.org/pad": big}, "pad.example.com"))
+	}
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		off, _ := strconv.Atoi(r.URL.Query().Get("continue"))
+		end := min(off+limit, len(items))
+		cont := ""
+		if end < len(items) {
+			cont = strconv.Itoa(end)
+		}
+		writeList(w, items[off:end], cont)
+	}
+	got, err := f.client(t).ListIngresses(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(items) {
+		t.Fatalf("got %d items, want %d", len(got), len(items))
+	}
+	full := 0
+	for _, raw := range f.requests {
+		if q, _ := url.ParseQuery(raw); q.Get("limit") == "100" {
+			full++
+		}
+	}
+	if full != 1 {
+		t.Fatalf("limit=100 was requested %d times, want once: %v", full, f.requests)
+	}
+	// One request per object, plus one overflow per regrow attempt.
+	if max := len(items) + 2 + len(items)/listPageRegrow; len(f.requests) > max {
+		t.Fatalf("%d requests, want at most %d", len(f.requests), max)
+	}
+}
+
+// Empty pages that always carry a continue token add no objects, so the
+// request bound is what ends such a list, as an error with no items.
+func TestListIngressesRefusesEndlessEmptyPages(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, nil, "more")
+	}
+	got, err := f.client(t).ListIngresses(context.Background())
+	if err == nil || got != nil {
+		t.Fatalf("endless empty pages must be an error with no items, got %d items / %v", len(got), err)
+	}
+	if !strings.Contains(err.Error(), "requests") {
+		t.Fatalf("error should name the request bound: %v", err)
 	}
 }

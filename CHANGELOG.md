@@ -102,6 +102,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
   including a zone apex a suffix list cannot single out.
 - DNS sync: a plain `http://` `pihole.url` on a non-loopback host is logged at
   warn, once per URL; the application password crosses the network in clear.
+- `maxCoverage` on an access-list source (`ipv4`, `ipv6`, as prefix-length
+  equivalents): an optional budget for the total address space one remote feed
+  may cover. A fetch over the budget is refused whole and a stored set over it
+  matches nothing. Without the key nothing changes; a feed that covers more
+  than one /8 of IPv4 or one /24 of IPv6 without it is logged as a warning
+  (#136).
+- `POST /api/sessions/revoke` (admin): ends every admin panel session except
+  the caller's own; also allowed on an HA follower (#153).
 
 ### Security
 
@@ -231,6 +239,88 @@ Follow-ups of the 2026-11-15 review:
   documented step by step (both flags, restart, repair, restore the settings
   file, rotate the password).
 
+The non-breaking items of the 2026-11-18 review:
+
+- Every write of a response, including error pages and redirects gpm writes
+  itself, is bounded by a write-progress deadline, and the rest of a response
+  is flushed under it after the handler returns, so a client that stops
+  accepting data cannot hold a request. The data-plane listeners advertise 100
+  concurrent HTTP/2 streams per connection (was 250).
+- Upstream-group retry buffering is bounded per request (64 KiB, was 1 MiB),
+  in time (5 s) and process-wide (32 MiB of buffers held); a body over any
+  bound gets a single attempt and its buffered prefix is released as soon as
+  it is sent. The proxy copy buffer is 64 KiB per response (was 512 KiB)
+  (#137).
+- A Host or HTTP/2 `:authority` containing whitespace, control or non-ASCII
+  bytes is refused with 400 (#144).
+- Guard `queryEquals` triggers also match query keys a lenient backend reads
+  as the trigger key (leading spaces, NUL, a `[...]` suffix, space or `.` for
+  `_`); two spellings of one key fail closed (#146).
+- Request method, Host and path are clipped before they are stored in the
+  access-log buffer or written to log lines; clearing the access-log buffer
+  releases its entries (#165).
+- Generic http bouncer lookups carry at most 1024 bytes of the path and 2048
+  bytes of `X-Original-URL`, and a fail-open verdict that came from a hook
+  error is no longer cached for the client address (#147).
+- CrowdSec stream mode runs one startup pull at a time with a retry backoff;
+  other requests wait for it for at most `timeout`, and a verdict given
+  because the pull had not finished is not cached. Range decisions are indexed
+  by prefix and each pull is folded outside the request lock (#150, #163).
+- The basic-auth failure lockout is shared by all routes of a host that use
+  the same gate (#148), and rate-limit blocks and basic-auth lockouts survive
+  a config reload when their spec is unchanged (#167).
+- Error-page output is capped at 1 MiB (the built-in response is served past
+  it) and inline error-page templates are limited to 256 KiB (#155).
+- The UDP stream per-source session cap groups IPv6 clients by /56 (#138).
+- A config write that validates but that the data plane cannot build (a custom
+  certificate whose files do not load, an unreadable `errorPages.dir`, a
+  client CA bundle with no certificate) is refused with 400 before it is
+  committed, on every write path including revert, restore and discovery
+  batches; a stored config that already fails stays editable so it can be
+  repaired (#156).
+- A reload that fails late no longer detaches the running client CAs from the
+  CRL watch (#157).
+- An ACME chain whose leaf is not for gpm's key, does not cover the requested
+  names or has expired is refused and not stored; the current certificate
+  keeps serving. ACME requests have a 30 s timeout, do not follow redirects
+  and cap every response at 1 MiB; the stored and notified renewal error is
+  truncated to 2 KiB (#156, #161).
+- Setting or changing `acme.directoryURL` or `acme.eab` on a certificate needs
+  the `admin` scope (#152).
+- Access-list source feeds: the data plane re-applies the entry rules to the
+  stored ledger at every compile, dropping and logging entries stored before a
+  rule existed, so a refused fetch can no longer keep them served (#135).
+- Admin listener: a `ReadTimeout` of 60 s ends a request whose body never
+  arrives; the restore upload lifts it for its own request (#141).
+- A `GPM_LOCAL_ADMIN_TOTP_SECRET_FILE` or `GPM_LOCAL_ADMIN_PASSWORD_HASH_FILE`
+  that is set but empty is an error and refuses local login, instead of
+  silently disabling the second factor (#142).
+- Proxy-host writes carry at most 64 plaintext basic-auth passwords per
+  request across the host and all locations, counted before any hashing;
+  hashing stops when the request is cancelled (#151).
+- Admin sessions are refused once the sign-in method they came from is no
+  longer allowed (provider unlisted or deleted, local login off) (#153).
+- The admin OIDC login-state cookie is `__Host-gpm_oidc_state` with `Path=/`
+  on Secure requests, and the callback tries every cookie of that name. A
+  login started before the upgrade may fail once (#154).
+- Analytics: queued events keep clipped copies of path, query and User-Agent;
+  reports are built one at a time and cached for 5 s on the in-memory ranges;
+  at the top-clients cap a new address replaces the lowest-count entry (#166,
+  #169).
+- Ingress and Docker discovery: an existing host that is skipped for a domain
+  conflict no longer keeps a chain its profile has since changed; it is
+  restamped on its current domains, or disabled when a stored domain is no
+  longer allowed (#139).
+- Ingress discovery: after an oversized page the smaller page size is kept for
+  the following pages, and the list bound counts objects and bytes instead of
+  pages (#140). The docs no longer say an Ingress author cannot influence
+  `profileRules`; a rule that matches on labels without a namespace is logged
+  as a warning (#162).
+- Docs: image verification uses an exact signing identity per release path
+  instead of a pattern that accepted any tag (#143).
+- DNS sync (Pi-hole): names held by a local host record are skipped and warned
+  about instead of receiving a CNAME (#164).
+
 ### Changed
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an
@@ -281,6 +371,19 @@ Follow-ups of the 2026-11-15 review:
   every delete on every run.
 - DNS sync: Cloudflare skips (and reports) names that are not the configured
   zone or under it instead of submitting them to the zone.
+- A TCP stream listener retries transient accept errors instead of stopping
+  (#168).
+- Two hosts whose domains differ only by a `:port` suffix are treated
+  as one name when a write is checked, as the router does; a write may not
+  create or widen such a pair, and a pair already stored loads with a warning
+  (#158).
+- An object file whose name does not match its object name is reported as a
+  config warning; a restore archive may only carry kind files named after a
+  valid object name (#159).
+- Control characters and angle brackets are removed from commit authors (a
+  name git would refuse falls back to the default author), a failed commit no
+  longer leaves the written change in the working tree, and history parsing no
+  longer drops commits (#160).
 
 ## [2.5.0] - 2026-10-20
 
