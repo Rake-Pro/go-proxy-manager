@@ -36,7 +36,7 @@ RUN go build \
 # actually runs on every build. A cached layer silently pins whatever package
 # versions existed when the RUN line last changed, and the release gate then
 # fails on a CVE the repos already fixed (libexpat 2.8.3-r0 -> 2.8.4-r0, v1.0.32).
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS final
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS final
 
 # Runtime deps: app shells out to git; certs/tz for TLS and timestamps.
 # apk upgrade first: the base image is digest-pinned and its packages lag
