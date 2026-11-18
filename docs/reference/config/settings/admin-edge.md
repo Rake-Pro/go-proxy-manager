@@ -22,7 +22,10 @@ It is **not a proxy host**:
   the panel stays reachable to turn maintenance back off;
 - while it is on, the name `gpm-admin` is reserved and no stored proxy,
   redirect or parked host may claim the panel's hostname: a settings write or
-  an object write that would collide is refused with the other side named;
+  an object write that would collide is refused with the other side named. A
+  host that lists the hostname with a port (`<panel-hostname>:8443`) routes
+  under the same name: a write that adds one is refused, and one already
+  stored is reported as a config warning without blocking other writes;
 - a middleware or access list it names cannot be deleted from under it.
 
 The direct admin listener keeps working unchanged: this is a second door, not a

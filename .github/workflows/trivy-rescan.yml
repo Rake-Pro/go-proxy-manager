@@ -32,7 +32,7 @@ jobs:
         id: tag
         run: |
           set -euo pipefail
-          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          latest=$(git tag -l 'v*' --sort=-v:refname | grep -m1 -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
           [ -n "$latest" ] || { echo "no v* tag; nothing to scan" >&2; exit 1; }
           echo "version=${latest#v}" >> "$GITHUB_OUTPUT"
 

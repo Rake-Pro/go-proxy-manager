@@ -33,6 +33,9 @@ var dataplaneTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+	// Upstream response headers are capped like the listeners' request
+	// headers (1 MiB) rather than at the 10 MiB transport default.
+	MaxResponseHeaderBytes: 1 << 20,
 	// The reverse proxy must not transparently gunzip upstream bodies (CPU cost,
 	// and it strips Content-Length, forcing the flush-per-write chunked path).
 	DisableCompression: true,
@@ -286,6 +289,7 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 				pr.Out.URL.RawPath = ""
 			}
 			reapplySetRequest(pr)
+			dropGateCookies(pr.In, pr.Out.Header)
 			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
 			setForwardedClient(pr)
 			applyHostHeader(pr.Out, hostHeader, pr.In.Host)
@@ -668,6 +672,10 @@ type hostHandler struct {
 	// serveErrorPage). Threaded into the middleware chain and the terminal proxy
 	// at build time (see buildRouter/hostProxy).
 	errorPages *compiledErrorPages
+
+	// chainKey digests the host's access configuration (see hostChainKey). An
+	// open upgraded connection is closed when a reload changes it.
+	chainKey string
 }
 
 // route returns the handler and upstream label for a request path: the

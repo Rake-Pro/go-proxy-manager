@@ -17,6 +17,28 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/session"
 )
 
+func TestAPIResponsesAreNotStored(t *testing.T) {
+	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/assets/app.js" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	for path, want := range map[string]string{
+		"/api/me":         "no-store",
+		"/api/settings":   "no-store",
+		"/assets/app.js":  "no-cache",
+		"/auth/login":     "",
+		"/apidocs/readme": "",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("%s: Cache-Control = %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -658,8 +658,17 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		return accessListAllowNets(al)
 	}
 	// Limiter state is per route (host route or one location) and per step; a
-	// name referenced twice on one route gets one limiter per reference.
+	// name referenced twice on one route gets one limiter per reference. A step
+	// with scope: host drops the route from its key, so the host route and every
+	// location resolve to the same limiter (the host's references come first in
+	// a location's list, so the reference numbers line up).
 	route := host.Name + "\x00" + inline.route + "\x00"
+	scoped := func(rl model.RateLimitMiddleware) string {
+		if rl.Scope == model.RateLimitScopeHost {
+			return host.Name + "\x00\x00"
+		}
+		return route
+	}
 	refs := map[string]int{}
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
@@ -667,13 +676,13 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 			continue
 		}
 		refs[name]++
-		l := reg.rateLimiterFor(route+"mw:"+name+"#"+strconv.Itoa(refs[name]), *mw.RateLimit)
+		l := reg.rateLimiterFor(scoped(*mw.RateLimit)+"mw:"+name+"#"+strconv.Itoa(refs[name]), *mw.RateLimit)
 		h = rateLimitHandlerWith(l, *mw.RateLimit, clientIP, host.Name, ep, h, listNets)
 	}
 	// Inline rate-limit blocks, outside the referenced ones for the same reason:
 	// an inline limit sheds the flood first, and every limit still applies.
 	for i, rl := range inline.rateLimit {
-		l := reg.rateLimiterFor(route+"inline#"+strconv.Itoa(i), rl)
+		l := reg.rateLimiterFor(scoped(rl)+"inline#"+strconv.Itoa(i), rl)
 		h = rateLimitHandlerWith(l, rl, clientIP, host.Name, ep, h, listNets)
 	}
 

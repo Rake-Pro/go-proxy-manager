@@ -15,7 +15,18 @@ how the release was made:
 | Release path | Signing identity ends in |
 |---|---|
 | A merge to `main` mints the tag (the normal path) | `release.yml@refs/heads/main` |
-| A `vX.Y.Z` tag pushed by hand | `release.yml@refs/tags/vX.Y.Z` |
+| A `vX.Y.Z` tag pushed by hand on the current head of `main` | `release.yml@refs/tags/vX.Y.Z` |
+
+- A pushed tag is released only when its commit is the head of `main` at the
+  time the run fetches `main`. A tag on any other commit, including an older
+  `main` commit, stops the run before anything is built, pushed, tagged
+  `latest` or signed. If `main` moves on before the run starts, push the tag
+  again on the new head, or let the next merge to `main` mint the release.
+- This check lives in the `release.yml` of the tagged commit, because a tag
+  push runs the workflow file of that commit. A tag on a commit whose
+  `release.yml` predates the check runs the older file. Restricting who may
+  create `v*` tags (a tag ruleset in the repository settings) closes that
+  path.
 
 Verify the version you are about to deploy (`X.Y.Z`) against the exact
 identity, never a pattern. For a release minted on `main`:

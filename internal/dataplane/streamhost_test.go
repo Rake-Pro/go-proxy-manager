@@ -345,3 +345,98 @@ func TestTCPAcceptLoopRetriesTemporaryErrors(t *testing.T) {
 		t.Fatal("acceptLoop did not return after the listener closed")
 	}
 }
+
+// echoOnce writes msg on c and reports whether it came back within wait.
+func echoOnce(c net.Conn, msg string, wait time.Duration) bool {
+	if _, err := c.Write([]byte(msg)); err != nil {
+		return false
+	}
+	buf := make([]byte, len(msg))
+	_ = c.SetReadDeadline(time.Now().Add(wait))
+	_, err := io.ReadFull(c, buf)
+	return err == nil && string(buf) == msg
+}
+
+// closedWithin reports whether the forwarder closed c within wait.
+func closedWithin(c net.Conn, wait time.Duration) bool {
+	_ = c.SetReadDeadline(time.Now().Add(wait))
+	_, err := c.Read(make([]byte, 1))
+	return err == io.EOF
+}
+
+// idleTimeout closes a TCP stream connection that carried no data for that
+// long; traffic keeps it open. Without the key a silent connection stays open.
+func TestTCPStreamIdleTimeout(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	dial := func(target *streamTarget) net.Conn {
+		f, err := startTCPForwarder(0, &streamRoutes{def: target}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(f.stop)
+		c, err := net.Dial("tcp", f.ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+
+	c := dial(&streamTarget{name: "s", addr: backend, idle: 300 * time.Millisecond})
+	for i := 0; i < 4; i++ { // 4 x 150 ms of traffic: past the timeout in total
+		if !echoOnce(c, "ping", time.Second) {
+			t.Fatalf("active connection: echo %d failed", i)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !closedWithin(c, 2*time.Second) {
+		t.Fatal("a silent connection must be closed after idleTimeout")
+	}
+
+	c = dial(&streamTarget{name: "s", addr: backend})
+	if !echoOnce(c, "ping", time.Second) {
+		t.Fatal("echo failed without idleTimeout")
+	}
+	if closedWithin(c, 600*time.Millisecond) {
+		t.Fatal("without idleTimeout a silent connection must stay open")
+	}
+}
+
+// maxConnsPerSource closes a connection over the cap before the backend is
+// dialled, and a closed connection frees its slot.
+func TestTCPStreamMaxConnsPerSource(t *testing.T) {
+	backend, stop := tcpEcho(t)
+	defer stop()
+	f, err := startTCPForwarder(0, &streamRoutes{def: &streamTarget{name: "s", addr: backend, maxPerSource: 2}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.stop()
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", f.ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	a, b := dial(), dial()
+	if !echoOnce(a, "a", time.Second) || !echoOnce(b, "b", time.Second) {
+		t.Fatal("connections within the cap must be forwarded")
+	}
+	if over := dial(); !closedWithin(over, 2*time.Second) {
+		t.Fatal("a connection over maxConnsPerSource must be closed")
+	}
+	a.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c := dial()
+		if echoOnce(c, "c", 300*time.Millisecond) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing a connection must free its slot")
+		}
+	}
+}

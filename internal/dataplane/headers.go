@@ -85,6 +85,10 @@ type headerRW struct {
 }
 
 func (h *headerRW) WriteHeader(status int) {
+	// The rules run on every header write until a final status: an interim
+	// 1xx (other than 101, which ends the response) does not latch, because
+	// the reverse proxy clears the header map after writing it, so the rules
+	// must run again for the final response.
 	if !h.written {
 		for _, k := range h.spec.RemoveResponse {
 			h.ResponseWriter.Header().Del(k)
@@ -92,7 +96,7 @@ func (h *headerRW) WriteHeader(status int) {
 		for k, v := range h.spec.SetResponse {
 			h.ResponseWriter.Header().Set(k, v)
 		}
-		h.written = true
+		h.written = status >= 200 || status == http.StatusSwitchingProtocols
 	}
 	h.ResponseWriter.WriteHeader(status)
 }

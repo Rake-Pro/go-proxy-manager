@@ -741,3 +741,58 @@ func TestChainStatesDropUnreferencedEntries(t *testing.T) {
 	}
 	runtime.KeepAlive(keep)
 }
+
+// A rate limit with scope: host is one budget per client across the host route
+// and all of its locations, for an inline block and a referenced middleware
+// alike, and the shared budget survives a reload with an unchanged spec. The
+// default scope keeps one budget per route.
+func TestRateLimitScopeHostSharedAcrossLocations(t *testing.T) {
+	upstream := chainStateUpstream(t)
+	locs := []model.Location{{Path: "/a"}, {Path: "/b"}}
+	limit := func(scope string) *model.RateLimitMiddleware {
+		return &model.RateLimitMiddleware{RequestsPerSecond: 0.001, Burst: 1, Scope: scope}
+	}
+	mk := func(other string) model.Config {
+		return model.Config{
+			Middlewares: []model.Middleware{{ObjectMeta: model.ObjectMeta{Name: "rl"}, Type: model.MWTypeRateLimit, RateLimit: limit(model.RateLimitScopeHost)}},
+			ProxyHosts: []model.ProxyHost{
+				{ObjectMeta: model.ObjectMeta{Name: "inline-host"}, Domains: []string{"inline.example.com"}, Upstream: upstream,
+					RateLimit: limit(model.RateLimitScopeHost), Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "mw-host"}, Domains: []string{"mw.example.com"}, Upstream: upstream,
+					Middlewares: []string{"rl"}, Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "route-host"}, Domains: []string{"route.example.com"}, Upstream: upstream,
+					RateLimit: limit(""), Locations: locs},
+				{ObjectMeta: model.ObjectMeta{Name: "tenant"}, Domains: []string{other}, Upstream: upstream},
+			},
+		}
+	}
+	s := New(Config{})
+	if err := s.Reload(mk("t1.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"inline.example.com", "mw.example.com"} {
+		if got := chainStateDo(s.dispatchHTTP, host, "/", ""); got != http.StatusOK {
+			t.Fatalf("%s first request: %d, want 200", host, got)
+		}
+		for _, p := range []string{"/a", "/b", "/"} {
+			if got := chainStateDo(s.dispatchHTTP, host, p, ""); got != http.StatusTooManyRequests {
+				t.Fatalf("%s%s after the host budget is spent: %d, want 429", host, p, got)
+			}
+		}
+	}
+	for _, p := range []string{"/", "/a", "/b"} {
+		if got := chainStateDo(s.dispatchHTTP, "route.example.com", p, ""); got != http.StatusOK {
+			t.Fatalf("default scope: first request on route %s -> %d, want 200 (one budget per route)", p, got)
+		}
+	}
+
+	if err := s.Reload(mk("t2.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	for _, host := range []string{"inline.example.com", "mw.example.com"} {
+		if got := chainStateDo(s.dispatchHTTP, host, "/b", ""); got != http.StatusTooManyRequests {
+			t.Fatalf("%s/b after an unrelated reload: %d, want 429 (shared budget kept)", host, got)
+		}
+	}
+}

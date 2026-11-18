@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // stubCNAME is a cnameLookuper that returns a fixed answer.
@@ -167,6 +171,38 @@ func TestNewACMEDNSSolverValidation(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("NewACMEDNSSolver() = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewACMEDNSSolverWarnsOnPlainHTTP(t *testing.T) {
+	cases := []struct {
+		base     string
+		local    bool
+		wantWarn bool
+	}{
+		{"http://192.0.2.10", false, true},
+		{"http://acme-dns.example.com", false, true},
+		{"https://acme-dns.example.com", false, false},
+		{"http://127.0.0.1:8080", true, false},
+		{"http://localhost:8080", true, false},
+		{"http://[::1]:8080", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.base, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Logger
+			log.Logger = zerolog.New(&buf)
+			t.Cleanup(func() { log.Logger = prev })
+			cfg := testACMEDNSConfig(tc.base)
+			cfg.AllowInsecureLocal = tc.local
+			if _, err := NewACMEDNSSolver(cfg); err != nil {
+				t.Fatalf("NewACMEDNSSolver(%q) = %v", tc.base, err)
+			}
+			got := strings.Contains(buf.String(), "baseURL is plain http")
+			if got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v (log %q)", got, tc.wantWarn, buf.String())
 			}
 		})
 	}

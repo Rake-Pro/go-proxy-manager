@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // ppConfig compiles a trusted-peer list for the tests.
@@ -425,5 +428,39 @@ func TestCompileProxyProtocol(t *testing.T) {
 	def := compileProxyProtocol(&model.ProxyProtocolSettings{Enabled: true, TrustedCIDRs: []string{"10.0.0.0/8"}})
 	if def == nil || def.timeout != model.DefaultProxyProtocolTimeout {
 		t.Fatalf("unset timeout must fall back to %s", model.DefaultProxyProtocolTimeout)
+	}
+}
+
+// remoteAddrConn reports a fixed peer address.
+type remoteAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c remoteAddrConn) RemoteAddr() net.Addr { return c.remote }
+
+// The untrusted-peer warning is logged once per IPv6 /64, not once per address.
+func TestUntrustedProxyPeerWarningIsPerIPv6Prefix(t *testing.T) {
+	var buf bytes.Buffer
+	prevLog, prevSet := log.Logger, untrustedProxyPeers
+	log.Logger = zerolog.New(&buf)
+	untrustedProxyPeers = &peerWarnSet{}
+	t.Cleanup(func() { log.Logger, untrustedProxyPeers = prevLog, prevSet })
+
+	cfg := ppConfig(t, 0, "192.0.2.0/24")
+	for i := range 100 {
+		a, b := net.Pipe()
+		ip := net.ParseIP("2001:db8:1:2::1")
+		ip[15] = byte(i + 1)
+		pc := &proxyProtoConn{Conn: remoteAddrConn{Conn: a, remote: &net.TCPAddr{IP: ip, Port: 40000}}, cfg: cfg}
+		_ = pc.RemoteAddr()
+		_ = a.Close()
+		_ = b.Close()
+	}
+	if n := strings.Count(buf.String(), "outside trustedCIDRs"); n != 1 {
+		t.Errorf("%d warnings for 100 addresses in one /64, want 1", n)
+	}
+	if !strings.Contains(buf.String(), "2001:db8:1:2::1") {
+		t.Errorf("warning does not name the exact peer: %s", buf.String())
 	}
 }

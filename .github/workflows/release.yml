@@ -43,7 +43,7 @@ jobs:
         id: next
         run: |
           set -euo pipefail
-          if [ -n "$(git tag --points-at HEAD -l 'v*')" ]; then
+          if [ -n "$(git tag --points-at HEAD -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)" ]; then
             echo "HEAD already tagged; skipping release."
             echo "tag=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -120,18 +120,31 @@ jobs:
           fetch-depth: 0 # the ancestor check below needs main's history
           persist-credentials: false
       # A pushed v* tag (or a dispatch on one) is built and signed only when it
-      # sits on main: a tag on any other commit must not become a release. The
-      # tag name is attacker-chosen on that path, so it reaches the shell only
-      # through an environment variable, quoted.
+      # sits on main: a tag on any other commit must not become a release. On
+      # that path the tag's commit must also be the current head of main, so an
+      # older main commit cannot be re-released under a new version and moved
+      # to `latest`. The minted-tag path (a merge to main) keeps the ancestor
+      # check only: main may move on while that run waits. The tag name is
+      # attacker-chosen on the tag path, so it reaches the shell only through
+      # an environment variable, quoted.
       - name: Require the tag to be on main
         env:
           TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor HEAD origin/main; then
             printf '::error::tag %s is not on main; refusing to release it\n' "$TAG"
             exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_commit=$(git rev-parse 'HEAD^{commit}')
+            main_commit=$(git rev-parse 'refs/remotes/origin/main^{commit}')
+            if [ "${tag_commit}" != "${main_commit}" ]; then
+              printf '::error::tag %s is on commit %s, not the head of main (%s); refusing to release it\n' \
+                "$TAG" "${tag_commit}" "${main_commit}"
+              exit 1
+            fi
           fi
 
       - name: Set build date

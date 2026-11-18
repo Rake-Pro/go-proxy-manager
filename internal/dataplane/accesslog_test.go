@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -249,6 +250,39 @@ func TestAccessLogClipsRequestStrings(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"path":"/a/b"`) {
 		t.Fatalf("access line = %s", logs.String())
+	}
+}
+
+// A clipped value ends at a rune boundary: a multi-byte UTF-8 sequence that
+// straddles the bound is dropped whole, never cut.
+func TestClipLogKeepsUTF8Whole(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"ab\u00e9", "ab..."},   // 2-byte rune straddles a bound of 3
+		{"a\u20acb", "a..."},    // 3-byte rune straddles a bound of 3
+		{"abc\u20ac", "abc..."}, // rune starts exactly at the bound
+		{"\U0001F600x", "..."},  // 4-byte rune longer than the bound
+		{"abc", "abc"},          // fits
+	} {
+		got := clipLog(tc.in, 3)
+		if got != tc.want || !utf8.ValidString(got) {
+			t.Errorf("clipLog(%q, 3) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// On input that is not valid UTF-8 clipLog backs up at most utf8.UTFMax-1
+// bytes looking for a sequence that crosses the limit, and otherwise cuts at
+// the limit, so it never drops valid bytes before the invalid ones.
+func TestClipLogBoundedOnInvalidUTF8(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{strings.Repeat("\x80", 10), strings.Repeat("\x80", 5) + "..."},
+		{"ab" + strings.Repeat("\xbf", 8), "ab\xbf\xbf\xbf..."},
+		{"abc" + strings.Repeat("\xbf", 8), "abc\xbf\xbf..."},
+		{"ab\xe2\x82" + strings.Repeat("x", 4), "ab\xe2\x82x..."}, // truncated sequence does not cross the limit
+	} {
+		if got := clipLog(tc.in, 5); got != tc.want {
+			t.Errorf("clipLog(%q, 5) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

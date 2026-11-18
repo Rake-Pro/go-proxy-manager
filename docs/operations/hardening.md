@@ -39,6 +39,10 @@ The settings to check before an instance faces the internet.
   covers every host, every stream-terminate listener and an unknown SNI in one
   place, and any host still serving older clients can pin `tls.minTLSVersion:
   "1.2"` for itself.
+- Bound what one client address can keep in progress:
+  [`settings.clientLimits.maxInFlight`](../reference/config/settings/client-limits.md#settings-client-limits-max-in-flight)
+  (off by default; `256` is a starting point) refuses a client's requests
+  past the limit with `429`.
 - Run with `cap_drop: ALL` and `no-new-privileges`, as in the
   [Compose file](../getting-started/install-docker.md#compose-file).
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.

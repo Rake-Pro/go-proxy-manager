@@ -181,10 +181,12 @@ func (s *Store) checkCompilesLocked(cand model.Config, candSettings model.Settin
 // checkDomainKeysLocked refuses a write whose result has a router-key domain
 // collision (model.Config.DomainKeyCollisions) that the stored config does not
 // already have, or that gained a host claiming it. before is the stored
-// config's DomainKeyOwners. An edit that keeps or shrinks an existing collision
+// config's domainKeyOwners. An edit that keeps or shrinks an existing collision
 // (a host disabled, a colliding domain removed, an unrelated field changed) is
-// allowed, so a stored collision can be repaired one step at a time.
-func checkDomainKeysLocked(before map[string]map[string]bool, merged model.Config) error {
+// allowed, so a stored collision can be repaired one step at a time. settings
+// are the ones the write leaves in place (see withAdminEdgeClaim).
+func checkDomainKeysLocked(before map[string]map[string]bool, merged model.Config, settings model.Settings) error {
+	merged = withAdminEdgeClaim(merged, settings)
 	after := merged.DomainKeyOwners()
 	keys := make([]string, 0, len(after))
 	for k := range after {
@@ -201,21 +203,52 @@ func checkDomainKeysLocked(before map[string]map[string]bool, merged model.Confi
 	return nil
 }
 
-// loadedCollisions is DomainKeyOwners of the stored config, or nil when it
+// domainKeyOwners is DomainKeyOwners of cfg with the admin front door's
+// hostname counted as claimed (withAdminEdgeClaim).
+func domainKeyOwners(cfg model.Config, settings model.Settings) map[string]map[string]bool {
+	return withAdminEdgeClaim(cfg, settings).DomainKeyOwners()
+}
+
+// withAdminEdgeClaim returns cfg with a host named after the admin edge that
+// claims the panel's hostname when settings.adminEdge is on, so a stored host
+// that spells that hostname with a port counts as a domain-key collision: a
+// write may not add one, and one already stored is a load warning. The host
+// list is copied, so cfg's backing array is never written.
+func withAdminEdgeClaim(cfg model.Config, settings model.Settings) model.Config {
+	name := model.AdminEdgeHostname(settings.ExternalBaseURL)
+	if !settings.AdminEdge.Enabled || name == "" {
+		return cfg
+	}
+	hosts := append([]model.ProxyHost{}, cfg.ProxyHosts...)
+	cfg.ProxyHosts = append(hosts, model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: model.AdminEdgeHostName}, Domains: []string{name}})
+	return cfg
+}
+
+// loadedCollisions is domainKeyOwners of the stored config, or nil when it
 // does not load (then every collision in the candidate counts as new).
-func loadedCollisions(cfg model.Config, err error) map[string]map[string]bool {
+func loadedCollisions(cfg model.Config, settings model.Settings, err error) map[string]map[string]bool {
 	if err != nil {
 		return nil
 	}
-	return cfg.DomainKeyOwners()
+	return domainKeyOwners(cfg, settings)
 }
 
 // checkRestoredLocked runs the domain-key and compile checks for a write that
 // replaced files on disk (Revert, RevertObject, Restore): restored is the new
-// tree, cur the config loaded before the tree changed. Callers hold s.mu.
+// tree, cur the config loaded before the tree changed. An invalid domain the
+// restored tree carries is logged, not refused: it was stored once, a config
+// holding it loads, and refusing it would block the rollback. Callers hold
+// s.mu.
 func (s *Store) checkRestoredLocked(restored model.Config, restoredSettings model.Settings, cur model.Config, curSettings model.Settings, curErr error) error {
-	if err := checkDomainKeysLocked(loadedCollisions(cur, curErr), restored); err != nil {
+	if err := checkDomainKeysLocked(loadedCollisions(cur, curSettings, curErr), restored, restoredSettings); err != nil {
 		return err
+	}
+	var invalid map[string][]string
+	if curErr == nil {
+		invalid = cur.InvalidDomains()
+	}
+	if err := model.InvalidDomainsError(invalid, restored.InvalidDomains()); err != nil {
+		log.Warn().Err(err).Msg("config store: the restored config holds a domain that is not a hostname; it loads with a config warning, edit the domain")
 	}
 	return s.checkCompilesLocked(restored, restoredSettings, func() (model.Config, model.Settings, error) {
 		return cur, curSettings, curErr
@@ -452,6 +485,15 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 		cfg.ConfigWarnings = append(cfg.ConfigWarnings, unknownKeysWarning(path, unknownKeys[path]))
 	}
 	cfg.ConfigWarnings = append(cfg.ConfigWarnings, misnamed...)
+	// A stored host that spells the admin panel's hostname with a port routes
+	// under the same key as the front door. Reported here, where the settings
+	// are known; Config.Warnings leaves out the compiled front door's key.
+	if settings.AdminEdge.Enabled {
+		key := model.DomainKey(model.AdminEdgeHostname(settings.ExternalBaseURL))
+		if msg, ok := withAdminEdgeClaim(cfg, settings).DomainKeyCollisions()[key]; ok {
+			cfg.ConfigWarnings = append(cfg.ConfigWarnings, msg+fmt.Sprintf(" (%q is the admin front door, settings.adminEdge); edit the other host's domains (new writes with such a collision are refused)", model.AdminEdgeHostName))
+		}
+	}
 
 	return cfg, settings, nil
 }
@@ -475,7 +517,7 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rel, out, exists, err := s.prepareSaveLocked(obj, time.Now().UTC())
+	rel, out, exists, strays, err := s.prepareSaveLocked(obj, time.Now().UTC())
 	if err != nil {
 		return "", err
 	}
@@ -494,11 +536,26 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 			return "", nil
 		}
 	}
-	snap, err := snapshotFile(path)
-	if err != nil {
-		return "", err
+	snaps := make([]fileState, 0, 1+len(strays))
+	for _, p := range append([]string{path}, strays...) {
+		snap, err := snapshotFile(p)
+		if err != nil {
+			return "", err
+		}
+		snaps = append(snaps, snap)
+	}
+	// The object moves to its own file: its old, differently named file goes
+	// in the same commit, so the object is never stored twice. Removed before
+	// the write, as in SaveBatch, so a remove can never take the new file with
+	// it.
+	for _, p := range strays {
+		if err := removeFile(p); err != nil && !os.IsNotExist(err) {
+			restoreFiles(snaps)
+			return "", err
+		}
 	}
 	if err := writeYAML(path, out); err != nil {
+		restoreFiles(snaps)
 		return "", err
 	}
 	msg := fmt.Sprintf("%s %q: update", obj.Kind(), obj.GetMeta().Name)
@@ -506,7 +563,7 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 	if err != nil {
 		// A write that is on disk but not committed would go live at the next
 		// reload and be swept into the next writer's commit.
-		restoreFiles([]fileState{snap})
+		restoreFiles(snaps)
 		return "", err
 	}
 	return sha, nil
@@ -552,7 +609,7 @@ func (s *Store) DryRun(ctx context.Context, obj model.Object) (string, []byte, b
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rel, out, exists, err := s.prepareSaveLocked(obj, time.Now().UTC())
+	rel, out, exists, _, err := s.prepareSaveLocked(obj, time.Now().UTC())
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -567,14 +624,15 @@ func (s *Store) DryRun(ctx context.Context, obj model.Object) (string, []byte, b
 // never pass where the real write would fail. It returns the object's path
 // relative to the config dir, the timestamp-stamped value to marshal and
 // whether an object of that name is already stored (the write would be an
-// update). Callers hold s.mu (read or write).
-func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any, bool, error) {
+// update), and the object's other files to remove (see kindFiles.strays).
+// Callers hold s.mu (read or write).
+func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any, bool, []string, error) {
 	if err := obj.Validate(); err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
 	dir, ok := kindDir[obj.Kind()]
 	if !ok {
-		return "", nil, false, fmt.Errorf("unknown object kind %q", obj.Kind())
+		return "", nil, false, nil, fmt.Errorf("unknown object kind %q", obj.Kind())
 	}
 
 	// Referential-integrity gate: apply this object to the current config and
@@ -582,39 +640,51 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	// committed.
 	cfg, settings, err := s.loadLocked()
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
 	meta := obj.GetMeta()
 	if settings.AdminEdge.Enabled && obj.Kind() == "ProxyHost" && meta.Name == model.AdminEdgeHostName {
-		return "", nil, false, fmt.Errorf("proxy host %q: the name is reserved for the admin edge while settings.adminEdge is on", meta.Name)
+		return "", nil, false, nil, fmt.Errorf("proxy host %q: the name is reserved for the admin edge while settings.adminEdge is on", meta.Name)
 	}
 	// Captured BEFORE withObject: upsert() below replaces a same-named element
 	// of cfg's slice in place, and withObject's shallow copy of cfg shares that
 	// slice's backing array, so cfg itself would otherwise be mutated to look
 	// like the incoming (not-yet-stamped) object by the time it is consulted.
 	existing, _ := findObject(cfg, obj.Kind(), meta.Name)
-	collisions := cfg.DomainKeyOwners()
+	collisions := domainKeyOwners(cfg, settings)
+	storedPages := cfg.ErrorPagesByHost()
+	invalid := cfg.InvalidDomains()
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
 	if err := checkAdminEdge(merged, settings); err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
-		return "", nil, false, fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+		return "", nil, false, nil, fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
-	if err := checkDomainKeysLocked(collisions, merged); err != nil {
-		return "", nil, false, err
+	if err := checkDomainKeysLocked(collisions, merged, settings); err != nil {
+		return "", nil, false, nil, err
+	}
+	if err := model.InvalidDomainsError(invalid, merged.InvalidDomains()); err != nil {
+		return "", nil, false, nil, err
+	}
+	if err := merged.CheckNewErrorPageTemplates(storedPages); err != nil {
+		return "", nil, false, nil, err
 	}
 	// The disk still holds the stored config here, so loadLocked is "current".
 	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
-		return "", nil, false, err
+		return "", nil, false, nil, err
 	}
-	return filepath.Join(dir, meta.Name+".yaml"), stampTimes(obj, existing, now), existing != nil, nil
+	strays, err := s.batchStraysLocked([]model.Object{obj})
+	if err != nil {
+		return "", nil, false, nil, err
+	}
+	return filepath.Join(dir, meta.Name+".yaml"), stampTimes(obj, existing, now), existing != nil, strays, nil
 }
 
 // Delete removes the named object of the given kind. It refuses the delete if
@@ -685,7 +755,9 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	for i, o := range objs {
 		existingByIndex[i], _ = findObject(cfg, o.Kind(), o.GetMeta().Name)
 	}
-	collisions := cfg.DomainKeyOwners()
+	collisions := domainKeyOwners(cfg, settings)
+	storedPages := cfg.ErrorPagesByHost()
+	invalid := cfg.InvalidDomains()
 	merged := cfg
 	for _, o := range objs {
 		merged = withObject(&merged, o)
@@ -702,27 +774,59 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
-	if err := checkDomainKeysLocked(collisions, merged); err != nil {
+	if err := checkDomainKeysLocked(collisions, merged, settings); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := merged.CheckNewErrorPageTemplates(storedPages); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := model.InvalidDomainsError(invalid, merged.InvalidDomains()); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
+	strays, err := s.batchStraysLocked(objs)
+	if err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
 
-	now := time.Now().UTC()
-	wrote := false
-	for i, o := range objs {
-		dir, ok := kindDir[o.Kind()]
-		if !ok {
-			return "", fmt.Errorf("unknown object kind %q", o.Kind())
+	// Snapshot every path the batch touches, so a failure below puts the tree
+	// back, the removed strays included.
+	snaps := make([]fileState, 0, len(strays)+len(objs))
+	for _, p := range strays {
+		snap, err := snapshotFile(p)
+		if err != nil {
+			return "", err
 		}
-		path := filepath.Join(s.dir, dir, o.GetMeta().Name+".yaml")
+		snaps = append(snaps, snap)
+	}
+	for _, o := range objs {
+		snap, err := snapshotFile(filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
+		if err != nil {
+			return "", err
+		}
+		snaps = append(snaps, snap)
+	}
+	// Strays go first: a file one member leaves may be the file another member
+	// is written to.
+	wrote := len(strays) > 0
+	for _, p := range strays {
+		if err := removeFile(p); err != nil && !os.IsNotExist(err) {
+			restoreFiles(snaps)
+			return "", err
+		}
+	}
+	now := time.Now().UTC()
+	for i, o := range objs {
+		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
 		out := stampTimes(o, existingByIndex[i], now)
 		if existingByIndex[i] != nil && unchangedOnDisk(path, out) {
 			continue // leave the file and its updatedAt alone
 		}
 		wrote = true
 		if err := writeYAML(path, out); err != nil {
+			restoreFiles(snaps)
 			return "", err
 		}
 	}
@@ -736,7 +840,12 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	if message == "" {
 		message = "Import configuration"
 	}
-	return s.git.CommitAll(ctx, message, author)
+	sha, err := s.git.CommitAll(ctx, message, author)
+	if err != nil {
+		restoreFiles(snaps)
+		return "", err
+	}
+	return sha, nil
 }
 
 // ObjectRef names one object for ApplyBatch's delete list.
@@ -901,7 +1010,18 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	// is consulted for CreatedAt preservation at write time.
 	appliedExisting := make([]model.Object, 0, len(upserts))
 	var removals []string
-	collisions := cfg.DomainKeyOwners()
+	files := map[string]kindFiles{}
+	collisions := domainKeyOwners(cfg, settings)
+	storedPages := cfg.ErrorPagesByHost()
+	invalid := cfg.InvalidDomains()
+	// The stored objects a delete names, captured for the guard before
+	// withObject below can overwrite cfg's shared backing arrays.
+	delExisting := map[ObjectRef]model.Object{}
+	for _, ref := range deletes {
+		if o, ok := findObject(cfg, ref.Kind, ref.Name); ok {
+			delExisting[ref] = o
+		}
+	}
 	merged := cfg
 	for _, o := range upserts {
 		if err := o.Validate(); err != nil {
@@ -920,7 +1040,24 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		// an operator's explicit PUT on the object is exempt from this check and
 		// can still update it.
 		if existsOK {
-			if s.autoWriteRefusedLocked(existing) {
+			refused := s.autoWriteRefusedLocked(existing)
+			if !refused {
+				// The same rule for a file the write would remove (an object stored
+				// under another file name).
+				dir := kindDir[o.Kind()]
+				k, ok := files[dir]
+				if !ok {
+					if k, err = s.kindFilesLocked(dir); err != nil {
+						return "", err
+					}
+					files[dir] = k
+				}
+				strays, _ := k.strays(o.GetMeta().Name)
+				for _, p := range strays {
+					refused = refused || unknownKeysAtPath(p, existing)
+				}
+			}
+			if refused {
 				log.Warn().Str("kind", o.Kind()).Str("name", o.GetMeta().Name).
 					Msg("config store: batch upsert skipped, the file on disk has unknown keys from a newer gpm; an automatic writer must not risk dropping them (use an explicit API write instead)")
 				continue
@@ -950,7 +1087,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 			continue // already gone; the desired end state is satisfied
 		}
 		if guard != nil {
-			existing, ok := findObject(cfg, ref.Kind, ref.Name)
+			existing, ok := delExisting[ref]
 			if !ok {
 				continue // on disk but not in the loaded config: nothing to authorise
 			}
@@ -979,16 +1116,33 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	if lits := model.LiteralSecrets(merged); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
 	}
-	if err := checkDomainKeysLocked(collisions, merged); err != nil {
+	if err := checkDomainKeysLocked(collisions, merged, settings); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := model.InvalidDomainsError(invalid, merged.InvalidDomains()); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := merged.CheckNewErrorPageTemplates(storedPages); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := s.checkCompilesLocked(merged, settings, s.loadLocked); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
+	strays, err := s.batchStraysLocked(applied)
+	if err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
 
 	// Snapshot every path the batch will touch, so any failure below - including a
 	// commit cancelled by shutdown - can be undone completely.
-	snaps := make([]fileState, 0, len(applied)+len(removals))
+	snaps := make([]fileState, 0, len(applied)+len(strays)+len(removals))
+	for _, path := range strays {
+		snap, err := snapshotFile(path)
+		if err != nil {
+			return "", err
+		}
+		snaps = append(snaps, snap)
+	}
 	for _, o := range applied {
 		snap, err := snapshotFile(filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
 		if err != nil {
@@ -1004,6 +1158,13 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		snaps = append(snaps, snap)
 	}
 
+	// Strays go before the writes, as in SaveBatch.
+	for _, path := range strays {
+		if err := removeFile(path); err != nil && !os.IsNotExist(err) {
+			restoreFiles(snaps)
+			return "", err
+		}
+	}
 	now := time.Now().UTC()
 	for i, o := range applied {
 		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
@@ -1391,8 +1552,16 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 	if err := checkAdminEdge(cfg, settings); err != nil {
 		return "", err
 	}
+	// A settings write that turns the edge on or moves the panel's hostname
+	// may not add a host spelling that hostname with a port either.
+	if err := checkDomainKeysLocked(domainKeyOwners(cfg, curSettings), cfg, settings); err != nil {
+		return "", err
+	}
 	if lits := model.LiteralSecrets(settings); len(lits) > 0 {
 		return "", fmt.Errorf("refusing to commit literal secret(s): %v; use ${ENV:...} or ${FILE:...} placeholders", lits)
+	}
+	if err := settings.ErrorPages.CheckNewTemplates(&curSettings.ErrorPages); err != nil {
+		return "", fmt.Errorf("settings: %w", err)
 	}
 	if err := s.checkCompilesLocked(cfg, settings, func() (model.Config, model.Settings, error) {
 		return cfg, curSettings, nil
@@ -1571,8 +1740,8 @@ func (s *Store) SaveAccessListSourceLedger(ctx context.Context, l model.AccessLi
 // warn about a key an older struct silently dropped without failing the load.
 // See model.UnknownYAMLKeys and unknownKeysWarning. A file whose object name is
 // not its file name is loaded (identity comes from the YAML name) and reported
-// through misnamed, because save, delete, history and revert all derive the
-// file from the name and would miss it.
+// through misnamed, because delete, history and revert derive the file from
+// the name and would miss it; a save moves it (see kindFiles.strays).
 func loadDir[T any](root, sub string, misnamed *[]string) ([]T, map[string][]string, error) {
 	dir := filepath.Join(root, sub)
 	entries, err := os.ReadDir(dir)
@@ -1604,11 +1773,138 @@ func loadDir[T any](root, sub string, misnamed *[]string) ([]T, map[string][]str
 			warnings[rel] = keys
 		}
 		if o, ok := any(v).(model.Object); ok && o.GetMeta().Name+".yaml" != e.Name() {
-			*misnamed = append(*misnamed, fmt.Sprintf("config: %s: object name %q does not match the file name; gpm saves, deletes and reverts it as %s/%s.yaml, so rename the file to match", rel, o.GetMeta().Name, sub, o.GetMeta().Name))
+			*misnamed = append(*misnamed, fmt.Sprintf("config: %s: object name %q does not match the file name; delete, history and revert use %s/%s.yaml, and the next save of the object moves it there", rel, o.GetMeta().Name, sub, o.GetMeta().Name))
 		}
 		out = append(out, v)
 	}
 	return out, warnings, nil
+}
+
+// kindFiles maps the object files of one kind dir to the object names they
+// hold, for finding an object stored under a file name that is not its own
+// (loadDir loads and warns about such a file).
+type kindFiles struct {
+	dir    string              // absolute kind dir
+	byName map[string][]string // object name -> file names holding it
+	byFile map[string]string   // file name -> object name
+}
+
+// kindFilesLocked reads every object file in sub. Callers hold s.mu.
+func (s *Store) kindFilesLocked(sub string) (kindFiles, error) {
+	k := kindFiles{dir: filepath.Join(s.dir, sub), byName: map[string][]string{}, byFile: map[string]string{}}
+	entries, err := os.ReadDir(k.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return k, nil
+		}
+		return k, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(k.dir, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir of the store's own kind dir
+		if err != nil {
+			return k, err
+		}
+		var meta model.ObjectMeta
+		if err := yaml.Unmarshal(data, &meta); err != nil {
+			return k, fmt.Errorf("%s/%s: %w", sub, e.Name(), err)
+		}
+		k.byName[meta.Name] = append(k.byName[meta.Name], e.Name())
+		k.byFile[e.Name()] = meta.Name
+	}
+	return k, nil
+}
+
+// strays returns the paths of the files, other than name.yaml, that hold the
+// object name, and the object name held by name.yaml when that file holds a
+// different object (occupant). A write of the object removes the strays in
+// the same commit, so the object never ends up in two files. When the name is
+// held by more than one file, the copy that is current is not guessed: no
+// stray is returned and a warning is logged.
+func (k kindFiles) strays(name string) (strays []string, occupant string) {
+	own := name + ".yaml"
+	target := filepath.Join(k.dir, own)
+	// A name that differs from own only in case is own when the file system
+	// resolves both to one file (a case-insensitive one does): removing it
+	// would remove the object's own file.
+	isOwn := func(f string) bool {
+		return f == own || strings.EqualFold(f, own) && sameFile(filepath.Join(k.dir, f), target)
+	}
+	for f, held := range k.byFile {
+		if held != name && isOwn(f) {
+			occupant = held
+		}
+	}
+	files := k.byName[name]
+	if len(files) > 1 {
+		log.Warn().Str("dir", filepath.Base(k.dir)).Str("name", name).Strs("files", files).
+			Msg("config store: more than one file holds this object name; none is removed, merge them by hand")
+		return nil, occupant
+	}
+	for _, f := range files {
+		if !isOwn(f) {
+			strays = append(strays, filepath.Join(k.dir, f))
+		}
+	}
+	return strays, occupant
+}
+
+// sameFile reports whether a and b name one file, as the file system says
+// after a stat. removeFile removes a stray file. Both are variables so a test
+// can stand in for a case-insensitive file system.
+var (
+	sameFile = func(a, b string) bool {
+		ai, err := os.Stat(a)
+		if err != nil {
+			return false
+		}
+		bi, err := os.Stat(b)
+		return err == nil && os.SameFile(ai, bi)
+	}
+	removeFile = os.Remove
+)
+
+// batchStraysLocked collects the strays of every object a write stores. A file
+// held by another object is refused unless that object is in the same batch:
+// it moves out first, because strays are removed before any file is written.
+// Callers hold s.mu.
+func (s *Store) batchStraysLocked(objs []model.Object) ([]string, error) {
+	inBatch := map[string]bool{}
+	for _, o := range objs {
+		inBatch[o.Kind()+"/"+o.GetMeta().Name] = true
+	}
+	byDir := map[string]kindFiles{}
+	var all []string
+	for _, o := range objs {
+		dir, known := kindDir[o.Kind()]
+		if !known {
+			return nil, fmt.Errorf("unknown object kind %q", o.Kind())
+		}
+		k, ok := byDir[dir]
+		if !ok {
+			var err error
+			if k, err = s.kindFilesLocked(dir); err != nil {
+				return nil, err
+			}
+			byDir[dir] = k
+		}
+		strays, occupant := k.strays(o.GetMeta().Name)
+		if occupant != "" && !inBatch[o.Kind()+"/"+occupant] {
+			return nil, errFileOccupied(dir, o.GetMeta().Name, occupant)
+		}
+		all = append(all, strays...)
+	}
+	return all, nil
+}
+
+// errFileOccupied refuses a write whose file is held by another object (a file
+// whose object name differs from its file name): writing would replace that
+// object without a trace. Saving the other object first moves it to its own
+// file.
+func errFileOccupied(sub, name, occupant string) error {
+	return fmt.Errorf("%s/%s.yaml holds the object %q; save %q first so it moves to its own file", sub, name, occupant, occupant)
 }
 
 // mergeUnknownKeyWarnings folds src into dst (both relative-path -> unknown

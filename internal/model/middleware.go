@@ -260,7 +260,20 @@ type RateLimitMiddleware struct {
 	// BlockMax caps a backed-off block (Go duration string). Default "24h" when
 	// BlockBackoff is set; must be at least BlockFor.
 	BlockMax string `json:"blockMax,omitempty" yaml:"blockMax,omitempty"`
+	// Scope selects which requests share one budget per client. Empty or
+	// RateLimitScopeRoute: each route (the host route and every location) has
+	// its own. RateLimitScopeHost: the host route and all of its locations draw
+	// on one. Not allowed on a location's own inline block, which applies to
+	// that location only.
+	Scope string `json:"scope,omitempty" yaml:"scope,omitempty"`
 }
+
+// Rate-limit budget scopes for RateLimitMiddleware.Scope. Empty means
+// RateLimitScopeRoute.
+const (
+	RateLimitScopeRoute = "route"
+	RateLimitScopeHost  = "host"
+)
 
 // DefaultBlockMax caps a backed-off rate-limit block when blockMax is unset.
 const DefaultBlockMax = 24 * time.Hour
@@ -379,6 +392,11 @@ func (r *RateLimitMiddleware) validate(owner string) error {
 		if d < blockFor {
 			return fmt.Errorf("%s: rateLimit.blockMax: must be at least blockFor (%s), got %q", owner, r.BlockFor, r.BlockMax)
 		}
+	}
+	switch r.Scope {
+	case "", RateLimitScopeRoute, RateLimitScopeHost:
+	default:
+		return fmt.Errorf("%s: rateLimit.scope: must be %q or %q, got %q", owner, RateLimitScopeRoute, RateLimitScopeHost, r.Scope)
 	}
 	return nil
 }

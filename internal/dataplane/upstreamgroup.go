@@ -673,6 +673,11 @@ type bodySource struct {
 	single  io.ReadCloser // non-nil for a body that gets exactly one attempt
 	none    bool
 	release func() // returns the budget reservation; nil when nothing is reserved
+	// refs counts the holders of buf: the source until done, plus every
+	// attempt body the transport has not closed yet. The transport may still
+	// be writing an attempt body after RoundTrip returns, so the reservation
+	// is returned only when the last holder lets go.
+	refs atomic.Int32
 }
 
 // newBodySource prepares req's body for (possibly repeated) sending. The bool
@@ -696,7 +701,9 @@ func newBodySource(req *http.Request) (*bodySource, bool, error) {
 	}
 	if complete {
 		_ = req.Body.Close()
-		return &bodySource{buf: data, release: release}, true, nil
+		src := &bodySource{buf: data, release: release}
+		src.refs.Store(1)
+		return src, true, nil
 	}
 	// The prefix is referenced only by the attempt body, which drops it once
 	// it has been read, so a body that keeps arriving slowly holds no buffered
@@ -743,9 +750,21 @@ func retryBufRelease(n int64) func() {
 	return func() { once.Do(func() { groupRetryBufInUse.Add(-n) }) }
 }
 
-// done returns the request's budget reservation once RoundTrip is over.
+// done drops RoundTrip's hold on the buffered body. A replay buffer's
+// reservation is returned once no attempt body still references it; a
+// single-attempt body handed to the transport returns its own (see prefixBody).
 func (b *bodySource) done() {
+	if b.buf != nil {
+		b.unref()
+		return
+	}
 	if b.release != nil {
+		b.release()
+	}
+}
+
+func (b *bodySource) unref() {
+	if b.refs.Add(-1) == 0 && b.release != nil {
 		b.release()
 	}
 }
@@ -755,9 +774,25 @@ func (b *bodySource) next() io.ReadCloser {
 		return nil
 	}
 	if b.single != nil {
+		// The transport closes the body it is given, so from here the attempt
+		// body owns the reservation.
+		b.release = nil
 		return b.single
 	}
-	return io.NopCloser(bytes.NewReader(b.buf))
+	b.refs.Add(1)
+	return &replayBody{Reader: bytes.NewReader(b.buf), src: b}
+}
+
+// replayBody is one attempt's view of a replay buffer; Close drops its hold.
+type replayBody struct {
+	*bytes.Reader
+	src  *bodySource
+	once sync.Once
+}
+
+func (r *replayBody) Close() error {
+	r.once.Do(r.src.unref)
+	return nil
 }
 
 // prefixBody is a single-attempt body: the buffered prefix, then the rest of

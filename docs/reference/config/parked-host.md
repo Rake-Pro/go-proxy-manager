@@ -5,7 +5,7 @@ anything. Useful to absorb unmatched vhosts and stop default-host leakage.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="parked-host-domains"></span>  `domains` | []string | yes | Hostnames this host claims. Exclusive across enabled hosts, like every other kind. |
+| <span id="parked-host-domains"></span>  `domains` | []string | yes | Hostnames this host claims. Exclusive across enabled hosts, like every other kind, with the same rules as [ProxyHost `domains`](proxy-host.md#proxy-host-domains). |
 | <span id="parked-host-status-code"></span>  `statusCode` | int | no | Status returned for every request. Unset (or `0`) sends `404`. |
 | <span id="parked-host-tls"></span>  `tls` | TLSSettings | no | Same shape as [ProxyHost `tls`](proxy-host.md#proxy-host-tls): `certificateRef`, `forceSSL`, `minTLSVersion`, `hsts.*` and `clientAuth.*` all apply. Note `certificateRef` is an intent record here too: the served certificate is selected by SNI. |
 

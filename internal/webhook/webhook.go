@@ -183,7 +183,7 @@ func (d *Dispatcher) post(t model.WebhookConfig, body []byte) {
 	d.record(t, status, dur, err)
 	switch {
 	case err != nil:
-		log.Warn().Err(err).Str("webhook", t.Name).Str("url", t.URL).Msg("webhook: delivery failed")
+		log.Warn().Err(err).Str("webhook", t.Name).Msg("webhook: delivery failed")
 	case status >= 300:
 		log.Warn().Str("webhook", t.Name).Int("status", status).Msg("webhook: non-2xx response")
 	default:

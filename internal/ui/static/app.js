@@ -2893,6 +2893,8 @@ function wireRateLimitBlock(p, rl) {
         if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
         spec.blockMax = blockMax;
       }
+      // The form has no scope control; keep a scope set through the API or YAML.
+      if (rl.scope) spec.scope = rl.scope;
       return spec;
     },
   };
@@ -3232,7 +3234,10 @@ async function route() {
   const parts = raw.split('/').filter(Boolean);
   if (!parts.length) { location.hash = '#/overview'; return; }
   const section = parts[0];
-  const sub = parts[1] ? decodeURIComponent(parts[1]) : null;
+  // A malformed escape in the hash keeps the raw segment rather than throwing
+  // before any view renders.
+  let sub = null;
+  if (parts[1]) { try { sub = decodeURIComponent(parts[1]); } catch (e) { sub = parts[1]; } }
 
   setActiveNav(section);
   pendingHead = null;
@@ -7708,6 +7713,11 @@ async function streamEditor(c, name) {
     }
     const als = $$('#ed-stream-al input:checked').map((i) => i.value);
     if (als.length) body.accessLists = als;
+    // The form has no controls for the TCP limits; keep values set through the API or YAML.
+    if (proto !== 'udp') {
+      if (o.idleTimeout) body.idleTimeout = o.idleTimeout;
+      if (o.maxConnsPerSource) body.maxConnsPerSource = o.maxConnsPerSource;
+    }
     return body;
   });
   wireCloneButton('streams', o);
@@ -10951,6 +10961,9 @@ async function viewSettings(c, tab) {
     if (s.notifications && Object.keys(s.notifications).length) body.notifications = s.notifications;
     // Saved list filters are edited from each list's Saved menu; carried forward.
     if (arr(s.savedFilters).length) body.savedFilters = s.savedFilters;
+    // The per-client in-flight limit has no control yet (settings.yaml or the
+    // API); carried forward.
+    if (s.clientLimits && Object.keys(s.clientLimits).length) body.clientLimits = s.clientLimits;
 
     btn.disabled = true;
     try {

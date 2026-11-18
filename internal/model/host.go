@@ -559,6 +559,9 @@ func validateLocations(owner string, locs []Location) error {
 		if err := l.RateLimit.validateInline(lo); err != nil {
 			return err
 		}
+		if l.RateLimit != nil && l.RateLimit.Scope == RateLimitScopeHost {
+			return fmt.Errorf("%s: rateLimit.scope: host is not allowed on a location's own block (it applies to that location only); set it on the host's block or a middleware", lo)
+		}
 		if err := validateAccessListsMode(lo, l.AccessListsMode, l.AccessLists); err != nil {
 			return err
 		}
@@ -760,6 +763,14 @@ type StreamHost struct {
 	// in a raw stream, so a list carrying basicAuth is rejected at validation
 	// rather than silently ignored.
 	AccessLists []string `json:"accessLists,omitempty" yaml:"accessLists,omitempty"`
+
+	// IdleTimeout (Go duration, TCP only) closes a connection that carried no
+	// data in either direction for this long. Empty: no idle limit.
+	IdleTimeout string `json:"idleTimeout,omitempty" yaml:"idleTimeout,omitempty"`
+	// MaxConnsPerSource (TCP only) caps the open connections one client address
+	// (IPv6 by /56, as the UDP per-source session cap) may hold to this host; a
+	// connection over the cap is closed before the backend is dialled. 0: no cap.
+	MaxConnsPerSource int `json:"maxConnsPerSource,omitempty" yaml:"maxConnsPerSource,omitempty"`
 }
 
 func (h StreamHost) Kind() string { return "StreamHost" }
@@ -784,6 +795,17 @@ func (h StreamHost) Validate() error {
 	}
 	if err := h.TLS.validate(h.Name, h.Protocol); err != nil {
 		return err
+	}
+	if h.IdleTimeout != "" {
+		if durationOr(h.IdleTimeout, 0) == 0 {
+			return fmt.Errorf("stream host %q: idleTimeout: must be a duration > 0 (e.g. \"10m\", \"1h\"), got %q", h.Name, h.IdleTimeout)
+		}
+	}
+	if h.MaxConnsPerSource < 0 {
+		return fmt.Errorf("stream host %q: maxConnsPerSource: must be >= 0, got %d", h.Name, h.MaxConnsPerSource)
+	}
+	if h.Protocol == "udp" && (h.IdleTimeout != "" || h.MaxConnsPerSource != 0) {
+		return fmt.Errorf("stream host %q: idleTimeout and maxConnsPerSource apply to TCP only; protocol is udp (UDP sessions have fixed limits)", h.Name)
 	}
 	return nil
 }

@@ -110,6 +110,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
   (#136).
 - `POST /api/sessions/revoke` (admin): ends every admin panel session except
   the caller's own; also allowed on an HA follower (#153).
+- `settings.clientLimits` (`maxInFlight`, `allowFrom`): an optional bound on
+  how many requests one client address may have in progress at once on the
+  proxy listeners (IPv6 per /64, upgraded connections count while open).
+  Requests past it get 429 with denial reason `in-flight-limit`. The tracking
+  table holds 65536 addresses; when it is full, new addresses are served
+  without a limit (logged) rather than refused. Off by default.
+- Rate limits: optional `scope: host` makes a host and all of its locations
+  share one budget per client; the default (`route`) keeps one budget per
+  route, and the docs now say so (#148).
+- Stream hosts: optional TCP `idleTimeout` and `maxConnsPerSource` (IPv6 by
+  /56). Both are off unless set and refused on `protocol: udp` (#114).
 
 ### Security
 
@@ -321,6 +332,46 @@ The non-breaking items of the 2026-11-18 review:
 - DNS sync (Pi-hole): names held by a local host record are skipped and warned
   about instead of receiving a CNAME (#164).
 
+Follow-ups to the 2026-11-18 review (items that needed a decision first):
+
+- Error pages: templates are checked against an allow-list (the documented
+  fields, `if`/`else`/`with`, comparisons, and
+  `html`/`js`/`urlquery`/`print`/`printf`/`len` applied to a field, with fixed
+  argument and size limits and at most 256 printing actions). A new or changed
+  inline template outside it is refused. A stored one, or a file in
+  `errorPages.dir`, is skipped with a warning and the next fallback page is
+  served; it never fails a reload or the start (#155).
+- OIDC gate: with the identity provider's `requireVerifiedEmail` set, a login
+  whose email is not verified is refused with a message that says so, and an
+  existing gate session issued without a verified email is sent back through
+  sign-in, so no unverified email reaches `X-Forwarded-User` or `X-Forwarded-
+  Email` (#149).
+- The release workflow builds a pushed `vX.Y.Z` tag only when its commit is
+  the current head of `main` (#143).
+- An admin front door host name listed with a port on another host is refused
+  when a write adds it and reported as a config warning when it is already
+  stored.
+- SSO gate: the gate's own session and login-state cookies are no longer
+  forwarded to the upstream of a request the gate admitted; the callback no
+  longer echoes the identity provider's error text.
+- Headers middleware: `removeResponse` and `setResponse` apply to the final
+  response as well as to an interim 1xx (such as 103 Early Hints) that
+  precedes it.
+- ACME: an order refuses an authorization for a name it did not request.
+- Proxy: upstream response headers are capped at 1 MiB (was 10 MiB); bouncer
+  lookups use at most 64 connections per bouncer; the auth-request outpost
+  passthrough uses the same dedicated transport as the auth subrequest.
+- Admin API responses carry `Cache-Control: no-store`.
+- Logs and messages: access-list source logs name the host only, webhook
+  failure logs omit the receiver URL, Docker and Kubernetes API error messages
+  are clipped, Discord notifications never trigger mentions, PROXY-protocol
+  and UDP-denial warnings are logged once per IPv6 /64. Clipped log values no
+  longer end in a partial UTF-8 sequence.
+- A config warning is reported for a proxy host with `tls.minTLSVersion:
+  "1.3"` and `forceSSL` off; Docker discovery skips containers that report a
+  loopback, unspecified or multicast address; config git calls ignore the
+  system git config.
+
 ### Changed
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an
@@ -335,6 +386,26 @@ The non-breaking items of the 2026-11-18 review:
   renders today, or a stored domain is no longer allowed. Before, it froze the
   host with the chain from before the profile change. A host whose chain still matches is frozen as before, and a
   clean derive re-enables it.
+- Open WebSocket and other upgraded connections are closed when a reload
+  removes or disables their host or changes its access configuration (access
+  lists, `auth`, `guard`, `rate-limit` and `bouncer` middlewares, client-
+  certificate settings, trusted proxies), when the SSO session that admitted
+  them expires or is revoked, and when a CRL update revokes their client
+  certificate. Other reloads, including edits to `headers` or `rewrite`
+  middlewares, keep them open. At most 65536 upgraded connections are tracked;
+  past that a new upgrade is refused (#145).
+- Basic auth: the failure table tracks up to 65536 clients per gate, and a
+  client that signed in successfully in the last 24 hours (up to 1024 per
+  gate) is still checked while the table is full; its failures count and a
+  lockout drops it from that list. Other untracked clients are still refused
+  while the table is full (#134).
+- Host and certificate domains must be hostnames (no port, no trailing dot;
+  certificates may use `*.`). A write that adds another spelling is refused; a
+  stored one still loads, is reported as a config warning and stays editable.
+  Revert and restore accept such a state with a warning (#158).
+- Saving an object stored under a file name that is not its own moves it to
+  `<name>.yaml` in the same commit; a write that would overwrite another
+  object's file is refused (#159).
 
 ### Fixed
 
@@ -384,6 +455,14 @@ The non-breaking items of the 2026-11-18 review:
   name git would refuse falls back to the default author), a failed commit no
   longer leaves the written change in the working tree, and history parsing no
   longer drops commits (#160).
+- CrowdSec stream mode: a panic inside the startup pull is handled as a failed
+  pull, so waiting requests are released and the pull is retried after the
+  backoff.
+- A client that disconnects during the first OIDC discovery no longer fails
+  the other requests waiting on it; an admin OIDC login with an oversized
+  return path lands on `/` instead of failing.
+- The upstream-group retry-buffer budget is returned only once the buffered
+  body is no longer being sent.
 
 ## [2.5.0] - 2026-10-20
 

@@ -69,6 +69,13 @@ func TestAdminEdgeHostAndRefs(t *testing.T) {
 	if err := a.ValidateRefs(cfg, "https://gpm.example.com"); err != nil {
 		t.Fatalf("a disabled host does not collide: %v", err)
 	}
+	// A port spelling is the store's domain-key check, not this absolute one,
+	// so a stored host with it does not block every write.
+	cfg.ProxyHosts[0].Disabled = false
+	cfg.ProxyHosts[0].Domains = []string{"gpm.example.com:443"}
+	if err := a.ValidateRefs(cfg, "https://gpm.example.com"); err != nil {
+		t.Fatalf("a port spelling is not an absolute collision: %v", err)
+	}
 	cfg.ProxyHosts = []ProxyHost{{ObjectMeta: ObjectMeta{Name: AdminEdgeHostName}, Domains: []string{"x.example.com"}}}
 	if err := a.ValidateRefs(cfg, "https://gpm.example.com"); err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("reserved name must be refused: %v", err)

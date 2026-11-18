@@ -702,3 +702,47 @@ func TestBroadSourceWithoutMaxCoverageIsAcceptedAndWarned(t *testing.T) {
 		})
 	}
 }
+
+// A source URL may carry a token in its query; refusal log lines name only the
+// host, and a transport failure does not repeat the URL.
+func TestRefusedFetchLogOmitsSourceURLQuery(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		closed bool
+	}{
+		{"http error", false},
+		{"transport error", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Logger
+			log.Logger = zerolog.New(&buf)
+			t.Cleanup(func() { log.Logger = prev })
+
+			ts := serving(t, http.StatusInternalServerError, "")
+			src := model.AccessListSource{Name: "feed", URL: ts.URL + "/list?token=s3cr3t-value"}
+			cfg := model.Config{AccessLists: []model.AccessList{{
+				ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
+				Sources:    []model.AccessListSource{src},
+				Rules:      []model.IPRule{{Action: model.ActionAllow, Source: src.Name, Paths: []string{"/health"}}},
+			}}}
+			s := New(func(context.Context) (model.Config, model.Settings, error) {
+				return cfg, model.Settings{}, nil
+			}, &memLedger{}, nil)
+			s.client = ts.Client()
+			if tt.closed {
+				ts.Close()
+			}
+			_ = s.Reconcile(context.Background())
+			if st := s.Status(); st.Refused != 1 {
+				t.Fatalf("refused = %d, want 1", st.Refused)
+			}
+			if strings.Contains(buf.String(), "s3cr3t-value") || strings.Contains(buf.String(), "/list") {
+				t.Errorf("log line carries the source URL path or query: %s", buf.String())
+			}
+			if !strings.Contains(buf.String(), strings.TrimPrefix(ts.URL, "https://")) {
+				t.Errorf("log line does not name the source host: %s", buf.String())
+			}
+		})
+	}
+}

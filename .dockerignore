@@ -6,6 +6,14 @@
 # Build artifacts / local runtime
 bin/
 data/
+/gpm
+site/
+work/
+
+# Local secrets (compose and test env files)
+.env
+deploy/.env
+test/local.env
 
 # Docs (not needed by the build)
 *.md

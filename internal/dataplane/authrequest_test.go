@@ -185,6 +185,25 @@ func TestAuthRequestOutpostPassthrough(t *testing.T) {
 	}
 }
 
+// The outpost passthrough uses the subrequest's dedicated transport, so neither
+// honours proxy environment variables.
+func TestAuthRequestOutpostPassthroughUsesDedicatedTransport(t *testing.T) {
+	p, err := compileAuthRequest(model.AuthRequestSpec{OutpostURL: "http://outpost.example.com:9000"})
+	if err != nil {
+		t.Fatalf("compileAuthRequest: %v", err)
+	}
+	tr, ok := p.outpost.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		t.Fatalf("outpost passthrough transport = %T, want the dedicated *http.Transport", p.outpost.Transport)
+	}
+	if tr != p.client.Transport {
+		t.Error("outpost passthrough and auth subrequest use different transports")
+	}
+	if tr.Proxy != nil {
+		t.Error("outpost transport honours proxy environment variables")
+	}
+}
+
 func TestAuthRequestAllowFromBypass(t *testing.T) {
 	// satisfy any; allow <LAN>; deny all + forward-auth: LAN clients skip SSO.
 	stub := &outpostStub{authStatus: http.StatusUnauthorized}

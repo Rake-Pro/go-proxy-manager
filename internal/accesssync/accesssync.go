@@ -542,14 +542,14 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 				st.Refused++
 				ss.LastError = err.Error()
 				st.Sources = append(st.Sources, ss)
-				log.Warn().Err(err).Str("accessList", al.Name).Str("source", src.Name).Str("url", src.URL).
+				log.Warn().Err(err).Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
 					Msg("accesssync: refused a source fetch; keeping the previously fetched set")
 				continue
 			}
 			// Success: this is what starts the interval clock (see due()).
 			s.markAttempt(key, now)
 			if src.MaxCoverage == nil && checkCoverage(entryNets(fetched), model.BroadAccessListSourceCoverageV4, model.BroadAccessListSourceCoverageV6) != nil {
-				log.Warn().Str("accessList", al.Name).Str("source", src.Name).Str("url", src.URL).
+				log.Warn().Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
 					Msg("accesssync: access-list source is broad (more than one /8 of IPv4 or one /24 of IPv6 in total) and has no maxCoverage; set maxCoverage on the source to bound it")
 			}
 			hash := model.AccessListSourceHash(key, src.URL, fetched)
@@ -659,6 +659,12 @@ func (s *Syncer) fetch(ctx context.Context, src model.AccessListSource) ([]strin
 	req.Header.Set("Accept", "text/plain")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// The *url.Error text repeats the full source URL, whose query may
+		// carry a token; the log line and status keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("fetch from %s: %w", u.Host, ue.Err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -682,6 +688,16 @@ func (s *Syncer) fetch(ctx context.Context, src model.AccessListSource) ([]strin
 		return nil, err
 	}
 	return entries, nil
+}
+
+// sourceHost is the host part of a source URL, for log lines: the path and
+// query of a feed URL may carry a token.
+func sourceHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // entryNets parses parseEntries' normalised CIDR strings.

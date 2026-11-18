@@ -10,7 +10,7 @@ object carries exactly one `type` and its matching spec.
 | `auth` | AuthMiddleware | Require authentication. |
 | `headers` | HeadersMiddleware | Add/remove request/response headers. |
 | `guard` | GuardMiddleware | Conditionally deny requests. |
-| `rate-limit` | RateLimitMiddleware | Per-host rate limiting. |
+| `rate-limit` | RateLimitMiddleware | Per-client rate limiting, per route or per host (`scope`). |
 | `rewrite` | RewriteMiddleware | Request-path replacement (upstream-facing): exact, prefix or regex rules. |
 | `bouncer` | BouncerMiddleware | Deny hook: ask an external bouncer (CrowdSec LAPI or any HTTP endpoint) whether the client IP is banned. |
 
@@ -80,7 +80,12 @@ A route whose gate spec differs, or a deprecated access-list `basicAuth` next to
 the gate, has its own budget. It also
 survives a config reload as long as the gate's own spec (credentials, realm,
 `allowFrom`) is unchanged; a changed spec, a restart or removing the host starts
-it fresh. What it adds is the treatment every other
+it fresh. The failure table tracks at most 65536 clients per gate. While it is
+full of clients with recent failures, a client it does not track is refused
+(fail closed), except a client that authenticated successfully through this
+gate in the last 24 hours (the gate remembers the 1024 most recent): it is
+still checked and its failures still count, and reaching the lockout drops it
+from that list. What it adds is the treatment every other
 auth mode has: it sits at the auth position of the chain (so a rate limit, an
 access list and a bouncer all still run outside it), the host's custom error pages
 render the refusal, denials are counted, and `allowFrom` exempts trusted networks.
@@ -127,6 +132,21 @@ the IdP. The signing key is auto-generated and persisted at
 `<cert-dir>/sso_signing.key` (0600) on first use, so sessions survive restarts
 without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
 own key (useful when rotating or sharing a key across instances).
+
+After a login the upstream receives `X-Forwarded-User` (the `email` claim, or the
+subject when the token has no email), `X-Forwarded-Email` and
+`X-Forwarded-Groups`. By default the email is asserted whether or not the IdP
+verified it. If an upstream keys accounts on either header and the IdP lets
+users change their own email, set the provider's
+[`oidc.requireVerifiedEmail`](identity-provider.md#identity-provider-oidc-require-verified-email):
+a login whose ID token lacks `email_verified: true` is then refused at the
+callback with `401` and the message "sign-in refused: the identity provider has
+not verified the email address of this account", so no session is issued and no
+unverified email reaches the upstream. A gate session issued without a
+verified email (before the option was turned on, or by an earlier release) is
+not accepted while the option is on: the user goes back through sign-in. The
+setting is per provider and also applies to admin sign-in through that
+provider.
 
 ## HeadersMiddleware (`headers`)
 
@@ -263,11 +283,16 @@ rewrite:
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 | <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
 | <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
+| <span id="middleware-rate-limit-scope"></span>  `scope` | string | `route` | no | `route` or `host`. Which requests share one budget per client: `route` gives the host route and every location its own; `host` makes the host route and all of its locations draw on one. Not allowed on a location's own inline block. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
-Enforced as a per-host, per-client-IP token bucket (capacity = `burst`, refill
-= `requests`/`window` in tokens/sec). Over-limit requests get `429 Too Many
+Enforced as a per-route, per-client-IP token bucket (capacity = `burst`, refill
+= `requests`/`window` in tokens/sec). By default every route of a host (the
+host route and each location prefix) has its own bucket per client, so a client
+spreading requests over N location prefixes gets up to N+1 times the rate; set
+`scope: host` to make one bucket per client cover the host and all of its
+locations. A location's own extra limit always applies to that location only. Over-limit requests get `429 Too Many
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
 request is not proxied. The bucket is keyed on the derived client IP, with an
@@ -365,8 +390,11 @@ keeping the banned IPs and CIDR ranges in memory, so the request hot path never
 calls the LAPI at all. The startup pull runs again for each config reload
 (the set is rebuilt with the chain). One request runs it, and every request
 that arrives meanwhile waits for it, at most `timeout`, and then gets the real
-verdict; only a request still waiting after `timeout` takes the `onError` path,
-and that verdict is not cached. A failed startup pull is retried after a
+verdict; a request still waiting after `timeout` takes the `onError` path,
+and that verdict is not cached. When the startup pull itself fails (the LAPI
+errors or does not answer within `timeout`), the requests that waited for it
+take `onError` too, and that verdict is cached like any error verdict (at most
+`5s`). A failed startup pull, including one that panicked, is retried after a
 backoff (1s, doubling up to `cacheTTL`), and requests inside the backoff take
 `onError` at once.
 Refreshes happen in the background while the current set keeps serving, and a

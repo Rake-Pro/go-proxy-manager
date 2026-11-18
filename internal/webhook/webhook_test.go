@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // waitDrained blocks until every currently in-flight delivery goroutine has
@@ -410,5 +413,31 @@ func TestTransportErrorOmitsReceiverURL(t *testing.T) {
 		if strings.Contains(dl.Error, secretPath) {
 			t.Fatalf("status error repeats the receiver URL: %q", dl.Error)
 		}
+	}
+}
+
+func TestDeliveryFailureLogOmitsReceiverURL(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = prev })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	const secretPath = "hooks/123/receiver-path-token"
+	d := New(func() []model.WebhookConfig {
+		return []model.WebhookConfig{{Name: "down", URL: "http://" + addr + "/" + secretPath}}
+	})
+	d.Dispatch(Event{Action: "save", Kind: "ProxyHost", Name: "app"})
+	waitDrained(t, d)
+	if !strings.Contains(buf.String(), "webhook: delivery failed") {
+		t.Fatalf("no delivery-failure log line: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), secretPath) {
+		t.Errorf("delivery-failure log repeats the receiver URL: %s", buf.String())
 	}
 }

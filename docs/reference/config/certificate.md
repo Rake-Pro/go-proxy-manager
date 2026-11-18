@@ -3,7 +3,7 @@
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | <span id="certificate-type"></span> `type` | string | yes | `custom` or `acme`. |
-| <span id="certificate-domains"></span> `domains` | []string | yes | Domains the cert covers (`*.example.com` for wildcard). |
+| <span id="certificate-domains"></span> `domains` | []string | yes | Domains the cert covers (`*.example.com` for wildcard). Each must be a hostname, optionally with a leading `*.`: no port, no trailing dot. A write that adds another spelling is refused; a stored one loads with a config warning. |
 | <span id="certificate-acme"></span> `acme` | ACMESpec | when `type: acme` | |
 | <span id="certificate-custom"></span> `custom` | CustomCertSpec | when `type: custom` | |
 

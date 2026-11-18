@@ -17,6 +17,8 @@ backend is dialled.
 | <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme: a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | <span id="stream-host-tls"></span>  `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
 | <span id="stream-host-access-lists"></span>  `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
+| <span id="stream-host-idle-timeout"></span>  `idleTimeout` | string | no | **TCP only.** Go duration (`"10m"`, `"1h"`). A connection that carries no data in either direction for this long is closed. Unset: no idle limit, a connection lasts until one side closes it. |
+| <span id="stream-host-max-conns-per-source"></span>  `maxConnsPerSource` | int | no | **TCP only.** Open connections one client address (IPv6 by /56, as the UDP per-source cap) may hold to this host. A connection over the cap is closed after the access-list check and before the backend is dialled. Unset or `0`: no cap. |
 
 ```yaml
 name: postgres
@@ -62,10 +64,18 @@ For UDP the list is evaluated once per session (the first packet from a source);
 a denied source creates no session and no upstream socket. Geo rules follow the
 same fail-closed rule as HTTP: with geo configured and no GeoIP database loaded,
 the port denies.
+UDP has no handshake, so a source address is not proven: a sender can put an
+allowed address on its datagrams and reach the backend one way (replies go to
+the real owner of that address). Treat a UDP access list as noise reduction,
+not authentication, for a service that acts on single datagrams.
 
 Behind an L4 balancer, enable `settings.proxyProtocol`, otherwise every
 connection looks like it came from the balancer and the rules match the wrong
 address.
+
+TCP limits are off unless set (`idleTimeout`, `maxConnsPerSource`, above);
+both are rejected on a `protocol: udp` host and apply to the TCP side of
+`both`.
 
 UDP session limits apply independently of any access list:
 

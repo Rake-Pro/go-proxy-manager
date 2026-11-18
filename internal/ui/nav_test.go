@@ -134,3 +134,23 @@ func TestParkedHostsSitInTheHostsGroup(t *testing.T) {
 		t.Error("Parked Hosts must follow Redirects inside the Hosts group")
 	}
 }
+
+// route() decodes the hash's second segment inside a try: a malformed escape
+// such as "#/hosts/%E0" must not throw before any view renders.
+func TestRouteDecodesHashSegmentSafely(t *testing.T) {
+	js := navBundle(t)
+	start := strings.Index(js, "async function route() {")
+	if start < 0 {
+		t.Fatal("app.js has no route() function")
+	}
+	body := js[start:]
+	if end := strings.Index(body, "\n}\n"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "try { sub = decodeURIComponent(parts[1]); } catch (e) { sub = parts[1]; }") {
+		t.Error("route() decodes the hash segment outside a try/catch")
+	}
+	if strings.Contains(body, "parts[1] ? decodeURIComponent(parts[1])") {
+		t.Error("route() still has an unguarded decodeURIComponent of the hash segment")
+	}
+}

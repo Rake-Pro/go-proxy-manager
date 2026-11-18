@@ -302,6 +302,8 @@ func main() {
 	// server's login and TOTP lockout buckets key on the same derivation, so an
 	// admin UI fronted by a gpm proxy host still throttles per real client.
 	dataplane.SetTrustedProxies(settings.TrustedProxies)
+	// Optional per-client in-flight request limit; nil (the default) sets none.
+	dataplane.SetClientLimits(settings.ClientLimits)
 	if adminEdgeHopUntrusted(settings, *adminAddr) {
 		log.Warn().Msg("settings.adminEdge is enabled but settings.trustedProxies does not cover the loopback hop to the admin listener: every request through the edge shares one client address for the local-login lockout; add 127.0.0.1/32 and ::1/128 to settings.trustedProxies")
 	}
@@ -443,6 +445,7 @@ func main() {
 		// The L7 trusted-proxy set, refreshed before the compile so the router
 		// build picks up the new set (see the initial load).
 		dataplane.SetTrustedProxies(st2.TrustedProxies)
+		dataplane.SetClientLimits(st2.ClientLimits)
 		// Same reasoning as the initial load: compile the settings-level error
 		// pages before the data plane, so a template that fails to parse fails
 		// the whole reload with a clear message rather than serving half of a

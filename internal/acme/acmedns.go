@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -69,6 +71,9 @@ func NewACMEDNSSolver(cfg ACMEDNSConfig, opts ...ACMEDNSOption) (*ACMEDNSSolver,
 	}
 	if err := model.ValidateOutboundBaseURL("acme-dns: baseURL", base, cfg.AllowInsecureLocal); err != nil {
 		return nil, err
+	}
+	if u, err := url.Parse(base); err == nil && u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		log.Warn().Str("host", u.Host).Msg("acme-dns: baseURL is plain http; the X-Api-User and X-Api-Key credentials are sent unencrypted, use an https URL")
 	}
 	user := strings.TrimSpace(cfg.Username)
 	if user == "" {
@@ -146,4 +151,13 @@ func (s *ACMEDNSSolver) checkDelegation(ctx context.Context, name string) {
 	}
 	log.Warn().Str("record", name).Str("cname", target).Str("subdomain", s.subdomain).
 		Msg("acme-dns: challenge name is not delegated to this acme-dns account; add a CNAME from it to <subdomain>.<acme-dns zone>")
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP literal.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
