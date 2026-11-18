@@ -67,6 +67,7 @@ supported home for this is an auth middleware in `basic` mode; the
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| Write refused: `the request carries N plaintext passwords` | One write set more than 64 plaintext passwords across the host block and its locations | Split the change over several writes, or send `passwordHash` for users whose password does not change |
 | Write refused: hash is not bcrypt | `passwordHash` is not a 60-character `$2a$`/`$2b$`/`$2y$` string | Regenerate with `htpasswd -nbB`, or POST a plaintext `password` field instead |
 | A LAN client is still prompted | The LAN CIDR is not in `allowFrom`, or the compared address is the proxy's | Add the CIDR, and declare any L7 proxy in `settings.trustedProxies` |
 | The browser never prompts | Something ahead of gpm strips `WWW-Authenticate`, or the host also strips it | Check `stripResponseHeaders` does not list `WWW-Authenticate` |

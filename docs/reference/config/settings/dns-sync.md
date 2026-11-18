@@ -58,6 +58,7 @@ Per desired record, on every run:
 | **created by gpm**, still holding the target gpm wrote, but `apexTarget` has since changed | **retarget**: replace it and update the ledger (the replacement is again a record gpm created) |
 | **adopted**, and `apexTarget` has since changed | **released, not retargeted**: the claim is dropped and the record left exactly where it is (logged at warn, counted as a skip) |
 | present, different target, not owned | **skip and warn**: never shadowed, never replaced |
+| Pi-hole only: no CNAME, but a local host record (`dns.hosts`) for the name | **skip and warn**: the name already resolves locally, so no CNAME is added next to it |
 | in the ledger as **created by gpm**, no longer desired | **delete**, and drop from the ledger (logged at warn, with the ledger revision that authorised it) |
 | in the ledger as **adopted**, no longer desired | **released, not deleted**: the claim is dropped and the record left exactly where it is (logged at warn) |
 | **not in the ledger** | **never deleted**, whatever it points at |
@@ -86,6 +87,8 @@ the comment (re-checked inside the delete call itself). Adoption likewise only
 claims records that already carry the comment; a record with the right content
 but no comment is somebody else's and is skipped. Pi-hole/dnsmasq CNAMEs have no
 comment field at all, which is exactly why the ledger exists.
+Pi-hole sync also reads the local host records (`config.dns.hosts`); a run whose
+response carries no such list fails rather than treating every name as free.
 
 **Enabling a backend for the first time is safe, and previewable.** With an empty
 ledger gpm owns nothing, so it can only create and adopt: records matching the

@@ -23,9 +23,13 @@ The traffic analytics collector behind the Analytics view and `GET /api/analytic
   A report sums the sources it asks for.
 - Every key set is capped: 512 hosts, two sources per host, 64 signature labels per
   host, source and hour (the rest fold into `other`), 8 countries per label, 512 client
-  addresses per host, source and hour (once reached, later new addresses are not
-  tracked for that hour), countries by the ISO list (a report shows the top 30 plus
-  one `Other` row). Path, query and User-Agent are never stored.
+  addresses per host, source and hour (once reached, a new address replaces the
+  one with the fewest requests, so one-hit addresses cannot crowd out a heavy
+  client), countries by the ISO list (a report shows the top 30 plus
+  one `Other` row). Path, query and User-Agent are never stored; a queued event
+  carries them clipped to what the classifier reads (2048, 512 and 512 bytes).
+- Reports are built one at a time and cached: 5 s for `1h`, `6h` and `24h`, 30 s
+  for `7d` and `30d`. A refresh within that time returns the same report.
 - Closed hours are written to the rollup database (`-analytics-db` /
   `GPM_ANALYTICS_DB`, default `/data/analytics.db`, same hardening as the session
   database): totals, status classes, latency buckets, denial reasons, countries,

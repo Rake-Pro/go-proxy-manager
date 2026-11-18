@@ -25,8 +25,8 @@ accessListSync:
 `pollInterval` is not how often a feed is downloaded: each source's own
 `interval` (default `24h`) decides that, so polling often is cheap. A fetch is
 **refused whole**, keeping the previously fetched set, when the source answers
-anything but `200`, returns no valid entries, returns more than `maxEntries`, or
-contains a single line that is neither a comment nor a valid IP/CIDR. Refusals
+anything but `200`, returns no valid entries, returns more than `maxEntries`,
+covers more address space than the source's `maxCoverage` (when set), or contains a single line that is neither a comment nor a valid IP/CIDR. Refusals
 are counted and named in `GET /api/access-list-sources/status`.
 
 Only the **leader** fetches (the ledger is a config-repo commit); a follower

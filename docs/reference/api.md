@@ -25,7 +25,7 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
 | `*:read` | Every read, including whole-config reads (`/api/config`, `/api/history`, `/api/logs`, `/api/upstream-health`, `/api/analytics`) |
 | `*:write` | Every read and write, except the `admin`-only routes below |
 | `metrics:read` | `GET /metrics` only, and nothing else |
-| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, every write on `/api/dns-providers` and `/api/identity-providers`, a bouncer middleware write that creates, or changes the `url` or `apiKey` of, a bouncer whose `apiKey` is a placeholder, `POST /api/middlewares/{name}/revert` (a revert restores a stored bouncer without that check), `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
+| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, every write on `/api/dns-providers` and `/api/identity-providers`, a bouncer middleware write that creates, or changes the `url` or `apiKey` of, a bouncer whose `apiKey` is a placeholder, `POST /api/middlewares/{name}/revert` (a revert restores a stored bouncer without that check), `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `POST /api/sessions/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
 
 Why the two provider kinds are admin-only: a DNS provider pairs a
 `${ENV:...}` / `${FILE:...}` credential with an API endpoint, so whoever can

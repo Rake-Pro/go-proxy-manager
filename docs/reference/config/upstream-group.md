@@ -85,9 +85,11 @@ Semantics worth knowing:
   count toward `fall`, so a dead upstream is skipped quickly even between probes.
 - **Fail-open**: with every upstream marked down, requests are still attempted in
   preference order rather than rejected outright.
-- **Request bodies up to 1 MiB are buffered** so a failover retry can replay
+- **Request bodies up to 64 KiB are buffered** so a failover retry can replay
   them; a larger body streams and gets a single attempt at the preferred
-  (healthiest) upstream.
+  (healthiest) upstream. So does a body that has not ended 5 s after gpm
+  started reading it (checked each time more of it arrives), and a body whose
+  buffer would take the replay buffers held process-wide past 32 MiB.
 - A `disabled` group cannot be referenced by an enabled host (validation error).
 - Live health is exposed at `GET /api/upstream-health`
   (`{"<group>": [{"upstream": "http://192.0.2.11:80", "healthy": true, "weight": 1, "active": 0}, ...]}`,

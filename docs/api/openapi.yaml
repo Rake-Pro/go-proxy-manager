@@ -1429,6 +1429,22 @@ components:
           type: integer
           description: Cap on how many networks the feed may carry. 0 means 10000; a body with more is
             refused whole.
+        maxCoverage:
+          type: object
+          description: Optional total address space the feed's entries may cover, summed per family,
+            written as prefix-length equivalents. Absent means no total budget (the per-entry rules still
+            apply); when set, a family left at 0 means one /8 of IPv4 or one /24 of IPv6, and a smaller
+            number allows more. A body over either budget is refused whole, and a stored set over it
+            matches nothing.
+          properties:
+            ipv4:
+              type: integer
+              minimum: 0
+              maximum: 32
+            ipv6:
+              type: integer
+              minimum: 0
+              maximum: 64
       required:
       - name
       - url
@@ -3253,7 +3269,7 @@ paths:
     post:
       summary: Fetch every due access-list source now
       description: 'Synchronous. Never queues: a run already in flight answers 409 instead of blocking.
-        A source whose fetch is refused (non-200, empty body, over maxEntries, any unparseable line)
+        A source whose fetch is refused (non-200, empty body, over maxEntries or maxCoverage, any unparseable line)
         keeps its previously fetched set.'
       tags:
       - Access lists
@@ -6198,6 +6214,39 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
       x-scope: settings:read
+  /api/sessions/revoke:
+    post:
+      summary: End every admin session except the caller's own
+      description: Deletes every admin panel session from this instance's session store; the caller's
+        own session (if it is one) is kept, and a token caller ends them all. Use it after withdrawing
+        someone's admin access or when an admin cookie may have leaked. Sessions are per instance, so
+        this also works on an HA follower; run it on each instance.
+      tags:
+      - Meta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - revoked
+                  revoked:
+                    type: integer
+                    description: Number of sessions ended.
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-scope: admin
   /api/settings:
     get:
       summary: Get the singleton application settings

@@ -63,7 +63,8 @@ settings-level pages outright.
 
 | Moment | Behaviour |
 |---|---|
-| Settings write | An `inline` template that does not parse is **rejected**, so it never commits. |
+| Settings write | An `inline` template that does not parse, or whose source is over 256 KiB, is **rejected**, so it never commits. |
+| Request | A page whose rendered output would pass 1 MiB stops rendering at that size; gpm serves its built-in response instead (for `interceptUpstream`, the upstream's own body passes through) and logs the template error. |
 | Config reload | A parse error (or an unreadable `dir`) **fails the reload** with a clear message; the previously compiled pages stay installed. |
 | Startup | A `dir` template that broke out of band is logged as a **warning** and gpm starts with its built-in error output; it never refuses to boot over an error page. |
 

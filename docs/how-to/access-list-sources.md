@@ -128,8 +128,9 @@ nothing.
 
 **Refusals fail closed.** A fetch is rejected **whole** (keeping whatever was
 fetched before) when the source answers anything but `200`, returns no valid
-entries, returns more than `maxEntries` (default 10000), sends a body over 1 MiB,
-or contains a single line that is neither a comment nor a valid IP/CIDR. A feed
+entries, returns more than `maxEntries` (default 10000), covers more address
+space than `maxCoverage` (only when set on the source), sends a body
+over 1 MiB, or contains a single line that is neither a comment nor a valid IP/CIDR. A feed
 that changed shape is a feed gpm no longer understands; keeping the subset it
 still parses would be a silent, partial allow list.
 
@@ -149,6 +150,26 @@ carries (loopback, link-local, RFC1918, ULA, CGNAT `100.64.0.0/10`, multicast,
 or fat-fingered `0.0.0.0/0` would pass every other check (valid CIDR, HTTP 200,
 under `maxEntries`) and a source rule with no `paths` would then allow the
 entire internet.
+
+**What a feed may cover in total.** Every entry can be acceptable on its own
+while the feed as a whole names most of the internet (two hundred public /8s
+pass the per-entry rules). Setting `maxCoverage` on a source bounds that: the
+entries are summed per family and the fetch is refused when they exceed the
+budget. `maxCoverage: {}` allows as many addresses as one IPv4 /8 (16,777,216)
+and one IPv6 /24 (256 /32s), which fits monitoring and CDN feeds; a feed that
+legitimately publishes more (a cloud provider's whole range list) sets
+`maxCoverage: {ipv4: 4}` or similar. Overlapping entries count twice. A source
+**without** `maxCoverage` has no total budget (the per-entry rules above still
+apply), and a fetch that covers more than one /8 of IPv4 or one /24 of IPv6 logs
+a `WARN` (`access-list source is broad ... set maxCoverage on the source to bound
+it`). See the [AccessList reference](../reference/config/access-list.md#access-list-sources-max-coverage).
+
+**Stored sets are re-checked.** The data plane applies both rules again when it
+compiles the ledger: a stored entry the entry rules refuse is dropped and
+logged, and a stored set over its `maxCoverage` matches nothing. A set stored
+before a rule existed therefore stops being served at once, even though a
+refused fetch keeps it in the ledger. A set that matches nothing also stops a
+`deny` rule that references it from denying.
 
 **SSRF guard.** A source URL must be `https`, redirects are never followed, **no
 proxy is honoured** (`HTTP_PROXY`/`HTTPS_PROXY` are deliberately ignored on this
@@ -190,8 +211,10 @@ list is being served from a set that is no longer being refreshed.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `refused > 0` in the status | The feed answered non-`200`, was empty, exceeded `maxEntries`, sent over 1 MiB, or held one unparseable line. A fetch is refused **whole** | Fix the feed; the previously fetched set keeps serving, and the retry is on the next poll tick rather than after the source's own interval |
+| `refused > 0` in the status | The feed answered non-`200`, was empty, exceeded `maxEntries` or `maxCoverage`, sent over 1 MiB, or held one unparseable line. A fetch is refused **whole** | Fix the feed; the previously fetched set keeps serving, and the retry is on the next poll tick rather than after the source's own interval |
 | A `source` rule matches nothing | The source has never been fetched, so it resolves to the **empty set** | Trigger a reconcile and check `fetchedAt`; an unfetched feed can never widen access |
+| `coverage budget` in `lastError`, or the log says the stored set is over its coverage budget | The source sets `maxCoverage` and the feed's entries together cover more (a family left at `0` allows one /8 of IPv4 or one /24 of IPv6) | If the feed really publishes that much, raise `maxCoverage` on the source; otherwise take it up with the feed publisher |
+| The log says `access-list source is broad` | The source has no `maxCoverage` and its feed covers more than one /8 of IPv4 or one /24 of IPv6 in total. The feed is still served | If the feed should be that large, nothing to do; to bound it, set `maxCoverage` on the source with room for what it publishes |
 | The whole fetch is refused over one line | The feed carries a default route, a prefix broader than `/8` (v4) or `/32` (v6), or a non-public address | That bound is deliberate: one hijacked `0.0.0.0/0` would otherwise allow the internet. Take it up with the feed publisher |
 | Config write refused: `sources: source "name" url must be an absolute https URL` | `http` source URLs are refused | Use the `https` endpoint |
 | Config load fails on the source ledger | `config/access-list-sources.yaml` was hand-edited; each entry carries a `sha256` over its set | Never hand-edit it: revert the file and let the fetcher rewrite it |
