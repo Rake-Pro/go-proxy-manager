@@ -4,7 +4,7 @@ Issues HTTP redirects.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="redirect-host-domains"></span>  `domains` | []string | yes | Source hostnames. |
+| <span id="redirect-host-domains"></span>  `domains` | []string | yes | Source hostnames, with the same rules as [ProxyHost `domains`](proxy-host.md#proxy-host-domains). |
 | <span id="redirect-host-target-domain"></span>  `targetDomain` | string | yes | Where to redirect. |
 | <span id="redirect-host-target-scheme"></span>  `targetScheme` | string | no | `http` \| `https` \| `auto`. Unset behaves as `auto`, which mirrors the scheme the request arrived on. |
 | <span id="redirect-host-status-code"></span>  `statusCode` | int | no | `301` \| `302` \| `307` \| `308`. Unset (or `0`) sends `301`. |

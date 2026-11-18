@@ -10,6 +10,7 @@ has its own reference page; the complete example at the end shows them together.
 | General | `schemaVersion`, `appName`, `externalBaseURL` | [General](general.md) |
 | Admin authentication | `adminAuth.*` | [Admin authentication](admin-auth.md) |
 | Trusted proxies | `trustedProxies` | [Trusted proxies](trusted-proxies.md) |
+| Client limits | `clientLimits.*` | [Client limits](client-limits.md) |
 | TLS | `tls.minVersion` | [TLS](tls.md) |
 | Security headers | `securityHeaders`, `stripResponseHeaders` | [Security headers](security-headers.md) |
 | Error pages | `errorPages` | [Error pages](error-pages.md) |
@@ -37,6 +38,8 @@ adminAuth:
   ssoOnly: false
 tls:
   minVersion: "1.2"                 # fleet floor; a host may pin "1.3" (or back to "1.2")
+clientLimits:
+  maxInFlight: 256                  # requests in progress per client address; absent = no limit
 webhooks:
   - name: ci
     url: https://hooks.example.com/gpm

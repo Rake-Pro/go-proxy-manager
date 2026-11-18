@@ -39,6 +39,10 @@ it can start a privileged container and own the host. Pick one of:
 
 **Never publish the raw socket over plain `tcp://`**: that hands the credential
 to anyone who can reach the port.
+A plain `tcp://` endpoint carries no authentication or integrity either: use it
+only to a socket proxy on a private container network that nothing else can
+join. Across any routed network use `https://` with `tlsCA`, because whoever can
+alter that traffic decides which containers and labels gpm sees.
 
 ```yaml
 services:

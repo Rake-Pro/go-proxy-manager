@@ -600,6 +600,16 @@ components:
             basicAuth users is rejected.'
           items:
             type: string
+        idleTimeout:
+          type: string
+          description: TCP only. Go duration; a connection that carries no data in either direction
+            for this long is closed. Unset means no idle limit.
+        maxConnsPerSource:
+          type: integer
+          minimum: 0
+          description: TCP only. Open connections one client address (IPv6 by /56) may hold to this
+            host; a connection over the cap is closed before the backend is dialled. 0 or unset means
+            no cap.
       required:
       - name
       - listenPort
@@ -1651,6 +1661,14 @@ components:
         blockMax:
           type: string
           description: Go duration capping a backed-off block. Default 24h. Must be at least blockFor.
+        scope:
+          type: string
+          enum:
+          - route
+          - host
+          description: Which requests share one budget per client. route (the default) gives the host
+            route and every location its own; host makes the host route and all of its locations share
+            one. Not allowed on a location's own inline block.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
     RewriteRule:
@@ -2170,6 +2188,8 @@ components:
           $ref: '#/components/schemas/DNSSyncSettings'
         proxyProtocol:
           $ref: '#/components/schemas/ProxyProtocolSettings'
+        clientLimits:
+          $ref: '#/components/schemas/ClientLimitsSettings'
         trustedProxies:
           type: array
           items:
@@ -2312,6 +2332,26 @@ components:
               gpm-generated and proxied upstream responses; "generated-only" only
               responses gpm writes itself (never a proxied app); "proxied-only"
               only proxied upstream responses.
+    ClientLimitsSettings:
+      type: object
+      description: 'Optional per-client limit on requests in progress at once on the
+        HTTP/HTTPS proxy listeners. Absent (default): no limit. The client is the
+        derived client IP (trustedProxies applies), IPv6 grouped per /64. An open
+        upgraded connection counts while it is open. Over the limit a request is
+        refused with 429 and counted with the denial reason in-flight-limit.'
+      properties:
+        maxInFlight:
+          type: integer
+          minimum: 0
+          maximum: 1048576
+          description: Requests one client address may have in progress at a time.
+            0 (default) sets no limit.
+          example: 256
+        allowFrom:
+          type: array
+          description: CIDRs or bare IPs that are never limited.
+          items:
+            type: string
     ProxyProtocolSettings:
       type: object
       description: 'Inbound HAProxy PROXY protocol (v1 and v2) on the HTTP/HTTPS proxy

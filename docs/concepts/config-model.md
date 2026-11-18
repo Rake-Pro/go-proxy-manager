@@ -128,6 +128,18 @@ are exempt: they are excluded from the running proxy listeners entirely, so stag
 replacement host beside the live one stays legal: enable the new one in the same
 change that disables the old one.
 
+- **Domains are hostnames.** Every host domain must be a hostname: letters,
+  digits and hyphens in dot-separated labels, with no port and no trailing dot
+  (case and surrounding space are ignored). Certificate domains may also start
+  with `*.`. A write that adds any other spelling is refused
+  (`proxy host "a": domains: "a.example.com:8443" must be a hostname ...`).
+- **Stored domains keep loading.** A domain stored before this rule (or by a
+  hand edit) loads and is reported as a config warning. Its object stays
+  editable: an edit that keeps or removes the domain is accepted, one that adds
+  another invalid domain is refused. A revert, scoped revert or restore to a
+  state that holds such a domain is accepted and logs a warning, so a rollback
+  is never blocked by it.
+
 ## Writes must compile
 
 Every write that can add or change an object (save, batch, discovery apply,
@@ -141,8 +153,13 @@ and changes nothing that is running.
   writes are accepted with a logged warning, so the edit that fixes it can land.
 - **Deletes are never refused** by this check.
 - **File names.** An object file whose `name` is not its file name still loads
-  and is reported as a config warning; rename the file to `<name>.yaml`. A
-  restore archive may only carry kind files named after a valid object name.
+  and is reported as a config warning. The next save of that object (editor,
+  batch or discovery) writes it to `<name>.yaml` and removes the old file in the
+  same commit; renaming the file by hand works too. gpm never picks between two
+  files that hold the same name (that is a duplicate-name validation error to
+  merge by hand), and a write whose `<name>.yaml` holds another object is
+  refused until that object is saved. A restore archive may only
+  carry kind files named after a valid object name.
 
 ## Secrets
 

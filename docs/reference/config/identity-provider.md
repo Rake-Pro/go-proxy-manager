@@ -17,7 +17,7 @@
 | <span id="identity-provider-oidc-client-secret"></span>  `clientSecret` | Secret | none | no | Client secret, as a `${ENV:...}` / `${FILE:...}` placeholder. Omit it for a public client relying on PKCE alone. |
 | <span id="identity-provider-oidc-scopes"></span>  `scopes` | []string | `openid profile email groups` | no | Scopes requested in the authorization request. |
 | <span id="identity-provider-oidc-use-pkce"></span>  `usePKCE` | bool (nullable) | `true` | no | Send a PKCE code challenge. Omitted means on; set `false` only for an IdP that rejects it. |
-| <span id="identity-provider-oidc-require-verified-email"></span>  `requireVerifiedEmail` | bool | `false` | no | Refuse a login whose ID token does not carry `email_verified: true`. |
+| <span id="identity-provider-oidc-require-verified-email"></span>  `requireVerifiedEmail` | bool | `false` | no | Refuse a login whose ID token does not carry `email_verified: true`. Applies to admin sign-in and to every `mode: oidc` gate using this provider, so an unverified email is never asserted upstream as `X-Forwarded-User` / `X-Forwarded-Email`; the gate answers such a login with `401` and a message saying the email is not verified. With the option on, a gate session issued without a verified email (before the option was turned on, or by an earlier release) is sent back through sign-in. See [AuthMiddleware](middleware.md#authmiddleware-auth). |
 
 ## ForwardAuthSpec (`forwardAuth`)
 

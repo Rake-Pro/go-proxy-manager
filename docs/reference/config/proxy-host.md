@@ -4,7 +4,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| <span id="proxy-host-domains"></span>  `domains` | []string | yes | One or more hostnames served by this host. |
+| <span id="proxy-host-domains"></span>  `domains` | []string | yes | One or more hostnames served by this host: letters, digits and hyphens in dot-separated labels, no port, no trailing dot, no wildcard. A write that adds another spelling is refused; a stored one loads with a config warning. See [Domains are exclusive](../../concepts/config-model.md#domains-are-exclusive). |
 | <span id="proxy-host-upstream"></span>  `upstream` | Upstream | one of | Default backend (single). Mutually exclusive with `upstreamGroupRef`. |
 | <span id="proxy-host-upstream-group-ref"></span>  `upstreamGroupRef` | string | one of | Name of an [UpstreamGroup](upstream-group.md) for health-checked failover across several backends. Mutually exclusive with `upstream`. |
 | <span id="proxy-host-robots-no-index"></span>  `robotsNoIndex` | bool | no | Emit `X-Robots-Tag: noindex, nofollow` (HTTP and HTTPS) to discourage search-engine indexing. A headers middleware that sets `X-Robots-Tag` explicitly still wins. |
@@ -151,7 +151,7 @@ than replacing it, so a location is always at least as restrictive as its host.
 | <span id="proxy-host-locations-access-lists"></span>  `accessLists` | []string | none | no | Access-list names checked in addition to the host's. |
 | <span id="proxy-host-locations-access-lists-mode"></span>  `accessListsMode` | string | `all` | no | How this location's own `accessLists` combine: `all` or `any`, same rules as the host field. The host's lists stay a separate group under the host's mode and both groups must pass, so a mode on one level never opens the other. |
 | <span id="proxy-host-locations-auth"></span>  `auth` | AuthMiddleware | none | no | Inline auth gate for this path, stacked on top of the host's (below). |
-| <span id="proxy-host-locations-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | none | no | Inline rate limit for this path, stacked on top of the host's (below). |
+| <span id="proxy-host-locations-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | none | no | Inline rate limit for this path, stacked on top of the host's (below). `scope: host` is refused here: this block applies to the location only. |
 
 `stripPrefix` is applied **inside** the whole security chain: rate limiting, the
 access list, the bouncer, auth and guards all still evaluate the original client
@@ -231,7 +231,7 @@ the middleware of that kind, so behaviour, metrics and error pages are identical
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `auth` | AuthMiddleware | none | no | Identical to a `type: auth` middleware's `auth` spec: `identityProvider`, `mode`, `requiredRoles`, `allowFrom`, `clientCertRoles`, `basic`. **Every mode works inline, `basic` included**, so `auth.basic.realm` and `auth.basic.users[].username`/`.passwordHash` are valid here, see [BasicAuthSpec](middleware.md#middleware-auth-basic-users). A plaintext `password` field on a `PUT` is hashed server-side on a host or location exactly as on a middleware. See [AuthMiddleware](middleware.md#authmiddleware-auth) for every field rule. |
-| `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`, `blockBackoff`, `blockMax`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
+| `rateLimit` | RateLimitMiddleware | none | no | Identical to a `type: rate-limit` middleware's `rateLimit` spec: `requestsPerSecond` **or** `requests`+`window`, `burst`, `allowFrom`, `blockFor`, `blockBackoff`, `blockMax`, `scope`. See [RateLimitMiddleware](middleware.md#ratelimitmiddleware-ratelimit). |
 
 Validation is the middleware's, verbatim: `identityProvider` must resolve to an
 existing IdentityProvider (a dangling name is a load-time error, and the proxy
