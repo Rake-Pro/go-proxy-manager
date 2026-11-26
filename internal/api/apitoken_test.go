@@ -596,13 +596,7 @@ func TestDNSSyncPlanEndpoint(t *testing.T) {
 		},
 	})
 
-	w := do(t, h, "GET", "/dns-sync/plan", "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
-	}
-	if calls != 1 {
-		t.Fatalf("plan called %d times, want 1", calls)
-	}
+	// Failures first: a success is reused for a few seconds, an error never.
 	planErr = fmt.Errorf("preview refused: %w", dnssync.ErrReconcileInProgress)
 	if w := do(t, h, "GET", "/dns-sync/plan", ""); w.Code != http.StatusConflict {
 		t.Fatalf("plan while running = %d, want 409: %s", w.Code, w.Body.String())
@@ -610,6 +604,14 @@ func TestDNSSyncPlanEndpoint(t *testing.T) {
 	planErr = fmt.Errorf("pihole unreachable")
 	if w := do(t, h, "GET", "/dns-sync/plan", ""); w.Code != http.StatusBadGateway {
 		t.Fatalf("failing plan = %d, want 502", w.Code)
+	}
+	planErr = nil
+	w := do(t, h, "GET", "/dns-sync/plan", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("plan called %d times, want 3", calls)
 	}
 }
 
@@ -715,13 +717,7 @@ func TestIngressDiscoveryPlanEndpoint(t *testing.T) {
 		},
 	})
 
-	w := do(t, h, "GET", "/ingress-discovery/plan", "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
-	}
-	if calls != 1 {
-		t.Fatalf("plan called %d times, want 1", calls)
-	}
+	// Failures first: a success is reused for a few seconds, an error never.
 	planErr = fmt.Errorf("preview refused: %w", k8s.ErrReconcileInProgress)
 	if w := do(t, h, "GET", "/ingress-discovery/plan", ""); w.Code != http.StatusConflict {
 		t.Fatalf("plan while running = %d, want 409: %s", w.Code, w.Body.String())
@@ -729,6 +725,14 @@ func TestIngressDiscoveryPlanEndpoint(t *testing.T) {
 	planErr = fmt.Errorf("api server unreachable")
 	if w := do(t, h, "GET", "/ingress-discovery/plan", ""); w.Code != http.StatusBadGateway {
 		t.Fatalf("failing plan = %d, want 502", w.Code)
+	}
+	planErr = nil
+	w := do(t, h, "GET", "/ingress-discovery/plan", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("plan = %d: %s", w.Code, w.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("plan called %d times, want 3", calls)
 	}
 }
 

@@ -405,10 +405,11 @@ func dockerSettingsErr(err error) error {
 	return errors.New(strings.Replace(err.Error(), "ingressDiscovery.", "dockerDiscovery.", 1))
 }
 
-// ValidateRefs cross-checks every object the docker discovery block NAMES - the
-// certificate, the upstream group, each middleware, each access list and the
-// mTLS trust anchor - against the objects that actually exist in cfg, for the
-// same reason ingressDiscovery does: a dangling ref there is stamped onto every
+// ValidateRefs cross-checks every object the docker discovery block NAMES,
+// with the same check as IngressDiscoverySettings.ValidateRefs (refErrors),
+// except the template's upstream and upstreamGroupRef, which Docker derive
+// ignores (the upstream is the container's own address), and for the same
+// reason ingressDiscovery does: a dangling ref there is stamped onto every
 // derived host and rejects the whole reconcile batch on every poll, dropping
 // unrelated changes with it. A disabled block is not checked at all.
 func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
@@ -418,48 +419,12 @@ func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
 	if err := d.checkPrefixMigration(cfg); err != nil {
 		return err
 	}
-	certs := map[string]bool{}
-	for _, o := range cfg.Certificates {
-		certs[o.Name] = true
-	}
-	mws := map[string]bool{}
-	for _, o := range cfg.Middlewares {
-		mws[o.Name] = true
-	}
-	als := map[string]bool{}
-	for _, o := range cfg.AccessLists {
-		als[o.Name] = true
-	}
-	anyRefused := anyModeRefusals(cfg.AccessLists)
-	ugs := map[string]bool{}
-	for _, o := range cfg.UpstreamGroups {
-		ugs[o.Name] = true
-	}
-	clientCAs := map[string]bool{}
-	disabledClientCAs := map[string]bool{}
-	for _, o := range cfg.ClientCAs {
-		clientCAs[o.Name] = true
-		if o.Disabled {
-			disabledClientCAs[o.Name] = true
-		}
-	}
-
 	var errs []error
 	check := func(path string, t IngressHostTemplate) {
-		owner := "dockerDiscovery." + path
-		checkRef(&errs, "", owner, "tls.certificateRef", "certificate", t.TLS.CertificateRef, certs)
-		checkRef(&errs, "", owner, "upstreamGroupRef", "upstreamGroup", t.UpstreamGroupRef, ugs)
-		checkClientAuthRef(&errs, "", owner, t.TLS, clientCAs, disabledClientCAs)
-		for _, m := range t.Middlewares {
-			checkRef(&errs, "", owner, "middlewares", "middleware", m, mws)
-		}
-		for _, a := range t.AccessLists {
-			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
-		}
-		checkAnyModeMembers(&errs, "", owner, "", t.AccessListsMode, t.AccessLists, anyRefused)
-		for _, l := range t.Locations {
-			checkAnyModeMembers(&errs, "", owner, fmt.Sprintf("locations: location %q: ", l.Path), l.AccessListsMode, l.AccessLists, anyRefused)
-		}
+		// Docker derive takes the upstream from the container and never stamps
+		// the template's upstream or upstream group, so neither is checked here.
+		t.Upstream, t.UpstreamGroupRef = Upstream{}, ""
+		errs = append(errs, t.refErrors(cfg, "dockerDiscovery."+path)...)
 	}
 	check(DefaultProfileName, d.Template)
 	for _, name := range d.ProfileNames() {

@@ -31,9 +31,13 @@ type fakePihole struct {
 	// the create half of a retarget while leaving the rollback that restores the
 	// original able to succeed.
 	failAddRecord string
-	logins        int
-	logouts       int
-	sawSID        []string
+	// failAddDomain fails every PUT for this domain, the rollback included.
+	failAddDomain string
+	// failDeleteRecord makes a DELETE fail for exactly this record.
+	failDeleteRecord string
+	logins           int
+	logouts          int
+	sawSID           []string
 	// writes counts every mutating call (PUT/DELETE on cnameRecords), so a test
 	// can assert that a dry run touched nothing at all.
 	writes int
@@ -97,7 +101,7 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
-		if f.failAddRecord != "" && rec == f.failAddRecord {
+		if (f.failAddRecord != "" && rec == f.failAddRecord) || (f.failAddDomain != "" && strings.HasPrefix(rec, f.failAddDomain+",")) {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -118,6 +122,11 @@ func (f *fakePihole) handler() http.Handler {
 			return
 		}
 		f.mu.Lock()
+		if f.failDeleteRecord != "" && rec == f.failDeleteRecord {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		f.writes++
 		out := f.records[:0]
 		for _, r0 := range f.records {
@@ -1036,6 +1045,61 @@ func TestPiholeHostRecordsShapes(t *testing.T) {
 			}
 			if len(got) != tc.wantLen {
 				t.Fatalf("records = %v, want %d", got, tc.wantLen)
+			}
+		})
+	}
+}
+
+// A failed retarget no longer ends the run: the remaining retargets, creates and
+// deletes still go ahead, the status reports the failure, and the ledger holds
+// what the resolver actually holds for the failed name (the old claim while the
+// old record stands, nothing once no record does).
+func TestPiholeFailedRetargetContinuesTheRun(t *testing.T) {
+	const oldA = "a.example.com,old-edge.example.com"
+	tests := []struct {
+		name           string
+		fail           func(*fakePihole)
+		wantRetargeted int
+		wantErr        string
+		wantA          []string // records for a.example.com afterwards
+		wantLedgerA    string   // "" = no claim
+	}{
+		{"delete fails", func(f *fakePihole) { f.failDeleteRecord = oldA }, 1, "", []string{oldA}, "old-edge.example.com"},
+		{"create fails, original restored", func(f *fakePihole) { f.failAddRecord = "a.example.com,edge.example.com" }, 2, "the original record was restored", []string{oldA}, "old-edge.example.com"},
+		{"create and restore fail", func(f *fakePihole) { f.failAddDomain = "a.example.com" }, 2, "restoring the original record also failed", nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakePihole{password: "secret", records: []string{
+				oldA, "b.example.com,old-edge.example.com", "d.example.com,edge.example.com",
+			}}
+			tc.fail(fake)
+			srv := startPihole(t, fake)
+			led := ownsPihole("a.example.com", "old-edge.example.com", "b.example.com", "old-edge.example.com", "d.example.com", "edge.example.com")
+			hosts := []model.ProxyHost{lanHost("a", "a.example.com"), lanHost("b", "b.example.com"), lanHost("c", "c.example.com")}
+			s := piholeSyncerWith(t, srv, hosts, led)
+			if err := s.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			st := s.Status().Pihole
+			if st.OK || st.Error == "" || !strings.Contains(st.Error, tc.wantErr) {
+				t.Fatalf("status = %+v, want a failed run mentioning %q", st, tc.wantErr)
+			}
+			if st.Retargeted != tc.wantRetargeted || st.Created != 1 || st.Deleted != 1 {
+				t.Fatalf("status = %+v, want %d retargeted, 1 created, 1 deleted", st, tc.wantRetargeted)
+			}
+			want := append([]string{"b.example.com,edge.example.com", "c.example.com,edge.example.com"}, tc.wantA...)
+			sort.Strings(want)
+			if got := fake.snapshot(); strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Fatalf("records = %v, want %v", got, want)
+			}
+			wantL := []string{"b.example.com", "edge.example.com", "c.example.com", "edge.example.com"}
+			if tc.wantLedgerA != "" {
+				wantL = append(wantL, "a.example.com", tc.wantLedgerA)
+			}
+			wantLedger(t, led.pihole(), wantL...)
+			if st.Managed != len(wantL)/2 {
+				t.Fatalf("managed = %d, want %d", st.Managed, len(wantL)/2)
 			}
 		})
 	}

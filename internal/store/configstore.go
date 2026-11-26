@@ -233,8 +233,9 @@ func loadedCollisions(cfg model.Config, settings model.Settings, err error) map[
 	return domainKeyOwners(cfg, settings)
 }
 
-// checkRestoredLocked runs the domain-key and compile checks for a write that
-// replaced files on disk (Revert, RevertObject, Restore): restored is the new
+// checkRestoredLocked runs the domain-key, discovery-reference and compile
+// checks for a write that replaced files on disk (Revert, RevertObject,
+// Restore): restored is the new
 // tree, cur the config loaded before the tree changed. An invalid domain the
 // restored tree carries is logged, not refused: it was stored once, a config
 // holding it loads, and refusing it would block the rollback. Callers hold
@@ -249,6 +250,9 @@ func (s *Store) checkRestoredLocked(restored model.Config, restoredSettings mode
 	}
 	if err := model.InvalidDomainsError(invalid, restored.InvalidDomains()); err != nil {
 		log.Warn().Err(err).Msg("config store: the restored config holds a domain that is not a hostname; it loads with a config warning, edit the domain")
+	}
+	if err := checkDiscoveryRefs(curErr == nil && discoveryRefs(cur, curSettings) == nil, restored, restoredSettings); err != nil {
+		return err
 	}
 	return s.checkCompilesLocked(restored, restoredSettings, func() (model.Config, model.Settings, error) {
 		return cur, curSettings, curErr
@@ -336,6 +340,35 @@ func (s *Store) withAdminEdge(cfg model.Config, settings model.Settings) model.C
 // created from neither.
 func checkAdminEdge(cfg model.Config, settings model.Settings) error {
 	return settings.AdminEdge.ValidateRefs(cfg, settings.ExternalBaseURL)
+}
+
+// discoveryRefs is the reference half of the check a settings write runs on
+// the ingress and docker discovery blocks: every certificate, upstream group,
+// middleware, access list and client CA a template or profile names must be
+// usable in cfg. The prefix-migration half is left to the settings write (the
+// migrate flags are set on a copy to skip it): it guards a settings change,
+// and a host carrying an old prefix's label wedges nothing.
+func discoveryRefs(cfg model.Config, settings model.Settings) error {
+	settings.IngressDiscovery.AnnotationPrefixMigrate = true
+	if err := settings.IngressDiscovery.ValidateRefs(cfg); err != nil {
+		return err
+	}
+	return settings.DockerDiscoveryResolved().ValidateRefs(cfg)
+}
+
+// checkDiscoveryRefs refuses a write whose result fails discoveryRefs: a
+// template reference that no longer resolves fails the next derived host's
+// batch, and with it that source's whole reconcile on every poll. When the
+// stored config already fails the check (storedOK false) the write is let
+// through with a warning, as checkCompilesLocked does, so the stored state
+// can be repaired one write at a time.
+func checkDiscoveryRefs(storedOK bool, result model.Config, settings model.Settings) error {
+	err := discoveryRefs(result, settings)
+	if err == nil || storedOK {
+		return err
+	}
+	log.Warn().Err(err).Msg("config store: the stored config already fails the discovery reference check; accepting the write so it can be repaired")
+	return nil
 }
 
 // Init creates the directory tree, initialises the git repo, seeds default
@@ -493,6 +526,15 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 		if msg, ok := withAdminEdgeClaim(cfg, settings).DomainKeyCollisions()[key]; ok {
 			cfg.ConfigWarnings = append(cfg.ConfigWarnings, msg+fmt.Sprintf(" (%q is the admin front door, settings.adminEdge); edit the other host's domains (new writes with such a collision are refused)", model.AdminEdgeHostName))
 		}
+	}
+	// A discovery template or profile naming an object that is missing or not
+	// usable is refused on every write path, so one here arrived out of band
+	// (a hand edit, a git pull, or a write from before the check). It still
+	// loads: refusing it would turn a stored config into a daemon that does not
+	// start.
+	if err := discoveryRefs(cfg, settings); err != nil {
+		cfg.ConfigWarnings = append(cfg.ConfigWarnings, strings.ReplaceAll(err.Error(), "\n", "; ")+
+			" (discovery reconcile fails for hosts derived from that template or profile until the reference is fixed)")
 	}
 
 	return cfg, settings, nil
@@ -654,11 +696,15 @@ func (s *Store) prepareSaveLocked(obj model.Object, now time.Time) (string, any,
 	collisions := domainKeyOwners(cfg, settings)
 	storedPages := cfg.ErrorPagesByHost()
 	invalid := cfg.InvalidDomains()
+	refsOK := discoveryRefs(cfg, settings) == nil
 	merged := withObject(&cfg, obj)
 	if err := merged.Validate(); err != nil {
 		return "", nil, false, nil, err
 	}
 	if err := checkAdminEdge(merged, settings); err != nil {
+		return "", nil, false, nil, err
+	}
+	if err := checkDiscoveryRefs(refsOK, merged, settings); err != nil {
 		return "", nil, false, nil, err
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
@@ -717,6 +763,9 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 	if err := checkAdminEdge(withoutObject(&cfg, kind, name), settings); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
 	}
+	if err := checkDiscoveryRefs(discoveryRefs(cfg, settings) == nil, withoutObject(&cfg, kind, name), settings); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
+	}
 
 	snap, err := snapshotFile(path)
 	if err != nil {
@@ -758,6 +807,7 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	collisions := domainKeyOwners(cfg, settings)
 	storedPages := cfg.ErrorPagesByHost()
 	invalid := cfg.InvalidDomains()
+	refsOK := discoveryRefs(cfg, settings) == nil
 	merged := cfg
 	for _, o := range objs {
 		merged = withObject(&merged, o)
@@ -766,6 +816,9 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := checkAdminEdge(merged, settings); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := checkDiscoveryRefs(refsOK, merged, settings); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {

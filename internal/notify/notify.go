@@ -303,12 +303,23 @@ func (n *Notifier) deliver(t model.NotificationTarget, ev Event) {
 // agree on what a receiver's 500 means.
 func (n *Notifier) post(ctx context.Context, t model.NotificationTarget, ev Event) (int, time.Duration, error) {
 	started := time.Now()
+	// t is this call's copy: the resolved url goes only into the request, while
+	// the caller records and reports the configured (placeholder) value.
+	u, err := t.ResolveURL()
+	if err != nil {
+		return 0, time.Since(started), err
+	}
+	configured := t.URL
+	t.URL = u
 	req, err := buildRequest(ctx, t, ev)
 	if err != nil {
 		return 0, time.Since(started), err
 	}
 	resp, err := n.client.Do(req)
 	if err != nil {
+		if model.Secret(configured).IsPlaceholder() {
+			return 0, time.Since(started), webhook.PlaceholderTransportCause(err)
+		}
 		return 0, time.Since(started), webhook.TransportCause(err)
 	}
 	defer resp.Body.Close()

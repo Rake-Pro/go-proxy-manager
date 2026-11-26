@@ -53,7 +53,8 @@ shell script invoked by cron doesn't have that gotcha.
 
 **Restore** replaces the *entire* current config, validates the result, and
 commits it as one revision. If the archive doesn't validate (a dangling
-reference, a literal un-placeholdered secret, a corrupt/oversized upload) the
+reference, including one a discovery template or profile names, a literal
+un-placeholdered secret, a corrupt/oversized upload) the
 working tree is rolled back to the pre-restore commit and **nothing is
 committed**: a bad restore attempt is a no-op, not a half-applied one:
 

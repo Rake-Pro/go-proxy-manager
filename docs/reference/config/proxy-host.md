@@ -134,7 +134,15 @@ means no override. A host with any override uses its **own** cloned transport
 (its own connection pool), so a custom timeout never affects another host's
 keep-alive reuse; hosts without an override share the default pooled transport.
 `readSeconds` bounds only time-to-first-byte, so it does not cut off a slow
-streaming / SSE / websocket body once headers have arrived.
+streaming / SSE / websocket body once headers have arrived. A reload closes the
+idle connections of the cloned pool it replaces; requests in flight and open
+WebSocket connections are not interrupted.
+
+**Interim responses**: an upstream's `1xx` responses (`100`, `102`, `103`) are
+relayed to the client with [`stripResponseHeaders`](#proxy-host-strip-response-headers)
+applied, at most 16 per request (later ones are dropped). An upstream that sends
+more than 256 for one request has the exchange aborted, and the client receives
+a `502`.
 
 **Location** (`locations[]`) is a path-scoped override. Matching is
 longest-prefix; the request path is forwarded unchanged unless `stripPrefix` is

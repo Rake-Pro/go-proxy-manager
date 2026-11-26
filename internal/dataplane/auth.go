@@ -78,6 +78,7 @@ func authHandler(a model.AuthMiddleware, reg *registry, hostName string, domains
 		if err != nil {
 			return failClosed(hostName, "auth-request: "+err.Error(), ep)
 		}
+		reg.own(arp.client)
 		return arp.handler(clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {

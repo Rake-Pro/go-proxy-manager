@@ -668,3 +668,208 @@ func TestPlanDomainMovesRandomized(t *testing.T) {
 		}
 	}
 }
+
+// fill sets v to a non-zero value of its type, so the YAML form differs from
+// the zero value's.
+func fill(t *testing.T, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		k := reflect.New(v.Type().Key()).Elem()
+		fill(t, k)
+		m.SetMapIndex(k, reflect.New(v.Type().Elem()).Elem())
+		v.Set(m)
+	case reflect.Struct:
+		fill(t, v.Field(0))
+	default:
+		t.Fatalf("fill: unhandled kind %s", v.Kind())
+	}
+}
+
+// Every IngressHostTemplate field is either compared by ChainDiffers or listed
+// here as deliberately excluded. A new template field fails this test until it
+// is classified, so a field a derive stamps onto hosts cannot be left out of
+// the comparison by accident.
+func TestChainDiffersCoversEveryTemplateField(t *testing.T) {
+	compared := map[string]bool{
+		"Upstream": true, "UpstreamGroupRef": true, // Ingress discovery only
+		"TLS": true, "RobotsNoIndex": true, "Timeouts": true,
+		"Middlewares": true, "AccessLists": true, "AccessListsMode": true,
+		"StripResponseHeaders": true, "SecurityHeaders": true, "Locations": true,
+	}
+	excluded := map[string]string{
+		"WebsocketsUpgrade":     "deprecated, no effect",
+		"Tags":                  "UI metadata with no data-plane effect",
+		"DefaultDNS":            "overridden per source object; compared against the derived host where there is one",
+		"AllowedDomainSuffixes": "not copied onto the host; checked by Ownership.DomainAllowed",
+		"AllowedHostnames":      "not copied onto the host; checked by Ownership.DomainAllowed",
+	}
+	upstreamOnly := map[string]bool{"Upstream": true, "UpstreamGroupRef": true}
+
+	typ := reflect.TypeOf(model.IngressHostTemplate{})
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		_, skip := excluded[f.Name]
+		if compared[f.Name] == skip {
+			t.Errorf("IngressHostTemplate.%s must be listed exactly once, as compared or excluded", f.Name)
+			continue
+		}
+		if skip {
+			continue
+		}
+		t.Run(f.Name, func(t *testing.T) {
+			var tmpl model.IngressHostTemplate
+			fill(t, reflect.ValueOf(&tmpl).Elem().Field(i))
+			if !ChainDiffers(model.ProxyHost{}, tmpl, true) {
+				t.Fatalf("a changed %s is not reported", f.Name)
+			}
+			if got := ChainDiffers(model.ProxyHost{}, tmpl, false); got == upstreamOnly[f.Name] {
+				t.Fatalf("upstream=false: ChainDiffers = %v for %s", got, f.Name)
+			}
+			// The host carrying the same value is what a derive stamps: equal.
+			var h model.ProxyHost
+			hf := reflect.ValueOf(&h).Elem().FieldByName(f.Name)
+			if !hf.IsValid() {
+				t.Fatalf("ProxyHost has no field %s", f.Name)
+			}
+			hf.Set(reflect.ValueOf(tmpl).Field(i))
+			if ChainDiffers(h, tmpl, true) {
+				t.Fatalf("a host stamped with the template's %s still differs", f.Name)
+			}
+		})
+	}
+}
+
+// A stored host is frozen only while every template-driven field still
+// matches its profile; a change to any of them (upstream, upstream group,
+// timeouts, robotsNoIndex) fails it closed. The upstream counts only for
+// Ingress discovery, where the profile supplies it.
+func TestPlanDeriveFailureComparesEveryTemplateField(t *testing.T) {
+	base := model.IngressHostTemplate{
+		Upstream: model.Upstream{Scheme: "http", Host: "192.0.2.1", Port: 80},
+		TLS:      model.TLSSettings{CertificateRef: "wildcard"},
+		Timeouts: &model.HostTimeouts{ReadSeconds: 30},
+	}
+	stored := func(value string) model.ProxyHost {
+		h := host("app", value, "app.example.com")
+		h.TLS = base.TLS
+		h.Timeouts = &model.HostTimeouts{ReadSeconds: 30}
+		return h
+	}
+	tests := []struct {
+		name         string
+		value        string
+		change       func(*model.IngressHostTemplate)
+		wantDisabled bool
+	}{
+		{"unchanged profile freezes", model.ManagedByIngressDiscovery, func(*model.IngressHostTemplate) {}, false},
+		{"timeouts changed", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) { t.Timeouts = &model.HostTimeouts{ReadSeconds: 5} }, true},
+		{"timeouts removed", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) { t.Timeouts = nil }, true},
+		{"robotsNoIndex changed", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) { t.RobotsNoIndex = true }, true},
+		{"upstream changed", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) { t.Upstream.Host = "192.0.2.2" }, true},
+		{"upstream group set", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) {
+			t.Upstream, t.UpstreamGroupRef = model.Upstream{}, "pool"
+		}, true},
+		{"tags only freeze", model.ManagedByIngressDiscovery, func(t *model.IngressHostTemplate) { t.Tags = []string{"x"} }, false},
+		{"docker: profile upstream is ignored", model.ManagedByDockerDiscovery, func(t *model.IngressHostTemplate) { t.Upstream.Host = "192.0.2.2" }, false},
+		{"docker: timeouts changed", model.ManagedByDockerDiscovery, func(t *model.IngressHostTemplate) { t.Timeouts = nil }, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpl := base
+			tc.change(&tmpl)
+			cfg := model.Config{ProxyHosts: []model.ProxyHost{stored(tc.value)}}
+			p := Plan(cfg, own("a discovery", tc.value), []Item{{
+				Ref: "src", Name: "app", Err: errors.New("boom"), Resolved: &tmpl,
+			}})
+			disabled := len(p.Upserts) == 1 && p.Upserts[0].Disabled
+			if disabled != tc.wantDisabled || (!tc.wantDisabled && len(p.Upserts) != 0) {
+				t.Fatalf("upserts %+v, want disabled=%v", p.Upserts, tc.wantDisabled)
+			}
+		})
+	}
+}
+
+// An existing host skipped for a domain conflict is restamped from its profile
+// when a template-driven field or its derived dns policy changed, and the
+// restamp carries every compared field, so the next poll sees it as current.
+func TestPlanDomainConflictRestampsEveryTemplateField(t *testing.T) {
+	o := own("a discovery", model.ManagedByIngressDiscovery)
+	tmpl := model.IngressHostTemplate{
+		Upstream: model.Upstream{Scheme: "http", Host: "192.0.2.1", Port: 80},
+		Timeouts: &model.HostTimeouts{ReadSeconds: 5},
+	}
+	want := host("app", model.ManagedByIngressDiscovery, "new.example.com")
+	want.Timeouts = &model.HostTimeouts{ReadSeconds: 5}
+	tests := []struct {
+		name     string
+		timeouts *model.HostTimeouts
+		dns      *model.DNSSyncPolicy
+	}{
+		{"timeouts changed", &model.HostTimeouts{ReadSeconds: 30}, nil},
+		{"derived dns policy changed", &model.HostTimeouts{ReadSeconds: 5}, &model.DNSSyncPolicy{LanDirect: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cur := host("app", model.ManagedByIngressDiscovery, "app.example.com")
+			cur.Timeouts, cur.DNS = tc.timeouts, tc.dns
+			cfg := model.Config{ProxyHosts: []model.ProxyHost{cur, host("op", "", "new.example.com")}}
+			p := Plan(cfg, o, []Item{{Ref: "src", Name: "app", Host: want, Resolved: &tmpl}})
+			if len(p.Upserts) != 1 {
+				t.Fatalf("upserts %+v, want one restamp", p.Upserts)
+			}
+			upd := p.Upserts[0]
+			if upd.Disabled || !slices.Equal(upd.Domains, cur.Domains) || upd.Timeouts == nil || upd.Timeouts.ReadSeconds != 5 || upd.DNS != nil {
+				t.Fatalf("restamp %+v, want current domains, the profile's timeouts and no dns policy", upd)
+			}
+			// Once restamped, the host matches its profile and is left alone.
+			cfg.ProxyHosts[0] = upd
+			if p := Plan(cfg, o, []Item{{Ref: "src", Name: "app", Host: want, Resolved: &tmpl}}); len(p.Upserts) != 0 || p.Skipped != 1 {
+				t.Fatalf("second poll %+v, want a plain skip", p)
+			}
+		})
+	}
+}
+
+// A derived name that a redirect, parked or stream host already uses is
+// skipped (the validator would reject the duplicate host name and fail the
+// whole batch), and the rest of the batch still applies.
+func TestPlanSkipsANameUsedByAnotherHostKind(t *testing.T) {
+	cfg := model.Config{
+		RedirectHosts: []model.RedirectHost{{ObjectMeta: model.ObjectMeta{Name: "redir"}, Domains: []string{"redir.example.com"}}},
+		ParkedHosts:   []model.ParkedHost{{ObjectMeta: model.ObjectMeta{Name: "parked"}, Domains: []string{"parked.example.com"}}},
+		StreamHosts:   []model.StreamHost{{ObjectMeta: model.ObjectMeta{Name: "stream"}}},
+	}
+	tests := []struct{ name, kind string }{
+		{"redir", "redirect host"},
+		{"parked", "parked host"},
+		{"stream", "stream host"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Plan(cfg, own("a discovery", "a-discovery"), []Item{
+				{Ref: "src", Name: tc.name, Host: host(tc.name, "a-discovery", "other.example.com")},
+				{Ref: "ok", Name: "ok", Host: host("ok", "a-discovery", "ok.example.com")},
+			})
+			if p.Skipped != 1 || p.Created != 1 || len(p.Upserts) != 1 || p.Upserts[0].Name != "ok" {
+				t.Fatalf("plan %+v, want %s skipped and ok created", p, tc.name)
+			}
+			for _, h := range p.Hosts {
+				if h.Name == tc.name && (h.Action != ActionSkipped || !strings.Contains(h.Reason, "a "+tc.kind+" with this name exists")) {
+					t.Fatalf("host %+v, want a skip naming the %s", h, tc.kind)
+				}
+			}
+		})
+	}
+}

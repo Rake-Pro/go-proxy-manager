@@ -181,13 +181,9 @@ ordering convention:
 
 - **Reached**: the headers the backend sent on its final response, whatever the
   status, including a `101 Switching Protocols` WebSocket handshake, so an
-  upgrade does not leak the fingerprint an ordinary response hides. The one
-  exception is an **interim `1xx`** (a `103 Early Hints`, or a `100 Continue`):
-  those are forwarded on a separate path that the strip does not sit on, so
-  their headers pass through unstripped. In practice this leaks nothing an
-  operator is hiding: an upstream's early-hints headers are `Link` preloads,
-  and the stdlib clears the interim header map before the final response is
-  written, but a backend that sets `Server` on a `103` would send it there.
+  upgrade does not leak the fingerprint an ordinary response hides. Interim
+  `1xx` responses relayed from the upstream (`100 Continue`, `102 Processing`,
+  `103 Early Hints`) are stripped the same way before they are relayed.
 - **Never reached**: anything **gpm** adds. Injected
   [`securityHeaders`](#settings-security-headers),
   HSTS, `X-Robots-Tag`, the `Set-Cookie` forward-auth copies back when the IdP

@@ -166,9 +166,10 @@ the existing host instead, as long as the stored host still carries the chain
 its resolved profile renders today: your policy has not changed there, the host
 on disk is the last good rendering of it, and failing closed would let any
 tenant take their own service offline with a one-character manifest edit. If the
-stored chain differs from the profile (`tls` including `clientAuth`,
-`middlewares`, `accessLists`, `accessListsMode`, `locations`,
-`stripResponseHeaders`, `securityHeaders`), or one of its domains is no longer
+stored chain differs from the profile (`upstream`, `upstreamGroupRef`, `tls`
+including `clientAuth`, `timeouts`, `robotsNoIndex`, `middlewares`,
+`accessLists`, `accessListsMode`, `locations`, `stripResponseHeaders`,
+`securityHeaders`), or one of its domains is no longer
 allowed by `allowedDomainSuffixes` or the profile's `allowedHostnames`, the
 policy was changed after the host was written, and the host is **disabled** the
 same way, so a malformed Ingress cannot keep the old chain or name in service.
@@ -178,15 +179,36 @@ default's access list can never leak onto a profile that is public on purpose.
 
 Every profile validates at **settings-write time**, not at reconcile time: an
 invalid one is rejected by `PUT /api/settings` where you see it, rather than
-surfacing later as a skipped host. That includes **referential** validation: the
-`certificateRef`, `upstreamGroupRef`, `middlewares`, `accessLists` and
-`tls.clientAuth.caRef` of the template and of every profile are cross-checked
-against the objects that actually exist. A dangling name there is not a
+surfacing later as a skipped host. That includes **referential** validation:
+every object the template and every profile name, at host level and in each of
+their `locations` (`certificateRef`, `upstreamGroupRef`, `middlewares`,
+`accessLists` and their `accessListsMode: any` fitness, `rateLimit.allowFrom`
+lists, inline auth providers, `tls.clientAuth.caRef`), is cross-checked against
+the objects that exist, with the rules a proxy host is held to (a disabled
+upstream group or client CA is refused). A dangling name there is not a
 localised problem later: it is stamped onto every derived host, and the store
 validates a reconcile as one batch, so the rejection would drop every *other*
 tenant's create, update and delete too, on every poll, until it was fixed.
 A disabled `ingressDiscovery` block is not cross-checked, so a half-filled draft
 never blocks an unrelated settings write.
+
+The same cross-check runs on every other write that changes the objects a
+template or profile can name, with the error text a settings write gives:
+
+- **Object writes and deletes.** A save, batch save or delete is refused when
+  the result leaves a reference dangling or unusable, for example deleting the
+  template's certificate, or giving a list a `defaultAction: allow` while the
+  template uses it with `accessListsMode: any`.
+- **Revert, scoped revert and restore.** A restored tree that fails the check is
+  rolled back and nothing is committed.
+- **A config already stored in that state** (a hand edit or a `git pull`) still
+  loads, with a config warning naming the reference. Object writes on it are
+  accepted; a settings write is refused until it fixes the reference.
+- **The check is off for object writes while the stored config fails it.** Until
+  the stored state passes again, a second reference can be broken and a revert
+  or restore that fails the check is let through.
+
+The prefix-migration refusal (`annotationPrefix`) stays a settings-write check.
 
 `GET /api/ingress-discovery/status` reports the resolved `profile` per host (the
 literal `template` for the default block), so you can audit what chain a given
@@ -196,6 +218,12 @@ decisions a reconcile would take (`created`/`updated`/`deleted`/`skipped` counts
 and the per-host `hosts` list) without writing anything, mirroring
 `GET /api/dns-sync/plan`. Both answer `409 Conflict` while a reconcile is already
 in flight.
+
+Concurrent plan calls share one cluster read, and a successful plan is reused for
+up to 5 seconds unless a config commit lands or
+`POST /api/ingress-discovery/reconcile` runs in between. A failed plan is never
+reused; a reconcile on its own schedule can still leave a reused plan up to 5
+seconds old.
 
 ## Operator-side profile selection (`profileRules`)
 
@@ -389,7 +417,10 @@ domain.
 **Ownership: what discovery will and will not touch.** Only objects carrying the
 managed-by label are ever created, updated or deleted. A hand-written proxy host
 with the same name is **skipped with a warning**, never overwritten and never
-removed (the same rule the DNS backends apply to records they do not own). To
+removed (the same rule the DNS backends apply to records they do not own). A
+derived name already used by a redirect, parked or stream host is skipped the
+same way (`reason`: `a <kind> with this name exists`), since host names are
+shared across those kinds; the rest of the reconcile still applies. To
 adopt a discovered host permanently, remove the label: gpm then treats it as
 operator-authored and stops managing it.
 
@@ -402,7 +433,8 @@ Ownership covers the **domain** as well as the name:
 - **A skipped existing host is not frozen on an old chain.** When the derived
   host already exists and is skipped for a domain conflict, it keeps the domains
   it serves, but the same test as for a derive failure applies: a stored chain
-  that differs from the resolved profile is restamped from the profile on those
+  that differs from the resolved profile, or a stored `dns` policy that differs
+  from the one the Ingress derives, is restamped from the profile on those
   domains (status `updated`), and a stored domain the profile no longer allows
   disables the host. Adding a contested hostname to an Ingress therefore cannot
   keep a host on a chain you have since tightened.

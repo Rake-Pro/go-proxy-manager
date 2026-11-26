@@ -4180,7 +4180,7 @@ async function viewIntegrations(c, tab) {
           <td class="mono col-name"><span class="trunc" title="${esc(r.name || '')}">${esc(r.name || '')}</span></td>
           <td class="faint col-time" data-v="${esc(r.fetchedAt || '')}"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'Never')}</td>
           <td class="mono col-num">${esc(r.entryCount || 0)}</td>
-          <td class="warn-text col-reason">${esc(r.lastError || '')}</td>
+          <td class="warn-text col-reason">${esc([r.expired ? 'Expired (maxAge passed), matching nothing' : '', r.lastError || ''].filter(Boolean).join('; '))}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="hint">No access list declares a remote source yet.</div>';
       wireMiniTables(el);
     } catch (e) {
@@ -4341,6 +4341,9 @@ async function viewIntegrations(c, tab) {
     if (alsPollVal) alsBody.pollInterval = alsPollVal;
     if (Object.keys(alsBody).length) body.accessListSync = alsBody; else delete body.accessListSync;
 
+    // A url that is wholly a ${ENV:...}/${FILE:...} placeholder is resolved by
+    // the server at send time, which checks its shape there.
+    const urlRef = (u) => /^(\$\{(ENV|FILE):[^}]+\}\s*)+$/.test(u);
     const webhooks = [];
     let whErr = '';
     clearRowErrors(whWrap);
@@ -4353,7 +4356,7 @@ async function viewIntegrations(c, tab) {
       // bounced by the API with no indication of which row; now the row says so.
       if (!nm) { whErr = markRowError(row, 'Name is required.'); return; }
       if (!url) { whErr = markRowError(row, 'URL is required.'); return; }
-      if (!/^https?:\/\//.test(url)) { whErr = markRowError(row, 'URL must start with http:// or https://.'); return; }
+      if (!urlRef(url) && !/^https?:\/\//.test(url)) { whErr = markRowError(row, 'URL must start with http:// or https://, or be a ${ENV:...} or ${FILE:...} placeholder.'); return; }
       const wh = { name: nm, url };
       const secret = row.querySelector('.wh-secret').value.trim();
       // A literal secret is redacted on read; saving it back would commit "***".
@@ -4380,8 +4383,8 @@ async function viewIntegrations(c, tab) {
       if (ntfSeen[nm]) { ntfErr = markRowError(row, `Duplicate name "${nm}" - target names must be unique.`); return; }
       ntfSeen[nm] = true;
       if (!url) { ntfErr = markRowError(row, 'URL is required.'); return; }
-      if (!/^https?:\/\//.test(url)) { ntfErr = markRowError(row, 'URL must start with http:// or https://.'); return; }
-      if (type === 'discord' && url.indexOf('/api/webhooks/') === -1) {
+      if (!urlRef(url) && !/^https?:\/\//.test(url)) { ntfErr = markRowError(row, 'URL must start with http:// or https://, or be a ${ENV:...} or ${FILE:...} placeholder.'); return; }
+      if (type === 'discord' && !urlRef(url) && url.indexOf('/api/webhooks/') === -1) {
         ntfErr = markRowError(row, 'A Discord webhook URL must contain /api/webhooks/.'); return;
       }
       const t = { name: nm, type, url };
@@ -7713,11 +7716,12 @@ async function streamEditor(c, name) {
     }
     const als = $$('#ed-stream-al input:checked').map((i) => i.value);
     if (als.length) body.accessLists = als;
-    // The form has no controls for the TCP limits; keep values set through the API or YAML.
+    // The form has no controls for the TCP and UDP limits; keep values set through the API or YAML.
     if (proto !== 'udp') {
       if (o.idleTimeout) body.idleTimeout = o.idleTimeout;
       if (o.maxConnsPerSource) body.maxConnsPerSource = o.maxConnsPerSource;
     }
+    if (proto !== 'tcp' && o.newSessionsPerMinute) body.newSessionsPerMinute = o.newSessionsPerMinute;
     return body;
   });
   wireCloneButton('streams', o);
@@ -8039,8 +8043,9 @@ async function accessEditor(c, name) {
       <input class="field mono src-interval" data-hint="accessList.sources.interval" style="flex:0 1 90px" value="${esc(s.interval || '')}" placeholder="24h" aria-label="Interval" />
       <input class="field mono src-maxentries" data-hint="accessList.sources.maxEntries" type="number" min="0" style="flex:0 1 110px" value="${s.maxEntries ? esc(s.maxEntries) : ''}" placeholder="10000" aria-label="Max entries" />
       <button class="icon-btn src-del" type="button" aria-label="Remove">${ICON.x}</button>`;
-    // maxCoverage has no field here; carry it through so a save keeps it.
+    // maxCoverage and maxAge have no field here; carry them through so a save keeps them.
     if (s.maxCoverage) d._maxCoverage = s.maxCoverage;
+    if (s.maxAge) d._maxAge = s.maxAge;
     d.querySelector('.src-del').addEventListener('click', () => { d.remove(); refreshSourceSelects(); });
     d.querySelector('.src-name').addEventListener('input', refreshSourceSelects);
     sourcesWrap.appendChild(d);
@@ -8073,7 +8078,7 @@ async function accessEditor(c, name) {
       card.style.display = '';
       el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
         <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
-        <span class="muted" style="font-size:12.5px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + plural(s.entryCount || 0, 'entry', 'entries') : 'Never'}</span>
+        <span class="muted" style="font-size:12.5px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + (s.expired ? 'expired (maxAge passed), matching nothing' : plural(s.entryCount || 0, 'entry', 'entries')) : 'Never'}</span>
         ${s.lastError ? `<span class="muted" style="font-size:12.5px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
     } catch (e) {
@@ -8172,6 +8177,7 @@ async function accessEditor(c, name) {
         if (n) src.maxEntries = n;
       }
       if (r._maxCoverage) src.maxCoverage = r._maxCoverage;
+      if (r._maxAge) src.maxAge = r._maxAge;
       sources.push(src);
     });
     if (srcErr) { showInvalid('Source invalid', srcErr, $('#ed-sources .row-bad')); return null; }

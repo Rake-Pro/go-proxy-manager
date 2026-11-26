@@ -25,6 +25,8 @@ type memLedger struct {
 	mu    sync.Mutex
 	l     model.AccessListSourceLedger
 	saves int
+	// failSaves makes that many next saves fail, as a refused commit would.
+	failSaves int
 }
 
 func (m *memLedger) Load(context.Context) (model.AccessListSourceLedger, string, error) {
@@ -36,6 +38,10 @@ func (m *memLedger) Load(context.Context) (model.AccessListSourceLedger, string,
 func (m *memLedger) Save(_ context.Context, l model.AccessListSourceLedger, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failSaves > 0 {
+		m.failSaves--
+		return errors.New("save refused")
+	}
 	if err := l.Validate(); err != nil {
 		return err
 	}
@@ -744,5 +750,536 @@ func TestRefusedFetchLogOmitsSourceURLQuery(t *testing.T) {
 				t.Errorf("log line does not name the source host: %s", buf.String())
 			}
 		})
+	}
+}
+
+// flakyFeed serves body while ok is set and a 502 otherwise.
+type flakyFeed struct {
+	mu   sync.Mutex
+	ok   bool
+	body string
+}
+
+func (f *flakyFeed) set(ok bool, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ok, f.body = ok, body
+}
+
+func (f *flakyFeed) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !f.ok {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(f.body))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = prev })
+	return &buf
+}
+
+const expiredMsg = "access-list source expired"
+
+// Without maxAge a refused fetch keeps the stored set however old it is: the
+// behaviour every existing config relies on.
+func TestUnsetMaxAgeKeepsAStaleSetForever(t *testing.T) {
+	buf := captureLog(t)
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	led := &memLedger{}
+	s := testSyncer(t, feed.server(t), model.AccessListSource{Name: "feed", Interval: "24h"}, led)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	feed.set(false, "")
+	now = now.Add(365 * 24 * time.Hour)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("a year later: %v", err)
+	}
+	l, saves := led.state()
+	if saves != 1 || len(l.Sources) != 1 || len(l.Sources[0].Entries) != 1 || l.Sources[0].ExpiredAt != "" {
+		t.Fatalf("saves = %d, ledger = %+v, want the year-old set kept untouched", saves, l)
+	}
+	if st := s.Status(); st.Sources[0].Expired || st.Sources[0].EntryCount != 1 {
+		t.Fatalf("status = %+v, want the kept set reported, not expired", st.Sources[0])
+	}
+	if l.Sources[0].MaxAgeSince != "" {
+		t.Fatalf("maxAgeSince = %q, want nothing written for a source without maxAge", l.Sources[0].MaxAgeSince)
+	}
+	if strings.Contains(buf.String(), expiredMsg) {
+		t.Fatalf("an unset maxAge must never expire a set; log: %s", buf.String())
+	}
+}
+
+// With maxAge set, a set whose last successful fetch is older is emptied once
+// (one save, one reload, one log line), stays expired across further ticks and
+// a restart without another commit, and is restored by the next successful
+// fetch with no operator action.
+func TestMaxAgeExpiresAStaleSetOnceAndRecovers(t *testing.T) {
+	buf := captureLog(t)
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	ts := feed.server(t)
+	led := &memLedger{}
+	src := model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}
+	s := testSyncer(t, ts, src, led)
+	reloads := 0
+	s.onChange = func() { reloads++ }
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := t0
+	s.now = func() time.Time { return now }
+	tick := func(s *Syncer, at time.Duration) {
+		t.Helper()
+		now = t0.Add(at)
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatalf("reconcile at +%s: %v", at, err)
+		}
+	}
+
+	tick(s, 0)
+	feed.set(false, "")
+	// Due again after 24h, refused, still young enough to serve.
+	tick(s, 48*time.Hour)
+	tick(s, 72*time.Hour)
+	if l, saves := led.state(); saves != 1 || len(l.Sources[0].Entries) != 1 {
+		t.Fatalf("saves = %d, ledger = %+v, want the set kept up to maxAge", saves, l)
+	}
+	if strings.Contains(buf.String(), expiredMsg) {
+		t.Fatalf("expired before maxAge passed; log: %s", buf.String())
+	}
+
+	tick(s, 72*time.Hour+15*time.Minute)
+	l, saves := led.state()
+	e := l.Sources[0]
+	if saves != 2 || reloads != 2 {
+		t.Fatalf("saves = %d, reloads = %d, want exactly one more of each for the expiry", saves, reloads)
+	}
+	if len(e.Entries) != 0 || e.ExpiredAt == "" || e.FetchedAt != t0.Format(time.RFC3339) {
+		t.Fatalf("entry = %+v, want no entries, expiredAt set, fetchedAt the last success", e)
+	}
+	ss := s.Status().Sources[0]
+	if !ss.Expired || ss.EntryCount != 0 || !ss.FetchedAt.Equal(t0) || ss.LastError == "" {
+		t.Fatalf("status = %+v, want expired with the last success and the refusal", ss)
+	}
+
+	// Further ticks, and a restarted process on the same ledger, change nothing.
+	tick(s, 73*time.Hour)
+	tick(s, 80*time.Hour)
+	restarted := testSyncer(t, ts, src, led)
+	restarted.now = func() time.Time { return now }
+	tick(restarted, 90*time.Hour)
+	if _, saves := led.state(); saves != 2 {
+		t.Fatalf("saves = %d, want the expiry committed once", saves)
+	}
+	if n := strings.Count(buf.String(), expiredMsg); n != 1 {
+		t.Fatalf("expiry logged %d times, want once; log: %s", n, buf.String())
+	}
+	if ss := restarted.Status().Sources[0]; !ss.Expired {
+		t.Fatalf("status after restart = %+v, want still expired", ss)
+	}
+
+	// The feed comes back: the set is restored on the next tick.
+	feed.set(true, "203.0.113.1\n")
+	tick(restarted, 90*time.Hour+15*time.Minute)
+	l, saves = led.state()
+	e = l.Sources[0]
+	if saves != 3 || len(e.Entries) != 1 || e.ExpiredAt != "" {
+		t.Fatalf("saves = %d, entry = %+v, want the set restored and expiredAt cleared", saves, e)
+	}
+	if ss := restarted.Status().Sources[0]; ss.Expired || ss.EntryCount != 1 {
+		t.Fatalf("status = %+v, want healthy again", ss)
+	}
+}
+
+// maxAge counts from the last SUCCESSFUL fetch, which for an unchanged feed is
+// later than the last change: fetchedAt is advanced for such a source so the
+// age survives a restart, and a refused attempt never counts.
+func TestMaxAgeCountsFromTheLastSuccessfulFetch(t *testing.T) {
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	ts := feed.server(t)
+	led := &memLedger{}
+	src := model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}
+	s := testSyncer(t, ts, src, led)
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := t0
+	s.now = func() time.Time { return now }
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Unchanged success two days later: fetchedAt moves to it.
+	now = t0.Add(48 * time.Hour)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	l, saves := led.state()
+	if saves != 2 || l.Sources[0].FetchedAt != now.Format(time.RFC3339) {
+		t.Fatalf("saves = %d, fetchedAt = %s, want the unchanged success recorded", saves, l.Sources[0].FetchedAt)
+	}
+
+	// Then the feed fails. A process restarted 70h after the last success (and
+	// 118h after the set last changed) still serves it; past 72h it does not.
+	feed.set(false, "")
+	restarted := testSyncer(t, ts, src, led)
+	restarted.now = func() time.Time { return now }
+	for _, tc := range []struct {
+		at      time.Duration
+		expired bool
+	}{
+		{70 * time.Hour, false},
+		{73 * time.Hour, true},
+	} {
+		now = t0.Add(48*time.Hour + tc.at)
+		if err := restarted.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if ss := restarted.Status().Sources[0]; ss.Expired != tc.expired {
+			t.Fatalf("+%s after the last success: status = %+v, want expired=%v", tc.at, ss, tc.expired)
+		}
+	}
+}
+
+// A source with maxAge that has never fetched is reported as never fetched,
+// not expired: there is no ledger entry and nothing is committed.
+func TestNeverFetchedSourceIsNotReportedExpired(t *testing.T) {
+	buf := captureLog(t)
+	feed := &flakyFeed{}
+	led := &memLedger{}
+	s := testSyncer(t, feed.server(t), model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}, led)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	for i := 0; i < 2; i++ {
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(100 * time.Hour)
+	}
+	if _, saves := led.state(); saves != 0 {
+		t.Fatalf("saves = %d, want none", saves)
+	}
+	ss := s.Status().Sources[0]
+	if ss.Expired || !ss.FetchedAt.IsZero() || ss.LastError == "" {
+		t.Fatalf("status = %+v, want never fetched (zero fetchedAt), refused, not expired", ss)
+	}
+	if strings.Contains(buf.String(), expiredMsg) {
+		t.Fatalf("a never-fetched source must not log an expiry; log: %s", buf.String())
+	}
+}
+
+// srcSyncer wires a syncer whose one source is read through src on every
+// reconcile, so a test can add or remove maxAge between runs, and which
+// counts data-plane reloads.
+func srcSyncer(t *testing.T, ts *httptest.Server, src *model.AccessListSource, led *memLedger, now *time.Time, reloads *int) *Syncer {
+	t.Helper()
+	src.URL = ts.URL
+	s := New(func(context.Context) (model.Config, model.Settings, error) {
+		return model.Config{AccessLists: []model.AccessList{{
+			ObjectMeta: model.ObjectMeta{Name: "lan-vpn"},
+			Sources:    []model.AccessListSource{*src},
+		}}}, model.Settings{}, nil
+	}, led, func() { *reloads++ })
+	s.client = ts.Client()
+	s.now = func() time.Time { return *now }
+	return s
+}
+
+// A dead feed expires about maxAge after its last successful fetch however
+// often the process restarts: everything the decision uses is in the ledger.
+func TestMaxAgeDeadFeedExpiresDespiteRestarts(t *testing.T) {
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	const tick = 15 * time.Minute
+	for _, tc := range []struct {
+		name    string
+		restart func(at time.Duration) bool
+	}{
+		{"restart every 20h", func(at time.Duration) bool { return at > 0 && at%(20*time.Hour) == 0 }},
+		{"single restart at +71h", func(at time.Duration) bool { return at == 71*time.Hour }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+			ts := feed.server(t)
+			led := &memLedger{}
+			src := model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}
+			now, reloads := t0, 0
+			s := srcSyncer(t, ts, &src, led, &now, &reloads)
+			var expiredAt time.Duration
+			for at := time.Duration(0); at <= 30*24*time.Hour; at += tick {
+				now = t0.Add(at)
+				if tc.restart(at) {
+					s = srcSyncer(t, ts, &src, led, &now, &reloads)
+				}
+				if err := s.Reconcile(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if at == 0 {
+					feed.set(false, "")
+				}
+				if s.Status().Sources[0].Expired {
+					expiredAt = at
+					break
+				}
+			}
+			if expiredAt <= 72*time.Hour || expiredAt > 72*time.Hour+tick {
+				t.Fatalf("expired after %s, want within one poll tick after 72h", expiredAt)
+			}
+		})
+	}
+}
+
+// Under maxAge a fetch whose set CHANGED but whose commit failed is not
+// credited to the old set the ledger still holds: that set is never
+// relabelled as freshly fetched, and it ages from its own fetch.
+func TestMaxAgeChangedSetFailedCommitDoesNotRelabelTheOldSet(t *testing.T) {
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	ts := feed.server(t)
+	led := &memLedger{}
+	src := model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now, reloads := t0, 0
+	s := srcSyncer(t, ts, &src, led, &now, &reloads)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	feed.set(true, "203.0.113.2\n")
+	led.mu.Lock()
+	led.failSaves = 1
+	led.mu.Unlock()
+	now = t0.Add(24 * time.Hour)
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatal("want the refused save reported")
+	}
+	feed.set(false, "")
+	now = t0.Add(24*time.Hour + 15*time.Minute)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	l, saves := led.state()
+	if saves != 1 || l.Sources[0].FetchedAt != t0.Format(time.RFC3339) || l.Sources[0].Entries[0] != "203.0.113.1/32" {
+		t.Fatalf("saves = %d, entry = %+v, want the old set untouched with its own fetchedAt", saves, l.Sources[0])
+	}
+	now = t0.Add(72*time.Hour + time.Minute)
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Status().Sources[0].Expired {
+		t.Fatal("want the old set expired 72h after its own fetch")
+	}
+}
+
+// A source that ran without maxAge has a fetchedAt that was not kept current
+// (ten unchanged days here). Opting in records maxAgeSince (one commit, no
+// reload), and the set expires maxAge after that, not at once, with or
+// without a restart in between.
+func TestMaxAgeOptInExpiresMaxAgeAfterOptIn(t *testing.T) {
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	optIn := t0.Add(10*24*time.Hour + 2*time.Hour)
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%v", restart), func(t *testing.T) {
+			feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+			ts := feed.server(t)
+			led := &memLedger{}
+			src := model.AccessListSource{Name: "feed", Interval: "24h"}
+			now, reloads := t0, 0
+			s := srcSyncer(t, ts, &src, led, &now, &reloads)
+			for d := 0; d <= 10; d++ {
+				now = t0.Add(time.Duration(d) * 24 * time.Hour)
+				if err := s.Reconcile(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if l, saves := led.state(); saves != 1 || l.Sources[0].FetchedAt != t0.Format(time.RFC3339) {
+				t.Fatalf("saves = %d, fetchedAt = %s, want the opted-out path to leave fetchedAt at the first fetch", saves, l.Sources[0].FetchedAt)
+			}
+
+			src.MaxAge = "72h"
+			feed.set(false, "")
+			now = optIn
+			if err := s.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			l, saves := led.state()
+			if saves != 2 || reloads != 1 || l.Sources[0].MaxAgeSince != optIn.Format(time.RFC3339) {
+				t.Fatalf("saves = %d, reloads = %d, maxAgeSince = %q, want it recorded once without a reload", saves, reloads, l.Sources[0].MaxAgeSince)
+			}
+			if restart {
+				s = srcSyncer(t, ts, &src, led, &now, &reloads)
+			}
+			for _, tc := range []struct {
+				at      time.Duration
+				expired bool
+			}{
+				{24 * time.Hour, false},
+				{71 * time.Hour, false},
+				{72*time.Hour + time.Minute, true},
+			} {
+				now = optIn.Add(tc.at)
+				if err := s.Reconcile(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if got := s.Status().Sources[0].Expired; got != tc.expired {
+					t.Fatalf("+%s after the opt-in: expired = %v, want %v", tc.at, got, tc.expired)
+				}
+			}
+			if _, saves := led.state(); saves != 3 || reloads != 2 {
+				t.Fatalf("saves = %d, reloads = %d, want one more of each for the expiry", saves, reloads)
+			}
+		})
+	}
+}
+
+// Removing maxAge removes the marker once, without a reload; adding it back
+// later starts a fresh baseline rather than reusing the old one.
+func TestMaxAgeOptOutRemovesTheMarkerAndReAddStartsAfresh(t *testing.T) {
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	ts := feed.server(t)
+	led := &memLedger{}
+	src := model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now, reloads := t0, 0
+	s := srcSyncer(t, ts, &src, led, &now, &reloads)
+	reconcile := func(at time.Duration) {
+		t.Helper()
+		now = t0.Add(at)
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile(0)
+	if l, _ := led.state(); l.Sources[0].MaxAgeSince != t0.Format(time.RFC3339) {
+		t.Fatalf("maxAgeSince = %q, want it set by the first fetch", l.Sources[0].MaxAgeSince)
+	}
+
+	src.MaxAge = ""
+	reconcile(time.Hour)
+	reconcile(2 * time.Hour)
+	l, saves := led.state()
+	if saves != 2 || reloads != 1 || l.Sources[0].MaxAgeSince != "" {
+		t.Fatalf("saves = %d, reloads = %d, maxAgeSince = %q, want it removed once without a reload", saves, reloads, l.Sources[0].MaxAgeSince)
+	}
+
+	// Ten opted-out days: unchanged fetches commit nothing.
+	for d := 1; d <= 10; d++ {
+		reconcile(time.Duration(d) * 24 * time.Hour)
+	}
+	src.MaxAge = "72h"
+	readd := 10*24*time.Hour + time.Hour
+	feed.set(false, "")
+	reconcile(readd)
+	if l, _ := led.state(); l.Sources[0].MaxAgeSince != t0.Add(readd).Format(time.RFC3339) {
+		t.Fatalf("maxAgeSince = %q, want a fresh baseline at the re-add", l.Sources[0].MaxAgeSince)
+	}
+	reconcile(readd + 71*time.Hour)
+	if s.Status().Sources[0].Expired {
+		t.Fatal("expired before maxAge after the re-add")
+	}
+	reconcile(readd + 72*time.Hour + time.Minute)
+	if !s.Status().Sources[0].Expired {
+		t.Fatal("want expired maxAge after the re-add")
+	}
+}
+
+// An unchanged fetch whose fetchedAt commit failed leaves the ledger one
+// interval behind; the next tick persists the in-memory success (once), so a
+// restart does not measure the age from the older value.
+func TestMaxAgeFailedAdvanceIsPersistedOnTheNextTick(t *testing.T) {
+	feed := &flakyFeed{ok: true, body: "203.0.113.1\n"}
+	ts := feed.server(t)
+	led := &memLedger{}
+	s := testSyncer(t, ts, model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}, led)
+	reloads := 0
+	s.onChange = func() { reloads++ }
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := t0
+	s.now = func() time.Time { return now }
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	led.mu.Lock()
+	led.failSaves = 1
+	led.mu.Unlock()
+	now = t0.Add(24 * time.Hour)
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatal("want the refused save reported")
+	}
+	if l, _ := led.state(); l.Sources[0].FetchedAt != t0.Format(time.RFC3339) {
+		t.Fatalf("fetchedAt = %s, want the ledger still one interval behind", l.Sources[0].FetchedAt)
+	}
+	for i := 1; i <= 2; i++ {
+		now = t0.Add(24*time.Hour + time.Duration(i)*15*time.Minute)
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, saves := led.state()
+	if saves != 2 || reloads != 1 || l.Sources[0].FetchedAt != t0.Add(24*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("saves = %d, reloads = %d, fetchedAt = %s, want the success persisted once, without a reload", saves, reloads, l.Sources[0].FetchedAt)
+	}
+}
+
+// For a source with maxAge an unchanged fetch commits the advanced fetchedAt
+// (that is what lets the age survive a restart) but does not reload the data
+// plane, since the served set is identical.
+func TestMaxAgeUnchangedFetchCommitsWithoutReload(t *testing.T) {
+	ts := serving(t, http.StatusOK, "203.0.113.1\n")
+	led := &memLedger{}
+	s := testSyncer(t, ts, model.AccessListSource{Name: "feed", Interval: "24h", MaxAge: "72h"}, led)
+	reloads := 0
+	s.onChange = func() { reloads++ }
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := t0
+	s.now = func() time.Time { return now }
+	for _, at := range []time.Duration{0, 24 * time.Hour} {
+		now = t0.Add(at)
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, saves := led.state()
+	if saves != 2 || l.Sources[0].FetchedAt != now.Format(time.RFC3339) {
+		t.Fatalf("saves = %d, fetchedAt = %s, want the unchanged fetch committed", saves, l.Sources[0].FetchedAt)
+	}
+	if reloads != 1 {
+		t.Fatalf("reloads = %d, want only the first fetch to reload", reloads)
+	}
+}
+
+// With a clock that is not on whole seconds, an unchanged feed under maxAge
+// still commits once per interval, not once per poll: the in-memory success is
+// compared with the ledger at the ledger's one-second resolution.
+func TestMaxAgeCommitsOncePerIntervalWithASubSecondClock(t *testing.T) {
+	ts := serving(t, http.StatusOK, "203.0.113.1\n")
+	led := &memLedger{}
+	s := testSyncer(t, ts, model.AccessListSource{Name: "feed", Interval: "1h", MaxAge: "1h"}, led)
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 123456789, time.UTC)
+	now := t0
+	s.now = func() time.Time { return now }
+	polls := 0
+	for at := time.Duration(0); at <= 10*time.Hour; at += 15*time.Minute + 7*time.Millisecond {
+		now = t0.Add(at)
+		polls++
+		if err := s.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if s.Status().Sources[0].Expired {
+			t.Fatalf("expired at +%s with a healthy feed", at)
+		}
+	}
+	// One save for the first fetch and at most one per elapsed interval.
+	if _, saves := led.state(); saves > 11 {
+		t.Fatalf("saves = %d over %d polls and 10 intervals, want at most 11", saves, polls)
 	}
 }

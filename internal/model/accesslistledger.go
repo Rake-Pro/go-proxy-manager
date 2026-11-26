@@ -33,7 +33,15 @@ type AccessListSourceEntry struct {
 	// FetchedAt is RFC3339. It is a string rather than a time.Time so the
 	// committed YAML is byte-stable across Go versions and marshallers.
 	FetchedAt string `json:"fetchedAt" yaml:"fetchedAt"`
-	SHA256    string `json:"sha256" yaml:"sha256"`
+	// ExpiredAt is RFC3339, set when the source's maxAge passed with no
+	// successful fetch: Entries is then empty and FetchedAt still names the
+	// last successful fetch. The next successful fetch clears it.
+	ExpiredAt string `json:"expiredAt,omitempty" yaml:"expiredAt,omitempty"`
+	// MaxAgeSince is RFC3339, set when the fetcher first handled the source with
+	// maxAge, and removed when maxAge is. A set's age is never measured from
+	// before it: fetchedAt is only kept current while maxAge is set.
+	MaxAgeSince string `json:"maxAgeSince,omitempty" yaml:"maxAgeSince,omitempty"`
+	SHA256      string `json:"sha256" yaml:"sha256"`
 	// Entries are CIDRs in masked form, sorted and deduplicated.
 	Entries []string `json:"entries" yaml:"entries"`
 }
@@ -94,6 +102,19 @@ func (l AccessListSourceLedger) Validate() error {
 		if e.FetchedAt != "" {
 			if _, err := time.Parse(time.RFC3339, e.FetchedAt); err != nil {
 				return fmt.Errorf("access-list source ledger: %s: fetchedAt %q is not RFC3339", e.Key(), e.FetchedAt)
+			}
+		}
+		if e.ExpiredAt != "" {
+			if _, err := time.Parse(time.RFC3339, e.ExpiredAt); err != nil {
+				return fmt.Errorf("access-list source ledger: %s: expiredAt %q is not RFC3339", e.Key(), e.ExpiredAt)
+			}
+			if len(e.Entries) > 0 {
+				return fmt.Errorf("access-list source ledger: %s: an expired entry must carry no entries", e.Key())
+			}
+		}
+		if e.MaxAgeSince != "" {
+			if _, err := time.Parse(time.RFC3339, e.MaxAgeSince); err != nil {
+				return fmt.Errorf("access-list source ledger: %s: maxAgeSince %q is not RFC3339", e.Key(), e.MaxAgeSince)
 			}
 		}
 		for _, c := range e.Entries {

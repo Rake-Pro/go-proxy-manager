@@ -88,8 +88,11 @@ commit, no reload, no webhook, no `X-Config-Commit` header.
   own validation is still a `200` with `valid: false` and the message in
   `error`; references to other objects are checked by the save or a dry run.
 - **`_parse` refusals.** Wrong `Content-Type` is `415`. Invalid YAML, a
-  document that is not a mapping, more than one document, excessive alias
-  expansion, or a body over 1 MiB is `400`.
+  document that is not a mapping, more than one document, or a body over 1 MiB
+  is `400`.
+- **`_parse` aliases.** Anchors, aliases and `<<` merge keys are accepted. A
+  document whose aliases add more than 100,000 nodes once expanded is a `400`
+  (`excessive aliasing`), checked before anything is decoded.
 - **HA followers.** Both calls are `POST`/`PUT`, so a follower answers `503`
   like any other write.
 

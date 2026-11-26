@@ -360,6 +360,59 @@ type bouncer struct {
 	cache      *verdictCache
 	stream     *streamState // nil unless crowdsec stream mode
 	allowNets  []*net.IPNet // clients that bypass the bouncer entirely
+	lookups    lookupGroup  // live lookups in flight, shared by identical queries
+}
+
+// lookupGroup lets concurrent callers that would send the same live lookup share
+// one: the first caller runs it and the others wait for its result. A call is
+// removed when it ends, so the map holds only lookups in flight and nothing is
+// cached here (the verdict cache does that).
+type lookupGroup struct {
+	mu    sync.Mutex
+	calls map[string]*lookupCall
+}
+
+type lookupCall struct {
+	done     chan struct{}
+	waiters  int // callers that joined this run, guarded by lookupGroup.mu
+	deny     bool
+	scenario string
+	err      error
+}
+
+// do runs fn for key, or waits for the run already in flight for key, and
+// returns that run's result to every caller. fn must bound itself (the bouncer
+// timeout), since the waiters wait for it. A panic in fn becomes the error of
+// every caller, so no waiter is left blocked.
+func (g *lookupGroup) do(key string, fn func() (bool, string, error)) (bool, string, error) {
+	g.mu.Lock()
+	if c := g.calls[key]; c != nil {
+		c.waiters++
+		g.mu.Unlock()
+		<-c.done
+		return c.deny, c.scenario, c.err
+	}
+	if g.calls == nil {
+		g.calls = map[string]*lookupCall{}
+	}
+	c := &lookupCall{done: make(chan struct{})}
+	g.calls[key] = c
+	g.mu.Unlock()
+
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				c.deny, c.scenario, c.err = false, "", fmt.Errorf("bouncer: lookup panicked: %v", p)
+			}
+		}()
+		c.deny, c.scenario, c.err = fn()
+	}()
+
+	g.mu.Lock()
+	delete(g.calls, key)
+	g.mu.Unlock()
+	close(c.done)
+	return c.deny, c.scenario, c.err
 }
 
 func compileBouncer(name string, spec model.BouncerMiddleware) *bouncer {
@@ -430,6 +483,11 @@ func (b *bouncer) errCacheTTL() time.Duration {
 // verdict asks the bouncer about ip and returns whether to deny. A non-nil
 // error means no usable answer was obtained; the caller applies the onError
 // policy. In stream mode the answer comes from the local decision set.
+//
+// Live lookups are shared between concurrent requests that would send the same
+// query (see lookupGroup), so they run detached from the request context: a
+// client that goes away does not fail the lookup for the others waiting on it.
+// They are still bounded by the bouncer timeout.
 func (b *bouncer) verdict(r *http.Request, ip net.IP) (deny bool, scenario string, err error) {
 	if b.apiKeyErr != nil {
 		return false, "", b.apiKeyErr
@@ -442,7 +500,10 @@ func (b *bouncer) verdict(r *http.Request, ip net.IP) (deny bool, scenario strin
 		deny, err = b.httpVerdict(r, ip)
 		return deny, "", err
 	default:
-		return b.crowdsecVerdict(r.Context(), ip)
+		// The LAPI query carries only the IP, which is also the cache key.
+		return b.lookups.do(ip.String(), func() (bool, string, error) {
+			return b.crowdsecVerdict(context.Background(), ip)
+		})
 	}
 }
 
@@ -694,10 +755,12 @@ func truncateHookValue(s string, n int) string {
 // 2xx = allow, 403 = deny, anything else = no usable answer (onError policy).
 // That contract is deliberately trivial so any bouncer - a shell script behind
 // inetd, a fail2ban shim, a corporate threat feed - can implement it.
+//
+// Concurrent requests share a lookup only when everything the hook is sent from
+// the request is identical (the query string, which carries ip, host and path,
+// and X-Original-URL), so a hook that judges by host or path never has one
+// request's answer handed to another that differs in them.
 func (b *bouncer) httpVerdict(r *http.Request, ip net.IP) (bool, error) {
-	ctx, cancel := context.WithTimeout(r.Context(), b.timeout)
-	defer cancel()
-
 	u, err := url.Parse(b.baseURL)
 	if err != nil {
 		return false, err
@@ -707,32 +770,39 @@ func (b *bouncer) httpVerdict(r *http.Request, ip net.IP) (bool, error) {
 	q.Set("host", r.Host)
 	q.Set("path", truncateHookValue(r.URL.Path, maxHookPathBytes))
 	u.RawQuery = q.Encode()
+	lookupURL := u.String()
+	origURL := truncateHookValue(absoluteURL(r), maxHookURLBytes)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return false, err
-	}
-	// The resolved client IP, not the inbound header: whatever the client sent is
-	// untrusted, and the bouncer must judge the peer gpm actually resolved.
-	req.Header.Set("X-Forwarded-For", ip.String())
-	req.Header.Set("X-Original-URL", truncateHookValue(absoluteURL(r), maxHookURLBytes))
-	if b.apiKey != "" {
-		req.Header.Set("X-Api-Key", b.apiKey)
-	}
+	deny, _, err := b.lookups.do(lookupURL+"\x00"+origURL, func() (bool, string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), b.timeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, lookupURL, nil)
+		if err != nil {
+			return false, "", err
+		}
+		// The resolved client IP, not the inbound header: whatever the client sent is
+		// untrusted, and the bouncer must judge the peer gpm actually resolved.
+		req.Header.Set("X-Forwarded-For", ip.String())
+		req.Header.Set("X-Original-URL", origURL)
+		if b.apiKey != "" {
+			req.Header.Set("X-Api-Key", b.apiKey)
+		}
 
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer drainClose(resp.Body)
-	switch {
-	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return false, nil
-	case resp.StatusCode == http.StatusForbidden:
-		return true, nil
-	default:
-		return false, fmt.Errorf("bouncer hook: unexpected status %d", resp.StatusCode)
-	}
+		resp, err := b.client.Do(req)
+		if err != nil {
+			return false, "", err
+		}
+		defer drainClose(resp.Body)
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			return false, "", nil
+		case resp.StatusCode == http.StatusForbidden:
+			return true, "", nil
+		default:
+			return false, "", fmt.Errorf("bouncer hook: unexpected status %d", resp.StatusCode)
+		}
+	})
+	return deny, err
 }
 
 // bouncerHandler gates next behind the compiled bouncer. ipOf resolves the

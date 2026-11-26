@@ -69,6 +69,43 @@ type router struct {
 	// connections are tracked against it (see tunnels.go). nil for a router
 	// built outside a Server, which tracks none.
 	live func() *router
+
+	// owned are the connection pools this build created for itself (per-host
+	// transport clones, auth-request and bouncer clients). Reload closes their
+	// idle connections once a new router replaces this one (closeReplacedIdle).
+	owned []idleCloser
+}
+
+// idleCloser is a connection pool whose idle connections can be closed:
+// *http.Transport and *http.Client.
+type idleCloser interface{ CloseIdleConnections() }
+
+// own records a pool this build created, for closeReplacedIdle. The shared
+// dataplaneTransport is never recorded.
+func (reg *registry) own(c idleCloser) {
+	if reg == nil || c == nil || c == idleCloser(dataplaneTransport) {
+		return
+	}
+	reg.owned = append(reg.owned, c)
+}
+
+// closeReplacedIdle closes the idle connections of every pool old owned that
+// next does not. CloseIdleConnections leaves in-flight requests and upgraded
+// (hijacked) connections alone. A connection a request still running on old
+// hands back is closed on return, unless another request on old reused the
+// pool meanwhile; then the pool's IdleConnTimeout reaps it. The close is best
+// effort, not a guarantee that old pools are empty.
+func closeReplacedIdle(old, next *router) {
+	keep := make(map[idleCloser]struct{}, len(next.owned))
+	for _, c := range next.owned {
+		keep[c] = struct{}{}
+	}
+	for _, c := range old.owned {
+		if _, ok := keep[c]; ok || c == idleCloser(dataplaneTransport) {
+			continue
+		}
+		c.CloseIdleConnections()
+	}
 }
 
 // clientAuthReq is a host's per-request mTLS enforcement record. cfg is the host's
@@ -222,6 +259,7 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 			return nil, fmt.Errorf("parked host %q: %w", h.Name, err)
 		}
 	}
+	rt.owned = reg.owned
 	return rt, nil
 }
 
@@ -301,10 +339,14 @@ func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.H
 	// the upstream's own response before the stdlib copies it out. A location
 	// inherits it, since buildLocations derives each location from this host.
 	strip := mergedStripResponseHeaders(h.StripResponseHeaders)
+	transport := transportFor(h.Timeouts)
+	if c, ok := transport.(idleCloser); ok {
+		reg.own(c)
+	}
 	var proxy http.Handler
 	var label string
 	if h.UpstreamGroupRef == "" {
-		proxy, label = newReverseProxy(h.Upstream, h.Name, h.Timeouts, ident, ep, strip), upstreamLabel(h.Upstream)
+		proxy, label = newReverseProxy(h.Upstream, h.Name, transport, ident, ep, strip), upstreamLabel(h.Upstream)
 	} else {
 		var gh *groupHealth
 		if reg.health != nil {
@@ -313,7 +355,7 @@ func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.H
 		if gh == nil {
 			return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
 		}
-		proxy, label = newGroupReverseProxy(gh, h.Name, h.Timeouts, ident, ep, strip), groupLabel(h.UpstreamGroupRef)
+		proxy, label = newGroupReverseProxy(gh, h.Name, transport, ident, ep, strip), groupLabel(h.UpstreamGroupRef)
 	}
 	if h.Compression.Enabled {
 		proxy = compressionHandler(h.Compression, proxy)

@@ -987,3 +987,264 @@ func TestCrowdSecStreamStartupPullPanicReleasesAndRetries(t *testing.T) {
 		t.Fatalf("pulls = %d, ready = %v; want the retry to run and load the set", got, ready)
 	}
 }
+
+// gatedBouncer is a bouncer endpoint that counts lookups and holds each one
+// until release is closed.
+type gatedBouncer struct {
+	calls   atomic.Int32
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func newGatedBouncer(t *testing.T, answer http.HandlerFunc) (*gatedBouncer, string) {
+	t.Helper()
+	g := &gatedBouncer{arrived: make(chan struct{}, 64), release: make(chan struct{})}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.calls.Add(1)
+		g.arrived <- struct{}{}
+		<-g.release
+		answer(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return g, srv.URL
+}
+
+// waitLookupWaiters waits until n callers have joined a lookup already in
+// flight in g, so a test releases the bouncer only once every request is
+// sharing a lookup rather than inferring it from a sleep.
+func waitLookupWaiters(t *testing.T, g *lookupGroup, n int) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		g.mu.Lock()
+		got := 0
+		for _, c := range g.calls {
+			got += c.waiters
+		}
+		g.mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("only %d callers joined an in-flight lookup, want %d", got, n)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// concurrently serves one request per entry of reqs at the same moment and
+// returns their status codes once all are done.
+func concurrently(h http.Handler, reqs []*http.Request) []int {
+	codes := make([]int, len(reqs))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, r := range reqs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+			codes[i] = rec.Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return codes
+}
+
+// Concurrent cache misses that would send the same live lookup share one call
+// to the bouncer, and all get its verdict. Lookups that differ (another client
+// IP; for the http hook another path) are not shared.
+func TestBouncerLiveLookupsAreCoalesced(t *testing.T) {
+	ban := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"type":"ban","scope":"Ip","value":"` + r.URL.Query().Get("ip") + `"}]`))
+	}
+	deny := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }
+	withPath := func(peer, path string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "http://app.example.com"+path, nil)
+		r.RemoteAddr = peer + ":51000"
+		return r
+	}
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		answer    http.HandlerFunc
+		reqs      func() []*http.Request
+		wantCalls int32
+	}{
+		{"crowdsec one ip", model.BouncerProviderCrowdSec, ban, func() []*http.Request {
+			var rs []*http.Request
+			for range 8 {
+				rs = append(rs, bouncerReq("203.0.113.7"))
+			}
+			return rs
+		}, 1},
+		{"crowdsec two ips", model.BouncerProviderCrowdSec, ban, func() []*http.Request {
+			var rs []*http.Request
+			for range 4 {
+				rs = append(rs, bouncerReq("203.0.113.7"), bouncerReq("203.0.113.8"))
+			}
+			return rs
+		}, 2},
+		{"http one path", model.BouncerProviderHTTP, deny, func() []*http.Request {
+			var rs []*http.Request
+			for range 8 {
+				rs = append(rs, withPath("203.0.113.7", "/a"))
+			}
+			return rs
+		}, 1},
+		{"http two paths", model.BouncerProviderHTTP, deny, func() []*http.Request {
+			var rs []*http.Request
+			for range 4 {
+				rs = append(rs, withPath("203.0.113.7", "/a"), withPath("203.0.113.7", "/b"))
+			}
+			return rs
+		}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, url := newGatedBouncer(t, tc.answer)
+			b := compileBouncer("bnc", model.BouncerMiddleware{
+				Provider: tc.provider, URL: url, APIKey: model.Secret("k"), Timeout: "5s", CacheTTL: "1h",
+			})
+			h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+			reqs := tc.reqs()
+			// Hold the lookups until every request that did not start one has
+			// joined one.
+			go func() {
+				waitLookupWaiters(t, &b.lookups, len(reqs)-int(tc.wantCalls))
+				close(g.release)
+			}()
+			for i, code := range concurrently(h, reqs) {
+				if code != http.StatusForbidden {
+					t.Errorf("request %d: status %d, want the shared deny verdict 403", i, code)
+				}
+			}
+			if got := g.calls.Load(); got != tc.wantCalls {
+				t.Errorf("bouncer lookups = %d, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// The shared lookup is not tied to the request that started it: when that
+// client goes away, a request waiting on the same lookup still gets the real
+// verdict rather than the onError path.
+func TestBouncerCoalescedLookupSurvivesFirstCallerCancel(t *testing.T) {
+	g, url := newGatedBouncer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"type":"ban","scope":"Ip","value":"203.0.113.7"}]`))
+	})
+	b := compileBouncer("bnc", model.BouncerMiddleware{URL: url, APIKey: model.Secret("k"), Timeout: "5s"})
+	h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, bouncerReq("203.0.113.7").WithContext(ctx))
+		first <- rec.Code
+	}()
+	<-g.arrived
+	second := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, bouncerReq("203.0.113.7"))
+		second <- rec.Code
+	}()
+	waitLookupWaiters(t, &b.lookups, 1)
+	cancel()
+	close(g.release)
+	if code := <-second; code != http.StatusForbidden {
+		t.Fatalf("waiting request: status %d, want the ban 403 (fail-open would mean the lookup was cancelled)", code)
+	}
+	<-first
+	if got := g.calls.Load(); got != 1 {
+		t.Fatalf("bouncer lookups = %d, want 1", got)
+	}
+}
+
+// An error from the shared lookup is every waiter's error, and the onError
+// policy and its caching apply unchanged: an http fail-open error admits the
+// waiters and is not cached, so the next request looks up again.
+func TestBouncerCoalescedLookupSharesError(t *testing.T) {
+	for _, tc := range []struct {
+		onError  string
+		wantCode int
+		provider string
+	}{
+		{model.BouncerOnErrorFailOpen, http.StatusOK, model.BouncerProviderHTTP},
+		{model.BouncerOnErrorFailClosed, http.StatusForbidden, model.BouncerProviderCrowdSec},
+	} {
+		g, url := newGatedBouncer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		b := compileBouncer("bnc", model.BouncerMiddleware{
+			Provider: tc.provider, URL: url, APIKey: model.Secret("k"), Timeout: "5s", OnError: tc.onError,
+		})
+		h := bouncerHandler(b, "app", clientIPResolver(nil), nil, bouncerNext(nil))
+		go func() {
+			waitLookupWaiters(t, &b.lookups, 7)
+			close(g.release)
+		}()
+		var reqs []*http.Request
+		for range 8 {
+			reqs = append(reqs, bouncerReq("203.0.113.9"))
+		}
+		for i, code := range concurrently(h, reqs) {
+			if code != tc.wantCode {
+				t.Errorf("%s: request %d status %d, want %d", tc.onError, i, code, tc.wantCode)
+			}
+		}
+		if got := g.calls.Load(); got != 1 {
+			t.Errorf("%s: bouncer lookups = %d, want 1", tc.onError, got)
+		}
+		// Not cached after a fail-open hook error; cached (5s) after fail-closed.
+		h.ServeHTTP(httptest.NewRecorder(), bouncerReq("203.0.113.9"))
+		want := int32(2)
+		if tc.onError == model.BouncerOnErrorFailClosed {
+			want = 1
+		}
+		if got := g.calls.Load(); got != want {
+			t.Errorf("%s: lookups after a follow-up request = %d, want %d", tc.onError, got, want)
+		}
+	}
+}
+
+// A panic in a shared lookup becomes every caller's error; no waiter is left
+// blocked and the key can be looked up again.
+func TestLookupGroupPanicReleasesWaiters(t *testing.T) {
+	var g lookupGroup
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	errs := make(chan error, 4)
+	go func() {
+		_, _, err := g.do("k", func() (bool, string, error) {
+			close(entered)
+			<-release
+			panic("boom")
+		})
+		errs <- err
+	}()
+	<-entered
+	for range 3 {
+		go func() {
+			_, _, err := g.do("k", func() (bool, string, error) { return false, "", nil })
+			errs <- err
+		}()
+	}
+	waitLookupWaiters(t, &g, 3)
+	close(release)
+	for range 4 {
+		select {
+		case err := <-errs:
+			if err == nil || !strings.Contains(err.Error(), "panicked") {
+				t.Errorf("caller error = %v, want the panic as an error", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a caller was left waiting after the lookup panicked")
+		}
+	}
+	if deny, _, err := g.do("k", func() (bool, string, error) { return true, "", nil }); err != nil || !deny {
+		t.Fatalf("after the panic a new lookup must run: deny=%v err=%v", deny, err)
+	}
+}

@@ -771,6 +771,11 @@ type StreamHost struct {
 	// (IPv6 by /56, as the UDP per-source session cap) may hold to this host; a
 	// connection over the cap is closed before the backend is dialled. 0: no cap.
 	MaxConnsPerSource int `json:"maxConnsPerSource,omitempty" yaml:"maxConnsPerSource,omitempty"`
+	// NewSessionsPerMinute (UDP only) caps how many new sessions one client
+	// address (IPv6 by /56) may open per minute, with a burst of the same size;
+	// a packet that would open one over the limit is dropped before the backend
+	// is dialled. Packets on an open session are never limited. 0: no limit.
+	NewSessionsPerMinute int `json:"newSessionsPerMinute,omitempty" yaml:"newSessionsPerMinute,omitempty"`
 }
 
 func (h StreamHost) Kind() string { return "StreamHost" }
@@ -805,7 +810,13 @@ func (h StreamHost) Validate() error {
 		return fmt.Errorf("stream host %q: maxConnsPerSource: must be >= 0, got %d", h.Name, h.MaxConnsPerSource)
 	}
 	if h.Protocol == "udp" && (h.IdleTimeout != "" || h.MaxConnsPerSource != 0) {
-		return fmt.Errorf("stream host %q: idleTimeout and maxConnsPerSource apply to TCP only; protocol is udp (UDP sessions have fixed limits)", h.Name)
+		return fmt.Errorf("stream host %q: idleTimeout and maxConnsPerSource apply to TCP only; protocol is udp (see newSessionsPerMinute for UDP)", h.Name)
+	}
+	if h.NewSessionsPerMinute < 0 {
+		return fmt.Errorf("stream host %q: newSessionsPerMinute: must be >= 0, got %d", h.Name, h.NewSessionsPerMinute)
+	}
+	if h.Protocol == "tcp" && h.NewSessionsPerMinute != 0 {
+		return fmt.Errorf("stream host %q: newSessionsPerMinute applies to UDP only; protocol is tcp (see maxConnsPerSource for TCP)", h.Name)
 	}
 	return nil
 }

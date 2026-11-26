@@ -15,7 +15,9 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/accesssync"
@@ -28,6 +30,7 @@ import (
 	"github.com/Rake-Pro/go-proxy-manager/internal/k8s"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/Rake-Pro/go-proxy-manager/internal/store"
+	"github.com/rs/zerolog/log"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -491,6 +494,22 @@ func New(d Deps) http.Handler {
 	// what serializes the read-modify-write that appending and superseding do.
 	clientCertLedger := clientcert.NewLedger(d.CertDir)
 
+	// One plan cache per dry-run route (GET /dns-sync/plan and the two
+	// discovery plans), see cachedPlan. A plan that reports a failure inside
+	// its value (a DNS backend that could not be read) is not reused.
+	dnsPlans := &planCache{now: time.Now, reusable: func(v any) bool {
+		p, ok := v.(dnssync.Plan)
+		return !ok || (p.Error == "" && p.Pihole.Error == "" && p.Cloudflare.Error == "")
+	}}
+	ingressPlans := &planCache{now: time.Now, reusable: func(v any) bool {
+		p, ok := v.(k8s.Plan)
+		return !ok || p.Error == ""
+	}}
+	dockerPlans := &planCache{now: time.Now, reusable: func(v any) bool {
+		p, ok := v.(docker.Plan)
+		return !ok || p.Error == ""
+	}}
+
 	register(mux, d, "proxy-hosts", resource[model.ProxyHost]{
 		kind: "ProxyHost",
 		list: func(c model.Config) []model.ProxyHost { return c.ProxyHosts },
@@ -735,7 +754,14 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("DNS sync is not wired"))
 			return
 		}
-		if err := d.DNSSyncReconcile(r.Context()); err != nil {
+		// A plan from before the run would show changes it has since applied
+		// without moving HEAD. Dropping it first sends a plan request during the
+		// run to the 409 it got before; dropping it again afterwards covers a
+		// plan that finished just before the run started.
+		dnsPlans.drop()
+		err := d.DNSSyncReconcile(r.Context())
+		dnsPlans.drop()
+		if err != nil {
 			// A run already in flight is a conflict, not a backend failure: the
 			// manual endpoint deliberately never queues behind one, so repeated
 			// clicks cannot pile blocked goroutines up behind a slow backend.
@@ -768,7 +794,7 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("DNS sync is not wired"))
 			return
 		}
-		plan, err := d.DNSSyncPlan(r.Context())
+		plan, err := d.cachedPlan(r, dnsPlans, d.DNSSyncPlan)
 		if err != nil {
 			// Same reasoning as the reconcile route: a run in flight is a conflict,
 			// and a preview of a moving target is worth less than an honest 409.
@@ -863,7 +889,11 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
 			return
 		}
-		if err := d.IngressDiscoveryReconcile(r.Context()); err != nil {
+		// Drop the cached plan before and after the run, as for DNS sync.
+		ingressPlans.drop()
+		err := d.IngressDiscoveryReconcile(r.Context())
+		ingressPlans.drop()
+		if err != nil {
 			// Same reasoning as the DNS reconcile: an in-flight run is a conflict,
 			// not a backend failure, and the manual endpoint never queues behind one.
 			if errors.Is(err, k8s.ErrReconcileInProgress) {
@@ -894,7 +924,7 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("ingress discovery is not wired"))
 			return
 		}
-		plan, err := d.IngressDiscoveryPlan(r.Context())
+		plan, err := d.cachedPlan(r, ingressPlans, d.IngressDiscoveryPlan)
 		if err != nil {
 			// Same reasoning as the reconcile route: a run in flight is a conflict,
 			// and a preview of a moving target is worth less than an honest 409.
@@ -919,7 +949,11 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))
 			return
 		}
-		if err := d.DockerDiscoveryReconcile(r.Context()); err != nil {
+		// Drop the cached plan before and after the run, as for DNS sync.
+		dockerPlans.drop()
+		err := d.DockerDiscoveryReconcile(r.Context())
+		dockerPlans.drop()
+		if err != nil {
 			// Same reasoning as the DNS and Ingress reconcile routes: an in-flight
 			// run is a conflict, not a backend failure.
 			if errors.Is(err, docker.ErrReconcileInProgress) {
@@ -948,7 +982,7 @@ func New(d Deps) http.Handler {
 			writeErr(w, http.StatusNotImplemented, fmt.Errorf("docker discovery is not wired"))
 			return
 		}
-		plan, err := d.DockerDiscoveryPlan(r.Context())
+		plan, err := d.cachedPlan(r, dockerPlans, d.DockerDiscoveryPlan)
 		if err != nil {
 			if errors.Is(err, docker.ErrReconcileInProgress) {
 				writeErr(w, http.StatusConflict, err)
@@ -1668,6 +1702,113 @@ func dryRunParam(r *http.Request) (bool, error) {
 	}
 }
 
+const (
+	// planReuseWindow is how long a successful dry-run plan is served again
+	// instead of querying the DNS backends, the cluster or the Engine API once
+	// more, so a burst of read-scoped calls costs one provider query.
+	planReuseWindow = 5 * time.Second
+	// planTimeout bounds one shared plan computation. It runs detached from the
+	// request that started it, so it needs its own bound; the longest provider
+	// read inside a plan (the Kubernetes Ingress list) is capped at 2 minutes.
+	planTimeout = 3 * time.Minute
+)
+
+// planCache coalesces the calls of one dry-run route: concurrent callers wait
+// for the same computation, and a successful result is reused for
+// planReuseWindow while the config repo HEAD is unchanged. A failed result is
+// shared only with the callers that were already waiting for it.
+type planCache struct {
+	now func() time.Time
+	// reusable, if set, reports whether a plan returned without an error may be
+	// served again: a DNS plan carries an unreachable backend inside the value.
+	reusable func(any) bool
+	mu       sync.Mutex
+	head     string    // config HEAD the current call was started at
+	call     *planCall // in flight or finished; nil before the first call
+}
+
+type planCall struct {
+	done     chan struct{} // closed once plan and err are set
+	plan     any
+	err      error
+	finished bool      // set under planCache.mu
+	ok       bool      // finished without an error and reusable; set under planCache.mu
+	at       time.Time // when it finished, set under planCache.mu
+}
+
+// get returns the plan for config HEAD head, starting a computation unless one
+// for the same head is in flight or finished successfully within the reuse
+// window. The computation is not cancelled when ctx is; a caller whose ctx ends
+// first stops waiting and gets ctx.Err().
+func (c *planCache) get(ctx context.Context, head string, compute func(context.Context) (any, error)) (any, error) {
+	call := c.join(ctx, head, compute)
+	select {
+	case <-call.done:
+		return call.plan, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// join returns the call get waits on, starting a new computation (detached
+// from ctx's cancellation, keeping its values) when there is nothing to reuse.
+func (c *planCache) join(ctx context.Context, head string, compute func(context.Context) (any, error)) *planCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	call := c.call
+	if call != nil && c.head == head &&
+		(!call.finished || (call.ok && c.now().Sub(call.at) < planReuseWindow)) {
+		return call
+	}
+	call = &planCall{done: make(chan struct{})}
+	c.call, c.head = call, head
+	go c.run(context.WithoutCancel(ctx), call, compute)
+	return call
+}
+
+func (c *planCache) run(ctx context.Context, call *planCall, compute func(context.Context) (any, error)) {
+	ctx, cancel := context.WithTimeout(ctx, planTimeout)
+	defer cancel()
+	var plan any
+	var err error
+	func() {
+		// A panic here would otherwise take the daemon down: this goroutine is
+		// outside net/http's per-request recovery.
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error().Str("panic", fmt.Sprint(p)).Bytes("stack", debug.Stack()).Msg("dry-run plan panicked")
+				plan, err = nil, errors.New("plan failed: internal error, see the server log")
+			}
+		}()
+		plan, err = compute(ctx)
+	}()
+	ok := err == nil && (c.reusable == nil || c.reusable(plan))
+	c.mu.Lock()
+	call.plan, call.err, call.finished, call.ok, call.at = plan, err, true, ok, c.now()
+	c.mu.Unlock()
+	close(call.done)
+}
+
+// drop forgets the current result, so the next call computes afresh. Callers
+// already waiting on an in-flight computation still get it.
+func (c *planCache) drop() {
+	c.mu.Lock()
+	c.call = nil
+	c.mu.Unlock()
+}
+
+// cachedPlan runs a dry-run plan through its route's cache, keyed on the
+// config repo HEAD: every config, settings and ownership-ledger change is a
+// commit, so a plan computed before one is never served after it. When HEAD
+// cannot be read the plan is computed directly, as before the cache existed.
+func (d Deps) cachedPlan(r *http.Request, c *planCache, plan func(context.Context) (any, error)) (any, error) {
+	head, err := d.Store.Head(r.Context())
+	if err != nil {
+		return plan(r.Context())
+	}
+	return c.get(r.Context(), head, plan)
+}
+
 // isYAMLContentType reports whether ct names one of the accepted YAML media
 // types (parameters such as charset are ignored).
 func isYAMLContentType(ct string) bool {
@@ -1682,27 +1823,88 @@ func isYAMLContentType(ct string) bool {
 	return false
 }
 
+// maxYAMLAliasNodes caps how many nodes alias references may add to a pasted
+// YAML document once every alias is expanded. yaml.v3's own guard is a ratio
+// (up to 99 alias-decoded nodes per literal one until 400,000 decoded nodes),
+// so a body of a few thousand literal nodes may still decode to about 400,000;
+// this bound is fixed whatever the body size. A config object that reuses an
+// anchored block adds tens to a few thousand nodes.
+const maxYAMLAliasNodes = 100_000
+
 // parseYAMLMapping decodes exactly one YAML document whose top level is a
-// mapping. yaml.v3 refuses documents with excessive alias expansion, and the
-// caller has already capped the body at maxBody.
+// mapping. The caller has already capped the body at maxBody, which bounds the
+// nodes written out literally; alias expansion is bounded by
+// maxYAMLAliasNodes before anything is decoded into Go values.
 func parseYAMLMapping(body []byte) (map[string]any, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(body))
-	var doc any
-	if err := dec.Decode(&doc); err != nil {
+	// Decoding into a yaml.Node only parses: aliases stay references, so
+	// nothing is expanded yet.
+	var node yaml.Node
+	if err := dec.Decode(&node); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.New("the request body is empty: expected one YAML mapping")
 		}
+		return nil, fmt.Errorf("invalid YAML: %w", err)
+	}
+	if n := yamlAliasNodes(&node); n > maxYAMLAliasNodes {
+		return nil, fmt.Errorf("invalid YAML: excessive aliasing: expanding the aliases adds more than %d nodes; reference anchored blocks fewer times", maxYAMLAliasNodes)
+	}
+	var doc any
+	if err := node.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %w", err)
 	}
 	m, ok := doc.(map[string]any)
 	if !ok {
 		return nil, errors.New("the YAML document must be a mapping of field names to values")
 	}
-	var extra any
+	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("expected exactly one YAML document")
 	}
 	return m, nil
+}
+
+// yamlAliasNodes returns how many nodes alias expansion adds to root: the
+// expanded node count, every alias replaced by its anchor's subtree, minus the
+// nodes written out literally. Sizes are memoised per anchored node, so the
+// walk is linear in the parsed tree however deep the nesting of aliases, and
+// saturate well below int overflow. An alias inside its own anchor counts as
+// one node; decoding refuses that document anyway.
+func yamlAliasNodes(root *yaml.Node) int {
+	const saturate = 1 << 29      // far above any bound, and twice it still fits a 32-bit int
+	sizes := map[*yaml.Node]int{} // anchored node -> expanded size, 0 while in progress
+	literal := 0
+	var expanded func(n *yaml.Node, inAlias bool) int
+	expanded = func(n *yaml.Node, inAlias bool) int {
+		if !inAlias {
+			literal++
+		}
+		if n.Kind == yaml.AliasNode {
+			s, seen := sizes[n.Alias]
+			if !seen {
+				// Not yet walked as literal content: walk it once now.
+				s = expanded(n.Alias, true)
+			} else if s == 0 {
+				s = 1 // the alias is inside its own anchor
+			}
+			return min(1+s, saturate)
+		}
+		if n.Anchor != "" {
+			if s, seen := sizes[n]; seen && s != 0 && inAlias {
+				return s
+			}
+			sizes[n] = 0
+		}
+		s := 1
+		for _, c := range n.Content {
+			s = min(s+expanded(c, inAlias), saturate)
+		}
+		if n.Anchor != "" {
+			sizes[n] = s
+		}
+		return s
+	}
+	return expanded(root, false) - literal
 }
 
 // tokenRevealNote is returned alongside a freshly minted secret so a client (or

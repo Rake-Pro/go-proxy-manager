@@ -220,7 +220,7 @@ type IngressHostTemplate struct {
 	// for one service whose upstream is not the cluster ingress controller (a
 	// hostPort pod, say) and which serves a sidecar under a path. Validated by
 	// the same rules as a proxy host's, at settings-write time, and
-	// cross-reference-checked when the derived host is written.
+	// cross-reference-checked by ValidateRefs like the rest of the template.
 	Locations []Location `json:"locations,omitempty" yaml:"locations,omitempty"`
 
 	// DefaultDNS is the dns policy a derived host gets when the corresponding
@@ -762,9 +762,14 @@ func suffixesSubsetOf(narrow, global []string) (string, bool) {
 	return "", true
 }
 
-// ValidateRefs cross-checks every object the discovery block NAMES - the
-// certificate, the upstream group, each middleware, each access list, and the
-// mTLS trust anchor - against the objects that actually exist in cfg.
+// ValidateRefs cross-checks every object the discovery block NAMES, in the
+// template and every profile, at host level and per location (certificate,
+// upstream groups, middlewares, access lists and their accessListsMode: any
+// fitness, rateLimit.allowFrom lists, inline auth providers, the mTLS trust
+// anchor), against the objects in cfg and with the usability rules a proxy host
+// is held to (a disabled upstream group or client CA is refused). It is the
+// reference part of Config.Validate run on a host built from each template
+// (refErrors), so a template that passes yields hosts that pass.
 //
 // Validate() above only checks name SHAPE, because a Settings value knows
 // nothing about the rest of the config. That was enough to write a settings
@@ -785,54 +790,77 @@ func (d IngressDiscoverySettings) ValidateRefs(cfg Config) error {
 	if err := d.checkAnnotationPrefixMigration(cfg); err != nil {
 		return err
 	}
-	certs := map[string]bool{}
-	for _, o := range cfg.Certificates {
-		certs[o.Name] = true
-	}
-	mws := map[string]bool{}
-	for _, o := range cfg.Middlewares {
-		mws[o.Name] = true
-	}
-	als := map[string]bool{}
-	for _, o := range cfg.AccessLists {
-		als[o.Name] = true
-	}
-	anyRefused := anyModeRefusals(cfg.AccessLists)
-	ugs := map[string]bool{}
-	for _, o := range cfg.UpstreamGroups {
-		ugs[o.Name] = true
-	}
-	clientCAs := map[string]bool{}
-	disabledClientCAs := map[string]bool{}
-	for _, o := range cfg.ClientCAs {
-		clientCAs[o.Name] = true
-		if o.Disabled {
-			disabledClientCAs[o.Name] = true
-		}
-	}
-
 	var errs []error
 	check := func(path string, t IngressHostTemplate) {
-		owner := "ingressDiscovery." + path
-		checkRef(&errs, "", owner, "tls.certificateRef", "certificate", t.TLS.CertificateRef, certs)
-		checkRef(&errs, "", owner, "upstreamGroupRef", "upstreamGroup", t.UpstreamGroupRef, ugs)
-		checkClientAuthRef(&errs, "", owner, t.TLS, clientCAs, disabledClientCAs)
-		for _, m := range t.Middlewares {
-			checkRef(&errs, "", owner, "middlewares", "middleware", m, mws)
-		}
-		for _, a := range t.AccessLists {
-			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
-		}
-		checkAnyModeMembers(&errs, "", owner, "", t.AccessListsMode, t.AccessLists, anyRefused)
-		for _, l := range t.Locations {
-			checkAnyModeMembers(&errs, "", owner, fmt.Sprintf("locations: location %q: ", l.Path), l.AccessListsMode, l.AccessLists, anyRefused)
-		}
+		errs = append(errs, t.refErrors(cfg, "ingressDiscovery."+path)...)
 	}
 	check(DefaultProfileName, d.Template)
 	for _, name := range d.ProfileNames() {
 		check("profiles."+name, d.Profiles[name])
 	}
 	return errors.Join(errs...)
+}
+
+// templateRefHost names the stand-in host refErrors validates.
+const templateRefHost = "discovery-template"
+
+// refErrors runs the reference part of Config.Validate on a proxy host carrying
+// every field a derive copies from t, against the objects in cfg, so a template
+// that passes yields derived hosts that pass it too: the two cannot drift, since
+// they are one check. owner is the settings path ("ingressDiscovery.template")
+// that replaces the stand-in host's name in each error. Errors from the host's
+// own shape check are dropped: Settings.Validate owns the template's shape.
+func (t IngressHostTemplate) refErrors(cfg Config, owner string) []error {
+	h := ProxyHost{
+		ObjectMeta:           ObjectMeta{Name: templateRefHost},
+		Domains:              []string{"template.example.com"},
+		Upstream:             t.Upstream,
+		UpstreamGroupRef:     t.UpstreamGroupRef,
+		TLS:                  t.TLS,
+		RobotsNoIndex:        t.RobotsNoIndex,
+		Timeouts:             t.Timeouts,
+		Middlewares:          t.Middlewares,
+		AccessLists:          t.AccessLists,
+		AccessListsMode:      t.AccessListsMode,
+		StripResponseHeaders: t.StripResponseHeaders,
+		SecurityHeaders:      t.SecurityHeaders,
+		Locations:            t.Locations,
+	}
+	if h.Upstream == (Upstream{}) && h.UpstreamGroupRef == "" {
+		// Docker derives the upstream per container.
+		h.Upstream = Upstream{Scheme: "http", Host: "192.0.2.1", Port: 80}
+	}
+	err := Config{
+		Certificates:      cfg.Certificates,
+		ClientCAs:         cfg.ClientCAs,
+		DNSProviders:      cfg.DNSProviders,
+		IdentityProviders: cfg.IdentityProviders,
+		UpstreamGroups:    cfg.UpstreamGroups,
+		AccessLists:       cfg.AccessLists,
+		Middlewares:       cfg.Middlewares,
+		ProxyHosts:        []ProxyHost{h},
+	}.Validate()
+	if err == nil {
+		return nil
+	}
+	shape := ""
+	if serr := h.Validate(); serr != nil {
+		shape = serr.Error()
+	}
+	all := []error{err}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		all = j.Unwrap()
+	}
+	prefix := fmt.Sprintf("proxy host %q: ", templateRefHost)
+	var out []error
+	for _, e := range all {
+		msg := e.Error()
+		if msg == shape || !strings.HasPrefix(msg, prefix) {
+			continue
+		}
+		out = append(out, errors.New(owner+"."+strings.TrimPrefix(msg, prefix)))
+	}
+	return out
 }
 
 // checkAnnotationPrefixMigration refuses a settings write that would silently

@@ -3,10 +3,12 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -261,6 +263,41 @@ h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
 i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
 `
 
+// anchoredHostYAML reuses an anchored upstream the way a hand-written config
+// does: a plain alias and a merge key with an override.
+const anchoredHostYAML = `name: app
+domains:
+  - app2.example.com
+upstream: &up
+  scheme: http
+  host: 10.0.0.5
+  port: 8080
+locations:
+  - path: /api
+    upstream: *up
+  - path: /static
+    upstream:
+      <<: *up
+      port: 8081
+`
+
+// paddedAliasBomb is about 16 KB: 8000 literal scalars first, then five levels
+// of tenfold aliases referenced twice, about 380,000 alias-expanded nodes.
+// The literal padding keeps it under yaml.v3's own alias ratio, so the library
+// alone decodes it (about 20 MiB of allocations).
+func paddedAliasBomb() string {
+	var b strings.Builder
+	b.WriteString("name: app\n")
+	b.WriteString("padding: [" + strings.TrimSuffix(strings.Repeat("p,", 8000), ",") + "]\n")
+	b.WriteString("a0: &a0 [p,p,p,p,p,p,p,p,p,p]\n")
+	for i := 1; i <= 4; i++ {
+		ref := fmt.Sprintf("*a%d,", i-1)
+		fmt.Fprintf(&b, "a%d: &a%d [%s]\n", i, i, strings.TrimSuffix(strings.Repeat(ref, 10), ","))
+	}
+	b.WriteString("bomb: [*a4,*a4]\n")
+	return b.String()
+}
+
 func TestParseYAML(t *testing.T) {
 	noUpstreamErr := model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "app"}, Domains: []string{"app2.example.com"}}.Validate()
 	if noUpstreamErr == nil {
@@ -294,6 +331,8 @@ func TestParseYAML(t *testing.T) {
 		{"json content type", "/proxy-hosts/_parse", "application/json", hostYAML, 415, "", false, "Content-Type"},
 		{"no content type", "/proxy-hosts/_parse", "", hostYAML, 415, "", false, "Content-Type"},
 		{"excessive aliasing", "/proxy-hosts/_parse", "application/yaml", billionLaughs, 400, "", false, "excessive aliasing"},
+		{"alias expansion under the library ratio", "/proxy-hosts/_parse", "application/yaml", paddedAliasBomb(), 400, "", false, "more than 100000 nodes"},
+		{"ordinary anchors and merge keys", "/proxy-hosts/_parse", "application/yaml", anchoredHostYAML, 200, "app", true, ""},
 		{"body over the cap", "/proxy-hosts/_parse", "application/yaml", "name: app\nx: " + strings.Repeat("a", 1<<20) + "\n", 400, "", false, "too large"},
 		{"other kind", "/certificates/_parse", "application/yaml", "name: wild\ntype: custom\ndomains: ['*.example.com']\ncustom: {certFile: c.pem, keyFile: k.pem}\n", 200, "wild", true, ""},
 	}
@@ -331,6 +370,38 @@ func TestParseYAML(t *testing.T) {
 			}
 			if err := json.Unmarshal(got.Object, &meta); err != nil || meta.Name != tc.wantName {
 				t.Fatalf("object = %s, want name %q", got.Object, tc.wantName)
+			}
+		})
+	}
+}
+
+// The expansion bound is checked on the parsed node tree, before any value is
+// decoded, so refusing a padded alias bomb costs about what parsing its 16 KB
+// does - in the first document, and in a second one, which is only ever
+// parsed to be refused.
+func TestParseYAMLAliasBombBoundedMemory(t *testing.T) {
+	e := newWizardEnv(t)
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"first document", paddedAliasBomb(), "excessive aliasing"},
+		{"second document", hostYAML + "---\n" + paddedAliasBomb(), "exactly one YAML document"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			w := doCT(t, e.h, "POST", "/proxy-hosts/_parse", "application/yaml", tc.body)
+			runtime.ReadMemStats(&after)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.wantErr) {
+				t.Fatalf("status = %d, want 400 containing %q: %s", w.Code, tc.wantErr, w.Body.String())
+			}
+			const limit = 8 << 20
+			if got := after.TotalAlloc - before.TotalAlloc; got > limit {
+				t.Fatalf("refusal allocated %d bytes, want at most %d", got, limit)
 			}
 		})
 	}

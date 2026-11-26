@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -120,9 +122,17 @@ func refuseLinkLocal(network, address string, _ syscall.RawConn) error {
 		host = address
 	}
 	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) { // netip keeps a %zone, which net.ParseIP rejects and so would let through
-		return fmt.Errorf("webhook: link-local destination %s refused", ip)
+		return linkLocalRefused{ip}
 	}
 	return nil
+}
+
+// linkLocalRefused is refuseLinkLocal's error, typed so PlaceholderTransportCause
+// can recognise it after net wraps it in a *net.OpError.
+type linkLocalRefused struct{ ip netip.Addr }
+
+func (e linkLocalRefused) Error() string {
+	return fmt.Sprintf("webhook: link-local destination %s refused", e.ip)
 }
 
 // Close waits for every in-flight delivery goroutine to finish. It does not
@@ -217,7 +227,13 @@ func Sign(secret, timestamp string, body []byte) string {
 // classify a 500 from the receiver the same way.
 func (d *Dispatcher) deliver(ctx context.Context, t model.WebhookConfig, body []byte) (int, time.Duration, error) {
 	started := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL, bytes.NewReader(body))
+	// A placeholder url resolves here; ResolveURL has already parsed the result,
+	// so NewRequestWithContext cannot fail with a *url.Error quoting it.
+	target, err := t.ResolveURL()
+	if err != nil {
+		return 0, time.Since(started), err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return 0, time.Since(started), fmt.Errorf("build request: %w", err)
 	}
@@ -234,6 +250,9 @@ func (d *Dispatcher) deliver(ctx context.Context, t model.WebhookConfig, body []
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {
+		if model.Secret(t.URL).IsPlaceholder() {
+			return 0, time.Since(started), PlaceholderTransportCause(err)
+		}
 		return 0, time.Since(started), TransportCause(err)
 	}
 	defer resp.Body.Close()
@@ -251,6 +270,47 @@ func TransportCause(err error) error {
 		return ue.Err
 	}
 	return err
+}
+
+// PlaceholderTransportCause replaces a transport failure for a url resolved
+// from a placeholder with a fixed phrase for its class. The underlying error
+// text names the resolved host, address or TLS server name (a DNS lookup, a
+// dial, a certificate check), and hiding the resolved url, host included, is
+// why the url is a placeholder. A literal url keeps TransportCause.
+func PlaceholderTransportCause(err error) error {
+	var (
+		dnsErr  *net.DNSError
+		opErr   *net.OpError
+		netErr  net.Error
+		verify  *tls.CertificateVerificationError
+		record  tls.RecordHeaderError
+		alert   tls.AlertError
+		ech     *tls.ECHRejectionError
+		host    x509.HostnameError
+		unknown x509.UnknownAuthorityError
+		invalid x509.CertificateInvalidError
+	)
+	cause := "other transport error"
+	switch {
+	case errors.As(err, new(linkLocalRefused)):
+		cause = "refused by the outbound policy"
+	case errors.As(err, &dnsErr):
+		cause = "name resolution failed"
+	case errors.As(err, &verify), errors.As(err, &record), errors.As(err, &alert), errors.As(err, &ech),
+		errors.As(err, &host), errors.As(err, &unknown), errors.As(err, &invalid),
+		// net/http replaces the record-header error with this one when an
+		// https url reaches a plain-HTTP receiver.
+		errors.Is(err, http.ErrSchemeMismatch),
+		// crypto/tls reports a sent or received alert as a *net.OpError with
+		// one of these two Ops.
+		errors.As(err, &opErr) && (opErr.Op == "local error" || opErr.Op == "remote error"):
+		cause = "TLS handshake failed"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		cause = "timed out"
+	case errors.As(err, &opErr):
+		cause = "connection failed"
+	}
+	return errors.New(cause + " (details withheld: the url comes from a placeholder)")
 }
 
 // record stores the outcome of the most recent POST to a target. It is in-memory

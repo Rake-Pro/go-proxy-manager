@@ -24,7 +24,7 @@ own payload shapes, own event filtering). Empty (default) sends nothing.
 |-------|------|----------|-------------|
 | <span id="settings-notifications-targets-name"></span> `name` | string | yes | Name-safe identifier, shown in logs and status. |
 | <span id="settings-notifications-targets-type"></span> `type` | string | yes | `ntfy`, `discord`, or `generic`. |
-| <span id="settings-notifications-targets-url"></span> `url` | string | yes | Absolute http/https endpoint: an ntfy topic URL, a Discord webhook URL (must contain `/api/webhooks/`), or any endpoint for `generic`. |
+| <span id="settings-notifications-targets-url"></span> `url` | string | yes | Absolute http/https endpoint: an ntfy topic URL, a Discord webhook URL (must contain `/api/webhooks/`), or any endpoint for `generic`. May instead be wholly a `${ENV:...}` / `${FILE:...}` placeholder, resolved at each send (below). |
 | <span id="settings-notifications-targets-secret"></span> `secret` | Secret | no | ntfy access token or `generic` bearer token, sent as `Authorization: Bearer <value>`. Unused for `discord`: the webhook URL is itself the credential. |
 | <span id="settings-notifications-targets-disabled"></span> `disabled` | bool | no | Keep the target configured without firing it. |
 | <span id="settings-notifications-targets-events"></span> `events` | []string | no | Subset of event kinds this target receives. Empty selects the default set (every kind below except `config.changed`). |
@@ -47,6 +47,24 @@ own payload shapes, own event filtering). Empty (default) sends nothing.
 - `ntfy`: POST to the topic URL with the message as the plain-text body; `Title`, `Priority` (`3`/`4`/`5` for info/warning/critical), and `Tags` headers carry the summary and severity. `secret` rides as `Authorization: Bearer <token>`.
 - `discord`: POST `{"content", "embeds": [{"title", "description", "color", "fields": [{"name", "value"}]}]}` to the webhook URL. No `Authorization` header: the URL is the credential.
 - `generic`: POST `{"kind", "title", "body", "severity", "fields", "time"}` as JSON, with the kind repeated in the `X-GPM-Event` header. `secret` rides as `Authorization: Bearer <token>`.
+
+**A url that is the credential** (a Discord webhook url, an ntfy topic on a
+shared server) can be kept out of git by giving `url` as a placeholder, the same
+way as `webhooks[].url`; see
+[Keeping the url out of git](webhooks.md#keeping-the-url-out-of-git).
+
+- Only a whole-value placeholder is resolved; a url that mixes text and a
+  placeholder is a literal, sent as written.
+- The url checks (absolute `http`/`https`, and `/api/webhooks/` for `discord`)
+  run on the resolved value at each send instead of at write time; a value that
+  fails them, or a placeholder that cannot be resolved, fails only that send,
+  with an error naming the target and the placeholder.
+- The whole resolved url, host included, is hidden: the API, the UI, the status,
+  the test result and the logs show the placeholder instead, and a transport
+  failure is reported only by its cause (`name resolution failed`,
+  `connection failed`, `TLS handshake failed`, `timed out`,
+  `refused by the outbound policy`, `other transport error`). A non-2xx answer
+  still reports its HTTP status; a literal url keeps the full error text.
 
 **Delivery is bounded, and drops rather than queues.** At most 8 deliveries are
 in flight at once. An event that would exceed that bound is **dropped for that
@@ -71,6 +89,9 @@ notifications:
       type: discord
       url: https://discord.com/api/webhooks/123456789012345678/example-token
       events: [cert.renewal_failed, cert.expired, discovery.frozen]
+    - name: discord-oncall
+      type: discord
+      url: ${FILE:/run/secrets/gpm_discord_oncall_url}
     - name: audit-log
       type: generic
       url: https://hooks.example.com/gpm-notify

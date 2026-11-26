@@ -610,6 +610,12 @@ components:
           description: TCP only. Open connections one client address (IPv6 by /56) may hold to this
             host; a connection over the cap is closed before the backend is dialled. 0 or unset means
             no cap.
+        newSessionsPerMinute:
+          type: integer
+          minimum: 0
+          description: UDP only. New sessions one client address (IPv6 by /56) may open per minute,
+            with a burst of the same size; a datagram that would open one over the limit is dropped
+            before the backend is dialled. Open sessions are never limited. 0 or unset means no limit.
       required:
       - name
       - listenPort
@@ -1455,6 +1461,13 @@ components:
               type: integer
               minimum: 0
               maximum: 64
+        maxAge:
+          type: string
+          description: Optional Go duration. Once the last successful fetch (or the time maxAge was
+            first applied, if later) is older and a fetch is refused, the stored set is
+            emptied and the source matches nothing until a fetch succeeds again. Must not be shorter than
+            interval (or its 24h default). Absent means a refused fetch keeps the previous set however
+            old it is.
       required:
       - name
       - url
@@ -1499,6 +1512,9 @@ components:
                 format: date-time
               entryCount:
                 type: integer
+              expired:
+                type: boolean
+                description: True once the source's `maxAge` has passed without a successful fetch; the stored set is empty until a fetch succeeds.
               lastError:
                 type: string
               lastAttempt:
@@ -1880,7 +1896,8 @@ components:
           type: string
         url:
           type: string
-          description: Absolute http(s) endpoint.
+          description: Absolute http(s) endpoint, or a value that is wholly a ${ENV:...} / ${FILE:...}
+            placeholder, resolved and checked at each delivery and echoed as the placeholder.
         secret:
           $ref: '#/components/schemas/Secret'
         disabled:
@@ -1902,7 +1919,9 @@ components:
           - generic
         url:
           type: string
-          description: Absolute http(s) endpoint. A discord url must contain "/api/webhooks/".
+          description: Absolute http(s) endpoint. A discord url must contain "/api/webhooks/". May
+            instead be wholly a ${ENV:...} / ${FILE:...} placeholder, resolved and checked at each
+            send and echoed as the placeholder.
         secret:
           $ref: '#/components/schemas/Secret'
           description: ntfy access token or generic bearer token, sent as "Authorization Bearer".
@@ -3399,7 +3418,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Access lists
@@ -3684,7 +3703,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - API tokens
@@ -3924,7 +3943,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Certificates
@@ -4179,7 +4198,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Client CAs
@@ -4636,7 +4655,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Parked hosts
@@ -4827,7 +4846,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - DNS providers
@@ -4997,7 +5016,10 @@ paths:
     get:
       summary: Preview a DNS sync reconcile
       description: 'Read-only dry run: reports what a reconcile would create/adopt/retarget/delete, without
-        changing anything.'
+        changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - DNS sync
       responses:
@@ -5177,7 +5199,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Identity providers
@@ -5346,7 +5368,10 @@ paths:
   /api/docker-discovery/plan:
     get:
       summary: Preview a Docker discovery reconcile
-      description: Read-only dry run, without changing anything.
+      description: 'Read-only dry run, without changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - Docker discovery
       responses:
@@ -5421,7 +5446,10 @@ paths:
   /api/ingress-discovery/plan:
     get:
       summary: Preview an Ingress discovery reconcile
-      description: Read-only dry run, without changing anything.
+      description: 'Read-only dry run, without changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - Ingress discovery
       responses:
@@ -5610,7 +5638,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Middlewares
@@ -5817,7 +5845,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Proxy hosts
@@ -6008,7 +6036,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Redirect hosts
@@ -6432,7 +6460,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Stream hosts
@@ -6623,7 +6651,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Upstream groups

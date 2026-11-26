@@ -159,6 +159,9 @@ provider.
 
 At least one of the four must be set.
 
+- **Order**: when several headers middlewares are attached, their response rules run in list order, so the later-listed middleware wins on a name both touch.
+- **Interim and upgrade responses**: the response rules apply to every interim `1xx` and to a `101 Switching Protocols`, in the same order. On a `101`, rules naming `Connection`, `Upgrade`, `Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` are skipped so the handshake stays intact; on other responses they apply as written.
+
 ## GuardMiddleware (`guard`)
 
 | Key | Type | Default | Required | Description |
@@ -434,6 +437,13 @@ minute of guessed verdicts and keep guessing long after the bouncer recovered.
 For the `http` provider a `fail-open` verdict derived from an error is not
 cached at all (the hook's answer depends on the request, so its error can be
 specific to one request); a `fail-closed` one is cached for the 5s.
+
+Live lookups are per client address (an IPv6 client is never judged by its
+neighbours' prefix), and concurrent requests that miss the cache with the same
+lookup share one call to the bouncer: for `crowdsec` the same client IP, for
+`http` the same IP, `host`, `path` and `X-Original-URL`. Every request sharing
+a call gets its verdict or its error (then `onError` as above); the shared call
+runs to its `timeout` even if the request that started it goes away.
 
 `denyWith: error-page` (the default) renders the host's configured custom error
 page for `denyStatus`, falling back to the plain status body when none is

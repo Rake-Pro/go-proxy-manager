@@ -326,7 +326,8 @@ func (s *Server) RecentLogs() []AccessEntry {
 // TCP/UDP stream listeners and upstream-group health probers, swapping the
 // router in atomically. Group health is staged first and committed only after
 // the router compiles, so a rejected config leaves the running probers (and
-// their accumulated up/down state) untouched.
+// their accumulated up/down state) untouched. The idle connections of the
+// pools only the replaced router used are closed (see closeReplacedIdle).
 func (s *Server) Reload(cfg model.Config) error {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
@@ -337,7 +338,9 @@ func (s *Server) Reload(cfg model.Config) error {
 	}
 	stage.commit()
 	rt.live = s.current
-	s.cur.Store(rt)
+	if old := s.cur.Swap(rt); old != nil {
+		closeReplacedIdle(old, rt)
+	}
 	// Published only now: a build that failed above never replaces the anchors
 	// the live router checks revocation against.
 	registerCRLAnchors(rt.clientCAs)
