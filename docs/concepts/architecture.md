@@ -196,10 +196,12 @@ clean run. Cloudflare pagination terminates on a short page and treats
 `result_info` as advisory, so a response without it cannot truncate the listing
 into a partial view of the zone. Neither backend can update a record in place, so a
 retarget is a delete followed by a create; if the create fails the **original is
-restored** and the run fails loudly, rather than leaving the name unresolved until
-some later reconcile heals it, and the counter is incremented as soon as the delete
-lands so a destructive half-step can never be reported as a run that changed
-nothing. The Pi-hole session is closed on a context detached from the caller's,
+restored** and the failure is reported, rather than leaving the name unresolved
+until some later reconcile heals it, and the counter is incremented as soon as the
+delete lands so a destructive half-step can never be reported as a run that changed
+nothing. A failed retarget, like a failed create or delete, does not stop the run:
+the remaining names are still written, and the ledger records what the backend
+holds for the failed name. The Pi-hole session is closed on a context detached from the caller's,
 because logout is reached by `defer` and the commonest reason to reach it is the
 caller having gone away: cancelling the logout with it leaks one of Pi-hole's few
 session slots per aborted run.
@@ -235,6 +237,15 @@ gate still holds across a restart's one re-fetch. And a source with no ledger
 entry resolves to the **empty set** rather than being dropped, which keeps the
 list's IP dimension intact: dropping the rule would leave a default-deny list
 with nothing to match on, which is exactly the shape that serves open.
+
+A kept set is served however old it is unless the source sets `maxAge`. The age is measured from the last successful fetch recorded in the ledger (`fetchedAt`), or from when `maxAge` was first applied to the source (`maxAgeSince`) if that is later; a success that could not be committed before a restart is not counted. For such a source every successful fetch advances `fetchedAt`, and opting in
+records `maxAgeSince`; both are timestamp-only commits without a data-plane
+reload on the leader (a follower reloads on every commit it pulls). Once the age
+passes `maxAge`, the next refused fetch empties the entry and marks it
+`expiredAt` in one ledger commit; a refused fetch is retried on every poll. That reuses the normal propagation
+(ledger commit, data-plane reload, follower replication), so expiry needs no
+clock in the data plane and is unaffected by restarts; the next successful
+fetch restores the set.
 
 **Kubernetes Ingress discovery** (`internal/k8s`). An optional, read-only poll
 loop that turns annotated cluster `Ingress` objects into gpm-managed proxy hosts,
@@ -288,7 +299,10 @@ recomputed from a complete list on every poll and compared with the config, so a
 missed event is impossible by construction. It is **ownership-gated**: only
 proxy hosts labelled `gpm.rake.pro/managed-by: ingress-discovery` are ever
 written or deleted, and a collision with a hand-written host is skipped with a
-warning, exactly as the DNS backends treat a record they do not own. Ownership is
+warning, exactly as the DNS backends treat a record they do not own. A derived
+name already used by a redirect, parked or stream host is skipped the same way,
+since host names are shared across those kinds and the write would fail the
+whole batch. Ownership is
 gated on the **domain** as well as the name, because the router keys its
 per-domain maps by hostname and fills them in config load order: without it a
 derived host whose name merely sorts after the operator's could take over
@@ -314,7 +328,19 @@ carries a *name* and never a chain, so a cluster tenant chooses among
 configurations the operator sanctioned but can never invent one, and an undefined
 profile name skips the Ingress rather than silently downgrading it to the
 default. Every profile validates exactly as the template does, at settings-write
-time. Because gpm is off-cluster,
+time, and the objects it names (host level and per location) are cross-checked
+again on every object write, delete, revert and restore, with the reference
+rules a proxy host is held to, so none of them can leave a template naming an
+object that is missing or unusable. A stored config already in that state still
+loads, with a config warning; object writes on it are accepted and a settings
+write must fix the reference, and while the stored state fails the check it is
+off for object writes, reverts and restores. A stored host is compared with its
+profile on every field the profile stamps (the upstream for Ingress discovery,
+TLS, `timeouts`, `robotsNoIndex`, the chain and the header policy), which decides
+whether a host whose source cannot be derived is frozen or disabled. When the
+source still derives but the host is skipped for a domain conflict, the same
+fields plus the derived `dns` policy decide whether the stored host is restamped
+or left as it is. Because gpm is off-cluster,
 in-cluster Service DNS is unusable, so the upstream is the ingress controller's
 address and the data plane's preserved `Host` header is what routes the request
 to the right workload. A whole reconcile lands as **one commit**
@@ -530,6 +556,16 @@ TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload:
 ports added are opened, ports removed are closed, and a changed route table is
 swapped without dropping the port.
 
+**Upstream connection pools across reloads** (`internal/dataplane/router.go`).
+Hosts without `timeouts` share one pooled upstream transport that survives
+reloads; a router builds its own pools for a host's cloned transport (`timeouts`
+set), each auth-request provider and each bouncer. Once a reload's new router is
+live, the idle connections of every pool only the replaced router owned are
+closed (`CloseIdleConnections`), which leaves in-flight requests and upgraded
+connections running. A connection handed back by a request still finishing on
+the old router is closed on return, or reaped by the pool's 90 s idle timeout
+if another such request reused the pool meanwhile.
+
 **Inbound PROXY protocol** (`internal/dataplane/proxyproto.go`). When
 `settings.proxyProtocol` is on, every data-plane listener (HTTP, HTTPS, and each
 TCP stream listener) is wrapped so an accepted connection parses a HAProxy PROXY
@@ -565,6 +601,11 @@ IP/CIDR and geo dimensions are evaluated (basic auth has no challenge/response o
 a raw stream and is rejected at validation), and the gate runs **before the
 backend dial** (for UDP, once per session), so a denied client never causes an
 upstream socket to exist.
+A new UDP session's slot is reserved under the listener lock and its backend is
+dialled in its own goroutine, so a slow dial (a DNS lookup for a hostname target)
+never holds up the listener's other sessions; datagrams from that client meanwhile
+are queued (bounded by count and bytes) for the session rather than opening a
+second one, and at most 64 dials run at once per listener (8 per source).
 
 **Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
 **proxy hosts** run the middleware chain to a reverse proxy; **redirect hosts**
@@ -735,10 +776,25 @@ writer is bypassed entirely by the hijack, so a WebSocket handshake would
 otherwise leak the exact `Server`/`X-Powered-By` fingerprint every other response
 hides. Hop-by-hop names are refused at validation, so `Connection`/`Upgrade`
 survive and the handshake stays intact, and the `Sec-WebSocket-*` trio is refused
-alongside them (a browser aborts a handshake with no `Sec-WebSocket-Accept`). An
-interim `1xx` is the one response the strip does not sit on: the stdlib forwards
-it through `Got1xxResponse` and then clears the header map, so its headers are
-neither stripped nor carried into the final response.
+alongside them (a browser aborts a handshake with no `Sec-WebSocket-Accept`).
+
+**Interim responses** (`interimTransport` in `internal/dataplane/proxy.go`). The
+stdlib relays an upstream `1xx` (other than `101`) from a `Got1xxResponse` trace
+hook, never through `ModifyResponse`, and the Transport stops bounding interim
+responses once such a hook exists; gpm wraps that hook per request. Each relayed
+interim response is stripped of the host's strip list while its header map still
+holds only the upstream's headers, at most 16 are relayed per request (later ones
+are dropped), and an upstream that sends more than 256 has the exchange aborted
+with the normal `502`.
+
+**Headers middleware on a `101`** (`internal/dataplane/headers.go`). A
+`setResponse`/`removeResponse` rule normally runs when the status is written,
+which a hijacked `101` never does, so the rules ride the request context and
+`ModifyResponse` applies them to the `101` in the same order as for any other
+response (the later-listed middleware wins). `Connection`, `Upgrade`,
+`Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions`
+are exempt on a `101`, so a rule written for ordinary
+responses cannot break the handshake.
 
 gpm-generated responses have no upstream response at all, so nothing runs on
 them, including the `ErrorHandler`'s `502`/`504`, which never reaches
@@ -772,7 +828,9 @@ pull succeeds one request runs it while the others wait for it (at most the
 bouncer `timeout`, so a hung LAPI never queues them one after another), and a
 failed first pull is retried after a backoff. Range decisions are
 indexed by prefix, and each pull is folded into a copy that is swapped in, so
-lookups never wait on a large set. Verdicts are
+lookups never wait on a large set. In live mode, concurrent requests that would
+send the same lookup share one call (detached from any one request, bounded by
+the bouncer `timeout`). Verdicts are
 cached per client IP with a bounded LRU; a verdict derived from an *error* is
 capped at 5s so an outage cannot pin a long TTL of guesses. `onError` decides
 what an unanswerable lookup means and defaults to **fail-open**: an unreachable

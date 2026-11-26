@@ -432,3 +432,26 @@ func TestStreamHostTCPLimitsValidation(t *testing.T) {
 		}
 	}
 }
+
+// newSessionsPerMinute is an optional UDP limit: a non-negative count, refused
+// on a tcp-only host.
+func TestStreamHostNewSessionsPerMinuteValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		limit    int
+		wantErr  bool
+	}{
+		{"unset on tcp", "tcp", 0, false},
+		{"udp", "udp", 30, false},
+		{"both", "both", 30, false},
+		{"negative", "udp", -1, true},
+		{"tcp only", "tcp", 30, true},
+	} {
+		h := StreamHost{ObjectMeta: ObjectMeta{Name: "s"}, ListenPort: 51820, Protocol: tc.protocol,
+			Target: StreamTarget{Host: "192.0.2.10", Port: 51820}, NewSessionsPerMinute: tc.limit}
+		if err := h.Validate(); (err != nil) != tc.wantErr {
+			t.Errorf("%s: err = %v, want error %v", tc.name, err, tc.wantErr)
+		}
+	}
+}

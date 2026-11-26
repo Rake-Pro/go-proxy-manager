@@ -59,6 +59,7 @@ below map each row's wording to its cause and fix.
 |---|---|---|
 | `state: pending` never clears | The first ACME order has not completed or keeps failing | Read `lastError`; verify DNS-01 credentials, or that `:80` is reachable for HTTP-01 ([Certificate health](certificate-health.md)) |
 | `state: error` on a `custom` certificate | `certFile`/`keyFile` could not be read or parsed as PEM | Check the path inside the cert store and the PEM contents |
+| DNS-01 fails with `refusing to use a partial listing` | A Hetzner or deSEC listing ran past 100 pages, so the solver stopped instead of acting on part of the account | Use a token scoped to fewer zones or domains |
 | `POST .../renew` returns `409`, message names an order in flight | Another order is already running on this instance; nothing is queued | Wait and retry |
 | `POST .../renew` returns `409`, message says `retry in ...` | The certificate is inside its 1-hour renew cooldown, counted from `lastAttempt`: failed attempts start it too | Wait out the stated time; read `lastError` meanwhile ([Certificate health](certificate-health.md)) |
 | `POST .../renew` returns `400` | The certificate is `type: custom`; gpm does not renew those | Replace the file and `PUT` the object |
@@ -84,6 +85,7 @@ below map each row's wording to its cause and fix.
 | `502` reaching the admin UI through gpm | The proxy host's upstream does not match `GPM_ADMIN_ADDR` | Align both ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
 | Login redirects in a loop through gpm's own host | `externalBaseURL` does not match the browser's scheme and host | Set it to exactly that value |
 | A stream backend stalls for seconds per connection | `proxyProtocol.enabled` is on but the relay does not send a header | Enable it on the relay first ([PROXY protocol](../reference/config/settings/proxy-protocol.md)) |
+| `502` on one path, log line `upstream sent too many interim (1xx) responses` | The upstream sent more than 256 interim responses for one request | Fix the upstream; gpm relays the first 16 interim responses and ends the exchange past 256 |
 
 ## Access control and identity
 
@@ -112,6 +114,7 @@ below map each row's wording to its cause and fix.
 | Pi-hole answers `403` | The session is read-only, or the instance lacks `webserver.api.app_sudo` | Fix the Pi-hole side; retrying will not help |
 | A reconcile deleted a record after a revert | A whole-tree revert restored an ownership claim reality had moved past | Run `GET /api/dns-sync/plan` before letting a reconcile proceed after any revert |
 | `409 Conflict` from `/reconcile` or `/plan` | A reconcile is already in flight; the endpoint never queues | Retry after it finishes |
+| `ok: false` after an `apexTarget` change, other names still retargeted | The backend refused the delete or the create of one retarget; the run went on with the rest | Read `error`: the original record still stands (or was restored) and the next run retries, or `restoring the original record also failed` and the next run recreates the name ([Settings: DNS sync](../reference/config/settings/dns-sync.md)) |
 
 ## Discovery (Kubernetes and Docker)
 
@@ -123,6 +126,10 @@ below map each row's wording to its cause and fix.
 | Container skipped: `port is required` | Zero or several exposed TCP ports | Set the `port` label explicitly |
 | Container or Ingress skipped: outside `allowedDomainSuffixes` | The hostname is not inside the configured bound | Add the suffix, or fix the label/annotation |
 | Skipped: `a proxy host with this name exists and is not managed by <subsystem>` | A hand-written or other-reconciler host already has that name | Rename, or remove the other host |
+| Skipped: `a <kind> with this name exists; host names are shared by proxy, redirect, parked and stream hosts` | A redirect, parked or stream host already has the derived name | Rename that host, or rename the source object |
+| Host disabled with `fails closed rather than keep serving a chain or domain its profile no longer renders` | The source cannot be derived, and the stored host differs from its profile in a stamped field (upstream for Ingress discovery, TLS, `timeouts`, `robotsNoIndex`, chain or header policy) or a domain | Fix the source object; the next clean derive re-enables the host |
+| A save, delete, revert or restore is refused with `ingressDiscovery.<path>` or `dockerDiscovery.<path>` | The result would leave a discovery template or profile naming an object that is missing or unusable | Change the template or profile first, then retry |
+| Config warning naming `ingressDiscovery.<path>` or `dockerDiscovery.<path>` at load | The stored config already has such a reference (a hand edit or a `git pull`) | Fix the reference; hosts derived from that template or profile fail to reconcile until then |
 | Skipped: `domain "<d>" is already claimed by <kind> "<h>", which <subsystem> does not manage` | A hand-written or other-reconciler proxy host, a redirect or a parked host serves `<d>` | Remove `<d>` from the source object, or from `<h>` |
 | Skipped: `domain "<d>" is already claimed by proxy host "<h>", also managed by <subsystem>, which holds it after this reconcile` | Another discovered host keeps or takes `<d>`, or cannot release it because its own move is blocked | Follow the `reason` of `<h>` to the host that cannot move and resolve that; the dependent moves then land in one reconcile |
 | Skipped: `the stored host's file has keys this gpm does not recognise` | The host's file was written by a newer gpm; the store refuses automatic rewrites, so the host keeps its domains and nothing may take them | Upgrade again, or rewrite the host through the API ([Rollback](upgrading.md#rollback)) |
@@ -138,6 +145,7 @@ below map each row's wording to its cause and fix.
 |---|---|---|
 | `refused > 0` in the source status | A feed answered non-`200`, was empty, over `maxEntries` or `maxCoverage`, or held one unparseable line | Fix the feed; the previously fetched set keeps serving ([Remote IP feeds](../how-to/access-list-sources.md)) |
 | A source rule matches nothing | The source has never been fetched, so it resolves to the empty set | Trigger a reconcile and check the status |
+| Source status shows `expired: true` and its rules match nothing | The source's `maxAge` passed without a successful fetch, so its stored set was emptied | Fix the feed; the next successful fetch restores the set ([Source expiry](../reference/config/access-list.md#access-list-sources-expiry)) |
 | A source rule grants more than intended | A `source` rule without `paths` is an ordinary allow rule | Pair every `source` rule with `paths` |
 
 ## Tunnels and relays

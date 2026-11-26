@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -55,12 +56,20 @@ func NewHetznerSolver(apiToken string, opts ...HetznerOption) (*HetznerSolver, e
 	return s, nil
 }
 
-type hetznerZoneList struct {
-	Zones []hetznerZone `json:"zones"`
-}
+// hetznerMaxPages bounds how many pages one listing follows, so a server that
+// keeps reporting more pages cannot hold a challenge in a loop.
+const hetznerMaxPages = 100
 
-type hetznerRecordList struct {
+// hetznerPage is one page of a zone or record listing; meta.pagination.last_page
+// is the total page count, absent or 0 on an unpaginated response.
+type hetznerPage struct {
+	Zones   []hetznerZone   `json:"zones"`
 	Records []hetznerRecord `json:"records"`
+	Meta    struct {
+		Pagination struct {
+			LastPage int `json:"last_page"`
+		} `json:"pagination"`
+	} `json:"meta"`
 }
 
 type hetznerRecord struct {
@@ -80,8 +89,8 @@ func (s *HetznerSolver) zoneFor(ctx context.Context, name string) (hetznerZone, 
 		return z, nil
 	}
 
-	var list hetznerZoneList
-	if err := s.api.do(ctx, http.MethodGet, "/api/v1/zones", nil, &list); err != nil {
+	list, err := s.listAll(ctx, "/api/v1/zones", url.Values{})
+	if err != nil {
 		return hetznerZone{}, err
 	}
 	names := make([]string, 0, len(list.Zones))
@@ -161,8 +170,8 @@ func (s *HetznerSolver) findRecords(ctx context.Context, zone hetznerZone, name,
 	q := url.Values{}
 	q.Set("zone_id", zone.ID)
 	q.Set("per_page", "500")
-	var list hetznerRecordList
-	if err := s.api.do(ctx, http.MethodGet, "/api/v1/records?"+q.Encode(), nil, &list); err != nil {
+	list, err := s.listAll(ctx, "/api/v1/records", q)
+	if err != nil {
 		if statusIs(err, http.StatusNotFound) {
 			return nil, nil
 		}
@@ -181,4 +190,39 @@ func (s *HetznerSolver) findRecords(ctx context.Context, zone hetznerZone, name,
 		out = append(out, rec)
 	}
 	return out, nil
+}
+
+// listAll fetches every page of a zone or record listing. The first request is
+// sent without a page parameter, as an unpaginated listing always was; later
+// pages add page=N until meta.pagination.last_page is reached. A 404 on the
+// first page is returned as is (callers treat it as "nothing there"); on a
+// later page it is an ordinary error, since a partial listing must not pass for
+// a complete one.
+func (s *HetznerSolver) listAll(ctx context.Context, path string, q url.Values) (hetznerPage, error) {
+	var all hetznerPage
+	for page := 1; ; page++ {
+		if page > 1 {
+			q.Set("page", strconv.Itoa(page))
+		}
+		p := path
+		if len(q) > 0 {
+			p += "?" + q.Encode()
+		}
+		var list hetznerPage
+		if err := s.api.do(ctx, http.MethodGet, p, nil, &list); err != nil {
+			if page > 1 {
+				return hetznerPage{}, fmt.Errorf("hetzner: %s page %d of a paginated listing: %v", path, page, err)
+			}
+			return hetznerPage{}, err
+		}
+		all.Zones = append(all.Zones, list.Zones...)
+		all.Records = append(all.Records, list.Records...)
+		last := list.Meta.Pagination.LastPage
+		if last <= page {
+			return all, nil
+		}
+		if page == hetznerMaxPages {
+			return hetznerPage{}, fmt.Errorf("hetzner: %s reports %d pages, more than the %d this client follows; refusing to use a partial listing", path, last, hetznerMaxPages)
+		}
+	}
 }

@@ -121,6 +121,20 @@ All notable changes to go-proxy-manager are documented here. The format follows
   route, and the docs now say so (#148).
 - Stream hosts: optional TCP `idleTimeout` and `maxConnsPerSource` (IPv6 by
   /56). Both are off unless set and refused on `protocol: udp` (#114).
+- Access-list sources: optional `maxAge`. The age of a source's stored set is
+  measured from the last successful fetch recorded in the ledger, or from when
+  `maxAge` was first applied to the source if that is later. Once it exceeds
+  `maxAge` and a fetch is refused, the set is emptied in the ledger (one
+  commit, one `WARN`) and every rule naming the source matches nothing: an
+  `allow` rule admits nobody through it, a `deny` rule denies nobody. The next
+  successful fetch restores it. It must not be shorter than the source's
+  `interval`; status reports `expired: true`. The ledger gains `expiredAt` and
+  `maxAgeSince`, written only for sources with `maxAge`. Unset keeps the
+  previous set however old it is, as before (#172).
+- Stream hosts: optional `newSessionsPerMinute` (UDP only) limits how many new
+  sessions one client address (IPv6 by /56) may open per minute; it counts
+  session attempts that reach the dial. Unset keeps today's behaviour and it is
+  refused on `protocol: tcp` (#172).
 
 ### Security
 
@@ -372,6 +386,33 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
   loopback, unspecified or multicast address; config git calls ignore the
   system git config.
 
+Hardening follow-ups from the 2026-11 review (#172), none a known
+vulnerability:
+
+- `stripResponseHeaders` now also applies to interim `1xx` responses relayed
+  from an upstream. At most 16 interim responses are relayed per request, and
+  an upstream that sends more than 256 gets a `502`.
+- A lifecycle webhook `url` and a notification target `url` may be a
+  whole-value `${ENV:...}` / `${FILE:...}` placeholder, resolved and checked at
+  each delivery, so a credential-bearing url (a Discord webhook, an ntfy topic,
+  a token in the path) no longer has to be committed to the config repository
+  or included in backups. The whole resolved url, host included, is hidden in
+  the API, UI, delivery status, test results and logs; a failed delivery to
+  such a url reports only its cause (name resolution, connection, TLS
+  handshake, timeout, outbound policy, other) or the HTTP status. Plain urls
+  are unchanged, including their error text.
+- The dry-run plan routes (`GET /api/dns-sync/plan`,
+  `/api/ingress-discovery/plan`, `/api/docker-discovery/plan`) share one
+  provider query between concurrent callers. A successful plan is reused for up
+  to 5 seconds unless a config commit lands or a reconcile runs through the
+  API; a failed plan, including a DNS plan reporting an unreachable backend, is
+  never reused. A read-scoped token can no longer drive unlimited provider API
+  calls, and concurrent callers get the shared result instead of `409`.
+- `POST /api/{plural}/_parse` refuses a YAML document whose aliases add more
+  than 100,000 nodes once expanded. The check runs on the parsed tree before
+  any value is decoded, so a small body can no longer allocate tens of MiB.
+  Ordinary anchors, aliases and merge keys are still accepted.
+
 ### Changed
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an
@@ -406,6 +447,11 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
 - Saving an object stored under a file name that is not its own moves it to
   `<name>.yaml` in the same commit; a write that would overwrite another
   object's file is refused (#159).
+- Bouncer live lookups: concurrent requests that miss the cache with the same
+  lookup share one call to the bouncer. The shared call is bounded by `timeout`
+  and is not cancelled when the request that started it goes away (#172).
+- UDP stream sessions take their read buffers from a pool instead of allocating
+  64 KiB each (#172).
 
 ### Fixed
 
@@ -463,6 +509,41 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
   return path lands on `/` instead of failing.
 - The upstream-group retry-buffer budget is returned only once the buffered
   body is no longer being sent.
+- A headers middleware's `setResponse` / `removeResponse` rules now apply to
+  `101 Switching Protocols` (WebSocket) responses, in the same order as other
+  responses. `Connection`, `Upgrade`, `Sec-WebSocket-Accept`,
+  `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions` are never changed on
+  a 101 (#172).
+- A config reload closes the idle upstream connections of the per-host timeout
+  transports, auth-request clients and bouncer clients it replaces, instead of
+  leaving them open until their idle timeout (#172).
+- UDP stream hosts: a new session's backend is dialled without holding the
+  listener, so a slow dial (for example a DNS lookup for a hostname target) no
+  longer stalls every other session on that port. At most 64 dials run at once
+  per listener and 8 per source address, and at most 32 datagrams (64 KiB) are
+  queued per session being dialled (#172).
+- Discovery: a host whose source cannot be derived, or that is skipped for a
+  domain conflict, is now compared with its profile on the upstream and
+  upstream group (Ingress discovery), `timeouts` and `robotsNoIndex` too, and
+  on its derived `dns` policy when the source still derives, so it no longer
+  keeps those old values after the profile changes (#172).
+- DNS sync: a failed retarget no longer ends the run. The remaining retargets,
+  creates and deletes still run, the backend reports `ok: false`, and the
+  ledger records what the backend holds for that name (#172).
+- Hetzner and deSEC DNS-01 solvers follow API pagination (Hetzner zone and
+  record listings, deSEC domain listing), capped at 100 pages with an error
+  instead of a partial result (#172).
+- Discovery: references in a template or profile are now checked like a proxy
+  host's, at host level and per location (unknown or disabled upstream groups,
+  location middlewares and access lists, `rateLimit.allowFrom` lists, inline
+  auth providers), on settings writes and on object saves, deletes, reverts,
+  scoped reverts and restores, with the settings write's error text. Docker
+  discovery does not check a template's or profile's own `upstream` /
+  `upstreamGroupRef`, which it ignores. A config already stored with a broken
+  reference still loads, with a config warning (#90).
+- Discovery: a derived host whose name is already used by a redirect, parked or
+  stream host is skipped with a reason instead of failing the whole reconcile
+  on every poll (#90).
 
 ## [2.5.0] - 2026-10-20
 

@@ -51,6 +51,8 @@ type registry struct {
 	// Set by buildRouter; nil (a fresh instance per compiled step) in chains
 	// built without a router.
 	states *chainStates
+	// owned collects the connection pools the build creates (see registry.own).
+	owned []idleCloser
 }
 
 // rateLimiterFor returns the limiter for one rate-limit step. owner names the
@@ -604,7 +606,9 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		if !ok || mw.Type != model.MWTypeBouncer || mw.Bouncer == nil {
 			continue
 		}
-		h = bouncerHandler(compileBouncer(mw.Name, *mw.Bouncer), host.Name, clientIP, ep, h)
+		b := compileBouncer(mw.Name, *mw.Bouncer)
+		reg.own(b.client)
+		h = bouncerHandler(b, host.Name, clientIP, ep, h)
 	}
 
 	// Access lists, wrapped outside auth so an IP the list would deny is

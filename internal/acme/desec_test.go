@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -185,5 +186,128 @@ func TestDesecZoneLongestSuffixMatch(t *testing.T) {
 func TestDesecRequiresToken(t *testing.T) {
 	if _, err := NewDesecSolver(""); err == nil {
 		t.Error("expected an error for an empty token")
+	}
+}
+
+// TestDesecDomainPagination serves the domain listing the way deSEC paginates
+// it: an account over one response's worth gets 400 plus a Link rel="first" on
+// the unpaginated request, and each page names the next in Link rel="next".
+func TestDesecDomainPagination(t *testing.T) {
+	tests := []struct {
+		name         string
+		paginated    bool     // refuse the unpaginated request with 400 + rel="first"
+		pages        []string // one domain per page
+		endless      bool     // every page sends a next link
+		noFirstLink  bool     // the 400 carries no Link header
+		wantErr      string
+		wantRequests []string
+	}{
+		{
+			name:         "single response",
+			pages:        []string{"example.com"},
+			wantRequests: []string{"/api/v1/domains/?limit=500"},
+		},
+		{
+			name:      "paginated account, domain on the last page",
+			paginated: true,
+			pages:     []string{"other.net", "third.org", "example.com"},
+			wantRequests: []string{
+				"/api/v1/domains/?limit=500",
+				"/api/v1/domains/?cursor=",
+				"/api/v1/domains/?cursor=c1",
+				"/api/v1/domains/?cursor=c2",
+			},
+		},
+		{
+			name:      "page bound reached",
+			paginated: true,
+			pages:     []string{"other.net"},
+			endless:   true,
+			wantErr:   "refusing to use a partial listing",
+		},
+		{
+			name:        "400 without a first link is returned as is",
+			paginated:   true,
+			noFirstLink: true,
+			pages:       []string{"example.com"},
+			wantErr:     ": 400: ",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests []string
+			// Absolute links on another host: only their path and query may be
+			// used, so every request must still reach this server.
+			const elsewhere = "https://elsewhere.example.com"
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/domains/", func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.URL.RequestURI())
+				if r.Header.Get("Authorization") != "Token ds-token" {
+					t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+				}
+				cursor, hasCursor := r.URL.Query()["cursor"]
+				if tc.paginated && !hasCursor {
+					if !tc.noFirstLink {
+						w.Header().Set("Link", `<`+elsewhere+`/api/v1/domains/?cursor=>; rel="first"`)
+					}
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(t, w, map[string]string{"detail": "Pagination required."})
+					return
+				}
+				page := 0
+				if hasCursor && cursor[0] != "" {
+					page, _ = strconv.Atoi(strings.TrimPrefix(cursor[0], "c"))
+				}
+				links := []string{`<` + elsewhere + `/api/v1/domains/?cursor=>; rel="first"`}
+				if tc.endless || page+1 < len(tc.pages) {
+					links = append(links, `<`+elsewhere+`/api/v1/domains/?cursor=c`+strconv.Itoa(page+1)+`>; rel="next"`)
+				}
+				if tc.paginated {
+					w.Header().Set("Link", strings.Join(links, ", "))
+				}
+				writeJSON(t, w, []desecDomain{{Name: tc.pages[min(page, len(tc.pages)-1)]}})
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			s, err := NewDesecSolver("ds-token", WithDesecBaseURL(srv.URL), WithDesecHTTPClient(srv.Client()))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			zone, err := s.zoneFor(context.Background(), "_acme-challenge.example.com")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("zoneFor error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if tc.endless && len(requests) != desecMaxPages {
+					t.Errorf("sent %d requests, want the bound %d", len(requests), desecMaxPages)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("zoneFor: %v", err)
+			}
+			if zone != "example.com" {
+				t.Errorf("zone = %q, want example.com", zone)
+			}
+			if strings.Join(requests, " ") != strings.Join(tc.wantRequests, " ") {
+				t.Errorf("requests = %q, want %q", requests, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestLinkRel(t *testing.T) {
+	h := http.Header{}
+	h.Add("Link", `<https://desec.example.com/api/v1/domains/?cursor=>; rel="first", <https://desec.example.com/api/v1/domains/?cursor=abc>; rel=next`)
+	tests := []struct{ rel, want string }{
+		{"first", "https://desec.example.com/api/v1/domains/?cursor="},
+		{"next", "https://desec.example.com/api/v1/domains/?cursor=abc"},
+		{"prev", ""},
+	}
+	for _, tc := range tests {
+		if got := linkRel(h, tc.rel); got != tc.want {
+			t.Errorf("linkRel(%q) = %q, want %q", tc.rel, got, tc.want)
+		}
 	}
 }

@@ -83,6 +83,7 @@ geo:
 | <span id="access-list-sources-interval"></span>  `interval` | string | Go duration between re-fetches. Empty = `24h`; below `1h` is refused. |
 | <span id="access-list-sources-max-entries"></span>  `maxEntries` | int | Cap on the feed's size. `0` = `10000`. |
 | <span id="access-list-sources-max-coverage"></span>  `maxCoverage` | object | Optional. Total address space the feed may cover, per family, as prefix-length equivalents: `ipv4` (1-32; `0` = `8`, one /8 = 16,777,216 addresses) and `ipv6` (1-64; `0` = `24`, 256 /32s). A smaller number allows more. Absent = no total budget; the per-entry rules below still apply. |
+| <span id="access-list-sources-max-age"></span>  `maxAge` | string | Optional. Go duration; once the last **successful** fetch recorded in the ledger (or the time `maxAge` was added, if later) is older, the stored set is emptied and the source matches nothing until a fetch succeeds again ([below](#access-list-sources-expiry)). Must not be shorter than `interval` (or the `24h` default). Absent = a refused fetch keeps the previous set however old it is. |
 
 The feed format is fixed: one IP or CIDR per line, `#` comment lines and blank
 lines ignored, a bare IP read as a `/32` or `/128`. Fetching is handled by the
@@ -126,6 +127,37 @@ set over its `maxCoverage` matches nothing, so a set fetched before a bound was
 set is not served while later fetches are refused. A set that matches nothing
 also stops a `deny` rule that references it from denying, so set `maxCoverage`
 on a deny feed only with room for what it publishes.
+
+<span id="access-list-sources-expiry"></span>
+
+**Source expiry (`maxAge`)**
+
+A refused fetch keeps the previous set, so without `maxAge` a feed that stays
+down is served from its last fetch indefinitely. `maxAge` bounds that: it is off
+by default, and setting it is a choice between serving an old list and serving
+none.
+
+| Aspect | Behaviour |
+|--------|-----------|
+| When a set expires | At the first fetcher poll (`accessListSync.pollInterval`, default `15m`) after the age passes `maxAge` whose fetch is refused; a refused fetch is retried on every poll. The age is measured from the last successful fetch recorded in the ledger (`fetchedAt`), or from when `maxAge` was first applied to the source (`maxAgeSince`) if that is later; a success that could not be committed before a restart is not counted. |
+| What changes | The ledger entry loses its entries and gains `expiredAt`, in one commit, and the data plane reloads. `fetchedAt` keeps the last successful fetch. One `WARN` (`access-list source expired`) is logged. |
+| `allow` rule on an expired source | Admits nobody through that rule; such clients fall through to later rules and `defaultAction`. |
+| `deny` rule on an expired source | Matches nothing, so it denies nobody; addresses it used to deny fall through to later rules and `defaultAction`. |
+| Recovery | The next successful fetch restores the set and clears `expiredAt`, with no operator action. Until then the source is retried on every poll. |
+| Restart | Everything the decision uses is in the committed ledger, so a restart or failover neither brings an expired set back nor delays an expiry. |
+| Status | `GET /api/access-list-sources/status` reports `expired: true` with `entryCount: 0`; a never-fetched source has no `fetchedAt` and is not `expired`. |
+| Commits | For a source with `maxAge`, every successful fetch advances `fetchedAt`: an unchanged one commits once per `interval`, with no data-plane reload on the leader (an HA follower reloads on every commit it pulls). Adding or removing `maxAge` writes or removes `maxAgeSince` (one commit, no reload). A success whose commit failed is committed on a later poll, only if the ledger still holds the same set. Sources without `maxAge` keep the no-commit-on-unchanged behaviour and never get `maxAgeSince`. |
+
+- **Leave room for retries.** A successful fetch never expires a set, but with `maxAge` equal to `interval` the first refused fetch does; `maxAge: 72h` at the default `24h` interval tolerates a feed outage of up to three days.
+- **Fetcher only.** Expiry is applied by the fetcher, which runs on the leader only; with `accessListSync.enabled: false` nothing is fetched or expired, and the stored set is served as it is.
+
+```yaml
+sources:
+  - name: monitors
+    url: https://example.com/monitors.txt
+    interval: 24h
+    maxAge: 72h      # serve nothing once three days pass without a successful fetch
+```
 
 > **Pair every `source` rule with `paths`.** A source rule *without* `paths` is
 > an ordinary allow rule: it grants every address in the feed full access to the

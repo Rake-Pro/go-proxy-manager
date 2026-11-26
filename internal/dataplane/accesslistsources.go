@@ -52,6 +52,13 @@ func compileAccessListSources(l model.AccessListSourceLedger) map[string][]*net.
 	}
 	out := make(map[string][]*net.IPNet, len(l.Sources))
 	for _, e := range l.Sources {
+		// An expired entry (maxAge passed) resolves to the empty set, like an
+		// unfetched one. The fetcher already stores it without entries; this
+		// holds even for a ledger that did not.
+		if e.ExpiredAt != "" {
+			out[e.Key()] = nil
+			continue
+		}
 		nets := make([]*net.IPNet, 0, len(e.Entries))
 		for _, c := range e.Entries {
 			n := accesssync.ParseEntry(c)

@@ -1,9 +1,12 @@
 package model
 
 import (
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -219,5 +222,135 @@ func TestClientCAWarningDays(t *testing.T) {
 		if got := ca.WarningDays(); got != tc.want {
 			t.Fatalf("expiryWarningDays %d -> WarningDays %d, want %d", tc.set, got, tc.want)
 		}
+	}
+}
+
+// TestClientCAKeyMustMatchCertificate checks, for every key type and encoding
+// parsePrivateKeyPEM accepts, that the signing key is only accepted when it is
+// the private key of the CA certificate in caPEM: both for a caKeyFile loaded
+// for signing and for an inline caKeyPEM at validation. A different valid key
+// sitting in the same cert store is refused with an error naming the CA.
+func TestClientCAKeyMustMatchCertificate(t *testing.T) {
+	type keyGen func(t *testing.T) (signer crypto.Signer, pemBlock *pem.Block)
+	rsaKey := func(pkcs8 bool) keyGen {
+		return func(t *testing.T) (crypto.Signer, *pem.Block) {
+			k, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !pkcs8 {
+				return k, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)}
+			}
+			b, err := x509.MarshalPKCS8PrivateKey(k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return k, &pem.Block{Type: "PRIVATE KEY", Bytes: b}
+		}
+	}
+	ecKey := func(pkcs8 bool) keyGen {
+		return func(t *testing.T) (crypto.Signer, *pem.Block) {
+			k, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !pkcs8 {
+				b, err := x509.MarshalECPrivateKey(k)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return k, &pem.Block{Type: "EC PRIVATE KEY", Bytes: b}
+			}
+			b, err := x509.MarshalPKCS8PrivateKey(k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return k, &pem.Block{Type: "PRIVATE KEY", Bytes: b}
+		}
+	}
+	edKey := func(t *testing.T) (crypto.Signer, *pem.Block) {
+		_, k, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := x509.MarshalPKCS8PrivateKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k, &pem.Block{Type: "PRIVATE KEY", Bytes: b}
+	}
+
+	tests := []struct {
+		name string
+		gen  keyGen
+	}{
+		{"RSA PKCS#1", rsaKey(false)},
+		{"RSA PKCS#8", rsaKey(true)},
+		{"ECDSA SEC 1", ecKey(false)},
+		{"ECDSA PKCS#8", ecKey(true)},
+		{"Ed25519 PKCS#8", edKey},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			caKey, caBlock := tc.gen(t)
+			_, otherBlock := tc.gen(t)
+			tmpl := x509.Certificate{
+				SerialNumber:          big.NewInt(1),
+				Subject:               pkix.Name{CommonName: "corp-ca"},
+				NotBefore:             time.Now().Add(-time.Hour),
+				NotAfter:              time.Now().Add(24 * time.Hour),
+				IsCA:                  true,
+				KeyUsage:              x509.KeyUsageCertSign,
+				BasicConstraintsValid: true,
+			}
+			der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, caKey.Public(), caKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+			keyPEM, otherPEM := pem.EncodeToMemory(caBlock), pem.EncodeToMemory(otherBlock)
+
+			certDir := t.TempDir()
+			for file, b := range map[string][]byte{"corp-ca.key": keyPEM, "other-ca.key": otherPEM} {
+				if err := os.WriteFile(filepath.Join(certDir, file), b, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cases := []struct {
+				name    string
+				ca      ClientCA
+				wantErr bool
+			}{
+				{"caKeyFile matching", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CAKeyFile: "corp-ca.key"}, false},
+				{"caKeyFile other key in the store", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CAKeyFile: "other-ca.key"}, true},
+				{"caKeyPEM matching", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CAKeyPEM: Secret(keyPEM)}, false},
+				{"caKeyPEM other key", ClientCA{ObjectMeta: ObjectMeta{Name: "corp"}, CAPEM: caPEM, CAKeyPEM: Secret(otherPEM)}, true},
+			}
+			for _, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					issuer, signer, err := c.ca.SigningKey(certDir)
+					verr := c.ca.Validate()
+					if !c.wantErr {
+						if err != nil || verr != nil {
+							t.Fatalf("SigningKey err = %v, Validate err = %v; want both nil", err, verr)
+						}
+						if pub, ok := issuer.PublicKey.(publicKeyEqual); !ok || !pub.Equal(signer.Public()) {
+							t.Fatal("signer does not belong to the issuer certificate")
+						}
+						return
+					}
+					const want = `client CA "corp": the configured signing key does not match any certificate in caPEM`
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("SigningKey err = %v, want %q", err, want)
+					}
+					// Validate has no cert store to read a caKeyFile from, so only
+					// the inline key is matched there.
+					if c.ca.CAKeyFile == "" && (verr == nil || !strings.Contains(verr.Error(), "does not match any certificate in caPEM")) {
+						t.Fatalf("Validate err = %v, want a key mismatch", verr)
+					}
+				})
+			}
+		})
 	}
 }

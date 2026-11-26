@@ -144,6 +144,14 @@ type AccessListSource struct {
 	// feed made of many individually acceptable prefixes cannot allow most of
 	// the internet. Absent means no budget (the per-entry rules still apply).
 	MaxCoverage *AccessListSourceCoverage `json:"maxCoverage,omitempty" yaml:"maxCoverage,omitempty"`
+	// MaxAge, when set, is a Go duration after which the stored set stops
+	// being served: once the last successful fetch recorded in the ledger, or
+	// the moment maxAge was first applied to the source if that is later, is
+	// older than MaxAge and a fetch is refused, the fetcher empties the set and
+	// the source matches nothing until a fetch succeeds again. It may not be
+	// shorter than the fetch interval. Empty means a refused fetch keeps the
+	// previous set however old it is.
+	MaxAge string `json:"maxAge,omitempty" yaml:"maxAge,omitempty"`
 }
 
 // AccessListSourceCoverage is a per-family coverage budget, each written as the
@@ -165,6 +173,19 @@ func (s AccessListSource) FetchInterval() time.Duration {
 		return DefaultAccessListSourceInterval
 	}
 	return d
+}
+
+// MaxAgeLimit is the configured maxAge; ok is false when none is set (or it
+// does not parse, which validation refuses), meaning a set never expires.
+func (s AccessListSource) MaxAgeLimit() (d time.Duration, ok bool) {
+	if s.MaxAge == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s.MaxAge)
+	if err != nil {
+		return 0, false
+	}
+	return d, true
 }
 
 // EntryLimit is the configured cap, or the 10000 default.
@@ -304,6 +325,17 @@ func (a AccessList) Validate() error {
 			}
 			if d < MinAccessListSourceInterval {
 				return fmt.Errorf("access list %q: sources: source %q interval must be at least %s, got %q", a.Name, src.Name, MinAccessListSourceInterval, src.Interval)
+			}
+		}
+		if src.MaxAge != "" {
+			d, err := time.ParseDuration(src.MaxAge)
+			if err != nil {
+				return fmt.Errorf("access list %q: sources: source %q maxAge must be a Go duration (e.g. \"72h\"), got %q: %w", a.Name, src.Name, src.MaxAge, err)
+			}
+			// Shorter than the interval would expire every set between two
+			// scheduled fetches of a healthy feed.
+			if iv := src.FetchInterval(); d < iv {
+				return fmt.Errorf("access list %q: sources: source %q maxAge must not be shorter than its fetch interval (%s), got %q", a.Name, src.Name, iv, src.MaxAge)
 			}
 		}
 		if src.MaxEntries < 0 {

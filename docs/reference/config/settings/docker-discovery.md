@@ -130,12 +130,15 @@ Two modes, one choice, decided by where gpm itself runs.
   `labels["gpm.rake.pro/managed-by"] = "docker-discovery"`.
 - Only objects carrying that exact label pair are created, updated or deleted. A
   hand-written host (or an Ingress-derived one) with the same name is skipped
-  with a warning, never overwritten.
+  with a warning, never overwritten. So is a derived name already used by a
+  redirect, parked or stream host, since host names are shared across those
+  kinds; the rest of the reconcile still applies.
 - Ownership covers the **domain** as well as the name: a derived host whose
   domains include one already claimed by a host this reconciler does not own is
   skipped, with the owner and its kind named in the status `reason`. If the
   skipped host already exists, it keeps its current domains, but a stored chain
-  that differs from the resolved profile is restamped on them, and a stored
+  (or `dns` policy) that differs from what the container derives under its
+  resolved profile is restamped on them, and a stored
   domain the profile no longer allows disables it, as for a bad label below.
 - A derived host can take a new domain in one reconcile when that domain is free
   or is released by another derived host updated or deleted in the same commit,
@@ -160,14 +163,25 @@ Two modes, one choice, decided by where gpm itself runs.
 - **A bad label freezes one host.** A container that cannot be derived (bad
   hostname, ambiguous port) is skipped **and** protects its existing host from
   deletion, as long as the stored host still carries the chain its resolved
-  profile renders today. When the stored chain differs (TLS, middlewares,
-  access lists and mode, locations, response-header policy), or a stored domain
+  profile renders today. When the stored chain differs (TLS, `timeouts`,
+  `robotsNoIndex`, middlewares, access lists and mode, locations,
+  response-header policy; not the upstream, which is the container's own
+  address), or a stored domain
   is no longer allowed by the suffix lists or `allowedHostnames`, the host is
   disabled the same way as for an unresolvable profile.
 - **An unresolvable profile fails closed.** The existing host is updated with
   `disabled: true` and `gpm.rake.pro/disabled-by: docker-discovery`, so a
   retired chain cannot be pinned by naming a profile that no longer exists.
   Re-adding the profile re-enables it on the next reconcile.
+- **Template references stay resolvable.** The objects the template and profiles
+  name are cross-checked on a settings write and again on every object write,
+  delete, revert and restore, as for
+  [Ingress discovery](ingress-discovery.md), except a template's or profile's own
+  `upstream`/`upstreamGroupRef`, which Docker discovery ignores (a location's
+  group is still checked). A stored config already failing the
+  check loads with a config warning; object writes on it are accepted, a
+  settings write is refused until it fixes the reference, and the check is off
+  for object writes, reverts and restores until the stored state passes again.
 - **One commit per reconcile**, authored by `docker-discovery`
   (`Docker discovery: reconcile (+N ~M -K)`). A reconcile that finds no drift
   writes nothing.

@@ -28,8 +28,8 @@ Solves ACME `dns-01` challenges. Not needed for `http-01`.
 |------------|------------|
 | `cloudflare` | API token with `Zone:DNS:Edit` + `Zone:Read` on the zone (`Authorization: Bearer`). |
 | `digitalocean` | Personal access token with write scope on domains (`Authorization: Bearer`). |
-| `hetzner` | Hetzner DNS API token, from the DNS console (`Auth-API-Token` header). |
-| `desec` | deSEC API token (`Authorization: Token`). RRsets are read-modify-written; TTL is 3600, deSEC's minimum. |
+| `hetzner` | Hetzner DNS API token, from the DNS console (`Auth-API-Token` header). Zone and record listings follow `page` / `meta.pagination.last_page`, up to 100 pages; more is an error, never a partial listing. |
+| `desec` | deSEC API token (`Authorization: Token`). RRsets are read-modify-written; TTL is 3600, deSEC's minimum. An account with more than 500 domains is listed through deSEC's `Link` cursor pagination, up to 100 pages; more is an error, never a partial listing. |
 
 Behaviour shared by all four:
 

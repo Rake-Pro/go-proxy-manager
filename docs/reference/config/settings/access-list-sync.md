@@ -27,7 +27,10 @@ accessListSync:
 **refused whole**, keeping the previously fetched set, when the source answers
 anything but `200`, returns no valid entries, returns more than `maxEntries`,
 covers more address space than the source's `maxCoverage` (when set), or contains a single line that is neither a comment nor a valid IP/CIDR. Refusals
-are counted and named in `GET /api/access-list-sources/status`.
+are counted and named in `GET /api/access-list-sources/status`. A source with
+[`maxAge`](../access-list.md#access-list-sources-max-age) stops serving its kept
+set once its last successful fetch is older than that; expiry is checked on this
+poll, so it lands up to one `pollInterval` late.
 
 Only the **leader** fetches (the ledger is a config-repo commit); a follower
 still serves the sets, since it replicates the ledger with the rest of the

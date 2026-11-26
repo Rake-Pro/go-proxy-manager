@@ -139,6 +139,12 @@ Two operational rules worth knowing before you alert on any of this:
 Scopes: `docker-discovery:read` for status and plan, `docker-discovery:write`
 for reconcile.
 
+Concurrent `/plan` calls share one Engine API read, and a successful plan is
+reused for up to 5 seconds unless a config commit lands or
+`POST /api/docker-discovery/reconcile` runs in between. A failed plan is never
+reused; a reconcile on an event or poll can still leave a reused plan up to 5
+seconds old.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

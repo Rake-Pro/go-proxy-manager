@@ -1,9 +1,12 @@
 package acme
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -75,8 +78,8 @@ func (s *DesecSolver) zoneFor(ctx context.Context, name string) (string, error) 
 		return zone, nil
 	}
 
-	var domains []desecDomain
-	if err := s.api.do(ctx, http.MethodGet, "/api/v1/domains/?limit=500", nil, &domains); err != nil {
+	domains, err := s.listDomains(ctx)
+	if err != nil {
 		return "", err
 	}
 	names := make([]string, 0, len(domains))
@@ -91,6 +94,117 @@ func (s *DesecSolver) zoneFor(ctx context.Context, name string) (string, error) 
 	s.zones[name] = zone
 	s.mu.Unlock()
 	return zone, nil
+}
+
+// desecMaxPages bounds how many pages the domain listing follows, so a server
+// that keeps sending a next link cannot hold a challenge in a loop.
+const desecMaxPages = 100
+
+// listDomains returns every domain on the account. deSEC returns up to 500
+// items per response; an account with more answers the unpaginated request with
+// 400 and a Link rel="first", and each page then names the following one in a
+// Link rel="next" until the last. An account that fits in one response is read
+// with exactly the single request it always was.
+func (s *DesecSolver) listDomains(ctx context.Context) ([]desecDomain, error) {
+	path := "/api/v1/domains/?limit=500"
+	var all []desecDomain
+	for page := 1; ; page++ {
+		var domains []desecDomain
+		hdr, err := s.get(ctx, path, &domains)
+		if err != nil {
+			first := linkRel(hdr, "first")
+			if page == 1 && statusIs(err, http.StatusBadRequest) && first != "" {
+				if path, err = sameAPIPath(first); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, err
+		}
+		all = append(all, domains...)
+		next := linkRel(hdr, "next")
+		if next == "" {
+			return all, nil
+		}
+		if page >= desecMaxPages {
+			return nil, fmt.Errorf("desec: domain listing still has a next page after %d requests; refusing to use a partial listing", desecMaxPages)
+		}
+		if path, err = sameAPIPath(next); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// get is restAPI.do for a GET whose response headers are needed (the Link
+// header carries deSEC's pagination). The header is returned for a non-2xx
+// answer too, since the 400 that asks for pagination carries the first link.
+func (s *DesecSolver) get(ctx context.Context, path string, out any) (http.Header, error) {
+	a := s.api
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+path, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("%s: build request: %w", a.name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	a.authorize(req)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: GET %s: %w", a.name, path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("%s: read response (%s): %w", a.name, resp.Status, err)
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, fmt.Errorf("%s: GET %s: server answered %d redirecting to another location; redirects are not followed because the request carries this provider's credentials", a.name, path, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.Header, &apiError{provider: a.name, method: http.MethodGet, path: path, status: resp.StatusCode, body: snippet(raw)}
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return resp.Header, nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return nil, fmt.Errorf("%s: decode GET %s response: %w", a.name, path, err)
+	}
+	return resp.Header, nil
+}
+
+// linkRel returns the target of the RFC 8288 Link header entry with the given
+// rel, or "" when there is none.
+func linkRel(h http.Header, rel string) string {
+	for _, v := range h.Values("Link") {
+		for _, entry := range strings.Split(v, ",") {
+			target, params, _ := strings.Cut(strings.TrimSpace(entry), ";")
+			target = strings.TrimSpace(target)
+			if len(target) < 2 || target[0] != '<' || target[len(target)-1] != '>' {
+				continue
+			}
+			for _, p := range strings.Split(params, ";") {
+				k, val, _ := strings.Cut(strings.TrimSpace(p), "=")
+				if strings.EqualFold(strings.TrimSpace(k), "rel") && strings.Trim(strings.TrimSpace(val), `"`) == rel {
+					return target[1 : len(target)-1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// sameAPIPath keeps only the path and query of a pagination link, so the next
+// request (which carries the API token) stays on the configured API base
+// whatever host the link names.
+func sameAPIPath(link string) (string, error) {
+	u, err := url.Parse(link)
+	if err != nil || u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
+		return "", fmt.Errorf("desec: unusable pagination link %q", link)
+	}
+	p := u.EscapedPath()
+	if u.RawQuery != "" {
+		p += "?" + u.RawQuery
+	}
+	return p, nil
 }
 
 // desecSubname is the RRset subname for fqdn within zone; "@" addresses the apex

@@ -217,6 +217,23 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			managed[h.Name] = h
 		}
 	}
+	// Redirect, parked and stream hosts share the proxy-host name space (the
+	// config validator rejects a duplicate host name across all of them), so a
+	// derived host with one of their names could never be written.
+	otherHost := map[string]string{}
+	for _, h := range cfg.RedirectHosts {
+		otherHost[h.Name] = "redirect host"
+	}
+	for _, h := range cfg.ParkedHosts {
+		otherHost[h.Name] = "parked host"
+	}
+	for _, h := range cfg.StreamHosts {
+		otherHost[h.Name] = "stream host"
+	}
+	// Ingress discovery stamps the profile's upstream onto every derived host;
+	// Docker discovery derives it per container and ignores the profile's, so
+	// comparing it there would report every stored host as differing.
+	templateUpstream := own.Value == model.ManagedByIngressDiscovery
 
 	desired := map[string]model.ProxyHost{}
 	source := map[string]string{}
@@ -238,8 +255,14 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 
 	// staleFor reports whether a stored managed host differs from what tmpl
 	// renders today: in its chain, or in a stored domain tmpl no longer allows.
-	staleFor := func(cur model.ProxyHost, tmpl model.IngressHostTemplate) (chain, domain bool) {
-		chain = ChainDiffers(cur, tmpl)
+	// derived is the freshly derived host when there is one: the dns policy is
+	// the profile's default overridden per source object, so it can only be
+	// compared against a derive, never against the template alone.
+	staleFor := func(cur model.ProxyHost, tmpl model.IngressHostTemplate, derived *model.ProxyHost) (chain, domain bool) {
+		chain = ChainDiffers(cur, tmpl, templateUpstream)
+		if derived != nil && dnsOf(cur.DNS) != dnsOf(derived.DNS) {
+			chain = true
+		}
 		for _, d := range cur.Domains {
 			if own.DomainAllowed != nil && !own.DomainAllowed(tmpl, model.NormalizeHostname(d)) {
 				domain = true
@@ -304,7 +327,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// freezing would keep serving it under that profile.
 			stale := false
 			if cur, ok := managed[it.Name]; ok && !it.UnknownProfile && it.Resolved != nil {
-				chain, domain := staleFor(cur, *it.Resolved)
+				chain, domain := staleFor(cur, *it.Resolved, nil)
 				stale = chain || domain
 			}
 			if cur, ok := managed[it.Name]; ok && (it.UnknownProfile || stale) && !cur.Disabled {
@@ -530,7 +553,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// (which cannot conflict, they are its own); a stored domain the profile
 			// no longer allows disables it.
 			if tmpl := resolved[name]; exists && own.Managed(cur) && tmpl != nil && !cur.Disabled {
-				chain, domain := staleFor(cur, *tmpl)
+				chain, domain := staleFor(cur, *tmpl, &want)
 				if chain || domain {
 					claim(name, cur.Domains)
 					p.Updated++
@@ -541,14 +564,8 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 						msg = ": domain conflict on a host that serves a domain its profile no longer allows; disabling it rather than leaving it serving that domain"
 						hr = "disabled (fails closed rather than keep serving a chain or domain its profile no longer renders): " + reason
 					} else {
-						upd := cur
-						upd.TLS = want.TLS
-						upd.Middlewares = want.Middlewares
-						upd.AccessLists = want.AccessLists
-						upd.AccessListsMode = want.AccessListsMode
-						upd.Locations = want.Locations
-						upd.StripResponseHeaders = want.StripResponseHeaders
-						upd.SecurityHeaders = want.SecurityHeaders
+						upd := withChain(cur, want, templateUpstream)
+						upd.DNS = want.DNS
 						p.Upserts = append(p.Upserts, upd)
 					}
 					p.Hosts = append(p.Hosts, HostResult{Name: name, Ref: source[name], Domains: cur.Domains,
@@ -573,6 +590,10 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			skip("a proxy host with this name exists and is not managed by " + own.Subsystem)
 			log.Warn().Str("host", name).Str("source", source[name]).
 				Msg(own.Subsystem + ": name is taken by a proxy host this reconciler does not own; leaving it alone")
+		case otherHost[name] != "":
+			skip("a " + otherHost[name] + " with this name exists; host names are shared by proxy, redirect, parked and stream hosts")
+			log.Warn().Str("host", name).Str("source", source[name]).Str("ownerKind", otherHost[name]).
+				Msg(own.Subsystem + ": name is taken by a host of another kind; leaving it alone")
 		case !exists:
 			claim(name, want.Domains)
 			p.Upserts = append(p.Upserts, want)
@@ -644,26 +665,20 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 	return p
 }
 
-// ChainDiffers reports whether the access-relevant fields of a stored host
-// (TLS including client auth, middlewares, access lists and their mode,
-// locations, response-header policy) differ from what tmpl stamps onto a
-// derived host. Both sides are compared in the YAML form the store writes, so
-// an explicit empty list in settings and the nil a stored host round-trips to
-// compare equal, at every nesting level.
-func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate) bool {
-	pick := func(h model.ProxyHost) model.ProxyHost {
-		return model.ProxyHost{
-			TLS:                  h.TLS,
-			Middlewares:          h.Middlewares,
-			AccessLists:          h.AccessLists,
-			AccessListsMode:      h.AccessListsMode,
-			Locations:            h.Locations,
-			StripResponseHeaders: h.StripResponseHeaders,
-			SecurityHeaders:      h.SecurityHeaders,
-		}
-	}
+// ChainDiffers reports whether the fields a derive copies verbatim from tmpl
+// onto a host (TLS including client auth, timeouts, robotsNoIndex,
+// middlewares, access lists and their mode, locations, response-header policy,
+// and the upstream or upstream group when upstream is true) differ between a
+// stored host and tmpl. Both sides are compared in the YAML form the store
+// writes, so an explicit empty list in settings and the nil a stored host
+// round-trips to compare equal, at every nesting level.
+func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate, upstream bool) bool {
 	want := model.ProxyHost{
+		Upstream:             tmpl.Upstream,
+		UpstreamGroupRef:     tmpl.UpstreamGroupRef,
 		TLS:                  tmpl.TLS,
+		RobotsNoIndex:        tmpl.RobotsNoIndex,
+		Timeouts:             tmpl.Timeouts,
 		Middlewares:          tmpl.Middlewares,
 		AccessLists:          tmpl.AccessLists,
 		AccessListsMode:      tmpl.AccessListsMode,
@@ -671,12 +686,38 @@ func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate) bool {
 		StripResponseHeaders: tmpl.StripResponseHeaders,
 		SecurityHeaders:      tmpl.SecurityHeaders,
 	}
-	a, errA := yaml.Marshal(pick(cur))
-	b, errB := yaml.Marshal(want)
+	a, errA := yaml.Marshal(withChain(model.ProxyHost{}, cur, upstream))
+	b, errB := yaml.Marshal(withChain(model.ProxyHost{}, want, upstream))
 	if errA != nil || errB != nil {
 		return true
 	}
 	return !bytes.Equal(a, b)
+}
+
+// withChain returns dst with every field ChainDiffers compares taken from src.
+func withChain(dst, src model.ProxyHost, upstream bool) model.ProxyHost {
+	if upstream {
+		dst.Upstream = src.Upstream
+		dst.UpstreamGroupRef = src.UpstreamGroupRef
+	}
+	dst.TLS = src.TLS
+	dst.RobotsNoIndex = src.RobotsNoIndex
+	dst.Timeouts = src.Timeouts
+	dst.Middlewares = src.Middlewares
+	dst.AccessLists = src.AccessLists
+	dst.AccessListsMode = src.AccessListsMode
+	dst.Locations = src.Locations
+	dst.StripResponseHeaders = src.StripResponseHeaders
+	dst.SecurityHeaders = src.SecurityHeaders
+	return dst
+}
+
+// dnsOf returns a host's dns policy, nil read as the empty policy.
+func dnsOf(p *model.DNSSyncPolicy) model.DNSSyncPolicy {
+	if p == nil {
+		return model.DNSSyncPolicy{}
+	}
+	return *p
 }
 
 // cloneLabels copies a label map so a write through the copy can never mutate

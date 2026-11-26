@@ -131,12 +131,18 @@ contribute nothing. Cloudflare also skips (and counts in `skipped`, logged at
 warn) every name that is neither equal to `cloudflare.zoneName` nor under it: a
 record for another zone cannot live in this one.
 
-**One refused write does not stop the run.** A create or delete the backend
-refuses is logged at error, named in the backend's `error` field and the run
-goes on with the remaining names; deletes run whatever happened to the creates.
-The backend then reports `ok: false`, the ledger keeps the claim it had before
-the run for that name, and the next reconcile tries it again. A failed retarget
-(delete then create) still ends the run, after restoring the original record.
+**One refused write does not stop the run.** A retarget, create or delete the
+backend refuses is logged at error, named in the backend's `error` field and the
+run goes on with the remaining names; creates and deletes run whatever happened
+to the retargets and creates. The backend then reports `ok: false`, and the
+ledger records what the backend holds for that name afterwards:
+
+| Failed write | Backend afterwards | Ledger afterwards | Next reconcile |
+|---|---|---|---|
+| create or delete | unchanged | the claim from before the run | tries it again |
+| retarget, the delete refused | the original record | the claim from before the run | retargets again |
+| retarget, the create refused, the original restored | the original record | the claim from before the run | retargets again |
+| retarget, the create and the restore refused | no record (logged at error as unresolved) | no claim | creates the name |
 
 `dnsProviderRef` is validated for *name shape* at settings-write time only:
 settings are a separate singleton from the object graph, so a reference to a

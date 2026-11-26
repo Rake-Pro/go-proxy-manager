@@ -32,8 +32,72 @@ func headersHandler(spec model.HeadersMiddleware, next http.Handler) http.Handle
 			next.ServeHTTP(w, r)
 			return
 		}
+		r = withResponseRules(r, w.Header(), spec)
 		next.ServeHTTP(&headerRW{ResponseWriter: w, spec: spec}, r)
 	})
+}
+
+// responseRulesKey carries the response rules of every headers middleware on
+// the chain, so the reverse proxy can apply them to a 101 Switching Protocols
+// (see applyUpgradeResponseRules): httputil.ReverseProxy writes a 101 to the
+// hijacked connection and never calls WriteHeader, so headerRW does not see it.
+type responseRulesKey struct{}
+
+// responseRules is the context value under responseRulesKey. header is the
+// client response's header map (every writer on the chain shares it); specs are
+// the headers middlewares outermost first.
+type responseRules struct {
+	header http.Header
+	specs  []model.HeadersMiddleware
+}
+
+func withResponseRules(r *http.Request, header http.Header, spec model.HeadersMiddleware) *http.Request {
+	rules := &responseRules{header: header, specs: []model.HeadersMiddleware{spec}}
+	if prev, ok := r.Context().Value(responseRulesKey{}).(*responseRules); ok {
+		rules.specs = append(append(rules.specs[:0:0], prev.specs...), spec)
+	}
+	return r.WithContext(context.WithValue(r.Context(), responseRulesKey{}, rules))
+}
+
+// upgradeHandshakeHeaders are never set or removed by a headers middleware on
+// a 101: they carry the protocol switch itself, and a rule written for ordinary
+// responses must not break the handshake.
+var upgradeHandshakeHeaders = map[string]struct{}{
+	"Connection": {}, "Upgrade": {}, "Sec-Websocket-Accept": {},
+	"Sec-Websocket-Protocol": {}, "Sec-Websocket-Extensions": {},
+}
+
+// applyUpgradeResponseRules applies the headers middlewares' response rules to
+// a 101 from the upstream, called from ModifyResponse. The stdlib then merges
+// resp.Header onto the client header map (handleUpgradeResponse), so each rule
+// acts on both maps: the result is the same as headerRW running the rules on
+// the merged map, innermost middleware first, which is the order an ordinary
+// response gets.
+func applyUpgradeResponseRules(resp *http.Response) {
+	if resp.StatusCode != http.StatusSwitchingProtocols || resp.Request == nil {
+		return
+	}
+	rules, ok := resp.Request.Context().Value(responseRulesKey{}).(*responseRules)
+	if !ok {
+		return
+	}
+	for i := len(rules.specs) - 1; i >= 0; i-- {
+		spec := rules.specs[i]
+		for _, k := range spec.RemoveResponse {
+			if _, hs := upgradeHandshakeHeaders[textproto.CanonicalMIMEHeaderKey(k)]; hs {
+				continue
+			}
+			rules.header.Del(k)
+			resp.Header.Del(k)
+		}
+		for k, v := range spec.SetResponse {
+			if _, hs := upgradeHandshakeHeaders[textproto.CanonicalMIMEHeaderKey(k)]; hs {
+				continue
+			}
+			rules.header.Del(k)
+			resp.Header.Set(k, v)
+		}
+	}
 }
 
 // setRequestKey carries the names a headers middleware set on the request, so
@@ -88,7 +152,8 @@ func (h *headerRW) WriteHeader(status int) {
 	// The rules run on every header write until a final status: an interim
 	// 1xx (other than 101, which ends the response) does not latch, because
 	// the reverse proxy clears the header map after writing it, so the rules
-	// must run again for the final response.
+	// must run again for the final response. A 101 written by the reverse proxy
+	// never reaches here (see applyUpgradeResponseRules).
 	if !h.written {
 		for _, k := range h.spec.RemoveResponse {
 			h.ResponseWriter.Header().Del(k)
