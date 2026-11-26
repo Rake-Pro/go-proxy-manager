@@ -17,7 +17,7 @@ backend is dialled.
 | <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme: a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | <span id="stream-host-tls"></span>  `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
 | <span id="stream-host-access-lists"></span>  `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
-| <span id="stream-host-idle-timeout"></span>  `idleTimeout` | string | no | **TCP only.** Go duration (`"10m"`, `"1h"`). A connection that carries no data in either direction for this long is closed. Unset: no idle limit, a connection lasts until one side closes it. |
+| <span id="stream-host-idle-timeout"></span>  `idleTimeout` | string | no | **TCP only.** Go duration (`"10m"`, `"1h"`). A connection that carries no data in either direction for this long is closed. Unset: no idle limit, a connection lasts until it is closed ([TCP connection close](#tcp-connection-close)). After a half-close this timeout is the only bound: a transfer that keeps moving is never cut. |
 | <span id="stream-host-max-conns-per-source"></span>  `maxConnsPerSource` | int | no | **TCP only.** Open connections one client address (IPv6 by /56, as the UDP per-source cap) may hold to this host. A connection over the cap is closed after the access-list check and before the backend is dialled. Unset or `0`: no cap. |
 | <span id="stream-host-new-sessions-per-minute"></span>  `newSessionsPerMinute` | int | no | **UDP only.** New sessions one client address (IPv6 by /56) may open per minute, with a burst of the same size. The limit counts session attempts that reach the dial: a datagram dropped by another limit (full table, no free dial slot) costs nothing, a dial that fails still counts. A datagram that would open one over the limit is dropped silently (one log line per source) before the backend is dialled; datagrams on an open session are never limited. Unset or `0`: no limit. |
 
@@ -48,6 +48,21 @@ the new shape: it is never silently accepted with no backend. See
 |-------|------|----------|-------|
 | <span id="stream-host-target-host"></span>  `host` | string | yes | Backend host. |
 | <span id="stream-host-target-port"></span>  `port` | int | yes | 1-65535. |
+
+## TCP connection close
+
+A TCP stream forwards a half-close: a side that finishes sending does not end the connection for the other side.
+
+| Event | What gpm does |
+|-------|---------------|
+| One side finishes sending (EOF on read) | Shuts only the write side toward the other peer (TCP FIN; in `terminate` mode a TLS `close_notify` first) and keeps copying the other direction. |
+| The other side finishes too | Closes the connection. |
+| With `idleTimeout` set: no data in the open direction for `idleTimeout` | Closes the connection. An active transfer after a half-close is never cut. |
+| Without `idleTimeout`: 60 s pass after the first side finished and the other has not | Resets both peers (TCP RST), so a cut reply surfaces as a connection error and is never read as a complete one. The 60 s linger bound is fixed. |
+| A read or write error in either direction (a reset, an `idleTimeout` expiry) | Closes both sides at once. |
+
+- **Slot:** the connection holds its `maxConnsPerSource` slot until it is closed or reset.
+- **Long replies after a half-close:** a client that half-closes and then waits for a reply (`nc -N`, a request sent before `shutdown(SHUT_WR)`) gets the whole reply on a host with `idleTimeout`; without it, the reply must finish within 60 s of the half-close or the client sees a reset.
 
 ## L4 access lists (`accessLists`)
 

@@ -1211,6 +1211,10 @@
     "text": "Forwards to the host-published port instead of the container IP. Use it when gpm runs on the Docker host rather than in a shared network.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-use-published-ports"
   },
+  "settings.dockerDiscovery.allowLinkLocal": {
+    "text": "Off by default: a link-local address is only reachable on the container's own link. Ignored with Use published ports.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-allow-link-local"
+  },
   "settings.dockerDiscovery.includeStopped": {
     "text": "Lists non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-include-stopped"
@@ -1288,7 +1292,7 @@
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.url": {
-    "text": "The absolute URL each event is POSTed to.",
+    "text": "The absolute URL each event is POSTed to. Or a ${ENV:...} or ${FILE:...} placeholder resolved at send time.",
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.secret": {
@@ -1316,7 +1320,7 @@
     "doc": "reference/config/settings/notifications.md#settings-notifications-targets-type"
   },
   "settings.notifications.targets.url": {
-    "text": "The absolute endpoint: an ntfy topic URL, a Discord webhook URL, or any endpoint for generic.",
+    "text": "The absolute endpoint: an ntfy topic URL, a Discord webhook URL, or any endpoint for generic. Or a ${ENV:...} or ${FILE:...} placeholder resolved at send time.",
     "doc": "reference/config/settings/notifications.md#settings-notifications-targets-url"
   },
   "settings.notifications.targets.secret": {

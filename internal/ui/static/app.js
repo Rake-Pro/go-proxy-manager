@@ -2581,8 +2581,9 @@ function deliveryChipHtml(st, disabled) {
 // ---------- basic-auth credential rows ----------
 // Shared by the auth middleware editor and every inline auth block (host and
 // location). The UI posts the PLAINTEXT password; the API bcrypts it and stores
-// only passwordHash, so nothing here ever hashes and nothing ever renders a
-// stored hash into a visible input.
+// only passwordHash, so nothing here ever hashes. A read returns each stored
+// hash as the placeholder "***", and sending that back keeps the stored hash of
+// the user of that name, so a renamed user needs a new password.
 const BASIC_MAX_USERS = 64;
 function makeBasicUserRows(wrap, users) {
   function addRow(u) {
@@ -2591,6 +2592,7 @@ function makeBasicUserRows(wrap, users) {
     const div = document.createElement('div');
     div.className = 'loc-row';
     div._hash = u.passwordHash || '';
+    div._user = u.username || '';
     div._new = !existing;
     div.innerHTML = `<input class="field mono bu-user" data-hint="middleware.auth.basic.users.username" style="flex:1 1 130px" value="${esc(u.username || '')}" placeholder="username" aria-label="Username" />
       <input class="field mono bu-pw" data-hint="middleware.auth.basic.users.password" type="password" autocomplete="new-password" style="flex:2 1 170px" placeholder="${existing ? 'Unchanged' : 'Set a password'}" aria-label="Password" />
@@ -2637,6 +2639,8 @@ function makeBasicUserRows(wrap, users) {
         if (seen[name]) { err = markRowError(r, `Duplicate username "${name}".`); return; }
         seen[name] = true;
         if (!pw && !r._hash) { err = markRowError(r, 'A password is required for a new user.'); return; }
+        // The kept hash belongs to the stored name, so the API refuses it under another.
+        if (!pw && r._hash && name !== r._user) { err = markRowError(r, `Renaming "${r._user}" to "${name}" needs a new password.`); return; }
       });
       if (!err && !rows().length) err = 'Add at least one user.';
       return err;
@@ -2893,8 +2897,10 @@ function wireRateLimitBlock(p, rl) {
         if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
         spec.blockMax = blockMax;
       }
-      // The form has no scope control; keep a scope set through the API or YAML.
+      // The form has no scope or IPv6 prefix control; keep a value set through
+      // the API or YAML.
       if (rl.scope) spec.scope = rl.scope;
+      if (rl.ipv6Prefix) spec.ipv6Prefix = rl.ipv6Prefix;
       return spec;
     },
   };
@@ -3683,6 +3689,7 @@ async function viewIntegrations(c, tab) {
             <div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Use published ports</div><div class="ds">Forward to the host-published port instead of the container IP.</div></div>${switchHtml('set-dkr-pubports', !!dd.usePublishedPorts, 'Use published ports', 'settings.dockerDiscovery.usePublishedPorts')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Include stopped containers</div><div class="ds">List non-running containers too.</div></div>${switchHtml('set-dkr-stopped', !!dd.includeStopped, 'Include stopped containers', 'settings.dockerDiscovery.includeStopped')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Allow link-local addresses</div><div class="ds">Accept a container address in 169.254.0.0/16 or fe80::/10 as the upstream. Off skips such a container.</div></div>${switchHtml('set-dkr-linklocal', !!dd.allowLinkLocal, 'Allow link-local addresses', 'settings.dockerDiscovery.allowLinkLocal')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Allowed domain suffixes</label>
                 <div class="chip-input" id="set-dkr-suffixes" data-hint="settings.dockerDiscovery.allowedDomainSuffixes" data-path="dockerDiscovery.allowedDomainSuffixes"></div>
@@ -3747,7 +3754,7 @@ async function viewIntegrations(c, tab) {
       <p class="section-label">Lifecycle webhooks</p>
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
-      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
+      <div class="hint" style="margin-top:8px">A URL may be a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder, resolved when an event is sent, so a URL that carries a token stays out of git. Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
       ${intSaveBar()}
     </div>
     </div>
@@ -4263,9 +4270,9 @@ async function viewIntegrations(c, tab) {
   let ntfStatus = [];
   const ntfWrap = $('#set-notifications');
   const NTF_URL_HINTS = {
-    ntfy: { ph: 'https://ntfy.example.com/gpm-alerts', hint: 'The topic URL.', secret: 'Access token (optional), sent as Authorization: Bearer <token>.' },
-    discord: { ph: 'https://discord.com/api/webhooks/123.../abc...', hint: 'Must contain /api/webhooks/ - the server rejects a URL that does not.', secret: 'Not used for Discord - the webhook URL itself is the credential.' },
-    generic: { ph: 'https://hooks.example.com/gpm-notify', hint: 'Any http(s) endpoint. Receives a JSON envelope.', secret: 'Bearer token (optional), sent as Authorization: Bearer <token>.' },
+    ntfy: { ph: 'https://ntfy.example.com/gpm-alerts', hint: 'The topic URL, or a ${ENV:...} or ${FILE:...} placeholder that resolves to it.', secret: 'Access token (optional), sent as Authorization: Bearer <token>.' },
+    discord: { ph: 'https://discord.com/api/webhooks/123.../abc...', hint: 'A literal URL must contain /api/webhooks/ - the server rejects one that does not. The URL is the credential, so a ${ENV:...} or ${FILE:...} placeholder keeps it out of git.', secret: 'Not used for Discord - the webhook URL itself is the credential.' },
+    generic: { ph: 'https://hooks.example.com/gpm-notify', hint: 'Any http(s) endpoint, or a ${ENV:...} or ${FILE:...} placeholder. Receives a JSON envelope.', secret: 'Bearer token (optional), sent as Authorization: Bearer <token>.' },
   };
   function notificationRow(t) {
     t = t || {};
@@ -4606,6 +4613,7 @@ async function viewIntegrations(c, tab) {
     if (dkrOn) dockerDiscovery.enabled = true;
     if (isOn('set-dkr-pubports')) dockerDiscovery.usePublishedPorts = true;
     if (isOn('set-dkr-stopped')) dockerDiscovery.includeStopped = true;
+    if (isOn('set-dkr-linklocal')) dockerDiscovery.allowLinkLocal = true;
     if (isOn('set-dkr-dns-lan') || isOn('set-dkr-dns-pub')) {
       dockerDiscovery.template.defaultDNS = { lanDirect: isOn('set-dkr-dns-lan'), publicCname: isOn('set-dkr-dns-pub') };
     }

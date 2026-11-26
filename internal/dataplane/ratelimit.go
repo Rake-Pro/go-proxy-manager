@@ -186,27 +186,27 @@ func (l *rateLimiter) evictLRULocked() {
 	delete(l.buckets, el.Value.(*lruBucket).key)
 }
 
-// rateLimitHandler enforces a per-client-IP token-bucket limit. On exhaustion it
-// replies 429 with a Retry-After header and does not call next. The client IP is
-// resolved via ipOf (the registry's shared, XFF-aware resolver); an unresolvable
-// IP falls back to the shared nil bucket. A client matching rl.AllowFrom bypasses
-// the limiter entirely (no token consumed, no 429); a nil/unresolvable IP never
-// matches, so it falls through to the shared bucket as before. An "@<name>"
-// entry resolves through listNets to the networks that access list allows
-// (nil listNets, or an unknown name, contributes nothing). host and ep resolve
-// the custom error page for the 429 (see serveErrorPage).
-func rateLimitHandler(rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listNets func(name string) []*net.IPNet) http.Handler {
-	return rateLimitHandlerWith(newRateLimiter(rl), rl, ipOf, host, ep, next, listNets)
-}
-
-// rateLimitHandlerWith is rateLimitHandler enforcing rl through the given
-// limiter, which may carry bucket state from an earlier build (see chainStates).
-func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listNets func(name string) []*net.IPNet) http.Handler {
+// rateLimitHandlerWith enforces a per-client-IP token-bucket limit through l,
+// which may carry bucket state from an earlier build (see chainStates). On
+// exhaustion it replies 429 with a Retry-After header and does not call next.
+// The client IP is resolved via ipOf (the registry's shared, XFF-aware
+// resolver); an unresolvable IP falls back to the shared nil bucket. A client
+// matching rl.AllowFrom bypasses the limiter entirely (no token consumed, no
+// 429); a nil/unresolvable IP never matches, so it falls through to the shared
+// bucket as before. An "@<name>" entry is the predicate listExempt returns for
+// that list (see registry.rateLimitExemption); nil listExempt, or a nil
+// predicate for an unknown name, exempts nobody. An IPv6 client is keyed by its
+// rl.IPv6Prefix. host and ep resolve the custom error page for the 429 (see
+// serveErrorPage).
+func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf func(*http.Request) net.IP, host string, ep *compiledErrorPages, next http.Handler, listExempt func(name string) func(net.IP) bool) http.Handler {
 	var allowNets []*net.IPNet
+	var listExempts []func(net.IP) bool
 	for _, c := range rl.AllowFrom {
 		if name, ok := model.AccessListRef(c); ok {
-			if listNets != nil {
-				allowNets = append(allowNets, listNets(name)...)
+			if listExempt != nil {
+				if f := listExempt(name); f != nil {
+					listExempts = append(listExempts, f)
+				}
 			}
 			continue
 		}
@@ -214,15 +214,34 @@ func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf fun
 			allowNets = append(allowNets, n)
 		}
 	}
+	v6Bits := rl.IPv6Prefix
+	if v6Bits == 0 {
+		v6Bits = model.DefaultRateLimitIPv6Prefix
+	}
+	v6Mask := net.CIDRMask(v6Bits, 128)
+	v6Suffix := "/" + strconv.Itoa(v6Bits)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := ipOf(r)
 		if ipInNets(ip, allowNets) {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if ip != nil {
+			for _, exempt := range listExempts {
+				if exempt(ip) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
 		key := nilIPRateLimitKey
 		if ip != nil {
+			// IPv6 clients share one bucket per ipv6Prefix (default /64, the
+			// same key as ipBucketKey); IPv4 keys stay the address.
 			key = ipBucketKey(ip)
+			if ip.To4() == nil && v6Bits != model.DefaultRateLimitIPv6Prefix {
+				key = ip.Mask(v6Mask).String() + v6Suffix
+			}
 		}
 		ok, retry := l.allow(key)
 		if !ok {

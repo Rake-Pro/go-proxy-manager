@@ -57,6 +57,11 @@ func compileGuard(g model.GuardMiddleware) guard {
 			for _, m := range t.Methods {
 				gt.methods[strings.ToUpper(m)] = struct{}{}
 			}
+			// A HEAD is a GET without the body and reaches the same handler on
+			// most backends, so a GET trigger covers it too.
+			if _, ok := gt.methods[http.MethodGet]; ok {
+				gt.methods[http.MethodHead] = struct{}{}
+			}
 		}
 		c.triggers = append(c.triggers, gt)
 	}

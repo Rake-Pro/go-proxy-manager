@@ -247,3 +247,51 @@ func TestDigitalOceanZonePaginationStaysOnBaseURL(t *testing.T) {
 		t.Errorf("%d request(s) left the API base URL, want 0", other)
 	}
 }
+
+func TestDigitalOceanZonePaginationBound(t *testing.T) {
+	var requests int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		// Every page carries the owning domain and names another page.
+		writeJSON(t, w, map[string]any{
+			"domains": []map[string]string{{"name": "example.com"}},
+			"links":   map[string]any{"pages": map[string]any{"next": "/v2/domains?page=" + strconv.Itoa(requests+1)}},
+		})
+	}))
+	t.Cleanup(api.Close)
+	s, err := NewDigitalOceanSolver("do-token", WithDOBaseURL(api.URL), WithDOHTTPClient(api.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.zoneFor(context.Background(), "_acme-challenge.example.com")
+	if err == nil || !strings.Contains(err.Error(), "refusing to use a partial listing") {
+		t.Fatalf("zoneFor error = %v, want a refusal to use a partial listing", err)
+	}
+	if requests != doMaxPages {
+		t.Errorf("followed %d pages, want the bound %d", requests, doMaxPages)
+	}
+}
+
+// A listing that ends on the last allowed page is complete and is used.
+func TestDigitalOceanZonePaginationWithinBound(t *testing.T) {
+	var requests int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		page := map[string]any{"domains": []map[string]string{{"name": "other" + strconv.Itoa(requests) + ".example.net"}}}
+		if requests < doMaxPages {
+			page["links"] = map[string]any{"pages": map[string]any{"next": "/v2/domains?page=" + strconv.Itoa(requests+1)}}
+		} else {
+			page["domains"] = []map[string]string{{"name": "example.com"}}
+		}
+		writeJSON(t, w, page)
+	}))
+	t.Cleanup(api.Close)
+	s, err := NewDigitalOceanSolver("do-token", WithDOBaseURL(api.URL), WithDOHTTPClient(api.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone, err := s.zoneFor(context.Background(), "_acme-challenge.example.com")
+	if err != nil || zone != "example.com" {
+		t.Fatalf("zoneFor = %q, %v, want example.com from page %d", zone, err, doMaxPages)
+	}
+}

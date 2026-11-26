@@ -59,6 +59,36 @@ scope. A viewer-role session and a resource-scoped token both hit this.
 provider's raw message, whoever is asking. The full message stays on that
 certificate's own status, behind `certificates:read`.
 
+## Basic-auth password hashes
+
+No API read returns a stored basic-auth `passwordHash`, whoever is asking: each
+one reads as `***`, like a literal secret. A write that sends `***` back keeps
+the stored hash, so a client can GET an object, edit it and PUT it back.
+
+| Topic | Rule |
+|---|---|
+| Where hashes live | `auth.basic.users[]` on a `type: auth` middleware, on a proxy host's inline `auth` and on each location's, the same inline blocks in discovery templates and profiles in settings, and the deprecated access-list `basicAuth`. |
+| Reads that return `***` | Every JSON reply: object and list reads, `GET /config`, `GET /settings`, the reply to a write, discovery and migration plans. Only the `passwordHash` of a basic-auth user is replaced; a label, header or other key that happens to be named `passwordHash` is returned as stored. |
+| Previews and diffs | The `yaml` of a dry run and the `patch` of `GET /history/diff` replace the value of every visible `passwordHash` key, plain or quoted, in block, flow or JSON style, through anchors, tags, block scalars and quoted values continued on later lines. In a proxy host, middleware, access list or settings file, a diff hunk that starts inside a value blanks, up to its first key, each line that could continue a hash (only hash characters and quotes, at most a hash long); other lines, such as an error page or a PEM, are shown as they are. Any bcrypt-shaped string anywhere is replaced too, with `$` written plainly or as `\x24`, `\u0024` or `\U00000024`. A non-hash key named `passwordHash` may therefore show `***` here too. |
+| What previews do not cover | The YAML gpm writes is always covered. A hand-written file that hides the key itself (an escaped key name, a complex `? passwordHash` key, or an alias to an anchor defined under another key) with a value that is not bcrypt-shaped can show that value in a diff. The full files are available to an admin through `GET /backup` in any case. |
+| `_parse` | Echoes the document it was sent verbatim, hashes included, because the import wizard creates the object from that reply. |
+
+What a `***` sent back resolves to, checked per user list in the write:
+
+| The user list in the write | Resolves to | Otherwise |
+|---|---|---|
+| Exists in the stored object at the same place: the same field; a location with the same `path` (locations sharing a path are told apart by order, only while the write keeps as many of them as are stored); a profile with the same name | The stored hash of the user with the same `username` in that same list | `400`: a placeholder never takes a hash from another list into an existing one |
+| The single rename at its level: exactly one written and one stored entry at that level are left unmatched, counting every location of a shared `path` whose number of locations differs between the write and the stored object (one profile renamed, one location given a new `path`) | The hash of the same `username` in that stored list, else the one hash that `username` has anywhere in the stored object | `400` when the username has no stored hash, or several different ones (the message names the lists) |
+| No counterpart: a new location, profile or auth block; several lists renamed or replaced at one level; a different number of locations on a shared `path` | The one hash that `username` has anywhere in the stored object | `400` as above |
+
+A list with no counterpart, and the single rename at its level when its paired list does not hold the username, may therefore take the one hash that `username` has anywhere in the stored object, in any other list. A username listed more than once in one list (only the deprecated access-list `basicAuth` allows it) is matched occurrence by occurrence when the write lists it as often as the stored list does; otherwise the write is refused.
+
+| Topic | Rule |
+|---|---|
+| Changing a password | Send `password` (plaintext, hashed server-side) or a new bcrypt `passwordHash`. `password` wins over `***` on the same user. |
+| Renaming a user | Needs a password: the stored hash belongs to the old name. |
+| Not affected | The backup archive (`GET /backup`) and the config files in git keep the real hashes: a restore must reproduce working credentials. |
+
 ## Previewing and importing objects
 
 Two calls on every config kind let a client show the committed YAML before a
@@ -78,7 +108,8 @@ commit, no reload, no webhook, no `X-Config-Commit` header.
   anything else is a `400`, so a typo never commits.
 - **`path` and `yaml`.** `path` is relative to the config dir (e.g.
   `proxy-hosts/app.yaml`); `yaml` is the exact file content, with `createdAt`
-  and `updatedAt` stamped as the save would stamp them.
+  and `updatedAt` stamped as the save would stamp them and every `passwordHash`
+  shown as `***` ([above](#basic-auth-password-hashes)).
 - **API tokens.** A dry run never mints a secret, so the previewed APIToken
   YAML has no `tokenHash`.
 - **`_parse` name.** Taken from the document's top-level `name` key, else the

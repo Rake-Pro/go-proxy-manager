@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
@@ -34,8 +36,8 @@ const certExpiringWindow = 30 * 24 * time.Hour
 const maxLastErrorLen = 300
 
 // UpstreamGroupHealth is one upstream group's healthy/unhealthy upstream count,
-// for GET /health. The API package does not import internal/dataplane's
-// per-upstream type; the daemon derives this from it (see Deps.UpstreamGroupSummary).
+// for GET /health. The daemon derives it from internal/dataplane's
+// per-upstream state (see Deps.UpstreamGroupSummary).
 type UpstreamGroupHealth struct {
 	Name      string `json:"name"`
 	Healthy   int    `json:"healthy"`
@@ -316,8 +318,25 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp.HARole = d.Role.String()
 	resp.ConfigHead = head
 	resp.ConfigWarnings = cfg.Warnings()
+	resp.ConfigWarnings = append(resp.ConfigWarnings, denySourceWarnings(r.Context(), cfg.AccessLists, d.Store.LoadAccessListSourceLedger)...)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// denySourceWarnings names every deny rule whose source the data plane
+// resolves to the empty set, so it denies no one. That is the decided
+// behaviour, so it is a warning rather than an error. The ledger is only
+// loaded when some enabled list has a deny rule with a source.
+func denySourceWarnings(ctx context.Context, lists []model.AccessList, load func(context.Context) (model.AccessListSourceLedger, string, error)) []string {
+	refs := model.DenySourceRefs(lists)
+	if len(refs) == 0 {
+		return nil
+	}
+	ledger, _, err := load(ctx)
+	if err != nil {
+		return []string{"the access-list source ledger could not be loaded, so deny rules that name a source may match nothing and deny no one"}
+	}
+	return dataplane.UnresolvedDenySourceWarnings(refs, ledger)
 }
 
 // latestACMEError names the certificate whose most recent attempt failed most

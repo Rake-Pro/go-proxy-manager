@@ -27,6 +27,32 @@ it is evaluated just **before** the referenced middlewares of that kind. Setting
 both is legal and both must pass. See
 [Inline auth and rate limit](../reference/config/proxy-host.md#proxy-host-inline-auth-and-rate-limit).
 
+### Several auth gates on one route
+
+Several auth gates on one route all have to pass, and they run in this order:
+
+1. the location's inline `auth` block (location routes only),
+2. the host's inline `auth` block,
+3. the referenced `type: auth` middlewares, **last-referenced first**. On a
+   location route the location's `middlewares` follow the host's in one list,
+   so the location's referenced gates run before the host's.
+
+The order decides which gate answers first (its refusal or sign-in redirect is
+what the client sees).
+
+An interactive gate (`oidc`, `auth-request`) has pass-through paths it serves
+itself: the `auth-request` outpost `pathPrefix` and the OIDC callback
+`/__gpm/oidc/callback`. A request on one of them is handled like this:
+
+| Gate | On another gate's pass-through path |
+|------|-------------------------------------|
+| The gate that owns the path | Never gates it; serves it once the gates below have passed. |
+| `basic`, `client-cert`, `forward-auth` | Applies its full rule, `allowFrom` included, wherever it runs in the order. |
+| Any other `oidc` or `auth-request` gate | Applies its rule only if it runs before the owning gate; after it, steps aside, so one sign-in flow never waits on another. |
+
+The pass-through request still skips the guard, headers, rewrite and upstream
+steps. On a location route the inherited host gates count the same way.
+
 ## How the chain is compiled
 
 **Middleware chain** (`internal/dataplane/chain.go`). Each host/location compiles
@@ -233,7 +259,9 @@ Everything, with no per-feature configuration:
   auth and `client-cert` auth middlewares.
 - **Throttling**: the rate-limit bucket key and the basic-auth lockout key.
 - **Outbound**: the `X-Real-IP` and `X-Forwarded-For` gpm sends to the
-  upstream, to a forward-auth/auth-request server, and to a bouncer.
+  upstream and to an auth-request outpost on the passthrough under its
+  `pathPrefix`, the `X-Forwarded-For` on the auth subrequest, and the address
+  sent to a bouncer.
 - **Observability**: the access log `client` field and the `/api/logs` viewer.
 - **Admin login throttling**: the admin listener derives the login and TOTP
   lockout key with the **same** function and the same `settings.trustedProxies`

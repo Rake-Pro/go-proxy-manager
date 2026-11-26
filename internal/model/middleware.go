@@ -240,10 +240,11 @@ type RateLimitMiddleware struct {
 	// AllowFrom lists client CIDRs that bypass rate limiting entirely: a matching
 	// request skips the limiter (no token consumed, no 429). An any-of,
 	// network-exempt bypass so trusted networks (e.g. LAN) are never throttled.
-	// An entry "@<name>" stands for the networks access list <name> allows (its
-	// allow cidr rules plus the fetched sets of its allow source rules; path-
-	// scoped rules are ignored), so one list can feed both the gate and the
-	// exemption.
+	// An entry "@<name>" exempts a client whose first matching rule in access
+	// list <name> is an allow rule (cidr or fetched source set) without a path
+	// condition; a deny rule above it keeps its networks limited, and path-
+	// scoped allow rules, the default action and geo rules exempt nobody. So one
+	// list can feed both the gate and the exemption.
 	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
 	// BlockFor, if set, is a Go duration string: once a client exceeds the limit,
 	// further requests from it are rejected for this long regardless of token
@@ -266,6 +267,13 @@ type RateLimitMiddleware struct {
 	// on one. Not allowed on a location's own inline block, which applies to
 	// that location only.
 	Scope string `json:"scope,omitempty" yaml:"scope,omitempty"`
+	// IPv6Prefix is the prefix length an IPv6 client is grouped by: every
+	// address inside one prefix of this length shares one bucket. 0 (unset)
+	// means DefaultRateLimitIPv6Prefix. Allowed MinRateLimitIPv6Prefix to
+	// DefaultRateLimitIPv6Prefix; a shorter prefix sheds a flood rotating
+	// through one large delegation sooner, at the cost of grouping unrelated
+	// customers of a provider that hands out small prefixes.
+	IPv6Prefix int `json:"ipv6Prefix,omitempty" yaml:"ipv6Prefix,omitempty"`
 }
 
 // Rate-limit budget scopes for RateLimitMiddleware.Scope. Empty means
@@ -273,6 +281,13 @@ type RateLimitMiddleware struct {
 const (
 	RateLimitScopeRoute = "route"
 	RateLimitScopeHost  = "host"
+)
+
+// Bounds of RateLimitMiddleware.IPv6Prefix. The default is also the longest
+// allowed value.
+const (
+	MinRateLimitIPv6Prefix     = 48
+	DefaultRateLimitIPv6Prefix = 64
 )
 
 // DefaultBlockMax caps a backed-off rate-limit block when blockMax is unset.
@@ -397,6 +412,9 @@ func (r *RateLimitMiddleware) validate(owner string) error {
 	case "", RateLimitScopeRoute, RateLimitScopeHost:
 	default:
 		return fmt.Errorf("%s: rateLimit.scope: must be %q or %q, got %q", owner, RateLimitScopeRoute, RateLimitScopeHost, r.Scope)
+	}
+	if r.IPv6Prefix != 0 && (r.IPv6Prefix < MinRateLimitIPv6Prefix || r.IPv6Prefix > DefaultRateLimitIPv6Prefix) {
+		return fmt.Errorf("%s: rateLimit.ipv6Prefix: must be between %d and %d (unset means %d), got %d", owner, MinRateLimitIPv6Prefix, DefaultRateLimitIPv6Prefix, DefaultRateLimitIPv6Prefix, r.IPv6Prefix)
 	}
 	return nil
 }

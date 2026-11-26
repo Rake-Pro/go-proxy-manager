@@ -22,7 +22,7 @@ object carries exactly one `type` and its matching spec.
 | <span id="middleware-auth-mode"></span>  `mode` | string | the provider's `type` | no | `oidc` \| `forward-auth` \| `auth-request` \| `client-cert` \| `basic`. See the mode table below. |
 | <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass. **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
 | <span id="middleware-auth-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this gate, compared against the derived client IP. Valid in `auth-request`, `client-cert` and `basic` mode only; **refused in `oidc` and `forward-auth` mode**, where the gate has no bypass to honour. With `mode` unset the effective mode is the provider's `type`, so an exemption against an `oidc` or `forward-auth` provider is refused too: set `mode` explicitly rather than relying on the default. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
-| <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
+| <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name when that contains no `=`) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
 | <span id="middleware-auth-basic"></span>  `basic` | BasicAuthSpec | none | yes in `basic` mode | Local credentials for `basic` mode. Table below. Setting it in any other mode is an error. |
 
 ### Auth modes
@@ -34,6 +34,14 @@ object carries exactly one `type` and its matching spec.
 | `auth-request` | An external `auth_request` endpoint | The auth server does authorization; `requiredRoles` is refused. |
 | `client-cert` | The TLS handshake | Names no `identityProvider`. The host (or the host a location belongs to) must set its own `tls.clientAuth` (`optional` for a gate that exempts some networks): without it the gate admits only its `allowFrom` exemptions and `GET /health` warns, because a certificate is accepted only when the handshake verified it under this host's SNI configuration, which such a host never requests. The gate also refuses a certificate presented under another host's SNI and re-checks revocation on every request. |
 | `basic` | The middleware's own `basic.users` | Names no `identityProvider`; HTTP basic auth against local bcrypt hashes. |
+
+### Several auth gates on one route
+
+- **All must pass.** Every referenced auth middleware and inline `auth` block that applies to the route gates it.
+- **Run order.** The location's inline block, then the host's inline block, then the referenced auth middlewares last-referenced first; a location's referenced gates run before its host's. The first gate that refuses or redirects answers the request.
+- **Pass-through paths.** An `auth-request` gate's outpost `pathPrefix` and an `oidc` gate's callback `/__gpm/oidc/callback` are served by that gate, never gated by it. Every `basic`, `client-cert` and `forward-auth` gate on the route still applies its full rule there (`allowFrom` included); another `oidc` or `auth-request` gate applies only if it runs before the owning gate.
+
+See [Several auth gates on one route](../../concepts/request-pipeline.md#several-auth-gates-on-one-route).
 
 ### BasicAuthSpec (`auth.basic`, `basic` mode only)
 
@@ -97,8 +105,10 @@ the host runs `tls.clientAuth` and the trust anchor (and its CRL, if configured)
 accepted the certificate; otherwise it replies `401`. `clientCertRoles` maps a
 certificate subject to a role: the key is the RFC 2253 subject (`CN=ops,O=Corp`)
 or its bare common name, the value is the role `requiredRoles` is checked
-against. With no mapping, any verified certificate passes; with a mapping, an
-unmapped subject or an insufficient role gets `403`. `requiredRoles` without a
+against. A common name that contains `=` is matched only through the full
+subject, so a CN cannot spell another certificate's subject and take its role.
+With no mapping, any verified certificate passes; with a mapping, an unmapped
+subject or an insufficient role gets `403`. `requiredRoles` without a
 mapping is refused at validation (it could never match).
 
 Pair it with `tls.clientAuth.mode: optional` so certless clients still reach the
@@ -176,7 +186,7 @@ At least one of the four must be set.
 |-----|------|---------|----------|-------------|
 | <span id="middleware-guard-triggers-name"></span>  `name` | string | none | no | Optional label (object-name characters, at most 64). A denial by this trigger is reported to Analytics as the signature `guard:<name>`; unnamed triggers count under the `guard` denial reason only. |
 | <span id="middleware-guard-triggers-paths"></span>  `paths` | []string | none | no | Exact request paths this trigger covers. Matching is exact, see [the four path mechanisms](../../concepts/which-mechanism.md#four-path-aware-mechanisms). |
-| <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | HTTP methods this trigger covers, matched without regard to letter case. |
+| <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | HTTP methods this trigger covers, matched without regard to letter case. Listing `GET` also covers `HEAD`. The method compared is the one on the request line: a method-override parameter (a `_method` form or query field, or an `X-HTTP-Method-Override` header) is not read. If your backend honours such an override, list `POST` in the trigger as well. |
 | <span id="middleware-guard-triggers-query-equals"></span>  `queryEquals` | map[string]string | none | no | Query parameters that must equal these values for the trigger to fire. See the `;` note below. |
 
 A trigger with no field set matches every request, which is a deny-all guard;
@@ -282,11 +292,12 @@ rewrite:
 | <span id="middleware-rate-limit-window"></span>  `window` | string | none | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
 | <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | none | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
 | <span id="middleware-rate-limit-burst"></span>  `burst` | int | `ceil(requests)` | no | Token-bucket capacity: how far above the steady rate a short spike may go. |
-| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` stands for every network access list `name` allows: its allow `cidr` rules plus the fetched sets of its allow `source` rules, path-scoped rules excluded. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays limited, and a path-scoped allow rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 | <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
 | <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
 | <span id="middleware-rate-limit-scope"></span>  `scope` | string | `route` | no | `route` or `host`. Which requests share one budget per client: `route` gives the host route and every location its own; `host` makes the host route and all of its locations draw on one. Not allowed on a location's own inline block. |
+| <span id="middleware-rate-limit-ipv6-prefix"></span>  `ipv6Prefix` | int | `64` | no | `48` to `64`; unset or `0` means `64`. Prefix length an IPv6 client is grouped by: every address in one such prefix shares one bucket. A shorter prefix stops one large delegation from spreading a flood over many buckets, but also groups unrelated customers of a provider that hands out small prefixes, so they share one budget. IPv4 clients are always keyed per address. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
@@ -299,7 +310,7 @@ locations. A location's own extra limit always applies to that location only. Ov
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
 request is not proxied. The bucket is keyed on the derived client IP, with an
-IPv6 client keyed by its /64 (one subscriber holds a whole /64, so a per-address
+IPv6 client keyed by its /64, or the `ipv6Prefix` set (one subscriber holds a whole /64, so a per-address
 key would be a fresh bucket per address); the basic-auth lockout keys IPv4 the
 same way and IPv6 by the wider /56 (see
 [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers));

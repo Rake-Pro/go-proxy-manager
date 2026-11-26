@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -340,8 +341,9 @@ func TestStoredSourceSetOverCoverageBudgetMatchesNothing(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("got %d want %d", rec.Code, tc.want)
 			}
-			if n := len(accessListAllowNets(al)); (n > 0) != (tc.want == http.StatusOK) {
-				t.Fatalf("accessListAllowNets returned %d networks", n)
+			exempt := buildRegistry(model.Config{AccessLists: []model.AccessList{al}}).rateLimitExemption("l")
+			if got := exempt(net.ParseIP("11.1.2.3")); got != (tc.want == http.StatusOK) {
+				t.Fatalf("rate-limit exemption = %v, want %v", got, tc.want == http.StatusOK)
 			}
 		})
 	}

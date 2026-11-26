@@ -40,6 +40,7 @@ Docker-specific items below differ. Design note:
 | <span id="settings-docker-discovery-tls-key"></span> `tlsKey` | string | none | no | Absolute path to the client key. Set with `tlsCert`. |
 | <span id="settings-docker-discovery-tls-ca"></span> `tlsCA` | string | none | no | Absolute path to the PEM bundle verifying the endpoint. There is no skip-verify option. |
 | <span id="settings-docker-discovery-network"></span> `network` | string | first non-`host` network | no | Docker network whose per-container IP becomes the upstream host. Mutually exclusive with `usePublishedPorts`. |
+| <span id="settings-docker-discovery-allow-link-local"></span> `allowLinkLocal` | bool | `false` | no | Accept a link-local container address (`169.254.0.0/16`, `fe80::/10`) as the upstream. Off: a link-local address is not used (with `network` set the container is skipped with the reason in the status; unset, its address on the next network by name is tried). Ignored with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-use-published-ports"></span> `usePublishedPorts` | bool | `false` | no | Forward to the host-published port instead of the container IP. |
 | <span id="settings-docker-discovery-published-host"></span> `publishedHost` | string | `127.0.0.1` | no | Address a published port is reached on. Only valid with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-include-stopped"></span> `includeStopped` | bool | `false` | no | List non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived. |
@@ -119,6 +120,11 @@ Two modes, one choice, decided by where gpm itself runs.
   unreachable. The event stream keeps that window at seconds.
 - `network: host` containers have no per-container address; use
   `usePublishedPorts` for them.
+- Loopback, unspecified and multicast container addresses are never used, and
+  link-local ones only with `allowLinkLocal: true`. With `network` unset such an
+  address is passed over for the next network by name; with `network` set the
+  container is skipped. A host already derived for a skipped container is kept
+  as it is (not rewritten, not deleted) while its profile is unchanged.
 
 ## Derived objects and ownership
 
@@ -138,7 +144,8 @@ Two modes, one choice, decided by where gpm itself runs.
   skipped, with the owner and its kind named in the status `reason`. If the
   skipped host already exists, it keeps its current domains, but a stored chain
   (or `dns` policy) that differs from what the container derives under its
-  resolved profile is restamped on them, and a stored
+  resolved profile is restamped on them, together with the container's current
+  upstream address, and a stored
   domain the profile no longer allows disables it, as for a bad label below.
 - A derived host can take a new domain in one reconcile when that domain is free
   or is released by another derived host updated or deleted in the same commit,

@@ -554,17 +554,32 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// no longer allows disables it.
 			if tmpl := resolved[name]; exists && own.Managed(cur) && tmpl != nil && !cur.Disabled {
 				chain, domain := staleFor(cur, *tmpl, &want)
+				// A Docker upstream is the container's current address, which the
+				// chain comparison leaves out: a stored one may belong to another
+				// container by now, and nothing else rewrites it while the conflict
+				// lasts.
+				upstreamStale := !templateUpstream && (cur.Upstream != want.Upstream || cur.UpstreamGroupRef != want.UpstreamGroupRef)
+				chainStale := chain
+				chain = chain || upstreamStale
 				if chain || domain {
 					claim(name, cur.Domains)
 					p.Updated++
-					msg := ": domain conflict on a host whose stored chain differs from its profile; restamping its chain on its current domains"
+					msg := ": domain conflict on a host whose stored chain or upstream differs from what its source renders; restamping it on its current domains"
 					hr := "kept its current domains, chain restamped from its profile: " + reason
+					if upstreamStale && chainStale {
+						hr = "kept its current domains, chain and upstream restamped from its source: " + reason
+					} else if upstreamStale {
+						hr = "kept its current domains, upstream restamped from its source: " + reason
+					}
 					if domain {
 						disable[name] = failClosed(cur)
 						msg = ": domain conflict on a host that serves a domain its profile no longer allows; disabling it rather than leaving it serving that domain"
 						hr = "disabled (fails closed rather than keep serving a chain or domain its profile no longer renders): " + reason
 					} else {
-						upd := withChain(cur, want, templateUpstream)
+						// The upstream is always taken from the derive: for Ingress it
+						// is the profile's, for Docker the container's current address,
+						// which the stored host may hold from an earlier container.
+						upd := withChain(cur, want, true)
 						upd.DNS = want.DNS
 						p.Upserts = append(p.Upserts, upd)
 					}

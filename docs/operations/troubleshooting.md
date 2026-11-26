@@ -38,6 +38,7 @@ below map each row's wording to its cause and fix.
 | The SPA shows an insecure-cookie banner | `GET /api/capabilities` reports `adminLogin.cookieSecure: insecure-public`: a session cookie was issued without `Secure` to a routable client address | Front the admin panel with TLS, or set `externalBaseURL` to its `https://` URL so `auto` marks the cookie `Secure` ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
 | Process exits at startup naming the config directory | The config dir is not writable by the `gpm` user | Fix ownership on the mounted volume |
 | Startup fails on an unmigrated config tree | `config/dead-hosts/` still holds objects, or a stream host still uses `forwardHost`/`forwardPort` | Apply both renames in the config repo first ([Upgrading](upgrading.md)) |
+| Load, reload, backup, revert or restore fails with `symbolic link does not resolve to a file inside the config directory` | A file named in the error (or its kind directory) is a symbolic link whose target is outside the config directory, missing, or a link loop | Replace the link with the file itself, or point it at a file inside the config directory ([Symbolic links](../concepts/config-model.md#symbolic-links)) |
 
 ## TOTP
 
@@ -103,6 +104,8 @@ below map each row's wording to its cause and fix.
 | Config write refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` | Set `mode` explicitly, or use an access list |
 | A LAN client is prompted for a password after migrating basic auth | The old list required both the IP and the password, so no `allowFrom` was copied | Add the CIDR to the middleware's `allowFrom` deliberately ([Migrate basic auth](../how-to/migrate-basic-auth.md)) |
 | `409` from `migrate-basic-auth` | A middleware named `<list>-basic` already exists | Rename or delete it, or migrate by hand |
+| Write refused: `user "<name>": passwordHash is the redacted placeholder "***", but ...` | API reads return every `passwordHash` as `***`, and `***` only keeps a hash gpm can place without guessing. `this user list has no stored user of that name`: the list exists and never held that user. `no stored user of that name`: the user is new or was renamed. `stored with different hashes in ...`: the username has several hashes in the object and the list is new | Send a `password` for that user ([Basic-auth password hashes](../reference/api.md#basic-auth-password-hashes)) |
+| A script that copied `passwordHash` from an API read gets `***` | Reads no longer return stored hashes | Read the hashes from the config files or a `GET /api/backup` archive, or set passwords with `password` |
 | SSO sessions end after an hour | The per-host SSO cookie has a 1-hour absolute TTL | Expected; re-auth is silent while the IdP session is valid |
 
 ## DNS sync
@@ -145,6 +148,7 @@ below map each row's wording to its cause and fix.
 |---|---|---|
 | `refused > 0` in the source status | A feed answered non-`200`, was empty, over `maxEntries` or `maxCoverage`, or held one unparseable line | Fix the feed; the previously fetched set keeps serving ([Remote IP feeds](../how-to/access-list-sources.md)) |
 | A source rule matches nothing | The source has never been fetched, so it resolves to the empty set | Trigger a reconcile and check the status |
+| Needs attention: `deny rule source "<name>" has never been fetched successfully` (or `expired at`, `... resolves to no networks`, `... over its maxCoverage budget`) | The data plane resolves the deny rule's source to the empty set, so it denies no one; the addresses it should block reach the later rules and `defaultAction` | Turn on `settings.accessListSync`, fix the feed and trigger a reconcile; the warning clears once a fetch succeeds ([Unfetched sources](../reference/config/access-list.md#access-list-sources-unfetched)) |
 | Source status shows `expired: true` and its rules match nothing | The source's `maxAge` passed without a successful fetch, so its stored set was emptied | Fix the feed; the next successful fetch restores the set ([Source expiry](../reference/config/access-list.md#access-list-sources-expiry)) |
 | A source rule grants more than intended | A `source` rule without `paths` is an ordinary allow rule | Pair every `source` rule with `paths` |
 

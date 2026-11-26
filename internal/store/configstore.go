@@ -391,8 +391,10 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.git.EnsureRepo(ctx); err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(s.dir, settingsFile)); os.IsNotExist(err) {
-		if err := writeYAML(filepath.Join(s.dir, settingsFile), model.DefaultSettings()); err != nil {
+	// Lstat: a settings.yaml link that does not resolve is left for Load to
+	// refuse, not replaced with defaults.
+	if _, err := os.Lstat(filepath.Join(s.dir, settingsFile)); os.IsNotExist(err) {
+		if err := writeYAML(s.dir, filepath.Join(s.dir, settingsFile), model.DefaultSettings()); err != nil {
 			return err
 		}
 	}
@@ -481,11 +483,11 @@ func (s *Store) loadLocked() (model.Config, model.Settings, error) {
 
 	settings := model.DefaultSettings()
 	sp := filepath.Join(s.dir, settingsFile)
-	if _, statErr := os.Stat(sp); statErr == nil {
-		data, rerr := os.ReadFile(sp) //nolint:gosec // G304: s.dir plus the constant settingsFile
-		if rerr != nil {
-			return cfg, settings, fmt.Errorf("%s: %w", settingsFile, rerr)
-		}
+	data, rerr := readInDir(s.dir, sp)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		return cfg, settings, fmt.Errorf("%s: %w", settingsFile, rerr)
+	}
+	if rerr == nil {
 		if err = yaml.Unmarshal(data, &settings); err != nil {
 			return cfg, settings, fmt.Errorf("%s: %w", settingsFile, err)
 		}
@@ -567,7 +569,7 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 		return "", fmt.Errorf("%s %q: %w", obj.Kind(), obj.GetMeta().Name, ErrExists)
 	}
 	path := filepath.Join(s.dir, rel)
-	if exists && unchangedOnDisk(path, out) {
+	if exists && unchangedOnDisk(s.dir, path, out) {
 		// Nothing but the timestamps would differ: write and commit nothing and
 		// return no commit, the same "nothing to commit" signal CommitAll gives a
 		// clean tree (the API sends it as an empty X-Config-Commit, which the UI
@@ -580,7 +582,7 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 	}
 	snaps := make([]fileState, 0, 1+len(strays))
 	for _, p := range append([]string{path}, strays...) {
-		snap, err := snapshotFile(p)
+		snap, err := snapshotFile(s.dir, p)
 		if err != nil {
 			return "", err
 		}
@@ -596,7 +598,7 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 			return "", err
 		}
 	}
-	if err := writeYAML(path, out); err != nil {
+	if err := writeYAML(s.dir, path, out); err != nil {
 		restoreFiles(snaps)
 		return "", err
 	}
@@ -614,8 +616,8 @@ func (s *Store) save(ctx context.Context, obj model.Object, author Author, creat
 // unchangedOnDisk reports whether out serializes to the same document as the
 // file already at path, ignoring createdAt and updatedAt. Any read or parse
 // failure reports false, so the caller falls through to a normal write.
-func unchangedOnDisk(path string, out any) bool {
-	disk, err := os.ReadFile(path) //nolint:gosec // path is built from a validated kind dir and object name
+func unchangedOnDisk(root, path string, out any) bool {
+	disk, err := readInDir(root, path)
 	if err != nil {
 		return false
 	}
@@ -767,7 +769,7 @@ func (s *Store) Delete(ctx context.Context, kind, name string, author Author) (s
 		return "", fmt.Errorf("%w: %v", ErrDanglingRef, err)
 	}
 
-	snap, err := snapshotFile(path)
+	snap, err := snapshotFile(s.dir, path)
 	if err != nil {
 		return "", err
 	}
@@ -848,14 +850,14 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	// back, the removed strays included.
 	snaps := make([]fileState, 0, len(strays)+len(objs))
 	for _, p := range strays {
-		snap, err := snapshotFile(p)
+		snap, err := snapshotFile(s.dir, p)
 		if err != nil {
 			return "", err
 		}
 		snaps = append(snaps, snap)
 	}
 	for _, o := range objs {
-		snap, err := snapshotFile(filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
+		snap, err := snapshotFile(s.dir, filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
 		if err != nil {
 			return "", err
 		}
@@ -874,11 +876,11 @@ func (s *Store) SaveBatch(ctx context.Context, objs []model.Object, message stri
 	for i, o := range objs {
 		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
 		out := stampTimes(o, existingByIndex[i], now)
-		if existingByIndex[i] != nil && unchangedOnDisk(path, out) {
+		if existingByIndex[i] != nil && unchangedOnDisk(s.dir, path, out) {
 			continue // leave the file and its updatedAt alone
 		}
 		wrote = true
-		if err := writeYAML(path, out); err != nil {
+		if err := writeYAML(s.dir, path, out); err != nil {
 			restoreFiles(snaps)
 			return "", err
 		}
@@ -989,8 +991,8 @@ type fileState struct {
 }
 
 // snapshotFile captures a file's current contents (or its absence).
-func snapshotFile(path string) (fileState, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // G304: callers pass paths built from s.dir, a kind dir and a validated object name
+func snapshotFile(root, path string) (fileState, error) {
+	b, err := readInDir(root, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fileState{path: path}, nil
@@ -1107,7 +1109,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 				}
 				strays, _ := k.strays(o.GetMeta().Name)
 				for _, p := range strays {
-					refused = refused || unknownKeysAtPath(p, existing)
+					refused = refused || unknownKeysAtPath(s.dir, p, existing)
 				}
 			}
 			if refused {
@@ -1190,21 +1192,21 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	// commit cancelled by shutdown - can be undone completely.
 	snaps := make([]fileState, 0, len(applied)+len(strays)+len(removals))
 	for _, path := range strays {
-		snap, err := snapshotFile(path)
+		snap, err := snapshotFile(s.dir, path)
 		if err != nil {
 			return "", err
 		}
 		snaps = append(snaps, snap)
 	}
 	for _, o := range applied {
-		snap, err := snapshotFile(filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
+		snap, err := snapshotFile(s.dir, filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml"))
 		if err != nil {
 			return "", err
 		}
 		snaps = append(snaps, snap)
 	}
 	for _, path := range removals {
-		snap, err := snapshotFile(path)
+		snap, err := snapshotFile(s.dir, path)
 		if err != nil {
 			return "", err
 		}
@@ -1221,7 +1223,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	now := time.Now().UTC()
 	for i, o := range applied {
 		path := filepath.Join(s.dir, kindDir[o.Kind()], o.GetMeta().Name+".yaml")
-		if err := writeYAML(path, stampTimes(o, appliedExisting[i], now)); err != nil {
+		if err := writeYAML(s.dir, path, stampTimes(o, appliedExisting[i], now)); err != nil {
 			restoreFiles(snaps)
 			return "", err
 		}
@@ -1625,11 +1627,11 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 		settings.SchemaVersion = model.SchemaVersion
 	}
 	path := filepath.Join(s.dir, settingsFile)
-	snap, err := snapshotFile(path)
+	snap, err := snapshotFile(s.dir, path)
 	if err != nil {
 		return "", err
 	}
-	if err := writeYAML(path, settings); err != nil {
+	if err := writeYAML(s.dir, path, settings); err != nil {
 		return "", err
 	}
 	sha, err := s.git.CommitAll(ctx, "Settings: update", author)
@@ -1659,14 +1661,10 @@ func (s *Store) LoadDNSLedger(ctx context.Context) (model.DNSLedger, string, err
 		return model.DNSLedger{}, "", err
 	}
 	var l model.DNSLedger
-	path := filepath.Join(s.dir, dnsLedgerFile)
-	if _, err := os.Stat(path); err != nil {
+	if err := readYAML(s.dir, filepath.Join(s.dir, dnsLedgerFile), &l); err != nil {
 		if os.IsNotExist(err) {
 			return model.DNSLedger{SchemaVersion: model.SchemaVersion}, head, nil
 		}
-		return l, head, err
-	}
-	if err := readYAML(path, &l); err != nil {
 		return l, head, fmt.Errorf("%s: %w", dnsLedgerFile, err)
 	}
 	if err := l.Validate(); err != nil {
@@ -1709,7 +1707,7 @@ func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Aut
 	if l.SchemaVersion == 0 {
 		l.SchemaVersion = model.SchemaVersion
 	}
-	if err := writeYAML(filepath.Join(s.dir, dnsLedgerFile), l); err != nil {
+	if err := writeYAML(s.dir, filepath.Join(s.dir, dnsLedgerFile), l); err != nil {
 		return "", err
 	}
 	return s.git.CommitAll(ctx, "DNS sync ledger: update", author)
@@ -1719,7 +1717,8 @@ func (s *Store) SaveDNSLedger(ctx context.Context, l model.DNSLedger, author Aut
 // with the config repo HEAD they were read at. A missing file is an EMPTY ledger,
 // not an error: that is the state every deployment starts in, and it means "no
 // source has been fetched yet", which the data plane resolves to the empty set -
-// a rule that matches nothing. An unfetched feed can never widen access.
+// a rule that matches nothing. For an allow rule that can never widen access;
+// a deny rule on an unfetched feed denies no one, which GET /health reports.
 //
 // The HEAD is returned for the same reason LoadDNSLedger returns it: a reconcile
 // is a read-modify-write spanning seconds of network I/O that a Revert can
@@ -1733,14 +1732,10 @@ func (s *Store) LoadAccessListSourceLedger(ctx context.Context) (model.AccessLis
 		return model.AccessListSourceLedger{}, "", err
 	}
 	var l model.AccessListSourceLedger
-	path := filepath.Join(s.dir, accessListSourcesFile)
-	if _, err := os.Stat(path); err != nil {
+	if err := readYAML(s.dir, filepath.Join(s.dir, accessListSourcesFile), &l); err != nil {
 		if os.IsNotExist(err) {
 			return model.AccessListSourceLedger{SchemaVersion: model.SchemaVersion}, head, nil
 		}
-		return l, head, err
-	}
-	if err := readYAML(path, &l); err != nil {
 		return l, head, fmt.Errorf("%s: %w", accessListSourcesFile, err)
 	}
 	if err := l.Validate(); err != nil {
@@ -1782,7 +1777,7 @@ func (s *Store) SaveAccessListSourceLedger(ctx context.Context, l model.AccessLi
 	if l.SchemaVersion == 0 {
 		l.SchemaVersion = model.SchemaVersion
 	}
-	if err := writeYAML(filepath.Join(s.dir, accessListSourcesFile), l); err != nil {
+	if err := writeYAML(s.dir, filepath.Join(s.dir, accessListSourcesFile), l); err != nil {
 		return "", err
 	}
 	return s.git.CommitAll(ctx, "Access-list source ledger: update", author)
@@ -1800,9 +1795,18 @@ func loadDir[T any](root, sub string, misnamed *[]string) ([]T, map[string][]str
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// A kind dir that is a link to nothing is refused, not read as empty.
+			if _, rerr := resolveInDir(root, dir); errors.Is(rerr, ErrSymlinkEscapes) {
+				return nil, nil, fmt.Errorf("%s: %w", sub, rerr)
+			}
 			return nil, nil, nil
 		}
 		return nil, nil, err
+	}
+	// A kind dir linked outside is refused even when it holds no file to trip
+	// over: the next write would go through it.
+	if _, rerr := resolveInDir(root, dir); errors.Is(rerr, ErrSymlinkEscapes) {
+		return nil, nil, fmt.Errorf("%s: %w", sub, rerr)
 	}
 	var out []T
 	var warnings map[string][]string
@@ -1811,7 +1815,7 @@ func loadDir[T any](root, sub string, misnamed *[]string) ([]T, map[string][]str
 			continue
 		}
 		rel := sub + "/" + e.Name()
-		data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir of the store's own kind dir
+		data, err := readInDir(root, filepath.Join(dir, e.Name()))
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", rel, err)
 		}
@@ -1856,9 +1860,9 @@ func (s *Store) kindFilesLocked(sub string) (kindFiles, error) {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(k.dir, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir of the store's own kind dir
+		data, err := readInDir(s.dir, filepath.Join(k.dir, e.Name()))
 		if err != nil {
-			return k, err
+			return k, fmt.Errorf("%s/%s: %w", sub, e.Name(), err)
 		}
 		var meta model.ObjectMeta
 		if err := yaml.Unmarshal(data, &meta); err != nil {
@@ -1986,7 +1990,7 @@ func (s *Store) autoWriteRefusedLocked(existing model.Object) bool {
 	if !ok {
 		return false
 	}
-	return unknownKeysAtPath(filepath.Join(s.dir, dir, existing.GetMeta().Name+".yaml"), existing)
+	return unknownKeysAtPath(s.dir, filepath.Join(s.dir, dir, existing.GetMeta().Name+".yaml"), existing)
 }
 
 // unknownKeysAtPath reports whether the file CURRENTLY on disk at path has
@@ -1994,8 +1998,8 @@ func (s *Store) autoWriteRefusedLocked(existing model.Object) bool {
 // at Load, re-run here at write time so an automatic writer sees the file's
 // state right now, not what a caller's plan (built seconds or minutes
 // earlier) read. A missing or unreadable file has nothing to protect.
-func unknownKeysAtPath(path string, sample any) bool {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is built by the store from s.dir, a kind dir and a validated object name
+func unknownKeysAtPath(root, path string, sample any) bool {
+	data, err := readInDir(root, path)
 	if err != nil {
 		return false
 	}
@@ -2030,9 +2034,9 @@ func (s *Store) snapshotDirs(subs []string) (map[string][]byte, error) {
 			if e.IsDir() {
 				continue
 			}
-			b, err := os.ReadFile(filepath.Join(s.dir, sub, e.Name())) //nolint:gosec // G304: entry name from os.ReadDir under s.dir
+			b, err := readInDir(s.dir, filepath.Join(s.dir, sub, e.Name()))
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%s/%s: %w", sub, e.Name(), err)
 			}
 			out[sub+"/"+e.Name()] = b
 		}
@@ -2050,7 +2054,13 @@ func (s *Store) writeDirs(files map[string][]byte) error {
 		if err := os.MkdirAll(full, 0o750); err != nil {
 			return err
 		}
-		entries, err := os.ReadDir(full)
+		// The tree change may have left the directory as a link: never prune or
+		// write through one that leads outside the config dir.
+		real, err := resolveInDir(s.dir, full)
+		if err != nil {
+			return fmt.Errorf("%s: %w", sub, err)
+		}
+		entries, err := os.ReadDir(real)
 		if err != nil {
 			return err
 		}
@@ -2059,30 +2069,38 @@ func (s *Store) writeDirs(files map[string][]byte) error {
 				continue
 			}
 			if _, keep := files[sub+"/"+e.Name()]; !keep {
-				if err := os.Remove(filepath.Join(full, e.Name())); err != nil {
+				if err := os.Remove(filepath.Join(real, e.Name())); err != nil {
 					return err
 				}
 			}
 		}
 	}
 	for rel, b := range files {
-		if err := os.WriteFile(filepath.Join(s.dir, filepath.FromSlash(rel)), b, 0o640); err != nil {
+		dst := filepath.Join(s.dir, filepath.FromSlash(rel))
+		// os.WriteFile follows a link the tree change left at dst.
+		if _, err := resolveInDir(s.dir, dst); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("%s: %w", rel, err)
+		}
+		if err := os.WriteFile(dst, b, 0o640); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func readYAML(path string, v any) error {
-	b, err := os.ReadFile(path) //nolint:gosec // G304: callers pass store-built paths under s.dir
+func readYAML(root, path string, v any) error {
+	b, err := readInDir(root, path)
 	if err != nil {
 		return err
 	}
 	return yaml.Unmarshal(b, v)
 }
 
-// writeYAML atomically writes v as YAML to path (temp file + rename).
-func writeYAML(path string, v any) error {
+// writeYAML atomically writes v as YAML to path (temp file + rename). The
+// write goes to the real location of path's directory and is refused when that
+// directory resolves outside root; the rename replaces a link at path itself
+// rather than writing through it.
+func writeYAML(root, path string, v any) error {
 	b, err := yaml.Marshal(v)
 	if err != nil {
 		return err
@@ -2090,7 +2108,12 @@ func writeYAML(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	dir, err := resolveInDir(root, filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(filepath.Dir(path)), err)
+	}
+	path = filepath.Join(dir, filepath.Base(path))
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return err
 	}

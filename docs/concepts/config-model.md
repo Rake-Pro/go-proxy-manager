@@ -46,6 +46,39 @@ that object is next written (including by an automatic reconciler commit, not
 only an operator save), which makes an unsupported rollback the one case this
 leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollback).
 
+## Symbolic links
+
+gpm reads a symbolic link in the config directory only when it resolves to a
+file inside that directory. The check compares the fully resolved target with
+the fully resolved config directory, so a directory reached through a link works.
+
+| Link | What gpm does |
+|---|---|
+| Resolves inside the config directory (relative or absolute, including a Kubernetes ConfigMap or Secret volume's `..data` indirection) | Read like a regular file |
+| Resolves outside the config directory | Refused |
+| Does not resolve (missing target or a link loop) | Refused |
+
+- **Where it applies.** Every file gpm reads from the tree: `settings.yaml`,
+  both ledgers, every object file, and a kind directory that is itself a link.
+- **At load.** A refused link fails the load the same way an unreadable or
+  invalid file does, naming it, for example `proxy-hosts/app.yaml: symbolic
+  link does not resolve to a file inside the config directory: the link target
+  /srv/other/app.yaml is outside the config directory /data/config`. At start
+  gpm exits; a reload (an API write, an HA follower pull) keeps serving the
+  last loaded config.
+- **On write.** A write through the API never creates a link and never writes
+  through one: a save replaces a link at the object's path with a regular file,
+  and a write into a kind directory that resolves outside the config directory
+  is refused. A revert or restore whose resulting tree holds a refused link is
+  refused and rolled back.
+- **Find them before upgrading.** This lists every link in the config
+  directory that resolves outside it or not at all (GNU `realpath`; set
+  `CONFIG` to the config directory):
+
+```
+d=$(realpath -- "$CONFIG"); find "$d" -path "$d/.git" -prune -o -type l -print | while IFS= read -r l; do t=$(realpath -e -- "$l" 2>/dev/null) || { echo "$l: does not resolve"; continue; }; case "$t/" in "$d"/*) ;; *) echo "$l -> $t";; esac; done
+```
+
 ## Common fields (every object)
 
 | Field | Type | Required | Notes |

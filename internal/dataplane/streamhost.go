@@ -37,7 +37,11 @@ const (
 //   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /56,
 //     see udpSourceKey) may hold inside it, so a single source cannot fill
 //     the table.
+//   - streamHalfCloseLinger bounds how long a TCP stream pair of a host
+//     without idleTimeout stays open after one side finished sending, waiting
+//     for the other side to finish; the pair is then reset.
 var (
+	streamHalfCloseLinger     = 60 * time.Second
 	streamTLSHandshakeTimeout = 10 * time.Second
 	maxUDPSessions            = 4096
 	maxUDPSessionsPerSource   = 64
@@ -379,6 +383,10 @@ type tcpForwarder struct {
 	// forwarder, so connections opened before a reload still count after it.
 	mu        sync.Mutex
 	perSource map[string]int
+
+	// linger is streamHalfCloseLinger, read once at start so a test that
+	// shrinks the var does not race with connections of other forwarders.
+	linger time.Duration
 }
 
 func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyProtoConfig, lc *net.ListenConfig) (*tcpForwarder, error) {
@@ -389,7 +397,7 @@ func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyP
 	if err != nil {
 		return nil, err
 	}
-	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto), perSource: map[string]int{}}
+	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto), perSource: map[string]int{}, linger: streamHalfCloseLinger}
 	f.routes.Store(routes)
 	go f.acceptLoop()
 	log.Info().Int("port", port).Bool("sniRouted", routes.sni).Msg("stream: tcp listener started")
@@ -506,15 +514,72 @@ func (f *tcpForwarder) handle(client net.Conn) {
 		mh.StreamOpened(target.name)
 		defer mh.StreamClosed(target.name)
 	}
+	// Half-close needs both sockets to shut their write side on its own. The
+	// client is a *net.TCPConn, possibly under the PROXY-protocol wrapper; any
+	// other conn (a test pipe) ends the pair at the first EOF instead.
+	type closeWriter interface{ CloseWrite() error }
+	rawClient := client
+	if pc, ok := client.(*proxyProtoConn); ok {
+		rawClient = pc.Conn
+	}
+	clientCW, okClient := rawClient.(closeWriter)
+	backendCW, okBackend := backend.(closeWriter)
+	rawBackend := backend
+	halfClose := okClient && okBackend
+	closeFront := func() error { return clientCW.CloseWrite() }
+	if tc, ok := front.(*tls.Conn); ok {
+		// close_notify first, then the FIN: tls.Conn.CloseWrite only sends the alert.
+		closeFront = func() error {
+			if err := tc.CloseWrite(); err != nil {
+				return err
+			}
+			return clientCW.CloseWrite()
+		}
+	}
 	if target.idle > 0 {
 		front, backend = idleConn{front, target.idle}, idleConn{backend, target.idle}
 	}
-	// Bidirectional copy. When either side ends, the deferred Close on both conns
-	// unblocks the other io.Copy so the goroutine exits.
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(backend, front); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(front, backend); done <- struct{}{} }()
-	<-done
+	// Bidirectional copy. A direction that reaches EOF shuts the write side
+	// toward the other peer and the other direction keeps copying until it ends
+	// too: with idleTimeout set, the idle deadline bounds it; otherwise the
+	// linger bound does. A read or write error in either direction ends the pair
+	// at once. Returning runs the deferred Close on both conns, which unblocks a
+	// copy still running so its goroutine exits.
+	done := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(backend, front)
+		if err == nil && halfClose {
+			err = backendCW.CloseWrite()
+		}
+		done <- err
+	}()
+	go func() {
+		_, err := io.Copy(front, backend)
+		if err == nil && halfClose {
+			err = closeFront()
+		}
+		done <- err
+	}()
+	if err := <-done; err != nil || !halfClose {
+		return
+	}
+	if target.idle > 0 {
+		<-done
+		return
+	}
+	linger := time.NewTimer(f.linger)
+	defer linger.Stop()
+	select {
+	case <-done:
+	case <-linger.C:
+		// Reset both peers instead of a clean FIN, so a reply cut here is not
+		// read as a complete one.
+		for _, c := range []net.Conn{rawClient, rawBackend} {
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetLinger(0)
+			}
+		}
+	}
 }
 
 // acquireSource takes one of the max connection slots of key, reporting false

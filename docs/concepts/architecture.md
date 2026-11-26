@@ -290,9 +290,9 @@ host so two derived hosts never share backing memory with each other or with the
 loaded settings. Parity matters because the alternative is silent: a service
 moved into discovery that loses its no-index header or its upstream timeout keeps
 serving, just differently, and the workaround is a second mechanism (a `headers`
-middleware) for something the model already expresses. The one field a derived
-host deliberately cannot carry is `locations`: path routing belongs to the
-cluster ingress controller, which does it from the same `Ingress` gpm read.
+middleware) for something the model already expresses. `locations` come the same way, but only from the operator's template or
+profile, never from the `Ingress`: an annotation names a profile and nothing
+else, so a tenant cannot add a path, an upstream or a chain of their own.
 
 Three properties define the reconciler. It is **full-state**: the desired set is
 recomputed from a complete list on every poll and compared with the config, so a
@@ -340,7 +340,8 @@ TLS, `timeouts`, `robotsNoIndex`, the chain and the header policy), which decide
 whether a host whose source cannot be derived is frozen or disabled. When the
 source still derives but the host is skipped for a domain conflict, the same
 fields plus the derived `dns` policy decide whether the stored host is restamped
-or left as it is. Because gpm is off-cluster,
+(taking the derived upstream with it, for Docker the container's current
+address) or left as it is. Because gpm is off-cluster,
 in-cluster Service DNS is unusable, so the upstream is the ingress controller's
 address and the data plane's preserved `Host` header is what routes the request
 to the right workload. A whole reconcile lands as **one commit**
@@ -554,7 +555,12 @@ families, so an inbound IPv6 client is routed, gated and logged as its own v6
 address with no second listener and no toggle. **Stream hosts** add their own raw
 TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload:
 ports added are opened, ports removed are closed, and a changed route table is
-swapped without dropping the port.
+swapped without dropping the port. A TCP stream pair forwards a half-close: EOF
+from one side shuts only the write side toward the other peer (`CloseWrite`,
+after a TLS `close_notify` in terminate mode), and the pair is closed once both
+directions are done or on any read or write error. After a half-close, a host
+with `idleTimeout` is bounded only by the idle deadline, and a host without it
+resets both peers 60 s after the first half-close.
 
 **Upstream connection pools across reloads** (`internal/dataplane/router.go`).
 Hosts without `timeouts` share one pooled upstream transport that survives
