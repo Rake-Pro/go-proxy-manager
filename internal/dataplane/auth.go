@@ -3,6 +3,7 @@ package dataplane
 import (
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
@@ -72,27 +73,38 @@ func authHandler(a model.AuthMiddleware, reg *registry, hostName string, domains
 		return forwardAuthGate(fa, idp.RoleMapping, a.RequiredRoles, hostName, ep, next)
 	case model.AuthModeAuthRequest:
 		if idp.AuthRequest == nil {
-			return failClosed(hostName, "auth-request mode requires an auth-request identity provider", ep)
+			return interactiveGate{Handler: failClosed(hostName, "auth-request mode requires an auth-request identity provider", ep)}
 		}
 		arp, err := compileAuthRequest(*idp.AuthRequest)
 		if err != nil {
-			return failClosed(hostName, "auth-request: "+err.Error(), ep)
+			return interactiveGate{Handler: failClosed(hostName, "auth-request: "+err.Error(), ep)}
 		}
 		reg.own(arp.client)
-		return arp.handler(clientIP, allowFromNets(a.AllowFrom), hostName, ep, next)
+		return interactiveGate{Handler: arp.handler(clientIP, allowFromNets(a.AllowFrom), hostName, ep, next), owns: arp.owns}
 	case model.AuthModeOIDC:
 		if idp.OIDC == nil {
-			return failClosed(hostName, "oidc mode requires an oidc identity provider", ep)
+			return interactiveGate{Handler: failClosed(hostName, "oidc mode requires an oidc identity provider", ep)}
 		}
 		gate, err := compileDataOIDC(idp, a.RequiredRoles, hostName, domains)
 		if err != nil {
-			return failClosed(hostName, "oidc: "+err.Error(), ep)
+			return interactiveGate{Handler: failClosed(hostName, "oidc: "+err.Error(), ep)}
 		}
 		gate.ep = ep
-		return gate.handler(next)
+		return interactiveGate{Handler: gate.handler(next), owns: gate.owns}
 	default:
 		return failClosed(hostName, "unknown auth mode "+mode, ep)
 	}
+}
+
+// interactiveGate is an auth gate with a sign-in flow of its own (oidc,
+// auth-request). owns reports whether a request path is one of the gate's
+// pass-through paths, which Handler serves itself without calling the next
+// handler; it is nil for a gate that failed to compile. buildChainInline uses
+// it so a pass-through request still meets the route's other non-interactive
+// gates (see passThroughGate).
+type interactiveGate struct {
+	http.Handler
+	owns func(path string) bool
 }
 
 // forwardAuthGate enforces a trusted forward-auth identity and role policy. host
@@ -128,8 +140,9 @@ func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []stri
 // to cover a different host or location.
 //
 // With clientCertRoles set, the certificate subject (RFC 2253 form, or its bare
-// common name) must map to a role, and that role must satisfy requiredRoles; an
-// unmapped subject is refused. With no mapping, a verified certificate is enough.
+// common name, unless it contains '=') must map to a role, and that role must
+// satisfy requiredRoles; an unmapped subject is refused. With no mapping, a
+// verified certificate is enough.
 //
 // allowNets are the middleware's AllowFrom networks and carry exactly the meaning
 // they do in auth-request mode: a client on one of them is proxied straight
@@ -189,7 +202,9 @@ func clientCertGate(spec model.AuthMiddleware, clientIP func(*http.Request) net.
 		}
 		subj := r.TLS.PeerCertificates[0].Subject
 		role, ok := roles[subj.String()]
-		if !ok {
+		// A common name containing '=' can spell another certificate's full
+		// subject (CN "CN=admin,O=Example"), so it never matches on its own.
+		if !ok && !strings.Contains(subj.CommonName, "=") {
 			role, ok = roles[subj.CommonName]
 		}
 		if !ok || !roleAllowed(auth.Role(role), required) {

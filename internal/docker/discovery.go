@@ -904,17 +904,38 @@ func containerIP(ct Container, conf model.DockerDiscoverySettings) (string, erro
 		if !usableContainerIP(n.IPAddress) {
 			return "", fmt.Errorf("container reports an unusable IP address on network %q", conf.Network)
 		}
+		if !conf.AllowLinkLocal && linkLocalIP(n.IPAddress) {
+			return "", fmt.Errorf("container reports a link-local IP address on network %q; set dockerDiscovery.allowLinkLocal: true to forward to it", conf.Network)
+		}
 		return n.IPAddress, nil
 	}
+	linkLocal := false
 	for _, name := range networkNames(nets) {
 		if name == "host" || name == "none" {
 			continue
 		}
-		if ip := nets[name].IPAddress; ip != "" && usableContainerIP(ip) {
-			return ip, nil
+		ip := nets[name].IPAddress
+		if ip == "" || !usableContainerIP(ip) {
+			continue
 		}
+		if !conf.AllowLinkLocal && linkLocalIP(ip) {
+			linkLocal = true
+			continue
+		}
+		return ip, nil
+	}
+	if linkLocal {
+		return "", errors.New("container has only link-local IP addresses on its Docker networks; set dockerDiscovery.allowLinkLocal: true to forward to one, or set dockerDiscovery.network")
 	}
 	return "", errors.New("container has no usable IP address on any Docker network; set dockerDiscovery.network, or usePublishedPorts when gpm runs on the host")
+}
+
+// linkLocalIP reports a link-local unicast address (169.254.0.0/16,
+// fe80::/10). It is only reachable on the link the container sits on, so it is
+// refused unless dockerDiscovery.allowLinkLocal is set.
+func linkLocalIP(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.IsLinkLocalUnicast()
 }
 
 // usableContainerIP reports whether a reported container address parses and

@@ -90,6 +90,17 @@ revertible with `POST /api/revert` like any other change.
   a fresh instance therefore leaves it with no tokens: re-mint the ones your
   automation needs (backup cron, metrics scrapers) afterwards.
 
+**Symbolic links** (see [Symbolic links](../concepts/config-model.md#symbolic-links)):
+
+- **Backup** archives a link that resolves inside the config directory as the
+  regular file it names. A link that resolves outside it, or not at all, fails
+  the backup with an error naming the file.
+- **Restore** writes regular files only: a symbolic-link or hard-link entry is
+  skipped and logged (`restore: archive entry is a link, not a regular file;
+  skipped`), so its file is missing from the result. A restore never removes
+  or writes a file through a kind directory that links outside the config
+  directory: it is refused instead.
+
 Verify a backup is actually restorable periodically, not just that the cron
 job exits `0`: a `GET`/`POST /api/restore` round trip against a disposable
 test instance is the only thing that proves the archive is usable, the same

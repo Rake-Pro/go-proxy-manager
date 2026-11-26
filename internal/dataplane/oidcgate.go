@@ -560,7 +560,7 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 			refuse(w, http.StatusNotFound, d.ep, d.hostName, "no such host")
 			return
 		}
-		if r.URL.Path == oidcCallbackPath {
+		if d.owns(r.URL.Path) {
 			d.handleCallback(w, r)
 			return
 		}
@@ -580,6 +580,9 @@ func (d *dataOIDC) handler(next http.Handler) http.Handler {
 		d.beginLogin(w, r)
 	})
 }
+
+// owns reports whether path is the gate's own pass-through path, the callback.
+func (d *dataOIDC) owns(path string) bool { return path == oidcCallbackPath }
 
 func (d *dataOIDC) beginLogin(w http.ResponseWriter, r *http.Request) {
 	client, err := d.client(r.Context(), r.Host)

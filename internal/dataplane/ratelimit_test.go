@@ -564,23 +564,16 @@ func TestRateLimitHandlerAccessListExemption(t *testing.T) {
 		{List: "lan", Source: "probes", Entries: []string{"203.0.113.0/24"}},
 	}})
 	t.Cleanup(func() { SetAccessListSources(model.AccessListSourceLedger{}) })
-	lists := map[string]model.AccessList{
-		"lan": {ObjectMeta: model.ObjectMeta{Name: "lan"}, DefaultAction: model.ActionDeny, Rules: []model.IPRule{
+	reg := buildRegistry(model.Config{AccessLists: []model.AccessList{
+		{ObjectMeta: model.ObjectMeta{Name: "lan"}, DefaultAction: model.ActionDeny, Rules: []model.IPRule{
 			{Action: model.ActionAllow, CIDR: "10.0.0.0/8"},
 			{Action: model.ActionAllow, Source: "probes"},
 			{Action: model.ActionAllow, CIDR: "0.0.0.0/0", Paths: []string{"/public"}},
 			{Action: model.ActionDeny, CIDR: "10.9.0.0/16"},
 		}},
-	}
-	listNets := func(name string) []*net.IPNet {
-		al, ok := lists[name]
-		if !ok {
-			return nil
-		}
-		return accessListAllowNets(al)
-	}
+	}})
 	rl := model.RateLimitMiddleware{RequestsPerSecond: 1, Burst: 1, AllowFrom: []string{"@lan", "@nope", "192.0.2.1"}}
-	h := rateLimitHandler(rl, peerIP, "", nil, okHandler(), listNets)
+	h := rateLimitHandlerWith(newRateLimiter(rl), rl, peerIP, "", nil, okHandler(), reg.rateLimitExemption)
 
 	for _, ip := range []string{"10.1.2.3", "203.0.113.7", "192.0.2.1"} {
 		for i := 0; i < 3; i++ {

@@ -406,7 +406,7 @@ func TestWriteRefusesAFileHeldByAnotherObject(t *testing.T) {
 	}
 	for _, n := range []string{"foo", "bar"} {
 		var got model.ProxyHost
-		if err := readYAML(filepath.Join(st.Dir(), "proxy-hosts", n+".yaml"), &got); err != nil || got.Name != n {
+		if err := readYAML(st.Dir(), filepath.Join(st.Dir(), "proxy-hosts", n+".yaml"), &got); err != nil || got.Name != n {
 			t.Fatalf("%s.yaml holds %q (%v), want %q", n, got.Name, err, n)
 		}
 	}

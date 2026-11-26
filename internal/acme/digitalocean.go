@@ -51,6 +51,10 @@ func NewDigitalOceanSolver(apiToken string, opts ...DigitalOceanOption) (*Digita
 	return s, nil
 }
 
+// doMaxPages bounds how many pages the domain listing follows, so a server that
+// keeps offering a next page cannot hold a challenge in a loop.
+const doMaxPages = 20
+
 type doDomainList struct {
 	Domains []struct {
 		Name string `json:"name"`
@@ -86,7 +90,7 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 	var names []string
 	// Page through the domain list; the API caps per_page at 200.
 	path := "/v2/domains?per_page=200"
-	for range 20 {
+	for page := 1; ; page++ {
 		var list doDomainList
 		if err := s.api.do(ctx, http.MethodGet, path, nil, &list); err != nil {
 			return "", err
@@ -97,6 +101,9 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 		next := list.Links.Pages.Next
 		if next == "" {
 			break
+		}
+		if page >= doMaxPages {
+			return "", fmt.Errorf("digitalocean: domain listing still has a next page after %d requests; refusing to use a partial listing", doMaxPages)
 		}
 		u, err := url.Parse(next)
 		// Only the path and query of the next link are used, so the request

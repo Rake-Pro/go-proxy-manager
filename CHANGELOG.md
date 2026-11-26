@@ -135,6 +135,17 @@ All notable changes to go-proxy-manager are documented here. The format follows
   sessions one client address (IPv6 by /56) may open per minute; it counts
   session attempts that reach the dial. Unset keeps today's behaviour and it is
   refused on `protocol: tcp` (#172).
+- Rate limit `ipv6Prefix` (48 to 64, default 64): the prefix length IPv6
+  clients are grouped by, so one large delegation cannot spread a flood over
+  many buckets (#172).
+- `GET /health` `configWarnings` (the Needs attention list) names every
+  access-list deny rule whose source the data plane resolves to the empty set
+  (never fetched successfully, expired under `maxAge`, over `maxCoverage`, or
+  every stored entry refused by the entry guard), since such a rule denies no
+  one (#172).
+- Docker discovery `allowLinkLocal` (default `false`): accept a container
+  whose address is link-local, as before this release (#172).
+- OpenAPI documents `settings.dockerDiscovery`.
 
 ### Security
 
@@ -412,6 +423,31 @@ vulnerability:
   than 100,000 nodes once expanded. The check runs on the parsed tree before
   any value is decoded, so a small body can no longer allocate tens of MiB.
   Ordinary anchors, aliases and merge keys are still accepted.
+- API reads no longer return basic-auth `passwordHash` values: every JSON
+  reply shows the user's hash as `***` (except `_parse`, which echoes the
+  document it was sent), and dry-run previews and history diffs
+  show `***` for every `passwordHash` value. A write that sends `***` back
+  keeps the stored hash of the user of that name in the same user list; a new
+  list, or the one list that replaces the single gone list of its level, may
+  take the one hash that username has in the stored object, and anything else
+  is refused. The backup archive is unchanged (#172).
+- Config store: a symbolic link in the config directory is read only when it
+  resolves to a file inside that directory (the resolved target is compared
+  with the resolved config directory, so ConfigMap `..data` layouts and a
+  linked config directory keep working). A link that resolves outside it, or
+  not at all, fails the load, backup, revert or restore with an error naming
+  the file. Writes, revert and restore no longer write or delete through such
+  a link; before, a revert or restore could write a token file or remove files
+  outside the config directory through one (#172).
+- `clientCertRoles`: the bare-common-name fallback is skipped when the CN
+  contains `=`, so a certificate's CN can no longer spell another
+  certificate's full subject and take its role (#172).
+- Several auth gates on one route: a request on an `auth-request` gate's
+  outpost `pathPrefix` or an `oidc` gate's callback now also has to pass the
+  route's `basic`, `client-cert` and `forward-auth` gates (with their
+  `allowFrom` exemptions), wherever they sit in the run order. Other `oidc` /
+  `auth-request` gates that run after it still step aside there, so a sign-in
+  flow never waits on a gate that runs after it (#172).
 
 ### Changed
 
@@ -452,6 +488,37 @@ vulnerability:
   and is not cancelled when the request that started it goes away (#172).
 - UDP stream sessions take their read buffers from a pool instead of allocating
   64 KiB each (#172).
+- Guard triggers that list `GET` now also match `HEAD`. Method-override
+  parameters (`_method`, `X-HTTP-Method-Override`) are not read; list `POST`
+  too if your backend honours them (#172).
+- Documented the run order of several auth gates on one route (location
+  inline, host inline, then referenced auth middlewares last-referenced
+  first); the order itself is unchanged (#172).
+- Auth-request outpost passthrough: the outpost's response headers must arrive
+  within 10 s (the subrequest's bound), and the passthrough sends the derived
+  client IP in `X-Forwarded-For` (as the auth subrequest does) and in
+  `X-Real-Ip` (#172).
+- A rate limit's `allowFrom: ["@<list>"]` entry now exempts a client only when
+  the first rule of that access list matching it is an allow rule, checked per
+  request like the list's own gate; a client a `deny` rule above that allow
+  rule matches is now rate limited (#172).
+- TCP stream hosts forward a half-close: when one side finishes sending, gpm
+  shuts only the write side toward the other peer (after a TLS `close_notify`
+  in terminate mode) and keeps the other direction open until it finishes too.
+  On a host with `idleTimeout` the idle deadline is the only bound after a
+  half-close, so an active transfer is never cut; on a host without it, a pair
+  whose other side has not finished 60 s after the first half-close is reset
+  (TCP RST to both peers), so a cut reply is not read as complete. A read or
+  write error still closes both sides at once, and the connection keeps its
+  `maxConnsPerSource` slot until it closes. Before, the first EOF from either
+  side closed the connection, so a reply sent after a client's half-close was
+  lost (#172).
+- Docker discovery: a container whose address is link-local (`169.254.0.0/16`,
+  `fe80::/10`) is now skipped, with the reason in the reconcile status; a
+  host already derived for it is kept as it is while its profile is unchanged.
+  `dockerDiscovery.allowLinkLocal: true` restores the previous behaviour
+  (#172).
+- Restore logs each symbolic-link or hard-link archive entry it skips.
 
 ### Fixed
 
@@ -544,6 +611,19 @@ vulnerability:
 - Discovery: a derived host whose name is already used by a redirect, parked or
   stream host is skipped with a reason instead of failing the whole reconcile
   on every poll (#90).
+- Docker discovery: a host restamped after a domain conflict now takes the
+  container's current upstream address instead of keeping the one stored
+  earlier, and is restamped when only that address changed while the conflict
+  lasts; after a container was recreated the stored address could be another
+  container's.
+- An access-list rule written as a bare IPv4-mapped IPv6 address (`cidr:
+  "::ffff:203.0.113.5"`) now matches that IPv4 address, as a bare IPv4 address
+  does; it was read as the IPv6 network `::/32`, so the rule missed its
+  address and matched unrelated `::/32` clients instead.
+- DigitalOcean DNS-01 solver: a domain listing with more than 20 pages is now
+  an error instead of being matched against a partial list.
+- The admin UI says that webhook and notification URLs accept `${ENV:...}` /
+  `${FILE:...}` placeholders.
 
 ## [2.5.0] - 2026-10-20
 

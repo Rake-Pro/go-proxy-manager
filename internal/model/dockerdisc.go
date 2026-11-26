@@ -103,6 +103,11 @@ type DockerDiscoverySettings struct {
 	// upstream host. Empty picks the container's first network by name, skipping
 	// "host" and "none". Ignored when UsePublishedPorts is set.
 	Network string `json:"network,omitempty" yaml:"network,omitempty"`
+	// AllowLinkLocal lets a link-local container address (169.254.0.0/16,
+	// fe80::/10) become the upstream. Off by default: such an address is only
+	// reachable on the container's own link, so a container reporting one is
+	// skipped. Ignored when UsePublishedPorts is set.
+	AllowLinkLocal bool `json:"allowLinkLocal,omitempty" yaml:"allowLinkLocal,omitempty"`
 	// UsePublishedPorts forwards to the HOST-published port on PublishedHost
 	// instead of the container IP on Network. Use it when gpm runs on the Docker
 	// host rather than inside a shared Docker network; see

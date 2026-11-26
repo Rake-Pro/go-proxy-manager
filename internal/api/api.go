@@ -1084,6 +1084,7 @@ func New(d Deps) http.Handler {
 			writeErr(w, status, err)
 			return
 		}
+		diff.Patch = redactHashesPatch(diff.Patch)
 		writeJSON(w, http.StatusOK, diff)
 	}))
 
@@ -1247,6 +1248,19 @@ func New(d Deps) http.Handler {
 		if err := json.Unmarshal(body, &settings); err != nil {
 			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
+		}
+		// Discovery templates may carry inline basic auth, read back with the
+		// hash placeholder like any other object.
+		if hasHashPlaceholder(&settings) {
+			_, stored, err := d.Store.Load(r.Context())
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			if err := keepStoredHashes(&settings, &stored); err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
 		}
 		sha, err := d.Store.SaveSettings(r.Context(), settings, d.author(r))
 		if err != nil {
@@ -1462,6 +1476,26 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 			writeErr(w, http.StatusBadRequest, decodeError(err))
 			return
 		}
+		// A read returns basic-auth hashes as a placeholder; a write that sends
+		// one back keeps the stored hash of that user.
+		if hasHashPlaceholder(&obj) {
+			cfg, _, err := d.Store.Load(r.Context())
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			var stored *T
+			for _, it := range res.list(cfg) {
+				if it.GetMeta().Name == name {
+					stored = &it
+					break
+				}
+			}
+			if err := keepStoredHashes(&obj, stored); err != nil {
+				writeErr(w, http.StatusBadRequest, err)
+				return
+			}
+		}
 		dryRun, err := dryRunParam(r)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1476,7 +1510,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 				writeErr(w, http.StatusBadRequest, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, dryRunResponse{Kind: res.kind, Name: name, Path: path, YAML: string(yml), Exists: exists})
+			writeJSON(w, http.StatusOK, dryRunResponse{Kind: res.kind, Name: name, Path: path, YAML: redactHashesYAML(string(yml)), Exists: exists})
 			return
 		}
 		// If-None-Match: * makes the PUT create-only (RFC 9110 section 13.1.2):
@@ -1582,7 +1616,9 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		if err := obj.Validate(); err != nil {
 			resp.Valid, resp.Error = false, err.Error()
 		}
-		writeJSON(w, http.StatusOK, resp)
+		// Verbatim: the reply is the caller's own document, and the wizard
+		// creates the object from it, so its passwordHash values must survive.
+		writeJSONVerbatim(w, http.StatusOK, resp)
 	}))
 
 	mux.HandleFunc("DELETE "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
@@ -2013,7 +2049,21 @@ func nonNilCommits(c []store.Commit) []store.Commit {
 	return c
 }
 
+// writeJSON writes v as the reply, with every basic-auth passwordHash replaced
+// by the placeholder (see hashPlaceholder): no API read hands out a hash.
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	out, err := redactForReply(v)
+	if err != nil {
+		log.Error().Err(err).Msg("api: reply not sent: its basic-auth hashes could not be redacted")
+		writeJSONVerbatim(w, http.StatusInternalServerError, map[string]string{"error": "the reply could not be redacted; see the server log"})
+		return
+	}
+	writeJSONVerbatim(w, status, out)
+}
+
+// writeJSONVerbatim is writeJSON without the passwordHash redaction, for a
+// reply that only echoes what the caller itself sent.
+func writeJSONVerbatim(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", contentTypeJS)
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)

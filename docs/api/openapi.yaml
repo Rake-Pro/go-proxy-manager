@@ -1254,7 +1254,14 @@ components:
         passwordHash:
           type: string
           description: bcrypt hash ($2a$/$2b$/$2y$, 60 characters). Required unless password is sent
-            instead. Anything that is not a bcrypt hash is refused at write time.
+            instead. Anything that is not a bcrypt hash is refused at write time. Every API read
+            (objects, lists, GET /config, GET /settings, write replies, dry-run previews, history
+            diffs) returns "***" in place of a stored hash; only POST /{kind}/_parse echoes the
+            caller's own value. A write that sends "***" back keeps the stored hash of the user of
+            that name in the same user list. A list that replaces the one gone list of its level (a
+            single renamed profile or location) or is new may instead take the one hash that
+            username has in the stored object. Anything else is refused with 400, so a new or renamed user needs a password;
+            see docs/reference/api.md#basic-auth-password-hashes.
         password:
           type: string
           format: password
@@ -1663,8 +1670,8 @@ components:
           type: array
           items:
             type: string
-          description: CIDRs, IPs or "@<access-list>" references (the networks that list allows, path-scoped
-            rules excluded) that bypass rate limiting entirely.
+          description: CIDRs, IPs or "@<access-list>" references (a client whose first matching rule in that
+            list is an allow rule without paths) that bypass rate limiting entirely.
         blockFor:
           type: string
           description: Go duration; once exceeded, further requests are rejected for this long regardless
@@ -1685,6 +1692,12 @@ components:
           description: Which requests share one budget per client. route (the default) gives the host
             route and every location its own; host makes the host route and all of its locations share
             one. Not allowed on a location's own inline block.
+        ipv6Prefix:
+          type: integer
+          minimum: 48
+          maximum: 64
+          description: Prefix length an IPv6 client is grouped by, so every address in one /N shares a
+            budget. Unset means 64.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
     RewriteRule:
@@ -2131,6 +2144,63 @@ components:
           - rules-only
       description: Disabled (default) is inert. Discovers annotated Kubernetes Ingress objects into managed
         proxy hosts.
+    DockerDiscoverySettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        socket:
+          type: string
+          description: Absolute path of the Engine API unix socket. Default /var/run/docker.sock. Ignored
+            when host is set.
+        host:
+          type: string
+          description: tcp:// or https:// Engine endpoint used instead of the socket.
+        tlsCert:
+          type: string
+          description: Absolute path to a client certificate for an https:// host. Set with tlsKey.
+        tlsKey:
+          type: string
+          description: Absolute path to the client key. Set with tlsCert.
+        tlsCA:
+          type: string
+          description: Absolute path to the PEM bundle verifying the endpoint.
+        network:
+          type: string
+          description: Docker network whose per-container IP becomes the upstream. Empty picks the first
+            non-host network. Mutually exclusive with usePublishedPorts.
+        allowLinkLocal:
+          type: boolean
+          default: false
+          description: Accept a link-local container address (169.254.0.0/16, fe80::/10) as the
+            upstream. Off skips such a container. Ignored with usePublishedPorts.
+        usePublishedPorts:
+          type: boolean
+        publishedHost:
+          type: string
+          description: Address a published port is reached on. Default 127.0.0.1. Only valid with
+            usePublishedPorts.
+        includeStopped:
+          type: boolean
+        pollInterval:
+          type: string
+          description: Go duration. Default 1m, minimum 15s.
+        allowedDomainSuffixes:
+          type: array
+          items:
+            type: string
+          description: Required when enabled.
+        template:
+          $ref: '#/components/schemas/IngressHostTemplate'
+        profiles:
+          type: object
+          properties: {}
+          description: Named chains a container may select by name. Empty inherits
+            ingressDiscovery.profiles. "template" is reserved.
+          additionalProperties:
+            $ref: '#/components/schemas/IngressHostTemplate'
+      description: Disabled (default) is inert. Discovers labelled Docker containers into managed proxy
+        hosts.
     TLSFleetSettings:
       type: object
       properties:
@@ -2229,6 +2299,8 @@ components:
             address; 0.0.0.0/0 and ::/0 are accepted but warned about at load.
         ingressDiscovery:
           $ref: '#/components/schemas/IngressDiscoverySettings'
+        dockerDiscovery:
+          $ref: '#/components/schemas/DockerDiscoverySettings'
         securityHeaders:
           type: object
           additionalProperties:
@@ -2846,7 +2918,10 @@ components:
             type: string
           description: Non-fatal config smells (mirrors Config.Warnings()), including one entry per
             config file with an unknown YAML key an older struct silently ignored - see
-            docs/operations/upgrading.md#rollback. Absent when there is nothing to warn about.
+            docs/operations/upgrading.md#rollback - and one entry per access-list deny rule whose
+            source the data plane resolves to the empty set (never fetched successfully, expired
+            under maxAge, over maxCoverage, or every stored entry refused by the entry guard), which
+            therefore denies no one. Absent when there is nothing to warn about.
     HealthListener:
       type: object
       properties:

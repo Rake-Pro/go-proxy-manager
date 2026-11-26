@@ -51,9 +51,19 @@ type IPRule struct {
 	CIDR string `json:"cidr,omitempty" yaml:"cidr,omitempty"`
 	// Source names an entry in the list's Sources: the rule then matches every
 	// network in that source's most recently fetched set (see
-	// AccessListSourceLedger). A source with no ledger entry yet resolves to the
-	// EMPTY set, so the rule matches nothing and the list falls through to its
-	// defaultAction - a feed that has never been fetched can never widen access.
+	// AccessListSourceLedger). A source with no ledger entry yet (never fetched
+	// successfully, or the ledger could not be loaded), and one whose set
+	// expired under maxAge, resolves to the EMPTY set: the rule matches nothing
+	// and evaluation moves on to the next rule and then the defaultAction. For
+	// an allow rule that is the safe direction. For a deny rule it is not: the
+	// rule blocks nobody, and an address it was meant to deny is decided by the
+	// rules after it, which may allow it. That is kept on purpose (an outage of
+	// a deny feed must not lock everyone out) and surfaced instead: such a deny
+	// rule is listed in the configWarnings of GET /health (see
+	// dataplane.UnresolvedDenySourceWarnings), and the data plane logs every
+	// source rule with an empty set once per reload. A set over its maxCoverage
+	// budget, or one whose every entry the entry guard refuses, resolves to
+	// the empty set in the same way.
 	Source string `json:"source,omitempty" yaml:"source,omitempty"`
 	// Paths scopes the rule to a set of exact request paths. When empty the rule
 	// applies to every request (the historical behaviour). When set, the rule
@@ -76,6 +86,34 @@ type IPRule struct {
 	// valid together with Paths; empty means GET and HEAD, the read-only pair a
 	// health probe needs.
 	Methods []string `json:"methods,omitempty" yaml:"methods,omitempty"`
+}
+
+// AccessListSourceRef is one deny rule's source reference: the list and the
+// source name.
+type AccessListSourceRef struct {
+	List   AccessList
+	Source string
+}
+
+// DenySourceRefs returns every source a deny rule names in an enabled list,
+// once per list and source. Such a rule denies no one while its source
+// resolves to the empty set (see IPRule.Source).
+func DenySourceRefs(lists []AccessList) []AccessListSourceRef {
+	var out []AccessListSourceRef
+	for _, al := range lists {
+		if al.Disabled {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, r := range al.Rules {
+			if r.Action != ActionDeny || r.Source == "" || seen[r.Source] {
+				continue
+			}
+			seen[r.Source] = true
+			out = append(out, AccessListSourceRef{List: al, Source: r.Source})
+		}
+	}
+	return out
 }
 
 // httpMethods is the standard method set an IPRule may name.
