@@ -7,6 +7,29 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Admin UI certificate wizard (#54): **Add certificate** opens a four-step
+  wizard (Domains, Authority, Validation, Review) for ACME certificates, with a
+  Review dry run, Import from YAML and a create-only save, like the proxy host
+  wizard. Without a DNS provider `dns-01` is offered only for a wildcard, which
+  forces it. A custom certificate (PEM files on the server) uses the full
+  editor, which stays at `#/certs/_new`.
+- Admin UI CA picker (#54): Let's Encrypt, Let's Encrypt (staging), ZeroSSL,
+  Google Public CA, SSL.com (ECC directory, since gpm issues ECDSA keys) and
+  Custom, in the wizard's Authority step and the certificate editor. It fills
+  the plain `acme.directoryURL`; ZeroSSL and Google Public CA turn external
+  account binding on and lock it, and Custom needs a directory URL (a blank one
+  means Let's Encrypt). No config key changed.
+- Admin UI Overview panels (#56): "This instance" (version, config commit,
+  listener addresses, request capture, metrics, HA role), "Hosts" (counts by
+  status and discovery source) and "Certificates" (counts by type and state,
+  next expiry of an enabled certificate), each non-zero count linking to the
+  filtered list (a zero is plain text).
+- Admin UI deep links (#56): `#/hosts?filter=<text>` and
+  `#/certs?filter=<text>` open that list with the filter applied. The filter
+  replaces the one remembered for the list (on the proxy hosts list it also
+  switches every zone chip back on), and the address drops back to `#/hosts`
+  or `#/certs`.
+
 - ACME profiles (#62): `acme.profile` names the CA's issuance profile for a
   certificate's orders (1 to 64 characters of letters, digits, `_` or `-`). A CA
   that does not offer it fails the order; changing it on an issued certificate
@@ -502,6 +525,16 @@ vulnerability:
 
 ### Changed
 
+- Admin UI certificate editor (#54): same layout as the proxy host editor, with
+  tabs in the title band (Certificate, Authority, Validation for ACME;
+  Certificate, Files for custom) and a rail with status, renewal, issuer,
+  covered names, last attempt and the config file path.
+- Admin UI: **Add certificate** (the list toolbar, the empty list and the
+  Overview) opens the certificate wizard instead of the editor (#54); a
+  middle-click still opens the full editor.
+- Admin UI Overview (#56): the one-line summary under Needs attention now holds
+  only the upstream members sentence; the host and certificate counts moved
+  into the panels.
 - Renewal is lifetime-relative (#62): an ACME certificate renews when
   `min(30 days, lifetime / 3)` remains, so a certificate living less than 90
   days no longer renews on every pass. The `expiring` state of an ACME certificate, the

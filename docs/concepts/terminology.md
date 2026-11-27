@@ -56,6 +56,7 @@ brackets where it differs.
 | **Ledger** | A committed record of what gpm owns: `config/dns-ledger.yaml` for DNS records, `config/access-list-sources.yaml` for fetched IP feeds. It is what authorises a deletion. |
 | **Adopted** | A record that already existed and gpm claimed rather than created. An adopted record is released, never deleted or retargeted. |
 | **ACME profile** (`acme.profile`) | A named issuance profile a CA offers in its ACME directory (for example a short-lived one). Not a discovery profile. |
+| **CA preset** (UI: the **CA** picker) | A named ACME directory the certificate wizard and editor offer (Let's Encrypt, ZeroSSL, Google Public CA and others; Custom for any other). UI only: picking one fills `acme.directoryURL`, and nothing in the stored object names the preset. See [CA directories](../reference/config/certificate.md#certificate-ca-directories). |
 | **ARI** | ACME Renewal Information (RFC 9773): the CA tells gpm when it wants a certificate renewed. It can only bring a renewal forward. See [Renewal](../reference/config/certificate.md#renewal). |
 | **Apex target** | The single CNAME target every DNS-sync-managed record points at. Not an ownership marker. |
 | **Freeze** | What a discovery reconciler does when it cannot read its source: no creates, no updates, no deletes, managed hosts left exactly as they are. |
@@ -99,7 +100,7 @@ Other views with no config object behind them:
 
 | View | What it shows |
 |---|---|
-| **Overview** | Dashboard: instance health, certificate status, discovery status. Not settings, despite the name. |
+| **Overview** | Dashboard: three panels (this instance, hosts, certificates) whose non-zero counts open the filtered lists, then the Needs attention list of problems. Not settings, despite the name. |
 | **Integrations** | `settings.dnsSync`, `settings.ingressDiscovery`, `settings.dockerDiscovery`, `settings.accessListSync`, `settings.webhooks`, `settings.notifications`. |
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |

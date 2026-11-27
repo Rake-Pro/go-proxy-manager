@@ -89,8 +89,12 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 - **Guided from the first sign-in.** A setup wizard names the instance, sets
   its public URL and the proxies to trust, then hands over to the host wizard.
 - **Wizards that show their work.** Creating a host walks Service, Certificate,
-  Access and Review; the Review step prints the exact YAML the server would
-  commit, and a pasted YAML document fills the steps back in.
+  Access and Review; adding an ACME certificate walks Domains, Authority (with
+  a CA picker), Validation and Review. The Review step prints the exact YAML
+  the server would commit, and a pasted YAML document fills the steps back in.
+- **Overview panels.** The Overview shows this instance's facts and the host
+  and certificate counts, each non-zero count opening the matching filtered
+  list.
 - **Everything is a file.** Every save is a git commit with history and revert;
   the panel, the API and a text editor edit the same objects.
 

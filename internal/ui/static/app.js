@@ -612,10 +612,12 @@ function wireFilter(id, fields, values, onChange, list) {
   }
 
   // The last filter used on this list comes back with the page.
+  // A deep link (route() parsed it) replaces the remembered filter.
   if (memKey) {
     let stored = '';
     try { stored = localStorage.getItem(memKey) || ''; } catch (e) { /* ignore */ }
-    if (stored) setQuery(stored);
+    if (deepFilter && deepFilter.list === list) { setQuery(deepFilter.text); deepFilter = null; }
+    else if (stored) setQuery(stored);
   }
   return { terms, set: setQuery };
 }
@@ -3501,11 +3503,24 @@ function wireCloneButton(section, orig, btnId) {
 // data in the new page's fields, its save handler on the new page's Save).
 let routeSeq = 0;
 const INNER_HTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+// The lists a #/<section>?filter=... link can open, by the list name
+// wireFilter keys them with.
+const DEEP_FILTER_LISTS = { hosts: 'hosts', certs: 'certificates' };
+let deepFilter = null;
 async function route() {
-  const raw = location.hash.replace(/^#/, '');
+  // A query on the hash (#/hosts?filter=status:live) is a one-shot deep link:
+  // it is stripped before the path is read, and wireFilter takes the filter.
+  const hashQ = location.hash.replace(/^#/, '').split('?');
+  const raw = hashQ[0];
   const parts = raw.split('/').filter(Boolean);
   if (!parts.length) { location.hash = '#/overview'; return; }
   const section = parts[0];
+  deepFilter = null;
+  if (hashQ.length > 1 && !parts[1] && DEEP_FILTER_LISTS[section]) {
+    const f = new URLSearchParams(hashQ.slice(1).join('?')).get('filter');
+    if (f !== null) deepFilter = { list: DEEP_FILTER_LISTS[section], text: f };
+  }
+  const deepLink = !!deepFilter;
   // A malformed escape in the hash keeps the raw segment rather than throwing
   // before any view renders.
   let sub = null;
@@ -3573,6 +3588,10 @@ async function route() {
       default: location.hash = '#/overview'; return;
     }
     if (seq !== routeSeq) return;
+    // The link has been applied (or the list was empty): leave the bare route,
+    // without a hashchange, so a later edit of the filter is not contradicted.
+    if (deepLink) history.replaceState(null, '', '#/' + section);
+    deepFilter = null;
     c.classList.add('view');
     applyRefListGuard(c);
     applyMaintenanceBanner(c);
@@ -5001,23 +5020,110 @@ function attnRow(sev, title, detail, href, action) {
     </div>`;
 }
 
+// The Overview's three panels. Each count is a link into the list filtered to
+// exactly the rows it counts (the filter fields are the lists' own).
+const OV_DASH = '<span class="muted">unavailable</span>';
+function ovFilterHref(section, text) { return `#/${section}?filter=${encodeURIComponent(text)}`; }
+function ovRow(label, valueHtml, dot) {
+  return `<span class="k">${dot ? `<span class="dot ${dot}"></span> ` : ''}${label}</span><span class="v">${valueHtml}</span>`;
+}
+// A count row. The number links into the list filtered to the rows it counts,
+// and the link's name says what the number is; a zero is plain text.
+function ovCountRow(label, n, section, filter, dot) {
+  const v = n ? `<a href="${ovFilterHref(section, filter)}" aria-label="${esc(label)}: ${n}">${n}</a>` : '<span class="muted">0</span>';
+  return ovRow(label, v, dot);
+}
+function overviewInstancePanel(rt, health) {
+  const r = rt.ok ? rt.data : null;
+  const onOff = (label, v, href) => `<a href="${href}" aria-label="${label}: ${v ? 'on' : 'off'}">${v ? 'On' : 'Off'}</a>`;
+  const head = health && health.configHead;
+  const role = r && (r.haRole === 'follower' ? 'Follower (read-only)' : 'Leader');
+  return `<div class="card ov-panel" id="ov-instance">
+    <h3>This instance</h3>
+    <div class="kv">
+      ${ovRow('Version', r ? `<span class="mono">${esc(r.version || 'unknown')}</span>` : OV_DASH)}
+      ${ovRow('Config commit', head ? `<a class="mono" href="#/history" aria-label="Config commit ${esc(shortSha(head))}, open History">${esc(shortSha(head))}</a>` : OV_DASH)}
+      ${ovRow('Listeners', r && r.listeners ? ['https', 'http', 'admin'].map((k) => `<span class="mono">${k} ${esc(r.listeners[k] || '-')}</span>`).join('<br>') : OV_DASH)}
+      ${ovRow('Request capture', r ? onOff('Request capture', r.accessLogEnabled, '#/logs') : OV_DASH)}
+      ${ovRow('Metrics', r ? onOff('Metrics', r.metricsEnabled, '#/settings/advanced') : OV_DASH)}
+      ${ovRow('HA role', r ? esc(role) : OV_DASH)}
+    </div>
+  </div>`;
+}
+function overviewHostsPanel(agg) {
+  // The hosts read failed. The sidebar's summary read, when it worked, still
+  // knows how many hosts there are and how many are disabled; it cannot tell
+  // live from maintenance (its maintenance count includes disabled hosts), so
+  // no bar and no status counts are shown.
+  if (!agg) {
+    const total = state.counts.proxyHosts;
+    const sm = state.summary || {};
+    const known = total != null
+      ? `<div class="kv">${ovRow('Total', String(total))}${ovRow('Disabled', String((sm.disabled && sm.disabled['proxy-hosts']) || 0))}</div>` : '';
+    return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>${known}
+      <p class="muted ov-note">Could not read the proxy hosts, so the counts by status and by discovery source are unavailable.</p>
+    </div>`;
+  }
+  if (!agg.total) {
+    return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>
+      <p class="muted ov-note">No proxy hosts yet.</p>
+      ${isReadOnly() ? '' : `<a class="btn primary sm" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`}
+    </div>`;
+  }
+  const SEGS = [['live', 'Live', 'ok'], ['maintenance', 'Maintenance', 'warn'], ['disabled', 'Disabled', 'muted']];
+  const bar = SEGS.filter((sg) => agg[sg[0]]).map((sg) => `<i class="${sg[2]}" style="width:${(agg[sg[0]] * 100 / agg.total).toFixed(2)}%"></i>`).join('');
+  const rows = SEGS.map((sg) => ovCountRow(sg[1], agg[sg[0]], 'hosts', 'status:' + sg[0], sg[2])).join('');
+  const managed = Object.keys(agg.managed).filter((k) => agg.managed[k] > 0)
+    .map((k) => ovCountRow(MANAGED_CHIPS[k].text, agg.managed[k], 'hosts', 'source:' + k)).join('');
+  return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>
+    <div class="meter ov-bar" aria-hidden="true">${bar}</div>
+    <div class="kv">${rows}${managed}</div>
+  </div>`;
+}
+function overviewCertsPanel(agg) {
+  if (!agg) {
+    return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3><p class="muted ov-note">Could not read the certificates.</p></div>`;
+  }
+  if (!agg.total) {
+    return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3>
+      <p class="muted ov-note">No certificates yet.</p>
+      ${isReadOnly() ? '' : `<a class="btn primary sm" href="#/certs/_new" data-wizard="certs">${ICON.plus}Add certificate</a>`}
+    </div>`;
+  }
+  const next = agg.soonest
+    ? `<p class="muted ov-note">Next expiry ${agg.soonest.days < 1 ? 'within a day' : 'in ' + plural(agg.soonest.days, 'day', 'days')}: <a href="#/certs/${encodeURIComponent(agg.soonest.name)}">${esc(agg.soonest.name)}</a></p>` : '';
+  return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3>
+    <div class="kv">
+      ${ovCountRow('ACME', agg.acme, 'certs', 'type:acme')}
+      ${ovCountRow('Custom', agg.custom, 'certs', 'type:custom')}
+      ${ovCountRow('Expiring', agg.expiring, 'certs', 'state:expiring')}
+      ${ovCountRow('Failed', agg.error, 'certs', 'state:error')}
+      ${agg.expired ? ovCountRow('Expired', agg.expired, 'certs', 'state:expired') : ''}
+    </div>${next}
+  </div>`;
+}
+
 async function viewOverview(c) {
-  // Four independent reads, issued together, each tolerated on its own: a
-  // source that fails contributes one warn row ("Could not read ...") instead
+  // Independent reads, issued together, each tolerated on its own: a source
+  // that fails contributes one warn row or an "unavailable" panel line instead
   // of failing the whole view. The two discovery status routes 501/404 when
   // the integration is not wired at all, which is not a failure - it just
   // means that source has nothing to report.
-  const [healthR, certsR, idR, dkrR, hostsR] = await Promise.all([
+  const [healthR, certsR, idR, dkrR, hostsR, runtimeR] = await Promise.all([
     api('/api/health').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/certificates').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
     api('/api/ingress-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/docker-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     // For the hosts in maintenance: the summary counts only enabled and disabled.
     memoGet('/api/proxy-hosts').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
+    // Fresh, not loadRuntime(): the cached copy goes stale when request capture
+    // is toggled on the Logs page.
+    api('/api/runtime').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
   ]);
-  // Only for the empty-state summary's "hosts live" figure. GET /config/summary
-  // is the sidebar's counts-only read and is memoized per route, so this adds
-  // no extra request beyond what the shell already made for the nav.
+  // For the setup card and the Hosts panel's fallback when the hosts read
+  // fails. GET /config/summary is the sidebar's counts-only read and is
+  // memoized per route, so this adds no extra request beyond what the shell
+  // already made for the nav.
   await loadCounts();
 
   const health = healthR.ok ? healthR.data : null;
@@ -5107,7 +5213,9 @@ async function viewOverview(c) {
   // ---- hosts in maintenance: GET /api/proxy-hosts ----
   // A host in maintenance answers every request with a 503: not a fault, but
   // the one host state an operator must not forget, so each gets an info row.
-  const maintHosts = hostsR.ok ? hostsR.data.filter((h) => !h.disabled && h.maintenance) : [];
+  const hostAgg = hostsR.ok ? hostAggregate(hostsR.data) : null;
+  const certAgg = certsR.ok ? certAggregate(certsWithStatus) : null;
+  const maintHosts = hostsR.ok ? hostsR.data.filter((h) => hostStatus(h) === 'maintenance') : [];
   const infoRows = maintHosts.map((h) => attnRow('info',
     `Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance`,
     'It answers 503 instead of passing requests to its upstream.',
@@ -5116,24 +5224,11 @@ async function viewOverview(c) {
   const errCount = errRows.length;
   const warnCount = warnRows.length;
 
-  // The one-line summary: "N hosts live, M in maintenance", certificates,
-  // upstream members.
-  const disabledHosts = hostsR.ok ? hostsR.data.filter((h) => h.disabled).length
-    : ((state.summary && state.summary.disabled && state.summary.disabled['proxy-hosts']) || 0);
-  const totalHosts = hostsR.ok ? hostsR.data.length : (state.counts.proxyHosts || 0);
-  const liveHosts = Math.max(0, totalHosts - disabledHosts - maintHosts.length);
-  const validCerts = certsWithStatus.filter((ct) => ct.state === 'valid');
+  // The one-line summary keeps what no panel shows: the upstream members.
   const upGroups = arr(health && health.upstreamGroups);
   const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
   const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
-  const parts = [`${plural(liveHosts, 'host', 'hosts')} live` + (maintHosts.length ? `, ${maintHosts.length} in maintenance` : '')];
-  if (validCerts.length) {
-    const soonest = validCerts.reduce((min, ct) =>
-      (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
-    parts.push(`${plural(validCerts.length, 'certificate', 'certificates')} valid`
-      + (soonest != null ? `, next expiry in ${plural(soonest, 'day', 'days')}` : ''));
-  }
-  parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
+  const parts = [upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups'];
 
   let body;
   if (errCount + warnCount + infoRows.length > 0) {
@@ -5163,6 +5258,7 @@ async function viewOverview(c) {
   c.innerHTML = `
     ${pageHead('Overview', `Status of <span class="mono">${esc(state.instance)}</span>: what needs attention right now.`)}
     ${setupOffered() ? setupCardHtml() : ''}
+    <div class="ov-panels">${overviewInstancePanel(runtimeR, health)}${overviewHostsPanel(hostAgg)}${overviewCertsPanel(certAgg)}</div>
     ${body}`;
   wireSetupCard(c);
 
@@ -5195,6 +5291,39 @@ function managedBy(h) {
     if (k === 'managed-by' || k.endsWith('/managed-by')) return labels[k];
   }
   return '';
+}
+// The fleet counts, computed once: the hosts list's Status column, the
+// Overview panels and its attention rows all read these, never their own copy
+// of the rule.
+function hostStatus(h) {
+  return h.disabled ? 'disabled' : (h.maintenance ? 'maintenance' : 'live');
+}
+function hostAggregate(hosts) {
+  const a = { total: 0, live: 0, disabled: 0, maintenance: 0, managed: { 'ingress-discovery': 0, 'docker-discovery': 0 } };
+  arr(hosts).forEach((h) => {
+    a.total++;
+    a[hostStatus(h)]++;
+    // The rule the list's source: filter applies (lowercased, substring), so
+    // a count and the list it links to agree whatever the label's spelling.
+    const m = managedBy(h).toLowerCase();
+    Object.keys(a.managed).forEach((k) => { if (m.indexOf(k) !== -1) a.managed[k]++; });
+  });
+  return a;
+}
+// certs as GET /api/certificates returns them. soonest is the valid or
+// expiring certificate in service (not disabled) with the fewest days left;
+// a pending certificate is in total only.
+function certAggregate(certs) {
+  const a = { total: 0, acme: 0, custom: 0, valid: 0, expiring: 0, expired: 0, error: 0, soonest: null };
+  arr(certs).forEach((ct) => {
+    a.total++;
+    if (ct.type === 'acme') a.acme++;
+    else if (ct.type === 'custom') a.custom++;
+    if (['valid', 'expiring', 'expired', 'error'].indexOf(ct.state) !== -1) a[ct.state]++;
+    if (!ct.disabled && (ct.state === 'valid' || ct.state === 'expiring') && ct.daysRemaining != null
+      && (a.soonest === null || ct.daysRemaining < a.soonest.days)) a.soonest = { name: ct.name, days: ct.daysRemaining };
+  });
+  return a;
 }
 // The one "disabled" marker: a muted dot plus the word, the quiet style of the
 // hosts list's Status column. Every list that shows a disabled object (cards,
@@ -5243,6 +5372,10 @@ async function listHosts(c) {
   function saveZonesOff() {
     try { localStorage.setItem(ZONES_OFF_KEY, JSON.stringify(Array.from(zonesOff))); } catch (e) { /* ignore */ }
   }
+  // A deep link names the rows to show (an Overview count links here): it
+  // replaces the remembered zone choice as it replaces the remembered filter,
+  // or a zone switched off earlier would hide rows the link counts.
+  if (deepFilter && deepFilter.list === 'hosts' && zonesOff.size) { zonesOff.clear(); saveZonesOff(); }
 
   const zoneCounts = {};
   // One record per host, holding the values the filter, the sort and the row
@@ -5262,7 +5395,7 @@ async function listHosts(c) {
     // so an inline auth block reads the same in this column as an attached auth
     // middleware does.
     const authInline = !!h.auth;
-    const status = h.disabled ? 'disabled' : (h.maintenance ? 'maintenance' : 'live');
+    const status = hostStatus(h);
     const tags = arr(h.tags);
     const managed = managedBy(h);
     const mc = MANAGED_CHIPS[managed];
@@ -6817,6 +6950,55 @@ function caBundleValue(typed, stored) {
   return typed.trim() ? typed.trim() : '';
 }
 
+// ACME CA presets. UI sugar only: what is stored stays a plain
+// acme.directoryURL. eab is 'required', 'optional' or 'no'; also lists other
+// directories recognised as the same CA but never written by the picker
+// (SSL.com's RSA directory: gpm issues ECDSA keys only).
+const CA_PRESETS = [
+  { id: 'letsencrypt', label: "Let's Encrypt", url: 'https://acme-v02.api.letsencrypt.org/directory', eab: 'no',
+    line: 'The default: used when no directory URL is set.' },
+  { id: 'letsencrypt-staging', label: "Let's Encrypt (staging)", url: 'https://acme-staging-v02.api.letsencrypt.org/directory', eab: 'no',
+    line: 'Issues untrusted test certificates, for trying a setup without using production rate limits.' },
+  { id: 'zerossl', label: 'ZeroSSL', url: 'https://acme.zerossl.com/v2/DV90', eab: 'required',
+    line: 'Needs the EAB key ID and HMAC key from your ZeroSSL account.' },
+  { id: 'google', label: 'Google Public CA', url: 'https://dv.acme-v02.api.pki.goog/directory', eab: 'required',
+    line: 'Needs an EAB key ID and HMAC key created in your Google Cloud project.' },
+  { id: 'sslcom', label: 'SSL.com', url: 'https://acme.ssl.com/sslcom-dv-ecc', also: ['https://acme.ssl.com/sslcom-dv-rsa'], eab: 'optional',
+    line: 'The ECC directory, since gpm issues ECDSA keys. Its directory does not require EAB.' },
+  { id: 'custom', label: 'Custom', url: '', eab: 'optional',
+    line: 'Any other ACME directory, for example a private CA: enter its directory URL.' },
+];
+// Trimmed, trailing slash dropped, scheme and host lowercased: the spellings
+// of one directory compare equal.
+function caURLKey(url) {
+  const s = String(url || '').trim().replace(/\/+$/, '');
+  const m = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)(.*)$/i.exec(s);
+  return m ? m[1].toLowerCase() + m[2] : s;
+}
+// The preset a stored directory URL belongs to: blank is Let's Encrypt, an
+// unknown URL is Custom.
+function caPresetFor(url) {
+  const k = caURLKey(url);
+  if (!k) return CA_PRESETS[0];
+  return CA_PRESETS.find((p) => p.url && [p.url].concat(p.also || []).some((u) => caURLKey(u) === k)) || CA_PRESETS[CA_PRESETS.length - 1];
+}
+// The URL picking a preset writes: blank for Let's Encrypt (the key is then
+// omitted, as for a certificate saved without a URL), the current text for
+// Custom.
+function caPresetURL(id, current) {
+  if (id === 'letsencrypt') return '';
+  if (id === 'custom') return current || '';
+  const p = CA_PRESETS.find((x) => x.id === id);
+  return p ? p.url : (current || '');
+}
+// The line under the EAB switch for a preset, and the reason the switch is
+// locked on when the preset requires it.
+function caEABText(p) {
+  if (p.eab === 'required') return `${p.label} requires external account binding`;
+  if (p.eab === 'optional') return p.id === 'custom' ? 'Only when the CA asks for it' : `Optional for ${p.label}`;
+  return `${p.label} does not use it`;
+}
+
 // ---------- CERTIFICATES LIST ----------
 // A table rather than a card grid, because the questions asked of this page are
 // comparative ("which of these expires first", "which one covers this domain")
@@ -6830,13 +7012,15 @@ function certExpiry(ct) {
 
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
-  const addBtn = `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`;
+  const addBtn = `<a class="btn primary" href="#/certs/_new" data-wizard="certs">${ICON.plus}Add certificate</a>`;
   const head = viewHead('Certificates',
     'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.');
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
       'Request an ACME certificate for the domains you serve - dns-01 if you need a wildcard, http-01 otherwise - or point gpm at PEM files already on the server.',
       'Add certificate', '#/certs/_new');
+    const es = c.querySelector('.empty-state a.btn');
+    if (es) es.setAttribute('data-wizard', 'certs');
     return;
   }
 
@@ -6964,33 +7148,39 @@ async function listCerts(c) {
 }
 
 // ---------- CERTIFICATE EDITOR ----------
-// Read-only card describing the material currently installed, not the config
-// that asked for it. Omitted entirely when the API reports no state (an older
-// build), rather than rendering a wall of dashes.
-function certStatusCardHtml(ct) {
+// The rail rows: the material currently installed, not the config that asked
+// for it, then the config file. A new certificate has nothing installed yet.
+// The config path is the one the store writes (a dry run reports
+// certificates/<name>.yaml).
+function certRailHtml(ct, isNew) {
+  const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
+  const file = row('Config file', `<span class="mono" id="ct-railPath">${esc('certificates/' + (ct.name || '<name>') + '.yaml')}</span><span class="muted">${isNew ? 'written by the first save' : 'one git commit per save, see <a href="#/history">History</a>'}</span>`);
+  if (isNew) return row('Status', '<span class="chip flat ok"><span class="dot ok"></span>New</span>') + file;
   const acme = ct.type === 'acme';
-  const days = ct.daysRemaining;
   const sans = arr(ct.sans).length ? arr(ct.sans) : arr(ct.domains);
-  const row = (k, v, cls) => `<span class="k">${esc(k)}</span><span class="v ${cls || ''}">${v}</span>`;
   const renew = acme ? certRenewInfo(ct) : null;
   const renewHtml = !renew ? ''
     : (renew.due
       ? `<span class="warn-text">${esc(renew.label)}</span> <span class="mono faint">since ${esc(fmtTime(ct.renewAt))}</span>`
       : `<span class="mono">${esc(fmtTime(ct.renewAt))}</span>`)
       + (renew.why ? ` <span class="faint" title="${esc(CERT_RENEW_RULE)}">- ${esc(renew.why)}</span>` : '');
-  return `<div class="card form-section" id="ct-status">
-    <p class="section-label">Status</p>
-    <div class="kv">
-      ${row('State', certStateChip(ct))}
-      ${row('Expiry', `<span class="mono">${esc(ct.notAfter ? fmtTime(ct.notAfter) : '-')}</span>`)}
-      ${row('Days remaining', `<span class="mono${days != null && days < 0 ? ' err-text' : ''}">${days != null ? esc(days) : '-'}</span>`)}
-      ${renewHtml ? row('Renews', renewHtml) : ''}
-      ${row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)}
-      ${row('SANs', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')}
-      ${acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : ''}
-      ${acme && ct.lastError ? row('Last error', `<span class="err-text" style="word-break:break-word">${esc(ct.lastError)}</span>`) : ''}
-    </div>
-  </div>`;
+  // The state chip already says the days remaining ("In 60 days").
+  return row('Status', certStateChip(ct) + (ct.disabled ? ' ' + DISABLED_CHIP : '')
+      + (ct.notAfter ? `<span class="muted">${ct.daysRemaining < 0 ? 'expired' : 'expires'} <span class="mono">${esc(fmtTime(ct.notAfter))}</span></span>` : ''))
+    + (renewHtml ? row('Renews', renewHtml) : '')
+    + row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)
+    + row('Covers', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')
+    + (acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : '')
+    + (acme && ct.lastError ? row('Last error', `<span class="err-text">${esc(ct.lastError)}</span>`) : '')
+    + file;
+}
+// Title-band tabs per certificate type; the set follows the Type select.
+const CERT_TABS = {
+  acme: [['cert', 'Certificate'], ['authority', 'Authority'], ['validation', 'Validation']],
+  custom: [['cert', 'Certificate'], ['files', 'Files']],
+};
+function certTabsHtml(type) {
+  return CERT_TABS[type === 'custom' ? 'custom' : 'acme'].map(([id, label]) => `<button class="tab-btn" type="button" role="tab" id="ct-tab-${id}" aria-controls="ct-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
 }
 
 async function certEditor(c, name) {
@@ -7008,64 +7198,59 @@ async function certEditor(c, name) {
   // Default a brand-new (non-cloned) cert to dns-01 only when a provider exists
   // to solve it; a clone carries its source object's real challenge/provider.
   const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
+  // The CA picker is derived from the stored URL and writes the URL field only
+  // on its own change event, so opening a certificate never rewrites it.
+  let preset = caPresetFor(acme.directoryURL);
+  const panel = (id, body) => `<div class="tab-panel" data-tab="${id}" role="tabpanel" id="ct-panel-${id}" aria-labelledby="ct-tab-${id}" hidden><div class="stack">
+${body}      </div></div>`;
 
   c.innerHTML = `
     ${pageHead(esc(isNew ? 'New certificate' : ct.name), isNew ? 'Add a certificate.' : 'Edit this certificate.',
-      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name, '',
-      editorActions(isNew, (!isNew && type === 'acme') ? '<button class="btn ghost sm" id="ed-renew" type="button">Renew now</button>' : '', 'ct-clone', 'ct-delete'))}
+      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name,
+      (!isNew && ct.disabled ? DISABLED_CHIP : '') + (ct.updatedAt && !isNew ? `<span class="head-meta">last change ${esc(fmtTime(ct.updatedAt))}</span>` : ''),
+      editorActions(isNew, (!isNew && type === 'acme') ? '<button class="btn ghost sm" id="ed-renew" type="button">Renew now</button>' : '', 'ct-clone', 'ct-delete'),
+      certTabsHtml(type))}
 
-    <div class="form-grid">
-      <div class="stack">
-      ${(!isNew && ct.state) ? certStatusCardHtml(ct) : ''}
-      ${identityCard('ct', ct, { section: 'certs', isNew, placeholder: seed ? seed.origName + '-copy' : 'wild' })}
-      <div class="card form-section">
-        <p class="section-label">Certificate</p>
-        <div class="field-group">
-          <label>Type</label>
-          <select class="field" id="ct-type" data-hint="certificate.type" data-path="type">
-            ${enumOptions('certType', ['acme', 'custom'], type)}
-          </select>
+    <div class="edit-grid">
+      <div class="edit-main">
+${panel('cert', `        ${identityCard('ct', ct, { section: 'certs', isNew, placeholder: seed && seed.origName ? seed.origName + '-copy' : 'wild' })}
+        <div class="card form-section">
+          <p class="section-label">Certificate</p>
+          <div class="field-group">
+            <label>Type</label>
+            <select class="field" id="ct-type" data-hint="certificate.type" data-path="type">
+              ${enumOptions('certType', ['acme', 'custom'], type)}
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Domains</label>
+            <div class="chip-input" id="ct-domains" data-hint="certificate.domains" data-path="domains"></div>
+            <div class="hint">Press Enter after each domain.</div>
+          </div>
         </div>
-        <div class="field-group">
-          <label>Domains</label>
-          <div class="chip-input" id="ct-domains" data-hint="certificate.domains" data-path="domains"></div>
-          <div class="hint">Press Enter after each domain.</div>
-        </div>
-      </div>
-      </div>
-
-      <div class="card form-section">
-        <div id="acme-fields" style="${type === 'custom' ? 'display:none' : ''}">
-          <p class="section-label">ACME</p>
+`)}
+${panel('authority', `        <div class="card form-section">
+          <p class="section-label">Certificate authority</p>
+          <div class="field-group"><label>CA</label>
+            <select class="field" id="ct-ca" data-hint="certificate.acme.directoryURL">
+              ${CA_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
+            </select>
+            <div class="hint" id="ct-ca-line">${esc(preset.line)}</div>
+          </div>
           <div class="field-group"><label>Account email</label><input class="field mono" id="ct-email" data-hint="certificate.acme.email" data-path="acme.email" value="${esc(acme.email || '')}" placeholder="you@example.com" /></div>
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" data-hint="certificate.acme.directoryURL" data-path="acme.directoryURL" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
-          <div class="field-group"><label>Issuance profile</label><input class="field mono" id="ct-profile" data-hint="certificate.acme.profile" data-path="acme.profile" value="${esc(acme.profile || '')}" placeholder="CA default" />
-            <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div>
+          <div class="inline-fields">
+            <div class="field-group"><label>Issuance profile</label><input class="field mono" id="ct-profile" data-hint="certificate.acme.profile" data-path="acme.profile" value="${esc(acme.profile || '')}" placeholder="CA default" />
+              <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div>
+            </div>
+            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
           </div>
           <div class="field-group"><label>CA bundle (private CA)</label><textarea class="field mono" id="ct-cabundle" data-hint="certificate.acme.caBundle" data-path="acme.caBundle" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE----- or \${FILE:/run/secrets/acme-ca.pem}"></textarea>
             <div class="hint">Only for a CA whose directory is not trusted by the system roots. Paste PEM, or use a <span class="mono">\${FILE:...}</span> or <span class="mono">\${ENV:...}</span> placeholder. Blank trusts the system roots.</div>
           </div>
-          <div class="inline-fields">
-            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
-            <div class="field-group"><label>Challenge</label>
-              <select class="field mono" id="ct-challenge" data-hint="certificate.acme.challenge" data-path="acme.challenge">
-                <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>${esc(enumLabel('acmeChallenge', 'http-01'))}</option>
-                <option value="dns-01"${challenge === 'dns-01' ? ' selected' : ''}${(dnsProviders.length || challenge === 'dns-01') ? '' : ' disabled'}>${esc(enumLabel('acmeChallenge', 'dns-01'))}${dnsProviders.length ? '' : ' - no provider configured'}</option>
-              </select>
-              <div class="hint">${dnsProviders.length ? 'http-01 is validated on port 80; dns-01 is the only way to get a wildcard.' : 'dns-01 needs a DNS provider - add one under DNS Providers.'}</div>
-            </div>
-          </div>
-          <div class="field-group" id="ct-dns-group" style="${challenge === 'dns-01' ? '' : 'display:none'}">
-            <label>DNS provider</label>
-            <select class="field mono" id="ct-dns" data-hint="certificate.acme.dnsProvider" data-path="acme.dnsProvider">
-              <option value="">select provider...</option>
-              ${dnsProviders.map((p) => `<option value="${esc(p.name)}"${acme.dnsProvider === p.name ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
-            </select>
-            ${dnsProviders.length ? '' : '<div class="hint">No DNS providers configured yet. Add one under DNS Providers.</div>'}
-          </div>
-          <div class="field-group">
-            <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds">Required by ZeroSSL and Google Public CA</div></div>${switchHtml('ct-eab', !!(acme.eab && acme.eab.kid), 'External account binding', 'certificate.acme.eab')}</div>
-          </div>
+        </div>
+        <div class="card form-section">
+          <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds" id="ct-eab-ds">${esc(caEABText(preset))}</div></div>${switchHtml('ct-eab', !!(acme.eab && acme.eab.kid), 'External account binding', 'certificate.acme.eab')}</div>
           <div id="ct-eab-fields" style="${(acme.eab && acme.eab.kid) ? '' : 'display:none'}">
             <div class="field-group"><label>EAB key ID</label><input class="field mono" id="ct-eab-kid" data-hint="certificate.acme.eab.kid" data-path="acme.eab.kid" value="${esc((acme.eab && acme.eab.kid) || '')}" placeholder="kid from the CA" /></div>
             <div class="field-group"><label>EAB HMAC key</label><input class="field mono" id="ct-eab-hmac" data-hint="certificate.acme.eab.hmacKey" data-path="acme.eab.hmacKey" value="${esc((acme.eab && acme.eab.hmacKey) || '')}" placeholder="\${ENV:ACME_EAB_HMAC}" />
@@ -7073,22 +7258,47 @@ async function certEditor(c, name) {
             </div>
           </div>
         </div>
-        <div id="custom-fields" style="${type === 'custom' ? '' : 'display:none'}">
+`)}
+${panel('validation', `        <div class="card form-section">
+          <p class="section-label">Validation</p>
+          <div class="field-group"><label>Challenge</label>
+            <select class="field mono" id="ct-challenge" data-hint="certificate.acme.challenge" data-path="acme.challenge">
+              <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>${esc(enumLabel('acmeChallenge', 'http-01'))}</option>
+              <option value="dns-01"${challenge === 'dns-01' ? ' selected' : ''}${(dnsProviders.length || challenge === 'dns-01') ? '' : ' disabled'}>${esc(enumLabel('acmeChallenge', 'dns-01'))}${dnsProviders.length ? '' : ' - no provider configured'}</option>
+            </select>
+            <div class="hint">${dnsProviders.length ? 'http-01 is validated on port 80; dns-01 is the only way to get a wildcard.' : 'dns-01 needs a DNS provider - add one under <a href="#/dns">DNS Providers</a>.'}</div>
+          </div>
+          <div class="field-group" id="ct-dns-group" style="${challenge === 'dns-01' ? '' : 'display:none'}">
+            <label>DNS provider</label>
+            <select class="field mono" id="ct-dns" data-hint="certificate.acme.dnsProvider" data-path="acme.dnsProvider">
+              <option value="">select provider...</option>
+              ${dnsProviders.map((p) => `<option value="${esc(p.name)}"${acme.dnsProvider === p.name ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+            </select>
+            ${dnsProviders.length ? '' : '<div class="hint">No DNS providers configured yet. Add one under <a href="#/dns">DNS Providers</a>.</div>'}
+          </div>
+        </div>
+`)}
+${panel('files', `        <div class="card form-section">
           <p class="section-label">Custom certificate</p>
           <div class="hint" style="margin-bottom:8px">Paths are relative to the cert store on the gpm host (<span class="mono">-cert-dir</span>, default <span class="mono">/data/certs</span>) - there is no upload here, the files must already exist there.</div>
           <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" data-hint="certificate.custom.certFile" data-path="custom.certFile" value="${esc(custom.certFile || '')}" placeholder="fullchain.pem" /></div>
           <div class="field-group"><label>Key file</label><input class="field mono" id="ct-keyfile" data-hint="certificate.custom.keyFile" data-path="custom.keyFile" value="${esc(custom.keyFile || '')}" placeholder="privkey.pem" /></div>
         </div>
-      </div>
-    </div>
-
+`)}
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
         <button class="btn primary" id="ct-save" type="button">${isNew ? 'Add certificate' : 'Save changes'}</button>
         <a class="btn ghost" href="#/certs">Cancel</a>
       </div>
+    </div>
+      </div>
+
+      <aside class="rail">
+        <div class="card rail-card"><dl class="dl" id="ct-rail">${certRailHtml(ct, isNew)}</dl></div>
+      </aside>
     </div>`;
+  wirePageTabs('cert');
 
   // Set as a property, not as markup between the tags: the HTML parser drops a
   // leading newline there, and the save compares against the loaded text.
@@ -7096,10 +7306,13 @@ async function certEditor(c, name) {
   const domainsCtl = makeChipInput($('#ct-domains'), arr(ct.domains), 'add domain...');
   const tagsCtl = wireIdentityCard('ct', ct);
   pathsFromHints($('#content'));
+  // A new certificate's config path follows the name being typed.
+  if (isNew) $('#ct-name').addEventListener('input', () => { $('#ct-railPath').textContent = 'certificates/' + ($('#ct-name').value.trim() || '<name>') + '.yaml'; });
+  // The tab set follows the type: the other type's tabs are removed from the
+  // band, not hidden, so neither a click nor an arrow key can reach them.
   $('#ct-type').addEventListener('change', () => {
-    const t = $('#ct-type').value;
-    $('#acme-fields').style.display = t === 'acme' ? '' : 'none';
-    $('#custom-fields').style.display = t === 'custom' ? '' : 'none';
+    $('#pageTabs').innerHTML = certTabsHtml($('#ct-type').value);
+    wirePageTabs('cert');
   });
   // The DNS provider only applies to dns-01; http-01 is solved on port 80.
   $('#ct-challenge').addEventListener('change', () => {
@@ -7107,6 +7320,40 @@ async function certEditor(c, name) {
   });
   $('#ct-eab').addEventListener('switchchange', () => {
     $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+  });
+  // EAB follows the CA: a preset that requires it turns the switch on and
+  // locks it when the operator picks that preset, on a new certificate, or
+  // when EAB is already on. A stored certificate with such a URL and no EAB is
+  // shown as stored and left unlocked, or an untouched save would fail.
+  // Leaving a required preset unlocks the switch, and turns it off only when
+  // both fields are empty.
+  function applyCA(p, picked) {
+    const prev = preset;
+    preset = p;
+    $('#ct-ca-line').textContent = p.line;
+    $('#ct-eab-ds').textContent = caEABText(p);
+    const sw = $('#ct-eab');
+    const lock = p.eab === 'required' && (picked || isNew || isOn('ct-eab'));
+    if (lock) sw.setAttribute('aria-checked', 'true');
+    else if (picked && prev.eab === 'required' && !$('#ct-eab-kid').value.trim() && !$('#ct-eab-hmac').value.trim()) sw.setAttribute('aria-checked', 'false');
+    gateControl(sw, !lock, caEABText(p));
+    $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+  }
+  applyCA(preset, false);
+  $('#ct-ca').addEventListener('change', () => {
+    const p = CA_PRESETS.find((x) => x.id === $('#ct-ca').value);
+    if (p.id === 'custom') $('#ct-dir').focus();
+    else $('#ct-dir').value = caPresetURL(p.id, '');
+    applyCA(p, true);
+  });
+  $('#ct-dir').addEventListener('input', () => {
+    const p = caPresetFor($('#ct-dir').value);
+    if (p.id === preset.id) return;
+    // Emptying the field keeps Custom (and so the save's refusal); going back
+    // to the default is picking Let's Encrypt.
+    if (!$('#ct-dir').value.trim() && preset.id === 'custom') return;
+    $('#ct-ca').value = p.id;
+    applyCA(p, true);
   });
 
   $('#ct-save').addEventListener('click', async () => {
@@ -7126,6 +7373,9 @@ async function certEditor(c, name) {
       const ch = $('#ct-challenge').value;
       const a = { email: $('#ct-email').value.trim(), challenge: ch };
       const dir = $('#ct-dir').value.trim(); if (dir) a.directoryURL = dir;
+      // A blank URL is Let's Encrypt, so Custom with no URL would not save
+      // what the picker says.
+      if (!dir && $('#ct-ca').value === 'custom') { showInvalid('Directory URL required', "Enter the CA's directory URL, or pick Let's Encrypt.", $('#ct-dir')); return; }
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
       // Both omitted when blank. The profile rule and the bundle's size cap
       // mirror model.ACMESpec; the PEM itself is parsed by the API.
@@ -7163,22 +7413,37 @@ async function certEditor(c, name) {
       toastSaved(r.commit, isNew ? 'Added' : 'Saved'); refreshHeadSha(); clearDirty();
       location.hash = isNew ? '#/certs/' + encodeURIComponent(nm) : '#/certs';
     } catch (e) {
-      if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate');
+      // A file complaint names no field ("custom: ...", "open <dir>/x.pem:
+      // ..."): it is shown on the file whose typed path, or its last
+      // segment (the server quotes a cleaned path), it contains, the longest
+      // match winning; else on the certificate file for a "custom:" message,
+      // or on the key file for one about the private key. The Files tab opens.
+      const msg = String((e && e.message) || '');
+      let field = null;
+      if (t === 'custom') {
+        const hit = [['#ct-certfile', obj.custom.certFile], ['#ct-keyfile', obj.custom.keyFile]]
+          .flatMap(([sel, v]) => [[sel, v], [sel, v.split(/[\\/]/).pop()]])
+          .filter(([, v]) => v && msg.includes(v)).sort((x, y) => y[1].length - x[1].length)[0];
+        if (hit) field = $(hit[0]);
+        else if (/^(?:certificate "[^"]*":\s*)?custom:/.test(msg)) field = $('#ct-certfile');
+        else if (/private key/i.test(msg)) field = $('#ct-keyfile');
+      }
+      if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate', field);
       btn.disabled = false;
     }
   });
 
   // Renew now: same shared action as the list's per-row button. The order runs
-  // in the background, so this re-reads THIS certificate and repaints its status
-  // card rather than leaving the page stale until the next navigation.
+  // in the background, so this re-reads THIS certificate and repaints the rail
+  // rather than leaving the page stale until the next navigation.
   const renewBtn = $('#ed-renew');
   if (renewBtn) renewBtn.addEventListener('click', async () => {
     renewBtn.disabled = true;
     try {
       if (await renewCertificate(ct.name)) {
         const fresh = (await api('/api/certificates/' + encodeURIComponent(ct.name)).catch(() => ({ data: null }))).data;
-        const card = $('#ct-status');
-        if (fresh && fresh.state && card) card.outerHTML = certStatusCardHtml(fresh);
+        const rail = $('#ct-rail');
+        if (fresh && rail) rail.innerHTML = certRailHtml(fresh, false);
       }
     } finally { renewBtn.disabled = false; }
   });
@@ -11574,7 +11839,8 @@ function wizard(opts) {
     const nextBtn = wrap.querySelector('#wz-next');
     const backBtn = wrap.querySelector('#wz-back');
     // Typing clears a stale validation message; it comes back on the next Next.
-    const mark = () => { dirty = true; setErr(''); };
+    // The import box is not the draft: typing there leaves it clean.
+    const mark = (e) => { if (!(e && e.target && e.target.id === 'wz-yaml')) dirty = true; setErr(''); };
     wrap.addEventListener('input', mark);
     wrap.addEventListener('change', mark);
     wrap.addEventListener('switchchange', mark);
@@ -11604,7 +11870,9 @@ function wizard(opts) {
       if (closed || cur !== i) return;
       ctl = got || null;
       decorateHints(main);
-      const f = main.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+      let f = main.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+      // A radio group takes the focus on its checked member, as Tab gives it.
+      if (f && f.type === 'radio') f = main.querySelector(`input[type=radio][name="${f.name}"]:checked:not([disabled])`) || f;
       if (f) f.focus(); else nextBtn.focus();
     }
     function commit() { if (ctl && ctl.read) ctl.read(draft); }
@@ -11718,8 +11986,6 @@ function wizard(opts) {
         try { r = await opts.importYAML(ta.value); }
         catch (e) { setErr(e && e.message ? e.message : String(e)); btn.disabled = false; return; }
         if (closed) return;
-        draft = r.draft;
-        dirty = true;
         // Walk the imported draft through every step's own checks: the first
         // step that objects is shown with its message, otherwise Review.
         const landing = () => {
@@ -11730,17 +11996,24 @@ function wizard(opts) {
           doneUpTo = steps.length - 2;
           return show(steps.length - 1);
         };
+        // The imported draft replaces the operator's only when they go on
+        // with it; "Back to the steps" returns to exactly what was there, and
+        // a fullOnly document never gets here.
+        const take = () => { draft = r.draft; dirty = true; return landing(); };
         if (r.note) {
+          // fullOnly: a document the steps cannot express at all goes to the
+          // full editor, with no way to continue in the wizard.
           const note = main.querySelector('#wz-import-note');
-          note.innerHTML = `<div class="ro-banner warn" style="margin:16px 0 0"><b>Partly covered.</b> ${esc(r.note)}</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="wz-import-go" type="button">Continue in the wizard</button>${r.full ? '<button class="btn ghost" id="wz-import-full" type="button">Open the full editor with everything</button>' : ''}</div>`;
-          note.querySelector('#wz-import-go').addEventListener('click', landing);
+          note.innerHTML = `<div class="ro-banner warn" style="margin:16px 0 0"><b>${r.fullOnly ? 'Not a wizard case.' : 'Partly covered.'}</b> ${esc(r.note)}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">${r.fullOnly ? '' : '<button class="btn primary" id="wz-import-go" type="button">Continue in the wizard</button>'}${r.full ? `<button class="btn ${r.fullOnly ? 'primary' : 'ghost'}" id="wz-import-full" type="button">Open the full editor with everything</button>` : ''}</div>`;
+          const go = note.querySelector('#wz-import-go');
+          if (go) go.addEventListener('click', take);
           const full = note.querySelector('#wz-import-full');
           if (full) full.addEventListener('click', () => { close(null); r.full(); });
           btn.disabled = false;
           return;
         }
-        await landing();
+        await take();
       });
     }
     document.addEventListener('keydown', onKey, true);
@@ -11782,6 +12055,15 @@ function copyText(text, btn) {
 // ask about keeps its default and is reachable in the editor afterwards; the
 // full editor stays one click away for the cases the steps do not cover.
 const HOST_NAME_RE = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
+// The wizards' domain check: a hostname, optionally behind "*.", in its ASCII
+// (punycode) form. '' when every domain passes.
+function domainsProblem(domains) {
+  const bad = domains.find((x) => !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(x));
+  if (!bad) return '';
+  return /[^\x00-\x7f]/.test(bad)
+    ? `"${bad}" has non-ASCII characters; enter its punycode (xn--) form.`
+    : `"${bad}" is not a valid domain name.`;
+}
 function hostNameFrom(domain) {
   // "*.example.com" names the host after the zone, not after the star.
   const d = String(domain || '').trim().toLowerCase().replace(/^\*\./, '');
@@ -11878,12 +12160,8 @@ async function runHostWizard() {
       },
       validate(d) {
         if (!d.domains.length) return 'Add at least one domain.';
-        const bad = d.domains.find((x) => !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(x));
-        if (bad) {
-          return /[^\x00-\x7f]/.test(bad)
-            ? `"${bad}" has non-ASCII characters; enter its punycode (xn--) form.`
-            : `"${bad}" is not a valid domain name.`;
-        }
+        const bad = domainsProblem(d.domains);
+        if (bad) return bad;
         if (!d.name) return 'Give the host a name.';
         if (d.name.length > 253) return 'The name is too long (253 characters at most).';
         if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
@@ -12083,13 +12361,389 @@ async function runHostWizard() {
   if (r === null && listsDown) toast('Some lists did not load', 'Certificates, identity providers, access lists or middleware could not be read; reload and try again.', 'err');
   return r;
 }
-// Any "Add proxy host" control (the list toolbar, the empty state) opens the
-// wizard; its href stays the full editor for middle-click and no-script cases.
+
+// ---------- new certificate wizard ----------
+// Four steps: Domains, Authority, Validation, Review, on the same primitive
+// and with the same manners as the proxy host wizard. It creates ACME
+// certificates only; a custom certificate (PEM files on the server) is set up
+// in the full editor.
+// "example.com" names the certificate example-com, "*.example.com"
+// wild-example-com.
+function certNameFrom(domain) {
+  let d = String(domain || '').trim().toLowerCase();
+  const wild = d.startsWith('*.');
+  if (wild) d = d.slice(2);
+  const base = d.replace(/[^a-z0-9.-]/g, '').replace(/\./g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  return base ? (wild ? 'wild-' + base : base) : '';
+}
+// The object the wizard writes. dirURL is written as held: a preset sets it
+// when it is picked (blank for Let's Encrypt), an import keeps the document's.
+function certWizardObject(d) {
+  const a = { email: d.email, challenge: d.challenge };
+  if (d.dirURL.trim()) a.directoryURL = d.dirURL.trim();
+  if (d.challenge === 'dns-01' && d.dnsProvider) a.dnsProvider = d.dnsProvider;
+  if (d.eab) a.eab = { kid: d.kid, hmacKey: d.hmac };
+  if (d.profile) a.profile = d.profile;
+  if (d.preset === 'custom' && d.caBundle) a.caBundle = d.caBundle;
+  return { name: d.name, type: 'acme', domains: d.domains.slice(), acme: a };
+}
+let certWizardBusy = false;
+async function openCertWizard() {
+  if (certWizardBusy) return null; // a double click must not stack two wizards
+  certWizardBusy = true;
+  try { return await runCertWizard(); } finally { certWizardBusy = false; }
+}
+async function runCertWizard() {
+  const [dnsR, certsR] = await Promise.all([
+    refList('/api/dns-providers', 'DNS providers'),
+    refList('/api/certificates', 'certificates'),
+  ]);
+  const providers = arr(dnsR);
+  const listsDown = dnsR === null || certsR === null;
+  // PUT is an upsert: the wizard only ever creates, checked here against the
+  // list and again on Review by the server.
+  const existing = new Set(arr(certsR).map((ct) => ct.name));
+  const defaultCh = providers.length ? 'dns-01' : 'http-01';
+  const draft = {
+    name: '', nameTouched: false, domains: [], preset: 'letsencrypt', dirURL: '', email: '',
+    eab: false, kid: '', hmac: '', profile: '', caBundle: '',
+    challenge: defaultCh, challengeTouched: false, dnsProvider: providers.length === 1 ? providers[0].name : '',
+  };
+  const wild = (d) => d.domains.some((x) => x.startsWith('*.'));
+  const presetOf = (d) => CA_PRESETS.find((p) => p.id === d.preset) || CA_PRESETS[0];
+  // The CA is named after the URL that will be written, not the radio alone.
+  const caText = (d) => `${esc(caPresetFor(d.dirURL).label)}${d.dirURL.trim() ? ` <span class="mono">${esc(d.dirURL.trim())}</span>` : ''}`;
+  const chText = (d) => (d.challenge === 'dns-01' ? `dns-01${d.dnsProvider ? ` via <span class="mono">${esc(d.dnsProvider)}</span>` : ''}` : 'http-01');
+  let reviewErr = '';
+  let reviewPending = false;
+  let reviewOffline = false;
+  const REVIEW_WAIT = 'Wait for the server check to finish.';
+  let reviewSeq = 0;
+
+  const steps = [
+    {
+      id: 'domains', title: 'Domains',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Domains</h3><p class="lead">The names this certificate covers.</p>
+          <div class="field-group"><label>Domains</label><div class="chip-input" id="wz-ct-domains" data-hint="certificate.domains"></div>
+            <div class="hint">Press Enter after each domain. A wildcard such as <span class="mono">*.example.com</span> covers one level of subdomains and can only be validated over dns-01.</div></div>
+          <div class="field-group"><label>Name</label><input class="field mono" id="wz-ct-name" value="${esc(d.name)}" placeholder="example-com" autocomplete="off" spellcheck="false" data-auto="${d.nameTouched ? '0' : '1'}" data-hint="common.name" />
+            <div class="hint">Internal name and config file name, fixed after creation. Taken from the first domain; lowercase letters, digits, dots, - and _.</div></div>
+          <p class="hint" style="margin-top:12px">This wizard orders a certificate over ACME. For PEM files already on the server (a custom certificate), use Open the full editor instead.</p>`;
+        const nameEl = pane.querySelector('#wz-ct-name');
+        nameEl.addEventListener('input', () => { nameEl.dataset.auto = '0'; d.nameTouched = true; });
+        const chips = makeChipInput(pane.querySelector('#wz-ct-domains'), d.domains, 'add domain...', (list) => {
+          if (nameEl.dataset.auto === '1') nameEl.value = certNameFrom(list[0]);
+        });
+        return {
+          read(dd) {
+            dd.domains = chips.get().map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+            dd.name = nameEl.value.trim();
+            dd.nameTouched = nameEl.dataset.auto === '0';
+          },
+        };
+      },
+      validate(d) {
+        if (!d.domains.length) return 'Add at least one domain.';
+        const bad = domainsProblem(d.domains);
+        if (bad) return bad;
+        if (!d.name) return 'Give the certificate a name.';
+        if (d.name.length > 253) return 'The name is too long (253 characters at most).';
+        if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
+        if (existing.has(d.name)) return `A certificate named "${d.name}" already exists. Pick another name, or edit that certificate from the list.`;
+        return '';
+      },
+      summary(d) {
+        const more = d.domains.length > 1 ? ` +${d.domains.length - 1}` : '';
+        return `${esc(d.domains[0])}${more}, named <span class="mono">${esc(d.name)}</span>`;
+      },
+    },
+    {
+      id: 'authority', title: 'Authority',
+      render(pane, d) {
+        const p = presetOf(d);
+        pane.innerHTML = `<h3>Certificate authority</h3><p class="lead">Who issues the certificate, and the ACME account gpm orders it with.</p>
+          <div class="field-group"><label id="wz-ct-ca-label">CA</label>
+            <div role="radiogroup" aria-labelledby="wz-ct-ca-label">${CA_PRESETS.map((x) => `<label class="radio"><input type="radio" name="wz-ct-ca" value="${x.id}"${x.id === p.id ? ' checked' : ''} data-hint="certificate.acme.directoryURL" /><span class="t">${esc(x.label)}</span><span class="d">${esc(x.line)}</span></label>`).join('')}</div></div>
+          <div class="field-group" id="wz-ct-dir-group"${p.id === 'custom' ? '' : ' hidden'}><label>Directory URL</label><input class="field mono" id="wz-ct-dir" value="${esc(d.dirURL)}" placeholder="https://ca.example.com/acme/directory" autocomplete="off" spellcheck="false" data-hint="certificate.acme.directoryURL" /></div>
+          <div class="field-group"><label>Account email</label><input class="field mono" id="wz-ct-email" value="${esc(d.email)}" placeholder="you@example.com" autocomplete="off" spellcheck="false" data-hint="certificate.acme.email" /></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds" id="wz-ct-eab-ds">${esc(caEABText(p))}</div></div>${switchHtml('wz-ct-eab', d.eab, 'External account binding', 'certificate.acme.eab')}</div>
+          <div id="wz-ct-eab-fields"${d.eab ? '' : ' hidden'}>
+            <div class="field-group"><label>EAB key ID</label><input class="field mono" id="wz-ct-kid" value="${esc(d.kid)}" placeholder="kid from the CA" autocomplete="off" spellcheck="false" data-hint="certificate.acme.eab.kid" /></div>
+            <div class="field-group"><label>EAB HMAC key</label><input class="field mono" id="wz-ct-hmac" value="${esc(d.hmac)}" placeholder="\${ENV:ACME_EAB_HMAC}" autocomplete="off" spellcheck="false" data-hint="certificate.acme.eab.hmacKey" />
+              <div class="hint">Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder so no secret is committed.</div></div>
+          </div>
+          ${foldHtml('wz-ct-more', 'More', [d.profile ? 'profile ' + d.profile : 'CA default profile', d.caBundle && p.id === 'custom' ? 'CA bundle set' : ''].filter(Boolean).join(', '), !!(d.profile || (d.caBundle && p.id === 'custom')),
+            `<div class="field-group"><label>Issuance profile</label><input class="field mono" id="wz-ct-profile" value="${esc(d.profile)}" placeholder="CA default" autocomplete="off" spellcheck="false" data-hint="certificate.acme.profile" />
+              <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div></div>
+            <div class="field-group" id="wz-ct-bundle-group"${p.id === 'custom' ? '' : ' hidden'}><label>CA bundle (private CA)</label><textarea class="field mono" id="wz-ct-bundle" rows="4" style="min-height:0" spellcheck="false" placeholder="-----BEGIN CERTIFICATE----- or \${FILE:/run/secrets/acme-ca.pem}" data-hint="certificate.acme.caBundle"></textarea>
+              <div class="hint">Only for a CA whose directory is not trusted by the system roots. Blank trusts the system roots.</div></div>`)}`;
+        pane.querySelector('#wz-ct-bundle').value = d.caBundle;
+        const sw = pane.querySelector('#wz-ct-eab');
+        const dirEl = pane.querySelector('#wz-ct-dir');
+        // Same EAB rule as the editor, on a certificate that is always new: a
+        // preset that requires EAB turns the switch on and locks it; leaving it
+        // turns the switch off only when both fields are empty.
+        const applyCA = (np, prev) => {
+          d.preset = np.id;
+          pane.querySelector('#wz-ct-dir-group').hidden = np.id !== 'custom';
+          pane.querySelector('#wz-ct-bundle-group').hidden = np.id !== 'custom';
+          pane.querySelector('#wz-ct-eab-ds').textContent = caEABText(np);
+          const lock = np.eab === 'required';
+          if (lock) sw.setAttribute('aria-checked', 'true');
+          else if (prev && prev.eab === 'required' && !pane.querySelector('#wz-ct-kid').value.trim() && !pane.querySelector('#wz-ct-hmac').value.trim()) sw.setAttribute('aria-checked', 'false');
+          gateControl(sw, !lock, caEABText(np));
+          pane.querySelector('#wz-ct-eab-fields').hidden = !isOn('wz-ct-eab');
+        };
+        applyCA(p, null);
+        pane.querySelectorAll('input[name="wz-ct-ca"]').forEach((r) => r.addEventListener('change', () => {
+          const np = CA_PRESETS.find((x) => x.id === r.value);
+          const prev = presetOf(d);
+          if (np.id !== 'custom') dirEl.value = caPresetURL(np.id, '');
+          // Custom starts blank unless the field holds a URL the operator
+          // typed: a preset's URL left there would order from that CA under
+          // the Custom label (arrowing down the list passes every preset).
+          else if (caPresetFor(dirEl.value).id !== 'custom') dirEl.value = '';
+          applyCA(np, prev);
+        }));
+        // A typed URL that is a preset's directory selects that preset once
+        // the field is left (not while typing, which would hide the field).
+        dirEl.addEventListener('change', () => {
+          const np = caPresetFor(dirEl.value);
+          if (np.id === 'custom' || !dirEl.value.trim()) return;
+          const prev = presetOf(d);
+          pane.querySelector(`input[name="wz-ct-ca"][value="${np.id}"]`).checked = true;
+          applyCA(np, prev);
+        });
+        sw.addEventListener('switchchange', () => { pane.querySelector('#wz-ct-eab-fields').hidden = !isOn('wz-ct-eab'); });
+        return {
+          read(dd) {
+            dd.dirURL = dirEl.value.trim();
+            dd.email = pane.querySelector('#wz-ct-email').value.trim();
+            dd.eab = isOn('wz-ct-eab');
+            dd.kid = pane.querySelector('#wz-ct-kid').value.trim();
+            dd.hmac = pane.querySelector('#wz-ct-hmac').value.trim();
+            dd.profile = pane.querySelector('#wz-ct-profile').value.trim();
+            dd.caBundle = pane.querySelector('#wz-ct-bundle').value.trim();
+          },
+        };
+      },
+      // The model's rules: an email, both EAB values together, the profile
+      // form and the bundle size. A Custom CA also needs its URL, or the
+      // blank would silently order from Let's Encrypt. The EAB rule follows
+      // the URL that will be written, whatever the radio says.
+      validate(d) {
+        const ca = caPresetFor(d.dirURL);
+        if (d.preset === 'custom' && !d.dirURL.trim()) return "Enter the CA's directory URL, or pick a CA from the list.";
+        if (!d.email) return 'Enter the account email; the CA requires one for the ACME account.';
+        if (ca.eab === 'required' && !d.eab) return `${caEABText(ca)}: enter the EAB key ID and the HMAC key.`;
+        if (d.eab && (!d.kid || !d.hmac)) return 'Enter both the EAB key ID and the HMAC key.';
+        if (d.eab && d.hmac === '***') return 'The EAB HMAC key reads *** - replace it with a ${ENV:...} or ${FILE:...} placeholder.';
+        if (d.profile && !ACME_PROFILE_RE.test(d.profile)) return 'The issuance profile must be 1 to 64 letters, digits, "_" or "-".';
+        if (d.preset === 'custom' && d.caBundle && new TextEncoder().encode(d.caBundle).length > ACME_CA_BUNDLE_MAX_BYTES) return `The CA bundle must be at most ${ACME_CA_BUNDLE_MAX_BYTES} bytes.`;
+        return '';
+      },
+      summary(d) {
+        return `${caPresetFor(d.dirURL).id === 'custom' ? caText(d) : esc(caPresetFor(d.dirURL).label)}${d.eab ? ', EAB' : ''}`;
+      },
+    },
+    {
+      id: 'validation', title: 'Validation',
+      render(pane, d) {
+        const w = wild(d);
+        if (w) d.challenge = 'dns-01';
+        else if (!d.challengeTouched) d.challenge = defaultCh;
+        const dnsHtml = dnsR === null
+          ? '<div class="hint warn">The DNS provider list could not be loaded. Reload the page and try again.</div>'
+          : (providers.length
+            ? `<select class="field mono" id="wz-ct-dns" data-hint="certificate.acme.dnsProvider"><option value="">select provider...</option>${providers.map((x) => `<option value="${esc(x.name)}"${d.dnsProvider === x.name ? ' selected' : ''}>${esc(x.name)}${x.provider ? ' (' + esc(x.provider) + ')' : ''}</option>`).join('')}</select>`
+            : `<div class="hint warn">${w ? 'A wildcard needs dns-01, and dns-01' : 'dns-01'} needs a DNS provider: add one under <a href="#/dns">DNS Providers</a> first.</div>`);
+        // No provider configured (the list loaded empty): dns-01 is disabled
+        // with the reason, as in the editor, unless it is the current choice
+        // (a wildcard, or an imported draft); Next then refuses it.
+        const noDNS = dnsR !== null && !providers.length;
+        const dnsOff = noDNS && !w && d.challenge !== 'dns-01';
+        pane.innerHTML = `<h3>Validation</h3><p class="lead">How the CA checks that you control ${esc(d.domains[0] || 'the domains')}.</p>
+          <div class="field-group"><label id="wz-ct-ch-label">Challenge</label>
+            <div role="radiogroup" aria-labelledby="wz-ct-ch-label">
+              <label class="radio"><input type="radio" name="wz-ct-ch" value="http-01"${d.challenge === 'http-01' ? ' checked' : ''}${w ? ' disabled' : ''} data-hint="certificate.acme.challenge" /><span class="t">http-01</span><span class="d">${w ? 'Not available: a wildcard domain can only be validated over dns-01.' : 'The CA fetches a token over port 80, so every domain must resolve to this instance from the internet.'}</span></label>
+              <label class="radio"><input type="radio" name="wz-ct-ch" value="dns-01"${d.challenge === 'dns-01' ? ' checked' : ''}${dnsOff ? ' disabled' : ''} data-hint="certificate.acme.challenge" /><span class="t">dns-01</span><span class="d">gpm writes a TXT record through a DNS provider. Works without an open port, and is the only way to get a wildcard.${dnsOff ? ' Not available: no DNS provider is configured. Add one under <a href="#/dns">DNS Providers</a> first.' : ''}</span></label>
+            </div></div>
+          <div class="field-group" id="wz-ct-dns-group"${d.challenge === 'dns-01' ? '' : ' hidden'}><label>DNS provider</label>${dnsHtml}</div>`;
+        pane.querySelectorAll('input[name="wz-ct-ch"]').forEach((r) => r.addEventListener('change', () => {
+          d.challengeTouched = true;
+          pane.querySelector('#wz-ct-dns-group').hidden = r.value !== 'dns-01';
+        }));
+        return {
+          read(dd) {
+            const on = pane.querySelector('input[name="wz-ct-ch"]:checked');
+            if (on) dd.challenge = on.value;
+            const sel = pane.querySelector('#wz-ct-dns');
+            if (sel) dd.dnsProvider = sel.value;
+          },
+        };
+      },
+      validate(d) {
+        if (d.challenge !== 'dns-01') return wild(d) ? 'A wildcard domain can only be validated over dns-01.' : '';
+        if (dnsR === null) return 'The DNS provider list could not be loaded. Reload the page and try again.';
+        if (!providers.length) return 'dns-01 needs a DNS provider. Add one under DNS Providers first.';
+        if (!d.dnsProvider) return 'Select the DNS provider that writes the TXT record.';
+        return '';
+      },
+      summary(d) { return chText(d); },
+    },
+    {
+      id: 'review', title: 'Review',
+      async render(pane, d) {
+        reviewErr = '';
+        reviewOffline = false;
+        reviewPending = true; // Add waits for the server's answer
+        const tok = ++reviewSeq; // a reply from an earlier render is dropped
+        // The answer clears a wait message left by an early Add.
+        const answered = () => {
+          reviewPending = false;
+          const el = pane.closest('.modal') && pane.closest('.modal').querySelector('#wz-err');
+          if (el && el.textContent === REVIEW_WAIT) el.textContent = '';
+        };
+        pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you add the certificate.</p>
+          <dl class="dl-h" style="margin-bottom:20px">
+            <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
+            <dt>Name</dt><dd class="mono">${esc(d.name)}</dd>
+            <dt>CA</dt><dd>${caText(d)}</dd>
+            <dt>Account email</dt><dd class="mono">${esc(d.email)}</dd>
+            <dt>Account binding</dt><dd>${d.eab ? `EAB key ID <span class="mono">${esc(d.kid)}</span>` : 'none'}</dd>
+            <dt>Profile</dt><dd>${d.profile ? `<span class="mono">${esc(d.profile)}</span>` : 'CA default'}</dd>
+            ${d.preset === 'custom' ? `<dt>CA bundle</dt><dd>${d.caBundle ? 'set' : 'none, system roots'}</dd>` : ''}
+            <dt>Validation</dt><dd>${chText(d)}</dd>
+            <dt>Everything else</dt><dd>defaults</dd>
+          </dl>
+          <div class="loading" id="wz-dry"><span class="spinner"></span>Checking with the server...</div>
+          <p class="hint">gpm orders the certificate at the manager's next pass, not when you add it. To order at once, use Renew now on the certificate's page.</p>`;
+        try {
+          const r = await api('/api/certificates/' + encodeURIComponent(d.name) + '?dryRun=1', { method: 'PUT', body: certWizardObject(d) });
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
+          const y = r.data || {};
+          const slot = pane.querySelector('#wz-dry');
+          if (!slot) return null;
+          if (y.exists) {
+            reviewErr = `A certificate named "${d.name}" already exists. Pick another name on the Domains step, or edit that certificate from the list.`;
+            slot.outerHTML = `<div class="inline-error"><b>This name is taken.</b><br/>${esc(reviewErr)}</div>`;
+            return null;
+          }
+          // The dry run stamps its own createdAt/updatedAt, which Add restamps.
+          const yaml = String(y.yaml || '').split('\n').filter((l) => !/^(createdAt|updatedAt):/.test(l)).join('\n');
+          slot.outerHTML = `<div class="code-head"><span>${esc(y.path || '')}</span><button class="btn plain sm" type="button" id="wz-copy">Copy</button></div><pre class="code">${yamlHtml(yaml)}</pre>
+            <p class="hint">createdAt and updatedAt are stamped when you add the certificate.</p>`;
+          pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(yaml, e.currentTarget));
+        } catch (e) {
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
+          reviewErr = (e && e.message) || String(e);
+          // No HTTP status: the request never reached the server.
+          reviewOffline = !(e && e.status);
+          const slot = pane.querySelector('#wz-dry');
+          if (slot) {
+            slot.outerHTML = reviewOffline
+              ? `<div class="inline-error"><b>The server could not be reached.</b><br/>${esc(reviewErr)}. Go Back, then Next to check again.</div>`
+              : `<div class="inline-error"><b>The server rejected this certificate.</b><br/>${esc(reviewErr)}</div>`;
+          }
+        }
+        return null;
+      },
+      validate() {
+        if (reviewPending) return REVIEW_WAIT;
+        if (reviewOffline) return 'The server could not be reached. Go Back, then Next to check again.';
+        return reviewErr ? 'Fix the rejected step first: ' + reviewErr : '';
+      },
+    },
+  ];
+
+  // The full editor takes an object as a new certificate through the
+  // clone-seed hand-over, minus what a hand-made object must not carry.
+  const toEditor = (o) => {
+    const seed = Object.assign({}, o);
+    delete seed.labels; delete seed.createdAt; delete seed.updatedAt;
+    cloneSeed = { section: 'certs', origName: '', data: seed };
+    location.hash = '#/certs/_new';
+  };
+  const r = await wizard({
+    title: 'New certificate',
+    desc: 'Order an ACME certificate for the domains you serve.',
+    noun: 'certificate',
+    steps, draft,
+    finishLabel: 'Add certificate',
+    altLink: { label: 'Open the full editor instead', href: '#/certs/_new', carry: (d) => toEditor(certWizardObject(d)) },
+    importPlaceholder: 'name: example-com\ntype: acme\ndomains: [example.com]\nacme: { email: you@example.com, challenge: http-01 }',
+    importYAML: async (text) => {
+      if (!String(text).trim()) throw new Error('Paste a YAML document first.');
+      const res = await api('/api/certificates/_parse', { method: 'POST', raw: text, contentType: 'application/yaml' });
+      const data = res.data || {};
+      const o = data.object || {};
+      const full = () => toEditor(o);
+      if (o.type === 'custom') {
+        return { fullOnly: true, full, note: 'This is a custom certificate (PEM files on the server). The wizard orders ACME certificates only; the full editor takes the document as it is.' };
+      }
+      if (o.type !== 'acme') {
+        throw new Error(data.valid === false && /type:/.test(data.error || '') ? data.error : `The document's type is "${o.type || ''}"; a certificate is type acme or custom.`);
+      }
+      const a = o.acme || {};
+      const eab = a.eab || {};
+      const nm = data.name || o.name || '';
+      // A literal HMAC key comes back from _parse as *** (the API never
+      // echoes a secret): it is left out of the draft, and the note says so.
+      const masked = eab.hmacKey === '***';
+      const nd = {
+        name: nm, nameTouched: !!nm, domains: arr(o.domains), preset: caPresetFor(a.directoryURL).id, dirURL: a.directoryURL || '',
+        email: a.email || '', eab: !!a.eab, kid: eab.kid || '', hmac: masked ? '' : (eab.hmacKey || ''), profile: a.profile || '', caBundle: a.caBundle || '',
+        challenge: certChallenge(o), challengeTouched: true, dnsProvider: a.dnsProvider || '',
+      };
+      // Everything the steps do not cover is listed, so an import never
+      // silently drops a field; the full editor keeps all of them.
+      const empty = (v) => v == null || v === false || v === '' || v === 0
+        || (Array.isArray(v) ? !v.length : (typeof v === 'object' && Object.keys(v).every((k) => empty(v[k]))));
+      const skip = ['name', 'type', 'domains', 'acme', 'createdAt', 'updatedAt', 'labels'];
+      const extra = Object.keys(o).filter((k) => skip.indexOf(k) === -1 && !empty(o[k]));
+      Object.keys(a).forEach((k) => { if (['email', 'directoryURL', 'challenge', 'dnsProvider', 'eab', 'profile', 'caBundle'].indexOf(k) === -1 && !empty(a[k])) extra.push('acme.' + k); });
+      if (a.caBundle && nd.preset !== 'custom') extra.push('acme.caBundle');
+      const note = [
+        extra.length ? `The steps cover the basics; this YAML also sets ${extra.join(', ')}, which the wizard would leave out.` : '',
+        masked ? 'A literal EAB HMAC key is not carried over by an import; enter it as a ${ENV:...} or ${FILE:...} placeholder.' : '',
+      ].filter(Boolean).join(' ');
+      return { draft: nd, invalid: data.valid === false ? (data.error || 'The server could not validate this object.') : '', note, full };
+    },
+    onFinish: async (d) => {
+      // Create-only: the server answers 409 for a stored name instead of
+      // replacing it, whatever this wizard believed when it opened.
+      let res;
+      try {
+        res = await api('/api/certificates/' + encodeURIComponent(d.name), { method: 'PUT', body: certWizardObject(d), headers: { 'If-None-Match': '*' } });
+      } catch (e) {
+        if (e && e.status === 409) throw new Error(`A certificate named "${d.name}" was created in the meantime. Pick another name on the Domains step.`);
+        throw e;
+      }
+      toastSaved(res.commit, 'Added');
+      refreshHeadSha();
+      location.hash = '#/certs/' + encodeURIComponent(d.name);
+      return true;
+    },
+  });
+  if (r === null && listsDown) toast('Some lists did not load', 'DNS providers or certificates could not be read; reload and try again.', 'err');
+  return r;
+}
+
+// Any "Add proxy host" or "Add certificate" control (a list toolbar, an empty
+// state, anything carrying data-wizard) opens its wizard on a plain left
+// click; the href stays the full editor for middle-click and no-script cases.
+// A gated control (read-only) opens nothing.
+const WIZARDS = { hosts: openHostWizard, certs: openCertWizard };
 document.addEventListener('click', (e) => {
-  const b = e.target.closest && e.target.closest('[data-wizard="hosts"]');
-  if (!b || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  const b = e.target.closest && e.target.closest('[data-wizard]');
+  const open = b && WIZARDS[b.dataset.wizard];
+  if (!open || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  if (b.getAttribute('aria-disabled') === 'true') return;
   e.preventDefault();
-  openHostWizard();
+  open();
 });
 
 

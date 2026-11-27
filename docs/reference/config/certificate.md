@@ -36,6 +36,34 @@ as the CA issued it). Both are required together. An EAB key id widens the ACME
 account identity, so two external accounts on the same CA get separate account
 keys under `<cert-dir>/acme/accounts/`.
 
+<span id="certificate-ca-directories"></span>
+**CA directories in the admin UI**
+
+The CA picker in the certificate wizard and editor knows these directories. It
+only fills `directoryURL` (and turns EAB on where it is required); the stored
+object is the plain `acme.directoryURL` key, so nothing else changes.
+
+| Picker label | `directoryURL` | EAB |
+|---|---|---|
+| Let's Encrypt | `https://acme-v02.api.letsencrypt.org/directory` (the default; the key is omitted) | Not used |
+| Let's Encrypt (staging) | `https://acme-staging-v02.api.letsencrypt.org/directory` | Not used |
+| ZeroSSL | `https://acme.zerossl.com/v2/DV90` | Required |
+| Google Public CA | `https://dv.acme-v02.api.pki.goog/directory` | Required |
+| SSL.com | `https://acme.ssl.com/sslcom-dv-ecc` | Optional |
+| Custom | Any URL you enter | Only when the CA asks for it |
+
+- **Any other directory works.** Pick Custom (or write the key by hand) and
+  enter its URL; the preset list is a convenience, not a restriction.
+- **Custom needs its URL.** A blank `directoryURL` means Let's Encrypt, so the
+  wizard and the editor refuse Custom with a blank **Directory URL**.
+- **EAB follows the URL.** The wizard requires EAB whenever the URL it will
+  write is a ZeroSSL or Google Public CA directory, whichever option is picked.
+- **SSL.com uses the ECC directory** because gpm issues ECDSA keys only
+  ([`keyType`](#certificate-acme-key-type)). A stored `https://acme.ssl.com/sslcom-dv-rsa` is
+  shown as SSL.com but never written by the picker.
+- **A URL that matches a preset selects it**, so opening a certificate does not
+  rewrite its `directoryURL`.
+
 Challenge selection:
 
 - **`http-01`**: validated on gpm's own plaintext `:80` proxy listener. The

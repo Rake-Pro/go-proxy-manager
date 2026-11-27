@@ -45,11 +45,34 @@ sideways), and wizards open as full-screen sheets.
 
 ## Overview
 
-![Overview with the Needs attention list](../assets/ui/overview.png)
+![Overview with the instance, hosts and certificates panels and the Needs attention list](../assets/ui/overview.png)
 
-One list, **Needs attention**: certificates that failed to renew or are about to
-expire, unhealthy upstream groups, discovery problems. Each row links to the
-object. With nothing to report it says so and shows the live counts.
+Three panels sit ahead of the **Needs attention** list.
+
+| Panel | Shows |
+|---|---|
+| This instance | Version, config commit (links to History), the `https`, `http` and `admin` listener addresses, request capture (On or Off, links to Access Logs, where it is switched), metrics (On or Off, links to Settings > Advanced; `GPM_METRICS=1` at startup switches it) and the HA role (Leader, or Follower (read-only) on an HA follower) |
+| Hosts | A bar and counts by status (Live, Maintenance, Disabled), then a count per discovery source that owns at least one host (`k8s-managed`, `docker-managed`) |
+| Certificates | Counts of ACME and custom certificates, Expiring, Failed and (when any) Expired, then the next expiry: the enabled, valid or expiring certificate with the fewest days left, linked |
+
+- **A non-zero count is a link.** It opens the list with the matching filter
+  applied, for example `#/hosts?filter=status:maintenance` or
+  `#/certs?filter=state:expiring` (see [Filtering a list](#filtering-a-list));
+  a zero is plain text.
+- **Needs attention** lists certificates that failed, expired or are about to
+  expire, unhealthy upstream groups, discovery problems, config warnings, hosts
+  in maintenance and a failed certificates, health or discovery read; each row
+  links to the object, and with nothing to report it reads "Nothing needs
+  attention".
+- **Summary line.** The line under the heading holds only the upstream members
+  sentence, for example "4 of 4 upstream members healthy" or "no upstream
+  groups".
+- **A failed read.** This instance shows "unavailable" in each row it could not
+  read, Certificates shows only a sentence, and Hosts shows a sentence plus
+  Total and Disabled when the sidebar's counts were readable.
+- **Empty panels.** With no hosts or no certificates yet the panel says so and
+  offers **Add proxy host** or **Add certificate**; a read-only user sees the
+  sentence without the button.
 
 ## Analytics
 
@@ -89,6 +112,12 @@ object. With nothing to report it says so and shows the live counts.
 - Hover a row's Tags cell to see every tag; the chips show the first three.
 - **Add proxy host** opens the creation wizard below; the full editor stays one
   link away for anything the wizard does not ask.
+
+## Wizards
+
+Two objects have a creation wizard: proxy hosts and ACME certificates. Both
+use the same step list, Review dry run, **Import from YAML** and **Open the
+full editor instead** controls.
 
 ## Creating a host with the wizard
 
@@ -141,9 +170,10 @@ object. With nothing to report it says so and shows the live counts.
   then opens the editor on the copy. Nothing is saved until you press Save.
   Domains are cleared, since a domain belongs to one host; labels and
   secrets are not copied.
-- The other object editors are one page of cards with the same title band:
-  Clone and Delete (and Renew now on an ACME certificate) sit there too, and
-  Clone asks for the name the same way.
+- The certificate editor uses the same layout, described under
+  [Editing a certificate](#editing-a-certificate). The other object editors are one page of
+  cards with the same title band: Clone and Delete sit there too, and Clone
+  asks for the name the same way.
 - The other list pages are tables like Proxy Hosts: one row per object, one
   column per summary field, values wrapped rather than cut short, every
   column sortable, and the whole row opens the object.
@@ -164,6 +194,14 @@ Every list has the same filter box.
 | `-client:@lan-only` | Access Logs: every client outside the networks the `lan-only` access list allows |
 | `country:RU` | Access Logs: the client's ISO country code, when a GeoIP database is loaded |
 
+- **Deep links.** `#/hosts?filter=<text>` or `#/certs?filter=<text>` opens
+  that list with the text in the box as if typed; the Overview counts are such
+  links (`status:live`, `source:docker-discovery`, `type:acme`, `state:error`).
+- The link's filter replaces the remembered one and is remembered in its place;
+  once the list is shown the address drops back to `#/hosts` or `#/certs`.
+  Only those two lists take it; on any other page the query is ignored.
+- On the proxy hosts list a link also switches every zone chip back on, so the
+  rows shown are exactly the ones the link names.
 - Typing suggests the field names, then the values present in the list; Enter
   or a click takes a suggestion, Escape closes it.
 - A complete `field:value` term becomes a chip when you type a space; the
@@ -175,7 +213,7 @@ Every list has the same filter box.
 - Commas split a scoped term into alternatives; quote the value
   (`path:"/a,b"`) to keep a literal comma.
 - The last filter typed on a list comes back when you return to it (kept in
-  this browser).
+  this browser), unless a deep link brings its own.
 - **Saved** beside the box lists the named filters stored for this list:
   pick one to apply it, **Save current filter...** keeps what is in the box
   under a name, and the x beside an entry deletes it. Saved filters live in
@@ -236,6 +274,63 @@ Every list has the same filter box.
 Each row shows the domains, the issuer, the state and the days left; the expiry
 meter turns amber inside the renewal window. ACME certificates renew on their
 own; **Renew now** forces it.
+
+### Adding a certificate
+
+**Add certificate** opens a four-step wizard for ACME certificates.
+
+![The certificate wizard on its Authority step](../assets/ui/wizard-certificate-authority.png)
+
+| Step | Asks for |
+|---|---|
+| Domains | The names to cover and the internal name. The name follows the first domain until you edit it: `example.com` gives `example-com`, `*.example.com` gives `wild-example-com` |
+| Authority | The CA, the account email, external account binding, and under **More** an issuance profile and (Custom CA only) a CA bundle |
+| Validation | `http-01` or `dns-01`, and for `dns-01` the DNS provider (`dns-01` is the default when a provider exists). A wildcard domain forces `dns-01`; otherwise, with no DNS provider configured, `dns-01` is greyed out with the reason |
+| Review | A summary and the exact YAML the server would commit, from a dry run with the same checks a save runs |
+
+- **CA picker.** Let's Encrypt, Let's Encrypt (staging), ZeroSSL, Google Public
+  CA, SSL.com or Custom; the directories behind each label are in the
+  [Certificate reference](../reference/config/certificate.md#certificate-ca-directories).
+- **Custom needs a URL.** Custom shows a **Directory URL** field for any other
+  ACME directory, and the step does not continue while it is blank.
+- **External account binding.** Picking ZeroSSL or Google Public CA turns the
+  switch on and locks it; the requirement follows the directory URL that will
+  be written, so a typed URL of either CA needs it too.
+- **Secrets out of git.** Enter the EAB HMAC key as a `${ENV:...}` or
+  `${FILE:...}` placeholder.
+- **Stored as a plain URL.** The picker only fills `acme.directoryURL`; nothing
+  else about the object changes.
+- **Review waits for the server.** **Add certificate** asks you to wait until
+  the dry run has answered, and a rejected dry run or a taken name blocks it.
+- **Import from YAML** fills the steps from a `type: acme` document and lists
+  the fields they do not cover; a `type: custom` document only opens in the
+  full editor, any other type is refused, and a literal EAB HMAC key is left
+  out (enter it as a placeholder).
+- **Create-only save.** As in the host wizard, a name that already exists is
+  refused rather than replaced.
+- **Open the full editor instead** carries what was typed into the editor as a
+  new, unsaved certificate.
+- **Custom certificates** (PEM files already in the server's cert store) are
+  not ordered over ACME: use **Open the full editor instead** and set **Type**
+  to **Custom (PEM files already on the server)**.
+- **When it is ordered.** The manager orders the certificate at its next pass,
+  not when you add it; **Renew now** on its page orders at once.
+
+### Editing a certificate
+
+![Certificate editor: title band with tabs, form, rail](../assets/ui/certificate-editor.png)
+
+- The editor has the proxy host editor's layout. Tabs sit in the title band:
+  Certificate, Authority and Validation for an ACME certificate; Certificate and
+  Files for a custom one. Changing **Type** swaps the tab set.
+- The title band carries **Renew now** (ACME only, starts an order at once and
+  refreshes the rail), **Clone** and **Delete**.
+- The Authority tab has the same CA picker; choosing a CA fills **Directory
+  URL**, and typing a URL that belongs to a preset selects it.
+- The rail on the right shows the status and expiry, the next renewal (ACME),
+  the issuer, the names covered, the last renewal attempt and its error, if
+  any (ACME), and the config file path; a new certificate shows New and the
+  path its first save writes.
 
 ## Settings and history
 
