@@ -33,7 +33,7 @@ Answer the probes every public host receives (`/.env`, `/wp-login.php`, `/.git/c
    pathBlock: off
    ```
 
-   A discovery-managed host: add `pathBlock: off` to the existing template or profile, because a hand edit of a derived host is rebuilt away at the next reconcile. A profile is a complete chain that replaces the template, so never write a profile that holds only this key.
+   A discovery-managed host: add `pathBlock: off` to the existing template or profile, because a hand edit of a derived host's `pathBlock` is rebuilt away at the next reconcile. A profile is a complete chain that replaces the template, so never write a profile that holds only this key.
 
    ```yaml
    # config/settings.yaml (a fragment: add the key to a profile you already have)

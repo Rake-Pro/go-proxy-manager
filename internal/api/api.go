@@ -385,13 +385,15 @@ func (d Deps) guardSecretDestination(r *http.Request, cfg model.Config, obj mode
 }
 
 // guardACMEDestination is the certificates' beforeSave: acme.directoryURL
-// chooses where gpm sends its ACME requests, and acme.eab pairs a
-// ${ENV:}/${FILE:} HMAC key with that destination, so setting either, or
-// changing either on a stored certificate, needs the admin scope (issue #49,
-// as guardSecretDestination). Every other certificate write, an edit that
-// keeps both as stored, and one that clears them stay on certificates:write.
+// chooses where gpm sends its ACME requests, acme.eab pairs a
+// ${ENV:}/${FILE:} HMAC key with that destination, and acme.caBundle decides
+// which server gpm accepts as that destination (and may name a file to read),
+// so setting any of them, or changing one on a stored certificate, needs the
+// admin scope (issue #49, as guardSecretDestination). Every other certificate
+// write, an edit that keeps all three as stored, and one that clears them stay
+// on certificates:write.
 func (d Deps) guardACMEDestination(r *http.Request, cfg model.Config, obj model.Certificate) (model.Certificate, map[string]any, error) {
-	if obj.ACME == nil || (obj.ACME.DirectoryURL == "" && obj.ACME.EAB == nil) || d.allows(r, model.ScopeAdmin) {
+	if obj.ACME == nil || (obj.ACME.DirectoryURL == "" && obj.ACME.EAB == nil && obj.ACME.CABundle == "") || d.allows(r, model.ScopeAdmin) {
 		return obj, nil, nil
 	}
 	var cur *model.ACMESpec
@@ -405,10 +407,11 @@ func (d Deps) guardACMEDestination(r *http.Request, cfg model.Config, obj model.
 	}
 	urlKept := obj.ACME.DirectoryURL == "" || obj.ACME.DirectoryURL == cur.DirectoryURL
 	eabKept := obj.ACME.EAB == nil || (cur.EAB != nil && *obj.ACME.EAB == *cur.EAB)
-	if urlKept && eabKept {
+	bundleKept := obj.ACME.CABundle == "" || obj.ACME.CABundle == cur.CABundle
+	if urlKept && eabKept && bundleKept {
 		return obj, nil, nil
 	}
-	return obj, nil, fmt.Errorf("%w: acme.directoryURL and acme.eab may only be set or changed by an admin", errAdminRequired)
+	return obj, nil, fmt.Errorf("%w: acme.directoryURL, acme.eab and acme.caBundle may only be set or changed by an admin", errAdminRequired)
 }
 
 // redactSettingsURLs returns a copy of settings with the path and query of
@@ -571,9 +574,13 @@ func New(d Deps) http.Handler {
 		// the stored object.
 		decorate:   d.decorateCertificate,
 		beforeSave: d.guardACMEDestination,
+		// A revert restores a stored object without running beforeSave, so it
+		// could bring back an earlier acme.directoryURL, acme.eab or
+		// acme.caBundle that only an admin may set.
+		revertScope: model.ScopeAdmin,
 	})
-	// Force an immediate ACME order for one certificate, bypassing the normal
-	// 30-day renewal window. See certhealth.go.
+	// Force an immediate ACME order for one certificate, bypassing its renewal
+	// window. See certhealth.go.
 	mux.HandleFunc("POST /certificates/{name}/renew", d.scoped("certificates:write", d.handleRenewCertificate))
 
 	register(mux, d, "client-cas", resource[model.ClientCA]{
@@ -1388,9 +1395,10 @@ type resource[T model.Object] struct {
 	readScope  string
 	writeScope string
 	// revertScope overrides the scope of POST /{name}/revert (default: the
-	// write scope). middlewares sets it to admin: a revert restores a stored
-	// object without running beforeSave, so it could bring back a bouncer's
-	// earlier url/apiKey pair that only an admin may set.
+	// write scope). middlewares and certificates set it to admin: a revert
+	// restores a stored object without running beforeSave, so it could bring
+	// back a bouncer's earlier url/apiKey pair, or a certificate's earlier ACME
+	// destination, that only an admin may set.
 	revertScope string
 
 	// beforeSave, if set, runs on PUT after decoding and before the store write.

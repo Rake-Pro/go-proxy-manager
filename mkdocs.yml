@@ -62,6 +62,9 @@ nav:
           - Add an HTTPS host: how-to/add-https-host.md
           - Wildcard over DNS-01 (Cloudflare): how-to/dns-01-cloudflare.md
           - DNS-01 for any nameserver: how-to/generic-dns01-rfc2136-acme-dns.md
+          - Certificates from a private step-ca: how-to/step-ca.md
+          - DNS without an API: how-to/dns-without-api.md
+          - DNS-01 through your own endpoint: how-to/dns-webhook.md
       - Authentication:
           - Admin SSO (OIDC): how-to/admin-oidc-sso.md
           - Per-host SSO: how-to/per-host-sso.md

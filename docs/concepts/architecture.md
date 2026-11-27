@@ -282,6 +282,14 @@ derive: an `Ingress` contributes hostnames from `spec.rules`, a container
 contributes them from one comma-separated label plus a port and scheme within
 its own address.
 
+What the reconciler owns and what it carries forward:
+
+- **Template fields it sets** are stamped onto every derived host.
+- **Tags:** the template's tags come first, then the host's other tags, so a tag added by hand is carried forward.
+- **Stale tags:** the tags stamped at the previous pass are remembered in memory only, which is how a tag dropped from the template is told from one added by hand.
+- **`trustedProxies` set (an empty list included):** stamped, and the host gets a `<prefix>/trusted-proxies-by` label.
+- **`trustedProxies` unset:** a host with the label gives up the stamped value (and the label); a host without it keeps its own.
+
 A derived host is a **full** `ProxyHost`, not a reduced one: the operator's
 template (or the profile an `Ingress` selected by name) supplies the upstream,
 TLS/mTLS, middleware and access-list chains, websockets, `robotsNoIndex`,
@@ -356,13 +364,33 @@ swept into the next unrelated commit.
 renews `Certificate` objects of type `acme`: register/reuse an account key per
 directory URL (per external account when EAB is configured), create the order,
 solve every authorization, finalize the CSR, and write `fullchain.pem` +
-`privkey.pem` atomically. Renewal triggers when a cert is unissued, its domain
-set changed, or it is within 30 days of expiry. On any change it signals the data
-plane to reload.
+`privkey.pem` atomically. A cert is due when it is unissued, its domain set or `acme.profile` changed,
+or `min(30 days, lifetime / 3)` of its life remains (lifetime is the leaf's
+`notAfter - notBefore`). On any change the manager signals the data plane to reload.
+
+Passes and retries:
+
+- **Regular pass:** every 12h, and once at start.
+- **Early wake:** after each pass the loop also wakes when the next issued cert enters its window (never sooner than one minute). Nothing wakes it for a certificate added or changed at runtime: that waits for the next pass.
+- **Failed attempt:** the n-th consecutive failure waits `min(base * 2^(n-1), 12h)` from when the attempt started, the base being a quarter of the cert's renewal window (5 minutes to 1 hour; 1 hour for a never-issued or 90-day cert). A success resets the count, which lives in memory, and a failed manual renew counts. A pass inside the backoff skips the cert.
+- **Attempt deadline:** every attempt fails after the propagation timeout plus 10 minutes (13 minutes by default), and its TXT records are still cleaned up.
+- **Config load failure:** a pass that cannot load the config is retried every 5 minutes.
+
+**ARI.** When a CA's directory advertises `renewalInfo` (RFC 9773), every pass (early wakes included) polls it per issued cert, over the same HTTP client as the order, and picks a time inside the suggested window. The cert renews at the earlier of that time and the lifetime rule, so ARI only brings a renewal forward. The answer is kept in the cert's `meta.json`, and orders do not send `replaces`.
+
+ARI guards:
+
+- **Same origin:** the `renewalInfo` URL must share the directory's scheme, host and port.
+- **Window:** the suggested window is cut to the cert's own validity.
+- **Age:** a time cannot fire before the cert is `min(72h, lifetime / 3)` old.
+- **Timeouts:** each request times out after 10s, and one transport error skips the other polls against that directory for the pass.
+- **Failures:** a failed renewal-information request keeps the previous answer and is retried an hour later. A failed directory fetch, a client that cannot be built, or a leaf without an authority key identifier is retried on the next pass. None of them is a renewal failure.
+
+**Per-certificate trust.** `acme.caBundle` gives one cert's ACME exchanges (account, order, renewal information) an HTTP client that trusts only that bundle, with the shared client's timeout, redirect and body-size limits. A bundle that does not resolve or parse fails the attempt rather than falling back to the system roots. `acme.profile` is passed on the order when set.
 
 Two challenge types are solved. **DNS-01** writes the `_acme-challenge` TXT
 record through the referenced DNS provider and waits for propagation against a
-public resolver before accepting; it is the only way to prove a wildcard. Six
+public resolver before accepting; it is the only way to prove a wildcard. Seven
 solvers sit behind one `DNSSolver` interface:
 
 - **Cloudflare, DigitalOcean, Hetzner, deSEC**: plain REST clients, one API
@@ -372,7 +400,13 @@ solvers sit behind one `DNSSolver` interface:
   walks up the name with SOA queries when no zone is configured.
 - **`acme-dns`**: one HTTP POST to a joohoi/acme-dns account, reached through a
   CNAME the operator places in the real zone once, so gpm never holds a
-  credential with authority over that zone. **HTTP-01** needs no provider: the manager parks the key
+  credential with authority over that zone.
+- **`webhook`**: one JSON `POST` per TXT record (`present` or `cleanup`) with a
+  bearer token to an endpoint the operator runs, over the hardened outbound
+  client (no redirects, link-local refused). The endpoint must add and remove
+  single values, since an apex plus wildcard order shares one name.
+
+**HTTP-01** needs no provider: the manager parks the key
 authorization in an in-memory token store (`HTTP01Store`, entries expiring with
 the order) which the data plane reads through the one-method
 `dataplane.ACMEChallengeStore` interface: the two packages stay decoupled, the

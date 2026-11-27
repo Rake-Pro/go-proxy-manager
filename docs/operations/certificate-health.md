@@ -1,7 +1,7 @@
 # Certificate health
 
 Check certificate expiry and force a renewal without waiting for the ACME
-manager's 30-day window.
+manager's renewal window.
 
 ## Prerequisites
 
@@ -41,11 +41,14 @@ manager's 30-day window.
 - The renew response is `{"started": true}` as soon as the order begins: it
   does **not** wait for the order to finish (DNS-01 propagation alone can take
   minutes). Poll `GET /api/certificates/<name>` afterwards: `state` moves to
-  `valid` and `lastError` clears once the new certificate lands, or `state`
-  becomes `error` with `lastError` set to the CA's rejection detail. An **admin**
+  `valid` and `lastError` clears once the new certificate lands. If the order
+  fails, an already issued certificate keeps `valid` or `expiring` with
+  `lastError` set to the CA's rejection detail; `state` is `error` only for a
+  certificate that was never issued, or whose leaf cannot be read. An **admin**
   caller sees that raw message; a viewer-role session or a `certificates:read`
   token sees the same short classified reason `GET /api/health` gives, so
   compare like with like when reading it from an automation credential.
+- `expiring` is lifetime-relative for `acme` certificates (inside `min(30 days, lifetime / 3)` of expiry) and a fixed 30 days for `custom` ones, because nothing renews those.
 - `GET /api/health`'s `certificates.expiring` / `.expired` / `.error` counts
   should match what `GET /api/certificates` reports for individual items.
 

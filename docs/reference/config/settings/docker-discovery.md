@@ -61,10 +61,10 @@ sub-key is settable and applied verbatim:
 | `template.timeouts` | `HostTimeouts` | [ProxyHost: `timeouts`](../proxy-host.md#proxy-host-timeouts): `connectSeconds`, `readSeconds` |
 | `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
-Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`,
+Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`, `trustedProxies`,
 `stripResponseHeaders`, `pathBlock`, `securityHeaders`, `allowedDomainSuffixes`, `allowedHostnames`) is documented on
 [Kubernetes Ingress discovery](ingress-discovery.md), which uses the identical
-type.
+type. That includes the [`trustedProxies` states](ingress-discovery.md#settings-ingress-discovery-template-trusted-proxies) and the [tag rule](ingress-discovery.md#tags-on-managed-hosts), which apply to Docker discovery unchanged.
 
 ## Container labels
 
@@ -157,7 +157,8 @@ Two modes, one choice, decided by where gpm itself runs.
   a newer version) never moves: it keeps every domain it serves and nothing may
   take one.
 - `disabled` and `maintenance` are operator-owned and carried forward across a
-  reconcile, exactly as for Ingress discovery.
+  reconcile, exactly as for Ingress discovery. So are tags added by hand and a
+  per-host `trustedProxies` while the template leaves it unset (the `<prefix>/trusted-proxies-by: docker-discovery` label marks a stamped value, see [trustedProxies on managed hosts](ingress-discovery.md#trustedproxies-on-managed-hosts)).
 - Two containers deriving the same name: first by derived name wins, the rest
   are skipped.
 

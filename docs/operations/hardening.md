@@ -49,6 +49,8 @@ The settings to check before an instance faces the internet.
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't
   show up in the process environment.
+- Keep `acme.caBundle` to the one private root you mean to trust: a certificate that sets it trusts **only** that bundle for its ACME directory, and setting or changing it through the API needs the `admin` scope (with `directoryURL` and `eab`), because it decides which server gpm accepts as the CA.
+- Give a `webhook` DNS provider a `https` `url` and a `token` held as a `${ENV:}` or `${FILE:}` placeholder (the `url` is a plain setting: a literal is committed and readable by anyone who can read DNS providers, so use a placeholder if it carries a credential). gpm refuses loopback, link-local, unspecified and multicast literals at write time unless `allowInsecureLocal` is set, always refuses a link-local destination when it connects, never follows redirects with the token attached, and warns in the log about a plain-`http` URL to a non-loopback host; writes on `/api/dns-providers` need the `admin` scope.
 - Give a webhook or notification `url` that carries a credential in its path
   (a chat or incident hook token) as a whole-value `${ENV:NAME}` or
   `${FILE:path}` placeholder, so only the reference is committed to git and

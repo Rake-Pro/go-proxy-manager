@@ -34,7 +34,26 @@ type Meta struct {
 	Domains      []string  `json:"domains"`
 	DirectoryURL string    `json:"directoryURL"`
 	IssuedAt     time.Time `json:"issuedAt"`
-	NotAfter     time.Time `json:"notAfter"`
+	// NotBefore is the leaf's NotBefore, written at issuance. Metadata written
+	// before the field existed has it zero; see Manager.notBefore.
+	NotBefore time.Time `json:"notBefore,omitzero"`
+	NotAfter  time.Time `json:"notAfter"`
+	// Profile is the ACME profile the certificate was ordered with, empty for
+	// the CA's default.
+	Profile string `json:"profile,omitempty"`
+	// ARI is the CA's latest renewal information for this certificate, nil
+	// until a poll has run (and always for a CA without ARI).
+	ARI *ARIState `json:"ari,omitempty"`
+}
+
+// saveMeta rewrites a certificate's metadata alone, for the ARI state a poll
+// updates between issuances.
+func saveMeta(certDir, name string, m Meta) error {
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(metaPath(certDir, name), b, 0o600)
 }
 
 // LoadIssuedMeta reads an ACME certificate's issued metadata; os.ErrNotExist
@@ -75,11 +94,7 @@ func saveIssued(certDir, name string, chainPEM []byte, key *ecdsa.PrivateKey, m 
 	if err := writeFileAtomic(IssuedKeyPath(certDir, name), keyPEM, 0o600); err != nil {
 		return err
 	}
-	metaJSON, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(metaPath(certDir, name), metaJSON, 0o600)
+	return saveMeta(certDir, name, m)
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
@@ -100,14 +115,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
-}
-
-func leafNotAfter(chainPEM []byte) (time.Time, error) {
-	info, err := ParseLeaf(chainPEM)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return info.NotAfter, nil
 }
 
 // LeafInfo is a certificate leaf's status fields, for the read-only decoration

@@ -55,6 +55,8 @@ brackets where it differs.
 | **Reconcile** | One full-state pass of a reconciler: recompute the desired set from the whole config, compare with reality, apply the difference as one commit. |
 | **Ledger** | A committed record of what gpm owns: `config/dns-ledger.yaml` for DNS records, `config/access-list-sources.yaml` for fetched IP feeds. It is what authorises a deletion. |
 | **Adopted** | A record that already existed and gpm claimed rather than created. An adopted record is released, never deleted or retargeted. |
+| **ACME profile** (`acme.profile`) | A named issuance profile a CA offers in its ACME directory (for example a short-lived one). Not a discovery profile. |
+| **ARI** | ACME Renewal Information (RFC 9773): the CA tells gpm when it wants a certificate renewed. It can only bring a renewal forward. See [Renewal](../reference/config/certificate.md#renewal). |
 | **Apex target** | The single CNAME target every DNS-sync-managed record points at. Not an ownership marker. |
 | **Freeze** | What a discovery reconciler does when it cannot read its source: no creates, no updates, no deletes, managed hosts left exactly as they are. |
 | **Fail closed** | Refusing rather than admitting when a decision cannot be made. The default everywhere except the bouncer's `onError`. |

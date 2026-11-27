@@ -81,6 +81,16 @@ const (
 	DisabledByIngressDiscovery = "ingress-discovery"
 )
 
+// TrustedProxiesByLabel marks a managed host's trustedProxies as STAMPED by
+// discovery from its template or profile, with the reconciler's managed-by
+// value ("ingress-discovery" or "docker-discovery") as the label value. It is
+// written only on a host whose resolved template sets trustedProxies, and
+// removed together with the value as soon as the resolved template stops
+// setting it. A managed host without it carries an operator's own value, which
+// a template that leaves the key unset keeps. This is the DEFAULT prefix's key;
+// use the settings' TrustedProxiesByLabel method for the configured one.
+const TrustedProxiesByLabel = "gpm.rake.pro/trusted-proxies-by"
+
 // ProfileSelection modes for IngressDiscoverySettings.ProfileSelection.
 const (
 	// ProfileSelectionAnnotationOrRules (the default/empty value) tries
@@ -209,12 +219,38 @@ type IngressHostTemplate struct {
 	// is rebuilt away (with a git commit) on the next reconcile.
 	SecurityHeaders map[string]SecurityHeaderValue `json:"securityHeaders,omitempty" yaml:"securityHeaders,omitempty"`
 
-	// Tags are applied verbatim to every derived host's ObjectMeta, so the hosts
-	// a given profile produces can be grouped and filtered in the UI like any
+	// TrustedProxies has the three states of ProxyHost.TrustedProxies, and
+	// decides who owns that field on a derived host:
+	//
+	//	omitted / null      discovery does not own the field: a stored host's
+	//	                    own trustedProxies is carried forward across every
+	//	                    reconcile (like maintenance), and a newly created
+	//	                    host gets none, so it inherits settings.trustedProxies
+	//	[] (present, empty) stamped onto every derived host: trust nobody
+	//	a list              stamped onto every derived host
+	//
+	// Which value is discovery's is recorded on the host itself, in the
+	// <prefix>/trusted-proxies-by label (see TrustedProxiesByLabel): a host
+	// stamped from a template carries it, so when its template or profile stops
+	// setting the key (it was removed, or the host moved to a profile without
+	// it) the stamped value is cleared rather than outliving the template that
+	// granted it. A host without the label carries an operator's own value.
+	TrustedProxies *[]string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty"`
+
+	// Tags are stamped onto every derived host's ObjectMeta, so the hosts a
+	// given profile produces can be grouped and filtered in the UI like any
 	// other host. They are free-form UI metadata with no validation rules and no
 	// data-plane effect, which is why they can be inherited from a profile an
 	// untrusted Ingress selects: the worst a tenant can do is pick a label the
 	// operator wrote.
+	//
+	// A reconcile puts these first and keeps the stored host's other tags after
+	// them, so a tag added by hand to a managed host survives. A template tag
+	// removed by hand comes back on the next reconcile. A tag that was in the
+	// template at the reconciler's previous pass and no longer is gets dropped
+	// from the hosts; that memory is in-process only, so a tag removed from the
+	// template while gpm was stopped stays on existing hosts until removed by
+	// hand.
 	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`
 
 	// Locations are path-scoped overrides stamped verbatim onto every derived
@@ -416,6 +452,13 @@ func (d IngressDiscoverySettings) ManagedByLabel() string { return d.Prefix() + 
 // itself, so the next clean derive knows it may re-enable it.
 func (d IngressDiscoverySettings) DisabledByLabel() string { return d.Prefix() + "/disabled-by" }
 
+// TrustedProxiesByLabel is the CURRENT-prefix label key discovery stamps (with
+// value ManagedByIngressDiscovery) onto a managed host whose trustedProxies it
+// took from the template; see the package-level TrustedProxiesByLabel.
+func (d IngressDiscoverySettings) TrustedProxiesByLabel() string {
+	return d.Prefix() + "/trusted-proxies-by"
+}
+
 // HasStaleManagedByLabel reports whether labels carries a managed-by label
 // (value ManagedByIngressDiscovery) under a prefix OTHER than the one d is
 // currently configured with - i.e. this object was labelled by discovery
@@ -445,6 +488,17 @@ func (d IngressDiscoverySettings) HasStaleDisabledByLabel(labels map[string]stri
 	return hasStaleDiscoveryLabel(labels, d.DisabledByLabel(), "/disabled-by", DisabledByIngressDiscovery)
 }
 
+// IsTrustedProxiesByLabel reports whether a label is a trusted-proxies-by
+// marker written by either discovery reconciler, under any prefix: its key
+// ends in "/trusted-proxies-by" and its value is "ingress-discovery" or
+// "docker-discovery". Deciding whether a stored value was stamped reads every
+// such marker, not only the current prefix's, because missing one would keep a
+// template's trust on a host forever; see discovery.Ownership.
+func IsTrustedProxiesByLabel(key, value string) bool {
+	return strings.HasSuffix(key, "/trusted-proxies-by") &&
+		(value == ManagedByIngressDiscovery || value == ManagedByDockerDiscovery)
+}
+
 // hasStaleDiscoveryLabel reports whether labels carries a key, other than
 // currentKey, ending in suffix ("/managed-by" or "/disabled-by") whose value is
 // value - i.e. one a discovery reconciler itself writes. value is passed in
@@ -463,20 +517,20 @@ func hasStaleDiscoveryLabel(labels map[string]string, currentKey, suffix, value 
 	return false
 }
 
-// StripStaleDiscoveryLabels deletes, in place, any managed-by/disabled-by
-// label belonging to a PREVIOUS annotation prefix from labels. Only meaningful
-// during an AnnotationPrefixMigrate relabel; harmless (a no-op) otherwise,
-// since there is nothing stale to find.
+// StripStaleDiscoveryLabels deletes, in place, any managed-by/disabled-by/
+// trusted-proxies-by label belonging to a PREVIOUS annotation prefix from
+// labels. Only meaningful during an AnnotationPrefixMigrate relabel; harmless
+// (a no-op) otherwise, since there is nothing stale to find.
 func (d IngressDiscoverySettings) StripStaleDiscoveryLabels(labels map[string]string) {
-	managedKey, disabledKey := d.ManagedByLabel(), d.DisabledByLabel()
+	managedKey, disabledKey, tpKey := d.ManagedByLabel(), d.DisabledByLabel(), d.TrustedProxiesByLabel()
 	for k, v := range labels {
 		if v != ManagedByIngressDiscovery {
 			continue
 		}
-		if k == managedKey || k == disabledKey {
+		if k == managedKey || k == disabledKey || k == tpKey {
 			continue
 		}
-		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") {
+		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") || strings.HasSuffix(k, "/trusted-proxies-by") {
 			delete(labels, k)
 		}
 	}
@@ -833,6 +887,7 @@ func (t IngressHostTemplate) refErrors(cfg Config, owner string) []error {
 		PathBlock:            t.PathBlock,
 		SecurityHeaders:      t.SecurityHeaders,
 		Locations:            t.Locations,
+		TrustedProxies:       t.TrustedProxies,
 	}
 	if h.Upstream == (Upstream{}) && h.UpstreamGroupRef == "" {
 		// Docker derives the upstream per container.
@@ -970,6 +1025,13 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 	}
 	if err := validateSecurityHeaders(t.SecurityHeaders); err != nil {
 		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
+	}
+	// A present-but-empty list is valid and means "trust nobody"; only the
+	// entries of a non-empty one are checked, as on a proxy host.
+	if t.TrustedProxies != nil {
+		if err := ValidateTrustedProxies("ingressDiscovery."+path+".trustedProxies", *t.TrustedProxies); err != nil {
+			return err
+		}
 	}
 	// Same loop ProxyHost.Validate runs, so a profile that would derive a host
 	// with a bad location fails the settings write, not the next reconcile.

@@ -84,8 +84,8 @@ upstream, because an Ingress author is untrusted. See
 The template and every profile carry the same fields a hand-written proxy host
 does (including `robotsNoIndex`, `timeouts` and `tags`) but they are *template*
 fields, so anything the chosen profile does not set is not set on the derived
-host either. Check the host you are retiring for `robotsNoIndex`, a `timeouts`
-override and `tags`, and put them on the profile you are cutting over to.
+host either. Check the host you are retiring for `robotsNoIndex` and a `timeouts`
+override, and put them on the profile you are cutting over to. A `tags` list you add by hand to the derived host is kept, and so is its own `trustedProxies` while the template leaves that unset; to give every derived host the same `trustedProxies`, set it on the template or profile.
 `locations` is the one thing that has no template equivalent by design: if the
 host you are moving has them, leave it hand-written (discovery never touches an
 unlabelled host) or publish the paths as their own annotated `Ingress`. After the

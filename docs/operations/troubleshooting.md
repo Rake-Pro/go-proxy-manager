@@ -15,7 +15,7 @@ page that fixes it.
 | Row | Severity | Source | Link |
 |---|---|---|---|
 | Certificate failed to renew, or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
-| Certificate expires in N days | warning | `GET /api/certificates` state `expiring` (inside the 30-day renewal window) | The certificate |
+| Certificate expires in N days | warning | `GET /api/certificates` state `expiring` (inside `min(30 days, lifetime / 3)` of expiry) | The certificate |
 | Upstream group has unhealthy members | problem | `GET /api/health` `upstreamGroups[]` | The group |
 | Ingress or Docker discovery failed | problem | `GET /api/ingress-discovery/status`, `GET /api/docker-discovery/status` `error` | Integrations |
 | Discovery skipped a host | warning | The same status routes, `hosts[]` with `action: skipped` and a `reason` | Integrations |
@@ -69,6 +69,11 @@ below map each row's wording to its cause and fix.
 | The wrong certificate is served | Selection is by SNI across every certificate, not by `tls.certificateRef` | Check which certificate's `domains` cover the name ([Certificate](../reference/config/certificate.md)) |
 | Wildcard issuance refused at validation | A wildcard cannot be proven over HTTP-01 | Use DNS-01 ([DNS-01 with Cloudflare](../how-to/dns-01-cloudflare.md)) |
 | ACME fails with a `dns-01` provider error | Wrong credential, missing zone scope, or a `dnsProvider` name typo | Check the provider object and test the token directly ([DNSProvider](../reference/config/dns-provider.md)) |
+| `lastError` contains `x509: certificate signed by unknown authority` for a private CA | The CA's own TLS certificate is not signed by a root gpm trusts for that certificate | Set `acme.caBundle` to the CA's root ([Private step-ca](../how-to/step-ca.md)) |
+| `lastError` starts with `the attempt did not finish within 13m0s` | The attempt (order, DNS propagation wait and validation) ran past the propagation timeout plus 10 minutes, so it was cancelled | Find the slow step (the CA, the DNS provider or the endpoint); the retry backoff applies and the TXT records are still cleaned up ([Renewal](../reference/config/certificate.md#renewal)) |
+| `lastError` says the CA does not support profiles, or does not advertise the profile | `acme.profile` names a profile the CA does not offer | Use a name from the CA's directory, or remove `acme.profile` |
+| A short-lived certificate renews with less than 30 days left (when `lifetime / 3` remains), or earlier than that rule when `renewReason` is `ari` or `changed` | Renewal happens at `min(30 days, lifetime / 3)`, and a CA that offers ARI can bring it forward, and `changed` means its domains or `acme.profile` changed | Nothing to fix; read `renewAt` and `renewReason` ([Renewal](../reference/config/certificate.md#renewal)) |
+| `lastError` from the `webhook` DNS provider shows a non-2xx status, or a redirect | The endpoint refused the request, or redirected (redirects are never followed) | [Solve DNS-01 through your own endpoint](../how-to/dns-webhook.md#troubleshooting) |
 | Client certificate expired and nobody noticed | There is no client-side renewal; a `.p12` lives in a keychain | Watch the expiry banner and re-issue before `notAfter` ([mTLS](../how-to/mtls-client-certs.md)) |
 
 ## Routing and requests

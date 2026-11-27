@@ -42,6 +42,7 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
   - **`PUT /api/settings`** (see below),
   - `GET /api/backup`: the archive is the raw on-disk YAML, so unlike the JSON
     reads it carries the api-tokens' stored digests,
+  - `POST /api/certificates/{name}/revert` (like the middleware revert: it restores a stored object without the admin check on the ACME destination fields),
   - `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`,
     `POST /api/sessions/revoke`,
   - `/debug/pprof/*` when profiling is enabled: a heap dump and the process
@@ -62,11 +63,14 @@ rewrite `adminAuth` outright. `settings:read` still grants `GET /api/settings`
 forward compatibility but grants nothing beyond `settings:read` today; the UI
 greys the box out rather than offering a grant that does nothing.
 
-**`certificates:write` does not set `acme.directoryURL` or `acme.eab`.** A
-certificate write that sets either field, or changes it on a stored
-certificate, needs `admin`: the pair chooses where gpm sends its ACME requests
-and binds a `${ENV:}`/`${FILE:}` HMAC key to that destination. Edits that keep
-both as stored, and edits that clear them, stay on `certificates:write`.
+**`certificates:write` does not set `acme.directoryURL`, `acme.eab` or `acme.caBundle`.** A
+certificate write that sets any of them, or changes one on a stored certificate, needs `admin`.
+
+- **Why `directoryURL` and `eab`:** they choose where gpm sends its ACME requests and bind a `${ENV:}`/`${FILE:}` HMAC key to that destination.
+- **Why `caBundle`:** it decides which server gpm accepts as that destination, and it may name a file to read.
+- **Still on `certificates:write`:** edits that keep all three as stored, and edits that clear them.
+- **`POST /api/certificates/{name}/revert` needs `admin` too**, because a revert restores an earlier stored certificate without that check.
+- **The refusal** is a `403` with the message `this write needs the admin scope: acme.directoryURL, acme.eab and acme.caBundle may only be set or changed by an admin`.
 
 **Reverting an `APIToken` is refused**: scoped (`POST
 /api/api-tokens/{name}/revert`) and whole-config (`POST /api/revert`, which

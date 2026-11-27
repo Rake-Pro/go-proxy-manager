@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,9 +54,94 @@ type stubCA struct {
 	leafNames    []string
 	// authzName, when set, replaces the identifier the authorization names.
 	authzName string
+
+	// profiles, when set, is advertised in the directory's meta.profiles, and
+	// orderProfile captures the profile field of the last new-order request.
+	profiles     map[string]string
+	orderProfile string
+	orders       int
+
+	// renewalInfo, when set, is the directory's renewalInfo value; ariURL
+	// returns the stub's own endpoint for it. onRenewalInfo answers
+	// GET /renewal-info/<certID>; ariIDs records every certID asked for.
+	renewalInfo   string
+	onRenewalInfo func(w http.ResponseWriter, certID string)
+	ariIDs        []string
+	directoryGets int
+
+	// leafLifetime, when set, replaces the issued leaf's 90-day validity.
+	leafLifetime time.Duration
+	// authzStuck keeps the authorization pending after its challenge is
+	// accepted, like a CA that never finishes validating.
+	authzStuck bool
 }
 
 func newStubCA(t *testing.T, offer []string) *stubCA {
+	t.Helper()
+	ca := newUnstartedStubCA(t, offer)
+	ca.srv.Start()
+	return ca
+}
+
+// newTLSStubCA starts the stub CA over HTTPS with a server certificate signed
+// by a separate test root, and returns that root as a PEM bundle: the shape
+// of a private CA whose directory a client trusts only through acme.caBundle.
+func newTLSStubCA(t *testing.T, offer []string) (*stubCA, string) {
+	t.Helper()
+	ca := newUnstartedStubCA(t, offer)
+	srvCert, rootPEM := testServerCert(t)
+	ca.srv.TLS = &tls.Config{Certificates: []tls.Certificate{srvCert}}
+	ca.srv.StartTLS()
+	return ca, rootPEM
+}
+
+// testServerCert makes a fresh root CA and a server certificate for 127.0.0.1
+// signed by it; it returns the server's key pair and the root as PEM.
+func testServerCert(t *testing.T) (tls.Certificate, string) {
+	t.Helper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		Subject:               pkix.Name{CommonName: "test private root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(11),
+		Subject:      pkix.Name{CommonName: "stub acme directory"},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	srvDER, err := x509.CreateCertificate(rand.Reader, srvTmpl, root, &srvKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := tls.Certificate{Certificate: [][]byte{srvDER}, PrivateKey: srvKey}
+	return pair, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}))
+}
+
+func newUnstartedStubCA(t *testing.T, offer []string) *stubCA {
 	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -78,12 +165,15 @@ func newStubCA(t *testing.T, offer []string) *stubCA {
 		t.Fatal(err)
 	}
 	ca := &stubCA{t: t, caKey: caKey, caCert: caCert, offer: offer}
-	ca.srv = httptest.NewServer(ca.handler())
+	ca.srv = httptest.NewUnstartedServer(ca.handler())
 	t.Cleanup(ca.srv.Close)
 	return ca
 }
 
 func (c *stubCA) url(path string) string { return c.srv.URL + path }
+
+// ariURL is the stub's own renewal-information endpoint.
+func (c *stubCA) ariURL() string { return c.url("/renewal-info") }
 
 // jwsPayload decodes the JSON payload of a JWS request body (signatures are not
 // verified - the stub trusts its single test client).
@@ -113,13 +203,31 @@ func (c *stubCA) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/directory", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(c.t, w, map[string]string{
+		c.directoryGets++
+		dir := map[string]any{
 			"newNonce":   c.url("/new-nonce"),
 			"newAccount": c.url("/new-account"),
 			"newOrder":   c.url("/new-order"),
 			"revokeCert": c.url("/revoke"),
 			"keyChange":  c.url("/key-change"),
-		})
+		}
+		if c.renewalInfo != "" {
+			dir["renewalInfo"] = c.renewalInfo
+		}
+		if c.profiles != nil {
+			dir["meta"] = map[string]any{"profiles": c.profiles}
+		}
+		writeJSON(c.t, w, dir)
+	})
+
+	mux.HandleFunc("/renewal-info/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/renewal-info/")
+		c.ariIDs = append(c.ariIDs, id)
+		if c.onRenewalInfo == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		c.onRenewalInfo(w, id)
 	})
 
 	mux.HandleFunc("/new-nonce", func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +242,8 @@ func (c *stubCA) handler() http.Handler {
 	})
 
 	mux.HandleFunc("/new-order", func(w http.ResponseWriter, r *http.Request) {
+		c.orders++
+		c.orderProfile, _ = c.jwsPayload(r)["profile"].(string)
 		w.Header().Set("Location", c.url("/order/1"))
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(c.t, w, map[string]any{
@@ -178,6 +288,10 @@ func (c *stubCA) handler() http.Handler {
 				writeJSON(c.t, w, map[string]any{"type": "urn:ietf:params:acme:error:unauthorized", "detail": err.Error()})
 				return
 			}
+		}
+		if c.authzStuck {
+			writeJSON(c.t, w, map[string]any{"type": typ, "url": c.url(r.URL.Path), "token": c.acceptedTok, "status": "processing"})
+			return
 		}
 		c.authzValid = true
 		writeJSON(c.t, w, map[string]any{"type": typ, "url": c.url(r.URL.Path), "token": c.acceptedTok, "status": "valid"})
@@ -235,12 +349,17 @@ func (c *stubCA) issueChain() []byte {
 	if c.leafNames != nil {
 		names = c.leafNames
 	}
+	lifetime := 90 * 24 * time.Hour
+	if c.leafLifetime != 0 {
+		lifetime = c.leafLifetime
+	}
+	notBefore := time.Now().Add(-time.Minute)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: names[0]},
 		DNSNames:     names,
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(90 * 24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notBefore.Add(lifetime),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

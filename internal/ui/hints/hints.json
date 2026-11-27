@@ -383,6 +383,14 @@
     "text": "The base64url HMAC key the CA issued alongside the key identifier. Use a ${ENV:...} or ${FILE:...} placeholder so no secret is committed.",
     "doc": "reference/config/certificate.md#certificate-acme-eab"
   },
+  "certificate.acme.profile": {
+    "text": "The CA issuance profile every order of this certificate asks for, for example a short-lived one. 1 to 64 letters, digits, _ or -. A CA that does not advertise this profile fails the order, and changing it on an issued certificate renews it at the next pass.",
+    "doc": "reference/config/certificate.md#certificate-acme-profile"
+  },
+  "certificate.acme.caBundle": {
+    "text": "Trust anchors for this certificate's ACME directory, as inline PEM CERTIFICATE blocks or a ${FILE:...} / ${ENV:...} placeholder, at most 65536 bytes. When set it replaces the system roots for every exchange with this CA (account, order, renewal information); a bundle that does not resolve or parse fails the renewal, with no fallback. Not a secret: stored and shown as written. Setting or changing it through the API needs the admin scope, like directoryURL and eab.",
+    "doc": "reference/config/certificate.md#certificate-acme-ca-bundle"
+  },
   "certificate.custom.certFile": {
     "text": "The full-chain PEM file, relative to the certificate store on the gpm host. There is no upload here; the file must already exist.",
     "doc": "reference/config/certificate.md#certificate-custom"
@@ -456,7 +464,7 @@
     "doc": "how-to/mtls-client-certs.md#issuance-records-expiry-warnings-and-renewal"
   },
   "dnsProvider.provider": {
-    "text": "Which DNS API gpm talks to. The four token providers authenticate with a single API token; rfc2136 and acme-dns take a typed form instead.",
+    "text": "Which DNS API gpm talks to. The four token providers authenticate with a single API token; rfc2136, acme-dns and webhook (your own HTTP endpoint) take a typed form instead.",
     "doc": "reference/config/dns-provider.md#dns-provider-provider"
   },
   "dnsProvider.config": {
@@ -496,11 +504,11 @@
     "doc": "reference/config/dns-provider.md#dns-provider-config-timeout"
   },
   "dnsProvider.config.baseURL": {
-    "text": "The API root of your acme-dns server. Must be an http or https URL.",
+    "text": "The API root of your acme-dns server: an http or https URL, stored and shown as written, or a ${ENV:...} / ${FILE:...} placeholder.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-base-url"
   },
   "dnsProvider.config.username": {
-    "text": "The username from the acme-dns /register response.",
+    "text": "The username from the acme-dns /register response. A secret: use an ${ENV:...} or ${FILE:...} placeholder.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-username"
   },
   "dnsProvider.config.password": {
@@ -510,6 +518,22 @@
   "dnsProvider.config.subdomain": {
     "text": "The subdomain from the acme-dns /register response. This is what your zone's permanent CNAME points at.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-subdomain"
+  },
+  "dnsProvider.config.allowInsecureLocal": {
+    "text": "Allows a baseURL whose host is a loopback address, for an acme-dns running beside gpm. Left as loaded, the stored value (yes, on, false, a placeholder) is saved as written; switched on it saves \"true\", switched off it removes the key. Off, a loopback literal is refused at write time; link-local, unspecified and multicast addresses are refused either way.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-allow-insecure-local"
+  },
+  "dnsProvider.config.url": {
+    "text": "The endpoint gpm POSTs every present and cleanup request to, path and query kept. Not a secret: stored and shown as written, so a URL that itself carries a credential in its path or query belongs in an ${ENV:...} or ${FILE:...} placeholder; user info (user:password@) is refused. http or https; a loopback literal is refused unless allowed below, link-local always, and redirects are never followed, so the token cannot reach another host.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-url"
+  },
+  "dnsProvider.config.token": {
+    "text": "Sent as Authorization: Bearer <token> on every request. Your endpoint must check it. Use an ${ENV:...} or ${FILE:...} placeholder so it is not committed.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-token"
+  },
+  "dnsProvider.config.webhook.allowInsecureLocal": {
+    "text": "Allows a url whose host is a loopback address, for an endpoint running beside gpm. Left as loaded, the stored value (yes, on, false, a placeholder) is saved as written; switched on it saves \"true\", switched off it removes the key. Off, a loopback literal is refused at write time; link-local, unspecified and multicast addresses are refused either way.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-allow-insecure-local"
   },
   "identityProvider.type": {
     "text": "How this provider asserts identity: an OIDC redirect flow, headers from a trusted proxy, or a subrequest to an external outpost.",
@@ -1167,6 +1191,10 @@
     "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-path-block"
   },
+  "settings.ingressDiscovery.template.trustedProxies": {
+    "text": "The trusted proxies of every host this template or profile derives, in the three states of a proxy host's own. Trust nobody ([]) or a list: stamped onto every derived host, replacing the fleet list there, and the host is labelled <prefix>/trusted-proxies-by; a hand edit of a stamped value follows the template. Not set: discovery does not own the field. A value set by hand on a host is kept, a value the template stamped is removed along with the label, and a new host uses the fleet list in Settings.",
+    "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-trusted-proxies"
+  },
   "settings.ingressDiscovery.template.middlewares": {
     "text": "Middlewares applied, in order, to every derived host.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-middlewares"
@@ -1184,7 +1212,7 @@
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-timeouts"
   },
   "settings.ingressDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
+    "text": "Tags stamped onto every derived host, for grouping and filtering in the host list; they have no effect on how a host is served. A reconcile puts these first and keeps the tags added to a host by hand. A template tag removed by hand from a host comes back at the next reconcile, and a tag dropped from the template here is removed from the hosts unless gpm restarted in between.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-tags"
   },
   "settings.ingressDiscovery.template.allowedDomainSuffixes": {
@@ -1295,6 +1323,10 @@
     "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
+  "settings.dockerDiscovery.template.trustedProxies": {
+    "text": "The trusted proxies of every host this template or profile derives, in the three states of a proxy host's own. Trust nobody ([]) or a list: stamped onto every derived host, replacing the fleet list there, and the host is labelled <prefix>/trusted-proxies-by; a hand edit of a stamped value follows the template. Not set: discovery does not own the field. A value set by hand on a host is kept, a value the template stamped is removed along with the label, and a new host uses the fleet list in Settings.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
+  },
   "settings.dockerDiscovery.template.timeouts": {
     "text": "Connect and read timeouts, in seconds, for derived hosts. Blank keeps the shared pooled transport.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
@@ -1312,7 +1344,7 @@
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
+    "text": "Tags stamped onto every derived host, for grouping and filtering in the host list; they have no effect on how a host is served. A reconcile puts these first and keeps the tags added to a host by hand. A template tag removed by hand from a host comes back at the next reconcile, and a tag dropped from the template here is removed from the hosts unless gpm restarted in between.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.allowedDomainSuffixes": {

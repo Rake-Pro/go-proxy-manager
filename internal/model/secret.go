@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -55,12 +56,16 @@ func (s Secret) MarshalJSON() ([]byte, error) {
 	}
 }
 
-var secretType = reflect.TypeOf(Secret(""))
+var (
+	secretType      = reflect.TypeOf(Secret(""))
+	dnsProviderType = reflect.TypeOf(DNSProvider{})
+)
 
 // LiteralSecrets walks v via reflection (structs, pointers, slices, arrays and
 // maps) and returns the dotted field paths of every Secret-typed value holding a
 // literal secret (non-placeholder, non-empty). The store uses it to refuse to
-// commit plaintext secrets to the git config.
+// commit plaintext secrets to the git config. A DNS provider's plain config
+// keys (DNSProviderPlainKey) are settings, not secrets, and are not reported.
 func LiteralSecrets(v any) []string {
 	var out []string
 	walkSecrets(reflect.ValueOf(v), "", &out)
@@ -89,6 +94,10 @@ func walkSecrets(v reflect.Value, path string, out *[]string) {
 			if t.Field(i).PkgPath != "" {
 				continue
 			}
+			if t == dnsProviderType && t.Field(i).Name == "Config" {
+				walkDNSProviderConfig(v.Interface().(DNSProvider), secretPath(path, "Config"), out)
+				continue
+			}
 			walkSecrets(v.Field(i), secretPath(path, t.Field(i).Name), out)
 		}
 	case reflect.Slice, reflect.Array:
@@ -98,6 +107,22 @@ func walkSecrets(v reflect.Value, path string, out *[]string) {
 	case reflect.Map:
 		for _, k := range v.MapKeys() {
 			walkSecrets(v.MapIndex(k), fmt.Sprintf("%s[%v]", path, k.Interface()), out)
+		}
+	}
+}
+
+// walkDNSProviderConfig is walkSecrets for a DNSProvider's config map: the
+// provider's plain keys (DNSProviderPlainKey) are left out, every other key is
+// checked, with the path any other map would get (Config[apiToken]).
+func walkDNSProviderConfig(p DNSProvider, cfg string, out *[]string) {
+	keys := make([]string, 0, len(p.Config))
+	for k := range p.Config {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !DNSProviderPlainKey(p.Provider, k) {
+			walkSecrets(reflect.ValueOf(p.Config[k]), fmt.Sprintf("%s[%s]", cfg, k), out)
 		}
 	}
 }

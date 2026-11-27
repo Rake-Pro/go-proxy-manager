@@ -196,6 +196,13 @@ func (d DockerDiscoverySettings) LabelPublicCname() string { return d.Prefix() +
 func (d DockerDiscoverySettings) ManagedByLabel() string  { return d.Prefix() + "/managed-by" }
 func (d DockerDiscoverySettings) DisabledByLabel() string { return d.Prefix() + "/disabled-by" }
 
+// TrustedProxiesByLabel is the CURRENT-prefix key of the marker that a managed
+// host's trustedProxies was stamped from its template (value
+// ManagedByDockerDiscovery); see the package-level TrustedProxiesByLabel.
+func (d DockerDiscoverySettings) TrustedProxiesByLabel() string {
+	return d.Prefix() + "/trusted-proxies-by"
+}
+
 // HasStaleManagedByLabel reports whether labels carries a docker-discovery
 // managed-by label under a prefix OTHER than the current one - the same
 // orphan-detection Ingress discovery does, keyed on this reconciler's own label
@@ -221,18 +228,18 @@ func (d DockerDiscoverySettings) HasStaleDisabledByLabel(labels map[string]strin
 }
 
 // StripStaleDiscoveryLabels deletes, in place, any docker-discovery
-// managed-by/disabled-by label belonging to a PREVIOUS prefix. Only meaningful
-// during a prefix migration; a no-op otherwise.
+// managed-by/disabled-by/trusted-proxies-by label belonging to a PREVIOUS
+// prefix. Only meaningful during a prefix migration; a no-op otherwise.
 func (d DockerDiscoverySettings) StripStaleDiscoveryLabels(labels map[string]string) {
-	managedKey, disabledKey := d.ManagedByLabel(), d.DisabledByLabel()
+	managedKey, disabledKey, tpKey := d.ManagedByLabel(), d.DisabledByLabel(), d.TrustedProxiesByLabel()
 	for k, v := range labels {
 		if v != ManagedByDockerDiscovery {
 			continue
 		}
-		if k == managedKey || k == disabledKey {
+		if k == managedKey || k == disabledKey || k == tpKey {
 			continue
 		}
-		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") {
+		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") || strings.HasSuffix(k, "/trusted-proxies-by") {
 			delete(labels, k)
 		}
 	}

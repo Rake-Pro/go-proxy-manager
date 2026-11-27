@@ -708,7 +708,14 @@ func TestChainDiffersCoversEveryTemplateField(t *testing.T) {
 		"Middlewares": true, "AccessLists": true, "AccessListsMode": true,
 		"StripResponseHeaders": true, "SecurityHeaders": true, "Locations": true,
 		"PathBlock": true,
+		// Compared only when the template sets it: unset means the stored
+		// host owns the field (see whenSet below).
+		"TrustedProxies": true,
 	}
+	// whenSet are compared fields a template owns only when it sets them. For
+	// those, a template that leaves the field unset must report no difference
+	// against a host carrying a value of its own.
+	whenSet := map[string]bool{"TrustedProxies": true}
 	excluded := map[string]string{
 		"WebsocketsUpgrade":     "deprecated, no effect",
 		"Tags":                  "UI metadata with no data-plane effect",
@@ -747,6 +754,53 @@ func TestChainDiffersCoversEveryTemplateField(t *testing.T) {
 			hf.Set(reflect.ValueOf(tmpl).Field(i))
 			if ChainDiffers(h, tmpl, true) {
 				t.Fatalf("a host stamped with the template's %s still differs", f.Name)
+			}
+			// The host's own value against a template that leaves the field
+			// unset: a difference only for fields the template always owns.
+			if got := ChainDiffers(h, model.IngressHostTemplate{}, true); got == whenSet[f.Name] {
+				t.Fatalf("unset template: ChainDiffers = %v for a host carrying its own %s", got, f.Name)
+			}
+		})
+	}
+	for name := range whenSet {
+		if !compared[name] {
+			t.Errorf("%s is in whenSet but not in compared", name)
+		}
+	}
+}
+
+// trustedProxies keeps its three states through the comparison: unset on the
+// template is not compared, and a set value (an empty list meaning "trust
+// nobody") is compared against the host's, where a host that inherits the
+// fleet default (nil) differs from one that trusts nobody.
+func TestChainDiffersTrustedProxiesStates(t *testing.T) {
+	list := func(v ...string) *[]string { s := append([]string{}, v...); return &s }
+	tests := []struct {
+		name string
+		host *[]string
+		tmpl *[]string
+		want bool
+	}{
+		{"unset template, host inherits", nil, nil, false},
+		{"unset template, host trusts nobody", list(), nil, false},
+		{"unset template, host has a list", list("192.0.2.10"), nil, false},
+		{"empty template, host inherits", nil, list(), true},
+		{"empty template, host trusts nobody", list(), list(), false},
+		{"empty template, host has a list", list("192.0.2.10"), list(), true},
+		{"list template, host inherits", nil, list("192.0.2.10"), true},
+		{"list template, host trusts nobody", list(), list("192.0.2.10"), true},
+		{"list template, same list", list("192.0.2.10"), list("192.0.2.10"), false},
+		{"list template, other list", list("198.51.100.0/24"), list("192.0.2.10"), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := host("app", model.ManagedByIngressDiscovery, "app.example.com")
+			h.TrustedProxies = tc.host
+			tmpl := model.IngressHostTemplate{Upstream: h.Upstream, TrustedProxies: tc.tmpl}
+			for _, upstream := range []bool{true, false} {
+				if got := ChainDiffers(h, tmpl, upstream); got != tc.want {
+					t.Fatalf("upstream=%v: ChainDiffers = %v, want %v", upstream, got, tc.want)
+				}
 			}
 		})
 	}
