@@ -37,7 +37,7 @@ Every object also carries the shared keys `displayName`, `labels`, `tags` and `d
 |-----|------|---------|----------|-------------|
 | <span id="middleware-auth-identity-provider"></span>  `identityProvider` | string | none | yes, except in `client-cert` and `basic` mode | Name of an [IdentityProvider](identity-provider.md). Naming one in `client-cert` or `basic` mode is an error. A dangling name is a load-time error, and the proxy listeners fail closed with `503` if one ever reaches it. |
 | <span id="middleware-auth-mode"></span>  `mode` | string | the provider's `type` | no | `oidc` \| `forward-auth` \| `auth-request` \| `client-cert` \| `basic`. See the mode table below. |
-| <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass. **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
+| <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass: `admin` and `user` in `oidc` and `forward-auth` mode, never group names (an entry that is not a role admits no one and is reported as a config warning). **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
 | <span id="middleware-auth-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this gate, compared against the derived client IP. Valid in `auth-request`, `client-cert` and `basic` mode only; **refused in `oidc` and `forward-auth` mode**, where the gate has no bypass to honour. With `mode` unset the effective mode is the provider's `type`, so an exemption against an `oidc` or `forward-auth` provider is refused too: set `mode` explicitly rather than relying on the default. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name when that contains no `=`) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
 | <span id="middleware-auth-basic"></span>  `basic` | BasicAuthSpec | none | yes in `basic` mode | Local credentials for `basic` mode. Table below. Setting it in any other mode is an error. |
@@ -149,16 +149,23 @@ auth:
   allowFrom: [10.0.0.0/8]   # LAN skips the certificate requirement
 ```
 
-In `oidc` mode gpm is itself the OIDC relying party for the host: an
-unauthenticated request is redirected to the IdP, the reserved callback path
-`/__gpm/oidc/callback` exchanges the code (PKCE + nonce) and sets a signed,
-stateless SSO session cookie, and `requiredRoles` (via the IdP's `roleMapping`)
-is enforced; with no role mapping or required roles the gate just requires a
-valid login. Register `https://<host>/__gpm/oidc/callback` as a redirect URI on
-the IdP. The signing key is auto-generated and persisted at
-`<cert-dir>/sso_signing.key` (0600) on first use, so sessions survive restarts
-without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
-own key (useful when rotating or sharing a key across instances).
+In `oidc` mode gpm is itself the OIDC relying party for the host.
+
+- **Flow.** An unauthenticated request is redirected to the IdP; the reserved
+  callback path `/__gpm/oidc/callback` exchanges the code (PKCE + nonce) and
+  sets a signed, stateless SSO session cookie.
+- **Roles.** `requiredRoles` is enforced through the IdP's `roleMapping`; with
+  no role mapping and no required roles the gate just requires a valid login.
+- **Redirect URI.** Register `https://<domain>/__gpm/oidc/callback` on the IdP
+  for every domain of the host. The URI never carries a port.
+- **On a location.** The callback path lies outside the location. gpm lets the
+  location's gate answer it when the host carries no interactive gate, no
+  other location covers the path, and the host's locations share one `oidc`
+  gate ([Gate a host with SSO](../../how-to/per-host-sso.md)).
+- **Signing key.** Auto-generated and persisted at `<cert-dir>/sso_signing.key`
+  (0600) on first use, so sessions survive restarts. Set `GPM_SSO_SIGNING_KEY`
+  to supply your own key (useful when rotating or sharing a key across
+  instances).
 
 After a login the upstream receives `X-Forwarded-User` (the `email` claim, or the
 subject when the token has no email), `X-Forwarded-Email` and

@@ -51,10 +51,7 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse outpostURL: %w", err)
 	}
-	prefix := spec.PathPrefix
-	if prefix == "" {
-		prefix = defaultOutpostPrefix
-	}
+	prefix := outpostPrefix(spec)
 	authPath := spec.AuthPath
 	if authPath == "" {
 		authPath = prefix + "/auth/nginx"
@@ -192,8 +189,19 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 }
 
 // owns reports whether path is under the auth server's own namespace.
-func (p *authRequestProxy) owns(path string) bool {
-	return path == p.prefix || strings.HasPrefix(path, p.prefix+"/")
+func (p *authRequestProxy) owns(path string) bool { return ownsOutpostPath(p.prefix, path) }
+
+// outpostPrefix is the path namespace an auth-request provider's outpost owns
+// on a gated host.
+func outpostPrefix(spec model.AuthRequestSpec) string {
+	if spec.PathPrefix == "" {
+		return defaultOutpostPrefix
+	}
+	return spec.PathPrefix
+}
+
+func ownsOutpostPath(prefix, path string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // authenticate performs the per-request GET subrequest to the auth server,

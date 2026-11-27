@@ -114,6 +114,7 @@ below map each row's wording to its cause and fix.
 | `403` with `reason="geo"` on an `any` host | No member allowed, and a member has `geo` rules while no GeoIP database is loaded, so that member fails closed | Load the database (`GPM_GEOIP_DB`) or remove the geo rules |
 | Geo rules deny everything | Geo is configured but no GeoIP database is loaded; geo fails closed | Set `GPM_GEOIP_DB`, or remove the geo rules |
 | SSO users are all denied `403` | Group claims are not in the ID token | gpm reads claims from the ID token; configure the IdP accordingly |
+| SSO users are all denied `403` and the Overview shows a config warning about `requiredRoles` | `requiredRoles` lists a group name (only `admin` and `user` are roles), or the provider's `roleMapping` gives no user a role | Use the role the group maps to, or map groups to roles on the provider ([Gate a host with SSO](../how-to/per-host-sso.md)) |
 | Config write refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` | Set `mode` explicitly, or use an access list |
 | A LAN client is prompted for a password after migrating basic auth | The old list required both the IP and the password, so no `allowFrom` was copied | Add the CIDR to the middleware's `allowFrom` deliberately ([Migrate basic auth](../how-to/migrate-basic-auth.md)) |
 | `409` from `migrate-basic-auth` | A middleware named `<list>-basic` already exists | Rename or delete it, or migrate by hand |

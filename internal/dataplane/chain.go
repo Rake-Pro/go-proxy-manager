@@ -796,12 +796,18 @@ func passThroughGate(gate, next http.Handler) http.Handler {
 	if !ok {
 		return gate
 	}
+	if ig.owns == nil {
+		// An interactive gate that failed to compile: it refuses every request
+		// and has no sign-in flow to protect, so it must not step aside for a
+		// request another gate tagged.
+		return ig.Handler
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, tagged := r.Context().Value(passThroughKey{}).(http.Handler); tagged {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if ig.owns != nil && ig.owns(r.URL.Path) {
+		if ig.owns(r.URL.Path) {
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), passThroughKey{}, ig.Handler)))
 			return
 		}
