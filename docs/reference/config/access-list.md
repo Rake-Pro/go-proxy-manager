@@ -13,6 +13,8 @@ pair below is deprecated.
 | <span id="access-list-default-action"></span>  `defaultAction` | string | `allow` \| `deny` (default `deny`). |
 | <span id="access-list-geo"></span>  `geo` | AccessListGeo | Country allow/deny over the same resolved client IP (requires `GPM_GEOIP_DB`). |
 
+- **`disabled: true`** (a [common field](../../concepts/config-model.md#common-fields-every-object)) in every mode: the list exempts nobody through an `@<list>` reference in the `allowFrom` of a rate limit or a path block, so its clients are limited or blocked like anyone else. It takes effect on reload. Under `accessListsMode: any` a disabled member is also skipped ([Composing access lists](#access-list-composing)).
+
 **IPRule**
 
 | Field | Type | Notes |

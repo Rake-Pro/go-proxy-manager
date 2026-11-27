@@ -386,3 +386,200 @@ func TestCertWizardMarkers(t *testing.T) {
 		"wild ? 'wild-' + base : base",
 	)
 }
+
+// The proxy host wizard's Add waits for the Review dry run the way the
+// certificate wizard's does: same flag, same reason text, cleared only by the
+// current render's answer.
+func TestHostWizardReviewWaitsForDryRun(t *testing.T) {
+	js := loadAppJS(t)
+	wz := jsRegion(t, js, "async function runHostWizard() {", "\n}\n")
+	requireAll(t, "host wizard", wz,
+		"let reviewPending = false;",
+		"const REVIEW_WAIT = 'Wait for the server check to finish.';",
+	)
+	review := jsRegion(t, wz, "id: 'review', title: 'Review',", "\n  ];")
+	i := strings.Index(review, "\n      validate(")
+	if i < 0 {
+		t.Fatal("host wizard Review step has no validate()")
+	}
+	render, validate := review[:i], review[i:]
+	requireAll(t, "host wizard Review render", render,
+		"reviewPending = true; // Add waits for the server's answer",
+		"const answered = () => {\n          reviewPending = false;",
+		"if (el && el.textContent === REVIEW_WAIT) el.textContent = '';",
+	)
+	if n := strings.Count(render, "if (tok !== reviewSeq || !pane.isConnected) return null;\n          answered();"); n != 2 {
+		t.Errorf("both dry-run answers must call answered() right after the stale-reply check; found %d", n)
+	}
+	if n := strings.Count(render, "answered();"); n != 2 {
+		t.Errorf("answered() is called %d times in the host Review render, want 2", n)
+	}
+	requireAll(t, "host wizard Review validate", validate,
+		"if (reviewPending) return REVIEW_WAIT;",
+		"if (reviewOffline) return 'The server could not be reached. Go Back, then Next to check again.';",
+		"return reviewErr ? 'Fix the rejected step first: ' + reviewErr : '';",
+	)
+	// A failure without an HTTP status never reached the server; a 4xx stays
+	// a rejection. Same wording as the certificate wizard.
+	requireAll(t, "host wizard", wz, "let reviewOffline = false;")
+	requireAll(t, "host wizard Review render", render,
+		"reviewOffline = false;",
+		"reviewOffline = !(e && e.status);",
+		"? `<div class=\"inline-error\"><b>The server could not be reached.</b><br/>${esc(reviewErr)}. Go Back, then Next to check again.</div>`",
+		": `<div class=\"inline-error\"><b>The server rejected this host.</b><br/>${esc(reviewErr)}</div>`;",
+	)
+	// The Review wait only holds because finish() validates every step,
+	// the last one included.
+	fin := jsRegion(t, jsRegion(t, js, "function wizard(opts) {", "\n}\n"), "async function finish() {", "\n    }\n")
+	requireAll(t, "wizard finish()", fin,
+		"for (let i = 0; i < steps.length; i++) {\n        const err = steps[i].validate ? steps[i].validate(draft) : '';\n        if (err) { if (i !== cur) await show(i); setErr(err); return; }\n      }\n      nextBtn.disabled = true;")
+}
+
+// Nothing in wizard() writes markup except the known static frames: every
+// error and server message goes through setErr (textContent), and the import
+// note escapes its text.
+func TestWizardWritesNoMessageAsMarkup(t *testing.T) {
+	wz := jsRegion(t, loadAppJS(t), "function wizard(opts) {", "\n}\n")
+	allowed := map[string]bool{
+		"wrap.innerHTML = `": true,
+		"wrap.querySelector('#wz-steps').innerHTML = steps.map((st, i) => {": true,
+		"main.innerHTML = '';":                        true,
+		"main.innerHTML = `<h3>Import from YAML</h3>": true,
+		"note.innerHTML = `<div class=\"ro-banner warn\" style=\"margin:16px 0 0\"><b>${r.fullOnly ? 'Not a wizard case.' : 'Partly covered.'}</b> ${esc(r.note)}</div>": true,
+	}
+	re := regexp.MustCompile(`[^\s;{}]+\.(?:innerHTML|outerHTML)\s*\+?=|insertAdjacentHTML\(|document\.write\(`)
+	seen := 0
+	for _, loc := range re.FindAllStringIndex(wz, -1) {
+		line := wz[loc[0]:]
+		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+			line = line[:nl]
+		}
+		line = strings.TrimRight(line, " ")
+		if !allowed[line] {
+			t.Errorf("wizard() writes markup outside the known frames: %q", line)
+		}
+		seen++
+	}
+	if seen != len(allowed) {
+		t.Errorf("found %d markup writes in wizard(), want the %d known ones", seen, len(allowed))
+	}
+}
+
+// An import the server calls invalid still fills the steps (an incomplete
+// document is finished in the wizard). The verdict follows the message of the
+// step that objects, as "The pasted YAML: ..."; Review shows none of it (its dry
+// run checks the filled draft). The verdict is used nowhere else in the import
+// handler, so no form of early return on it can stop the draft being filled.
+func TestWizardImportShowsInvalidVerdict(t *testing.T) {
+	js := loadAppJS(t)
+	wz := jsRegion(t, js, "function wizard(opts) {", "\n}\n")
+	parse := jsRegion(t, wz, "main.querySelector('#wz-parse').addEventListener('click', async () => {", "\n      });")
+	landing := jsRegion(t, parse, "const landing = () => {", "\n        };")
+	decl := "const inv = r.invalid || '';"
+	requireAll(t, "wizard import", parse, decl)
+	requireAll(t, "wizard import landing", landing,
+		"const msg = !inv || err === inv ? err : `${err} The pasted YAML: ${inv}`;",
+		"if (err) { doneUpTo = i - 1; return show(i).then(() => setErr(msg)); }",
+		"doneUpTo = steps.length - 2;\n          return show(steps.length - 1);",
+	)
+	if strings.Contains(landing, "The server reports:") {
+		t.Error("the verdict is worded as if it were about the draft")
+	}
+	// Outside the landing walk the verdict is only declared: any other use of
+	// it (an early return, a refusal) would act on it before take().
+	rest := strings.Replace(strings.Replace(parse, landing, "", 1), decl, "", 1)
+	rest = regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(rest, "")
+	if m := regexp.MustCompile(`\binv\b|\.invalid\b`).FindString(rest); m != "" {
+		t.Errorf("the import handler acts on the verdict outside the landing step (%q)", m)
+	}
+	// After the walk, nothing on Review touches the error line.
+	tail := landing[strings.Index(landing, "doneUpTo = steps.length - 2;"):]
+	if strings.Contains(tail, "setErr(") {
+		t.Error("Review shows a message from the import")
+	}
+	// The draft is still replaced only by take(), and an unparseable document
+	// (the importer throws) shows its error and fills nothing.
+	requireAll(t, "wizard import", parse,
+		"const take = () => { draft = r.draft; dirty = true; return landing(); };",
+		"catch (e) { setErr(e && e.message ? e.message : String(e)); btn.disabled = false; return; }",
+	)
+	if a, b := strings.Index(parse, "catch (e) { setErr("), strings.Index(parse, "const take = () =>"); a < 0 || b < a {
+		t.Error("the importer's thrown error must return before the draft can be replaced")
+	}
+	// The verdict and every other message is text, never markup.
+	requireAll(t, "wizard()", wz, "function setErr(msg) { errEl.textContent = msg || ''; }")
+	if regexp.MustCompile(`errEl\.(innerHTML|outerHTML|insertAdjacentHTML)`).MatchString(wz) {
+		t.Error("wizard() writes the error line as markup")
+	}
+	// Both importers report the verdict under the name the wizard reads.
+	for _, fn := range []string{"async function runHostWizard() {", "async function runCertWizard() {"} {
+		requireAll(t, fn, jsRegion(t, js, fn, "\n}\n"),
+			"invalid: data.valid === false ? (data.error || 'The server could not validate this object.') : '',")
+	}
+}
+
+// An untouched save of a stored certificate without acme.challenge keeps the
+// key absent; a new certificate and a changed or stored value still write it.
+func TestCertEditorKeepsImpliedChallengeAbsent(t *testing.T) {
+	ed := certEditorJS(t, loadAppJS(t))
+	requireAll(t, "certEditor save", ed,
+		"const a = { email: $('#ct-email').value.trim() };",
+		"if (isNew || acme.challenge || ch !== challenge) a.challenge = ch;",
+		// The initial control value is the implied one for a stored certificate.
+		"const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);",
+		// dnsProvider is written only for dns-01, so the omission keeps the
+		// same effective challenge.
+		"if (ch === 'dns-01') {\n        a.dnsProvider = $('#ct-dns').value;",
+	)
+	if strings.Contains(ed, "challenge: ch }") {
+		t.Error("the save writes acme.challenge unconditionally")
+	}
+	// The implied value is the model's EffectiveChallenge: dns-01 when a DNS
+	// provider is named, else http-01.
+	requireAll(t, "certChallenge", jsRegion(t, loadAppJS(t), "function certChallenge(ct) {", "\n}\n"),
+		"if (a.challenge) return a.challenge;",
+		"return a.dnsProvider ? 'dns-01' : 'http-01';",
+	)
+}
+
+// A public CA preset with a private CA bundle warns next to the picker; the
+// bundle is never cleared for the operator.
+func TestCertEditorBundleWarning(t *testing.T) {
+	ed := certEditorJS(t, loadAppJS(t))
+	caGroup := jsRegion(t, ed, `<select class="field" id="ct-ca"`, "\n          </div>")
+	requireAll(t, "CA field group", caGroup, `<div class="hint warn" id="ct-ca-bundle-warn" hidden>`)
+	requireAll(t, "certEditor", ed,
+		// From the URL that will be written; blank is Let's Encrypt unless
+		// the picker says Custom.
+		"const url = $('#ct-dir').value.trim();\n    const ca = url ? caPresetFor(url) : preset;",
+		"$('#ct-ca-bundle-warn').hidden = ca.id === 'custom' || !$('#ct-cabundle').value.trim();",
+		"$('#ct-cabundle').addEventListener('input', bundleWarn);",
+		"$('#ct-dir').addEventListener('input', bundleWarn);",
+	)
+	if strings.Contains(ed, "$('#ct-ca-bundle-warn').hidden = preset.id === 'custom'") {
+		t.Error("the bundle warning follows the picker label, not the URL")
+	}
+	// The bundle is in the field before the load-time applyCA decides the
+	// warning, or the warning is wrong on load.
+	if fill, apply := strings.Index(ed, "$('#ct-cabundle').value = acme.caBundle || '';"), strings.Index(ed, "applyCA(preset, false);"); fill < 0 || apply < 0 || fill > apply {
+		t.Error("the CA bundle field is filled after the load-time applyCA")
+	}
+	apply := jsRegion(t, ed, "function applyCA(p, picked) {", "\n  }\n")
+	if !strings.Contains(apply, "bundleWarn();") {
+		t.Error("applyCA does not refresh the bundle warning")
+	}
+	if regexp.MustCompile(`\$\('#ct-cabundle'\)\.value\s*=\s*''`).MatchString(ed) {
+		t.Error("the editor clears the CA bundle on its own")
+	}
+}
+
+// The Files tab's cert store line is a hint inside a field group, so it takes
+// the hint size like the editor's other hints.
+func TestCertEditorFilesHintInGroup(t *testing.T) {
+	ed := certEditorJS(t, loadAppJS(t))
+	grp := jsRegion(t, ed, `<div class="field-group"><label>Certificate file</label>`, "\n          </div>")
+	requireAll(t, "Certificate file group", grp, `<div class="hint">Paths are relative to the cert store`)
+	if strings.Contains(ed, `<div class="hint" style="margin-bottom:8px">Paths are relative`) {
+		t.Error("the cert store line still sits outside a field group")
+	}
+}

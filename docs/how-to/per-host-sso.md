@@ -118,7 +118,10 @@ Full field rules for every mode are in
      ends every per-host SSO session at once.
    - **Signing key.** The key is created on first use at
      `<cert-dir>/sso_signing.key`. Set `GPM_SSO_SIGNING_KEY` only to supply
-     your own, for example the same value on both nodes of an HA pair.
+     your own, for example the same value on both nodes of an HA pair, or
+     `GPM_SSO_SIGNING_KEY_FILE` to read it from a file such as a mounted
+     secret. A non-empty file wins over `GPM_SSO_SIGNING_KEY`; an unreadable or
+     empty file stops startup.
 
 ## Verify
 
@@ -143,6 +146,7 @@ Full field rules for every mode are in
 | Everyone is denied with `403` | The groups claim is not in the ID token | gpm reads claims from the ID token; configure the IdP to include the groups claim there |
 | One user is denied with `403` | The user is in none of the mapped groups and `roleMapping.defaultRole` is empty | Add the user to a mapped group, or set `defaultRole: user` |
 | A page stops loading data after about an hour | The session expired; a background request is redirected to the IdP and the browser blocks that cross-origin answer | Reload the page; the sign-in is silent while the IdP session is alive |
+| Everyone is denied with `403` on a `forward-auth` gate and the Overview shows `a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "<idp>" gives no user a role, so every request is refused; ...` | A `forward-auth` gate admits only a user who holds a role, with or without `requiredRoles`, and the provider's `roleMapping` gives none | Map groups to roles on the provider (`roleMapping.adminGroups`, `userGroups` or `defaultRole`) |
 | Sign-in on a gated location ends on an application page for `/__gpm/oidc/callback` | The callback did not reach the gate: another location covers that path, the host carries an `auth-request` gate, or two locations use different `oidc` gates | See step 5 |
 | A write is refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` inheriting the provider type | Set `mode` explicitly, or move the network rule into an [access list](../reference/config/access-list.md) |
 | Sessions end after an hour | The per-host SSO cookie has a 1-hour absolute TTL, not a sliding window | Expected. Re-auth is silent while the IdP session is valid |

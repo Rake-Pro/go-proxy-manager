@@ -136,8 +136,24 @@ commit, no reload, no webhook, no `X-Config-Commit` header.
 - **`_parse` aliases.** Anchors, aliases and `<<` merge keys are accepted. A
   document whose aliases add more than 100,000 nodes once expanded is a `400`
   (`excessive aliasing`), checked before anything is decoded.
-- **HA followers.** Both calls are `POST`/`PUT`, so a follower answers `503`
-  like any other write.
+- **HA followers.** Both calls work on a follower, because neither writes:
+  `PUT /api/{plural}/{name}?dryRun=1` (or `dryRun=true`) and
+  `POST /api/{plural}/_parse` answer as on the leader. A real object `PUT` (no `dryRun`, `dryRun=0` or `dryRun=false`) answers `503`,
+  and so does a `PUT` with an invalid `dryRun` value (the `400` is a leader
+  answer). See [High availability](../operations/high-availability.md#1-roles).
+- **Only the object `PUT` has a dry run.** Any other write (a `POST`, `PUT`
+  or `DELETE`, for example `PUT /api/settings` or `DELETE /api/{plural}/{name}`)
+  that carries `dryRun=1`, `dryRun=true` or an unrecognised value is refused and
+  writes nothing. `dryRun=0` or `dryRun=false` is a normal write, and
+  `POST .../_parse` writes nothing and ignores the parameter.
+  - **Leader:** `400` with `{"error": "dryRun is not supported for <METHOD> <route pattern>: nothing was written; send the request without dryRun to make the change"}`,
+    where the route pattern is the routed path without the `/api` prefix (for
+    example `PUT /settings`).
+  - **HA follower:** the usual `503` read-only answer, because that guard runs
+    first. `POST /api/sessions/revoke?dryRun=1`, which a follower otherwise
+    allows, gets the `400`.
+  - **Object `PUT`, unrecognised value:** unchanged, `400` (`invalid dryRun
+    value`) on the leader and `503` on a follower.
 
 ```
 curl -s -X PUT 'https://<admin>/api/proxy-hosts/app?dryRun=1' \

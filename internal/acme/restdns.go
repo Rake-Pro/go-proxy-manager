@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/webhook"
 )
@@ -73,6 +74,10 @@ func (a *restAPI) do(ctx context.Context, method, path string, body, out any) er
 	if a.hidePath {
 		// From here on path is only used to name the call in an error.
 		path = "the configured url"
+	} else if c, mark := cutForError(path); mark != "" {
+		// A path can come from the server (a next-page link), so an error
+		// carries it cut short.
+		path = c + mark
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
@@ -116,6 +121,23 @@ func (a *restAPI) do(ctx context.Context, method, path string, body, out any) er
 		return fmt.Errorf("%s: decode %s %s response: %w", a.name, method, path, err)
 	}
 	return nil
+}
+
+// maxQuoted bounds how much of a server-supplied value an error carries: the
+// text reaches the ACME status and notifications.
+const maxQuoted = 200
+
+// cutForError returns s cut to maxQuoted bytes on a rune boundary, and the
+// marker to append after it when it was cut ("" when it was not).
+func cutForError(s string) (string, string) {
+	if len(s) <= maxQuoted {
+		return s, ""
+	}
+	i := maxQuoted
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i], fmt.Sprintf("... (cut, %d bytes in all)", len(s))
 }
 
 // apiError is a non-2xx provider response.

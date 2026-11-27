@@ -26,7 +26,12 @@ info:
 
 
     HA: on an instance running GPM_HA_ROLE=follower, every write (any POST/PUT/DELETE under /api/) answers
-    503 rather than being applied; reads are unaffected. See docs/ha.md.'
+    503 rather than being applied; reads are unaffected. Three non-GET calls only read or end this
+    instance''s own sessions, so a follower still answers them (PUT /api/{plural}/{name}?dryRun=1 (or
+    true), POST /api/{plural}/_parse and POST /api/sessions/revoke). Only PUT /api/{plural}/{name}
+    implements a dry run: any other write that carries dryRun=1, true or an unrecognised value is refused
+    with 400 and writes nothing (a follower answers 503 first, except for POST /api/sessions/revoke).
+    See docs/operations/high-availability.md.'
   license:
     name: See repository LICENSE
 servers:
@@ -444,7 +449,9 @@ components:
           type: array
           items:
             type: string
-          description: Host-wide, applied before any location-scoped ones.
+          description: 'Host-wide middleware names. Chain order is fixed by middleware type, not by list
+            position. Within one type the last-referenced name runs first, and a location''s middlewares
+            run before the host''s. See docs/concepts/request-pipeline.md#middleware-ordering.'
         accessLists:
           type: array
           items:
@@ -3489,7 +3496,8 @@ components:
   responses:
     BadRequest:
       description: Malformed request body, invalid object, or a validation error (e.g. a dangling reference,
-        a literal secret, an invalid name).
+        a literal secret, an invalid name). Also the answer to a write other than PUT /api/{plural}/{name}
+        that carries dryRun=1, true or an unrecognised value; nothing was written.
       content:
         application/json:
           schema:
@@ -3521,7 +3529,9 @@ components:
             $ref: '#/components/schemas/Error'
     FollowerReadOnly:
       description: This instance is an HA follower (GPM_HA_ROLE=follower) and refuses every write; make
-        the change on the leader.
+        the change on the leader. A PUT /api/{plural}/{name} with ?dryRun=1 (or true), POST /api/{plural}/_parse and POST
+        /api/sessions/revoke are not writes and are still answered. Any other write, with or without
+        dryRun, answers 503 here.
       content:
         application/json:
           schema:
@@ -6614,7 +6624,11 @@ paths:
     put:
       summary: Replace the application settings
       description: 'Admin scope, not settings:write: a settings write can point webhooks/dnsSync at an
-        attacker-controlled URL with a ${ENV:...} placeholder, and can rewrite adminAuth.'
+        attacker-controlled URL with a ${ENV:...} placeholder, and can rewrite adminAuth. A body equal
+        to the stored settings (defaults filled in) writes nothing and makes no commit when the config
+        repository has no uncommitted changes: the X-Config-Commit header is empty and no reload or
+        event follows. Changing appName still commits; emptying it removes the key, and it reads back
+        as the default name.'
       tags:
       - Settings
       requestBody:
@@ -6663,7 +6677,8 @@ paths:
       summary: Replace the admin UI's saved list filters
       description: Replaces only the `savedFilters` section of settings and commits. `settings:write`
         rather than admin, as the full settings write requires, because this section is inert
-        (the UI interprets a query locally; nothing resolves or dispatches).
+        (the UI interprets a query locally; nothing resolves or dispatches). A list equal to the
+        stored one makes no commit, as for the full settings write, and the X-Config-Commit header is empty.
       tags:
       - Settings
       requestBody:

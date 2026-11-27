@@ -14,7 +14,7 @@ to the page that explains the mechanism behind it.
 
 | Row | Severity | Source | Link |
 |---|---|---|---|
-| Certificate failed to renew, or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
+| Certificate has no usable certificate (ACME), could not be loaded (custom), or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
 | Certificate expires in N days | warning | `GET /api/certificates` state `expiring` (inside `min(30 days, lifetime / 3)` of expiry) | The certificate |
 | Upstream group has unhealthy members | problem | `GET /api/health` `upstreamGroups[]` | The group |
 | Ingress or Docker discovery failed | problem | `GET /api/ingress-discovery/status`, `GET /api/docker-discovery/status` `error` | Integrations |
@@ -63,6 +63,7 @@ below map each row's wording to its cause and fix.
 | `state: pending` never clears | The first ACME order has not completed or keeps failing | Read `lastError`; verify DNS-01 credentials, or that `:80` is reachable for HTTP-01 ([Certificate health](certificate-health.md)) |
 | `state: error` on a `custom` certificate | `certFile`/`keyFile` could not be read or parsed as PEM | Check the path inside the cert store and the PEM contents |
 | DNS-01 fails with `refusing to use a partial listing` | A Hetzner or deSEC listing ran past 100 pages, so the solver stopped instead of acting on part of the account | Use a token scoped to fewer zones or domains |
+| DNS-01 fails with `digitalocean: domain listing next page link ... refusing to use a partial listing` | The DigitalOcean domain listing's next-page link (quoted in the error, cut to 200 bytes) leaves `https://api.digitalocean.com` (another scheme or host), is opaque, does not parse, or has a `.` or `..` path segment; the token is only sent to the configured API | Check that nothing between gpm and the API rewrites its responses, then retry |
 | `POST .../renew` returns `409`, message names an order in flight | Another order is already running on this instance; nothing is queued | Wait and retry |
 | `POST .../renew` returns `409`, message says `retry in ...` | The certificate is inside its 1-hour renew cooldown, counted from `lastAttempt`: failed attempts start it too | Wait out the stated time; read `lastError` meanwhile ([Certificate health](certificate-health.md)) |
 | `POST .../renew` returns `400` | The certificate is `type: custom`; gpm does not renew those | Replace the file and `PUT` the object |
@@ -115,6 +116,8 @@ below map each row's wording to its cause and fix.
 | Geo rules deny everything | Geo is configured but no GeoIP database is loaded; geo fails closed | Set `GPM_GEOIP_DB`, or remove the geo rules |
 | SSO users are all denied `403` | Group claims are not in the ID token | gpm reads claims from the ID token; configure the IdP accordingly |
 | SSO users are all denied `403` and the Overview shows a config warning about `requiredRoles` | `requiredRoles` lists a group name (only `admin` and `user` are roles), or the provider's `roleMapping` gives no user a role | Use the role the group maps to, or map groups to roles on the provider ([Gate a host with SSO](../how-to/per-host-sso.md)) |
+| Config warning `<owner>: auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "<idp>" gives no user a role, so every request is refused; ...` (`<owner>` is `middleware "<n>"`, `proxy host "<h>"` or `proxy host "<h>": location "<p>"`) | A `forward-auth` gate admits only a user who holds a role, and the provider's `roleMapping` gives none | Map groups to roles on the provider: `roleMapping.adminGroups`, `userGroups` or `defaultRole` ([Gate a host with SSO](../how-to/per-host-sso.md)) |
+| Config warning `dns provider "<n>": config.<key> points at the link-local address <host>, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; ...` (`<key>` is `baseURL` for acme-dns and `url` for webhook) | `allowInsecureLocal` lets a link-local literal pass validation, but gpm never connects to one | Point `config.baseURL` (acme-dns) or `config.url` (webhook) at the service's own address ([DNSProvider](../reference/config/dns-provider.md)) |
 | Config write refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` | Set `mode` explicitly, or use an access list |
 | A LAN client is prompted for a password after migrating basic auth | The old list required both the IP and the password, so no `allowFrom` was copied | Add the CIDR to the middleware's `allowFrom` deliberately ([Migrate basic auth](../how-to/migrate-basic-auth.md)) |
 | `409` from `migrate-basic-auth` | A middleware named `<list>-basic` already exists | Rename or delete it, or migrate by hand |

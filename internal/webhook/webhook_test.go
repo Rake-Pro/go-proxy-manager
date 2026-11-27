@@ -151,7 +151,7 @@ func TestRefuseLinkLocal(t *testing.T) {
 		{"[fe80::1]:80", true},       // v6 link-local
 		{"192.0.2.10:443", false},    // ordinary target
 		{"10.0.0.5:80", false},       // private LAN receivers stay allowed
-		{"example.com:443", false},   // unresolved name: Control sees IPs, names pass
+		{"example.com:443", true},    // Control only ever sees IPs; what it cannot read is refused
 	}
 	for _, tc := range tests {
 		err := refuseLinkLocal("tcp", tc.addr, nil)

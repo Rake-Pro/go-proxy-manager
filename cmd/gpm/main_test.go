@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/auth"
 	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
@@ -198,5 +202,95 @@ func TestAdminEdgeHopUntrusted(t *testing.T) {
 	clientip.SetTrusted([]string{"127.0.0.1/32", "::1/128"})
 	if adminEdgeHopUntrusted(on, ":8081") {
 		t.Fatal("a trusted loopback hop must not be reported")
+	}
+}
+
+// GPM_SSO_SIGNING_KEY_FILE follows the other _FILE secrets: a named file that
+// cannot be read or holds only whitespace is a startup error, never a silent
+// fall back to a generated key; a readable file wins over the plain variable;
+// and with neither set an empty key is handed over, which leaves the data
+// plane's own resolution in charge.
+func TestSSOSigningKeyFileFailsStartup(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	good := filepath.Join(dir, "key")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(good, []byte("k3y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		file, plain string
+		wantErr     bool
+		want        string
+	}{
+		{"", "", false, ""},
+		{"", "pl4in", false, "pl4in"},
+		{filepath.Join(dir, "missing"), "pl4in", true, ""},
+		{empty, "pl4in", true, ""},
+		{good, "", false, "k3y"},
+		{good, "pl4in", false, "k3y"},
+	} {
+		t.Setenv("GPM_SSO_SIGNING_KEY_FILE", tc.file)
+		t.Setenv("GPM_SSO_SIGNING_KEY", tc.plain)
+		got, called := "", false
+		err := applySSOSigningKey(func(k string) { got, called = k, true })
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("file=%q plain=%q: err = %v, wantErr %v", tc.file, tc.plain, err, tc.wantErr)
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "GPM_SSO_SIGNING_KEY_FILE") {
+				t.Fatalf("error %q does not name GPM_SSO_SIGNING_KEY_FILE", err)
+			}
+			if called {
+				t.Fatalf("file=%q: a key was handed over despite the error", tc.file)
+			}
+			continue
+		}
+		if !called || got != tc.want {
+			t.Fatalf("file=%q plain=%q: handed over %q (called %v), want %q", tc.file, tc.plain, got, called, tc.want)
+		}
+	}
+}
+
+// main stops at startup, with the SSO key message, when the key file is
+// unreadable. The child runs main itself; -ha-role is invalid so that a main
+// which did not check the key fails at the next fatal check instead of
+// starting listeners.
+func TestMainRefusesUnreadableSSOKeyFile(t *testing.T) {
+	if os.Getenv("GPM_TEST_RUN_MAIN") == "1" {
+		os.Args = []string{"gpm", "-ha-role", "not-a-role"}
+		main()
+		return
+	}
+	for _, tc := range []struct {
+		file, want string
+	}{
+		{filepath.Join(t.TempDir(), "missing"), "SSO signing key file is unreadable or empty"},
+		{"", "invalid HA role"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMainRefusesUnreadableSSOKeyFile$")
+		// Only the GPM_ variables this test sets: the caller's own (a log
+		// level, a TOTP secret, a _FILE naming a FIFO) must not decide it.
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "GPM_") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		cmd.Env = append(cmd.Env, "GPM_TEST_RUN_MAIN=1", "GPM_SSO_SIGNING_KEY_FILE="+tc.file)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+			t.Fatalf("file=%q: main did not exit with an error (err %v):\n%s", tc.file, err, out)
+		}
+		if !strings.Contains(string(out), tc.want) {
+			t.Fatalf("file=%q: output lacks %q:\n%s", tc.file, tc.want, out)
+		}
+		if tc.file != "" && strings.Contains(string(out), "invalid HA role") {
+			t.Fatalf("main went past the SSO key check:\n%s", out)
+		}
 	}
 }

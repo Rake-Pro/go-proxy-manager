@@ -87,6 +87,14 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 		return zone, nil
 	}
 
+	base, err := url.Parse(s.api.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("digitalocean: api base url: %w", err)
+	}
+	// restAPI.do puts the base URL (path included) in front of every path,
+	// so a next link must lie under the base path, which is then dropped.
+	basePath := base.EscapedPath()
+
 	var names []string
 	// Page through the domain list; the API caps per_page at 200.
 	path := "/v2/domains?per_page=200"
@@ -105,14 +113,31 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 		if page >= doMaxPages {
 			return "", fmt.Errorf("digitalocean: domain listing still has a next page after %d requests; refusing to use a partial listing", doMaxPages)
 		}
-		u, err := url.Parse(next)
-		// Only the path and query of the next link are used, so the request
-		// stays on the configured API base; an opaque or relative link ends
-		// the paging.
-		if err != nil || u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
-			break
+		// A relative link resolves against the page that carried it. Only the
+		// path and query are used, so the request (and the token with it) stays
+		// on the configured API base; a link that leaves it is refused rather
+		// than followed or dropped, since a partial listing can miss the zone.
+		// The link comes from the server, so errors quote it cut short.
+		cur, err := url.Parse(s.api.baseURL + path)
+		if err != nil {
+			return "", fmt.Errorf("digitalocean: domain listing: %w", err)
 		}
-		path = u.EscapedPath()
+		u, err := cur.Parse(next)
+		switch {
+		case err != nil:
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s does not parse as a URL; refusing to use a partial listing", quoteCut(next))
+		case u.Opaque != "":
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s is opaque, not a URL on the API; refusing to use a partial listing", quoteCut(next))
+		case u.Scheme != cur.Scheme:
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s uses scheme %s, not the API's %q; the API token is only sent to the configured API, refusing to use a partial listing", quoteCut(next), quoteCut(u.Scheme), cur.Scheme)
+		case !strings.EqualFold(u.Host, cur.Host):
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s points at host %s, not the API host %q; the API token is only sent to the configured API, refusing to use a partial listing", quoteCut(next), quoteCut(u.Host), cur.Host)
+		case hasDotSegment(u.Path):
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s has a \".\" or \"..\" path segment, which a server may resolve outside the API path; the API token is only sent to the configured API, refusing to use a partial listing", quoteCut(next))
+		case basePath != "" && !strings.HasPrefix(u.EscapedPath(), basePath+"/"):
+			return "", fmt.Errorf("digitalocean: domain listing next page link %s is outside the API base path %q; the API token is only sent to the configured API, refusing to use a partial listing", quoteCut(next), basePath)
+		}
+		path = strings.TrimPrefix(u.EscapedPath(), basePath)
 		if u.RawQuery != "" {
 			path += "?" + u.RawQuery
 		}
@@ -126,6 +151,25 @@ func (s *DigitalOceanSolver) zoneFor(ctx context.Context, name string) (string, 
 	s.zones[name] = zone
 	s.mu.Unlock()
 	return zone, nil
+}
+
+// hasDotSegment reports whether the decoded path p has a "." or ".." segment.
+// Resolving a link removes literal ones; an escaped one (%2e%2e) is left in
+// the path and sent as it is.
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// quoteCut returns s quoted with %q, cut by cutForError with the cut marked
+// after the closing quote.
+func quoteCut(s string) string {
+	c, mark := cutForError(s)
+	return strconv.Quote(c) + mark
 }
 
 // Present adds a TXT record at name with the given value.

@@ -1625,3 +1625,105 @@ func TestSaveNoOpIgnoresFormatting(t *testing.T) {
 		t.Fatalf("sha=%q commits=%d, want no commit over %d", sha, gitCount(t, st.dir), n0)
 	}
 }
+
+// An unchanged settings write is a no-op only on a clean tree. On a dirty one
+// (here a hand edit of settings.yaml not yet committed) it goes through as any
+// settings write does: the file is written and the whole working tree is
+// committed, hand edit included, so the store is clean again afterwards.
+func TestSaveSettingsUnchangedOnADirtyTreeCommits(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	_, s, err := st.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.AppName = "Edge"
+	b, err := yaml.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir(), settingsFile), b, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := st.Head(ctx)
+	_, loaded, err := st.Load(ctx)
+	if err != nil || loaded.AppName != "Edge" {
+		t.Fatalf("load of the hand edit: %q, %v", loaded.AppName, err)
+	}
+	sha, err := st.SaveSettings(ctx, loaded, Author{})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if sha == "" || sha == head {
+		t.Fatalf("an unchanged write on a dirty tree made no commit (sha %q, head %q)", sha, head)
+	}
+	if clean, err := st.git.IsClean(ctx); err != nil || !clean {
+		t.Fatalf("tree after the write: clean=%v err=%v, want clean", clean, err)
+	}
+	if _, after, _ := st.Load(ctx); after.AppName != "Edge" {
+		t.Fatalf("committed appName = %q, want Edge", after.AppName)
+	}
+}
+
+// Stored settings that the settings write refuses (made so out of band, by
+// removing an object they name) still get that refusal on an identical write:
+// the unchanged check comes after the validations, never instead of them.
+func TestSaveSettingsUnchangedStillRefusesAStoredBadState(t *testing.T) {
+	ctx := context.Background()
+	author := Author{Name: "admin", Email: "admin@example.com"}
+	oidc := model.IdentityProvider{
+		ObjectMeta: model.ObjectMeta{Name: "idp"},
+		Type:       model.IdPTypeOIDC,
+		OIDC:       &model.OIDCSpec{IssuerURL: "https://idp.example.com", ClientID: "gpm"},
+	}
+	office := model.AccessList{ObjectMeta: model.ObjectMeta{Name: "office"}, DefaultAction: model.ActionDeny,
+		Rules: []model.IPRule{{CIDR: "192.0.2.0/24", Action: model.ActionAllow}}}
+	cases := []struct {
+		name   string
+		obj    model.Object
+		file   string
+		mutate func(*model.Settings)
+		want   string
+	}{
+		{"pathBlock names a removed list", office, "access-lists/office.yaml", func(s *model.Settings) {
+			s.PathBlock = &model.PathBlockMiddleware{Extensions: []string{".php"}, AllowFrom: []string{"@office"}}
+		}, `pathBlock.allowFrom: references unknown accessList "office"`},
+		{"ssoOnly names a removed provider", oidc, "identity-providers/idp.yaml", func(s *model.Settings) {
+			s.AdminAuth = model.AdminAuthSettings{Providers: []string{"idp"}, SSOOnly: true}
+		}, "does not exist"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			if _, err := st.Save(ctx, tc.obj, author); err != nil {
+				t.Fatal(err)
+			}
+			_, s, err := st.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&s)
+			if _, err := st.SaveSettings(ctx, s, author); err != nil {
+				t.Fatalf("seed settings: %v", err)
+			}
+			if err := os.Remove(filepath.Join(st.Dir(), filepath.FromSlash(tc.file))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.git.CommitAll(ctx, "out of band", Author{}); err != nil {
+				t.Fatal(err)
+			}
+			head, _ := st.Head(ctx)
+			_, stored, err := st.Load(ctx)
+			if err != nil {
+				t.Fatalf("the stored state must still load: %v", err)
+			}
+			sha, err := st.SaveSettings(ctx, stored, author)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("identical write: sha %q, err %v; want the refusal %q", sha, err, tc.want)
+			}
+			if now, _ := st.Head(ctx); now != head {
+				t.Fatal("a refused write moved HEAD")
+			}
+		})
+	}
+}

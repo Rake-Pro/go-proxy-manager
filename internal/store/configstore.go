@@ -995,6 +995,10 @@ type fileState struct {
 	path   string
 	data   []byte
 	exists bool
+	// link is the target of a symbolic link at path (a link inside the config
+	// dir, see readInDir). A write replaces such a link and a delete removes
+	// it, so the undo has to put the link back, not a copy of its file.
+	link string
 }
 
 // snapshotFile captures a file's current contents (or its absence).
@@ -1006,7 +1010,13 @@ func snapshotFile(root, path string) (fileState, error) {
 		}
 		return fileState{}, err
 	}
-	return fileState{path: path, data: b, exists: true}, nil
+	f := fileState{path: path, data: b, exists: true}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if f.link, err = os.Readlink(path); err != nil {
+			return fileState{}, err
+		}
+	}
+	return f, nil
 }
 
 // restoreFiles puts every snapshotted path back the way it was. It is a
@@ -1014,7 +1024,9 @@ func snapshotFile(root, path string) (fileState, error) {
 func restoreFiles(snaps []fileState) {
 	for _, f := range snaps {
 		var err error
-		if f.exists {
+		if f.link != "" {
+			err = restoreLink(f)
+		} else if f.exists {
 			err = os.WriteFile(f.path, f.data, 0o640)
 		} else if err = os.Remove(f.path); os.IsNotExist(err) {
 			err = nil
@@ -1024,6 +1036,34 @@ func restoreFiles(snaps []fileState) {
 				Msg("config store: could not roll back a failed batch; the working tree may hold uncommitted changes")
 		}
 	}
+}
+
+// restoreLink puts the link f held back at f.path. The link's target was never
+// written (writes replace the link), so only the link itself comes back. It is
+// created under a temporary name in the same directory and renamed over what
+// the write left at the path, so the path is never left empty: a gap there
+// would be committed by the next writer as the object's deletion.
+func restoreLink(f fileState) error {
+	if cur, err := os.Readlink(f.path); err == nil && cur == f.link {
+		return nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(f.path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	tmp.Close()
+	if err := os.Remove(name); err != nil {
+		return err
+	}
+	if err := symlinkFile(f.link, name); err != nil {
+		return err
+	}
+	if err := os.Rename(name, f.path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // ApplyBatch writes every object in upserts and removes every object named in
@@ -1076,6 +1116,7 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 	collisions := domainKeyOwners(cfg, settings)
 	storedPages := cfg.ErrorPagesByHost()
 	invalid := cfg.InvalidDomains()
+	refsOK := discoveryRefs(cfg, settings) == nil
 	// The stored objects a delete names, captured for the guard before
 	// withObject below can overwrite cfg's shared backing arrays.
 	delExisting := map[ObjectRef]model.Object{}
@@ -1170,6 +1211,9 @@ func (s *Store) ApplyBatch(ctx context.Context, upserts []model.Object, deletes 
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := checkAdminEdge(merged, settings); err != nil {
+		return "", fmt.Errorf("batch validation failed: %w", err)
+	}
+	if err := checkDiscoveryRefs(refsOK, merged, settings); err != nil {
 		return "", fmt.Errorf("batch validation failed: %w", err)
 	}
 	if err := s.checkGeoAvailable(merged); err != nil {
@@ -1638,6 +1682,17 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 	if settings.SchemaVersion == 0 {
 		settings.SchemaVersion = model.SchemaVersion
 	}
+	// Settings equal to the stored ones as loaded (defaults filled in) write and
+	// commit nothing, so a GET then PUT of the same body is a no-op even when
+	// settings.yaml leaves a defaulted key such as appName out. Only on a clean
+	// tree, as in save.
+	if a, err := yaml.Marshal(settings); err == nil {
+		if b, err := yaml.Marshal(curSettings); err == nil && bytes.Equal(a, b) {
+			if clean, err := s.git.IsClean(ctx); err == nil && clean {
+				return "", nil
+			}
+		}
+	}
 	path := filepath.Join(s.dir, settingsFile)
 	snap, err := snapshotFile(s.dir, path)
 	if err != nil {
@@ -1922,7 +1977,8 @@ func (k kindFiles) strays(name string) (strays []string, occupant string) {
 
 // sameFile reports whether a and b name one file, as the file system says
 // after a stat. removeFile removes a stray file. Both are variables so a test
-// can stand in for a case-insensitive file system.
+// can stand in for a case-insensitive file system. symlinkFile creates the
+// link restoreLink puts back, a variable so a test can make it fail.
 var (
 	sameFile = func(a, b string) bool {
 		ai, err := os.Stat(a)
@@ -1932,7 +1988,8 @@ var (
 		bi, err := os.Stat(b)
 		return err == nil && os.SameFile(ai, bi)
 	}
-	removeFile = os.Remove
+	removeFile  = os.Remove
+	symlinkFile = os.Symlink
 )
 
 // batchStraysLocked collects the strays of every object a write stores. A file

@@ -221,6 +221,14 @@ All notable changes to go-proxy-manager are documented here. The format follows
 - Docker discovery `allowLinkLocal` (default `false`): accept a container
   whose address is link-local, as before this release (#172).
 - OpenAPI documents `settings.dockerDiscovery`.
+- `GPM_SSO_SIGNING_KEY_FILE` (#172): the path of a file holding the per-host
+  SSO signing key, read at startup like the other `_FILE` secrets. A non-empty
+  file wins over `GPM_SSO_SIGNING_KEY`; an unreadable or empty file stops
+  startup instead of signing every SSO user out with a generated key.
+- More config warnings (#172), both loading and behaving as before: a
+  `forward-auth` gate whose provider maps no role (every request is refused),
+  and a DNS provider with `allowInsecureLocal` whose `baseURL` or `url` is a
+  link-local address (every DNS-01 challenge fails).
 
 ### Security
 
@@ -523,6 +531,25 @@ vulnerability:
   `allowFrom` exemptions), wherever they sit in the run order. Other `oidc` /
   `auth-request` gates that run after it still step aside there, so a sign-in
   flow never waits on a gate that runs after it (#172).
+- A write that asked for a dry run could commit (#172): `dryRun` was ignored
+  on every route except the object `PUT /api/{plural}/{name}`, so
+  `PUT /api/settings?dryRun=1` committed (also on an HA follower) and
+  `DELETE /api/{plural}/{name}?dryRun=1` deleted. Any other write carrying
+  `dryRun=1`, `true` or an unrecognised value is now refused with `400` and
+  writes nothing (an HA follower answers its usual `503`, except
+  `POST /api/sessions/revoke?dryRun=1`, which gets the `400`). `dryRun=0` or
+  `false` is a normal write.
+- Outbound link-local guard (#172): gpm refuses to connect to link-local
+  addresses (`169.254.0.0/16`, `fe80::/10`, link-local multicast) from the
+  bouncer, webhook and notification targets, the acme-dns, webhook,
+  DigitalOcean, Hetzner and deSEC DNS-01 solvers, Kubernetes and Docker
+  discovery, and DNS sync. An IPv4-mapped link-local literal written with a
+  zone, for example `[::ffff:169.254.169.254%25eth0]`, got past the guard; the
+  zone is now ignored when deciding, and a destination the guard cannot read is
+  refused. Unix socket paths (Docker) are unaffected.
+- A disabled access list no longer exempts anyone through an `@<list>`
+  reference in a rate limit's or path block's `allowFrom` (#172), as it already
+  granted nothing under `accessListsMode: any`. Takes effect on reload.
 
 - `POST /api/certificates/{name}/revert` needs the `admin` scope (it was
   `certificates:write`), like the middleware revert: a revert restores a stored
@@ -644,6 +671,26 @@ vulnerability:
   `dockerDiscovery.allowLinkLocal: true` restores the previous behaviour
   (#172).
 - Restore logs each symbolic-link or hard-link archive entry it skips.
+- `PUT /api/settings` and `PUT /api/settings/saved-filters` with settings equal
+  to the stored ones write nothing and make no commit (#172) when the config
+  repository has no uncommitted changes: `X-Config-Commit` is empty and no
+  reload or event fires. An unchanged save no longer adds the
+  default `appName` to a `settings.yaml` that leaves it out, or reformats a
+  hand-edited file.
+- Admin UI (#172): Overview does not offer the first-time setup card when the
+  counts could not be read and shows "Could not read proxy hosts" under Needs
+  attention when that read fails. A custom certificate in error reads "could
+  not be loaded" and an ACME one "has no usable certificate" (never issued, or
+  its stored certificate cannot be read); expiry reads "expires today", "expires tomorrow" or "expires in 1
+  day", and one that ended less than a day ago "expired today" or "expired
+  yesterday". Pressing **Add** on the proxy host wizard's Review step before
+  the server check has answered shows "Wait for the server check to finish.",
+  and Review says so, with how to retry (Back, then Next), when the server
+  cannot be reached. **Import from YAML** still fills the steps when the server
+  reports the document invalid, and shows the server's message after the
+  step's own at a step that objects. The certificate editor warns while a
+  private `acme.caBundle` is set and the directory URL that will be written is
+  a public CA (or blank with a preset picked).
 
 ### Fixed
 
@@ -772,6 +819,39 @@ vulnerability:
   an error instead of being matched against a partial list.
 - The admin UI says that webhook and notification URLs accept `${ENV:...}` /
   `${FILE:...}` placeholders.
+- Rate limit (#172): clients with a zoned IPv6 address (an IPv6 link-local
+  peer such as `fe80::1%eth0`) no longer share one bucket with every other such
+  client; each network interface has its own bucket, shared by every such peer
+  on it. Access lists and `allowFrom` still treat such a client as having no
+  address.
+- Debug headers (#172): `X-GPM-Upstream` is no longer sent when a gate serves
+  its own path (the sign-in callback, the outpost `pathPrefix`), because the
+  upstream is not contacted. A refusal by a tier that runs before the gate on
+  that path (rate limit, path block, access list, bouncer, an outer auth gate)
+  still carries it.
+- Analytics (#172): a request in flight while analytics is switched on is
+  recorded under its host, not the unknown-host label.
+- Config store (#172): when a write's commit fails, a symbolic link the write
+  replaced or removed comes back as the same link, and its target file is never
+  written.
+- DigitalOcean DNS-01 (#172): a relative next-page link in the domain listing
+  is followed. A link that leaves `https://api.digitalocean.com` (another
+  scheme or host), is opaque, does not parse, or has a `.` or `..` path segment
+  fails the challenge with an error that ends `refusing to use a partial
+  listing`. Before, a relative, opaque or unparseable link ended the listing
+  early, and a link to another host was followed on the API host with its path
+  and query.
+- Config store (#172): the batch write path (discovery batches use it, but
+  they only write derived proxy hosts and are not affected) now runs the same
+  settings reference check as single writes: a batch is refused when it leaves a
+  discovery template, a profile or `settings.pathBlock.allowFrom` naming a
+  missing or unusable object. A stored config that already fails the check
+  still accepts the batch, with a log warning.
+- Admin UI (#172): saving the Ingress discovery template keeps the `upstream`
+  keys the form has no control for (`path`, `hostHeader`), and saving the
+  Docker one keeps `upstream` and `upstreamGroupRef`. An untouched certificate
+  save no longer writes an implied `acme.challenge`. A `?query` on the address
+  no longer breaks tab selection in Settings and Integrations.
 
 ## [2.5.0] - 2026-10-20
 

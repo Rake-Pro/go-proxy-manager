@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -788,4 +789,111 @@ func TestRateLimitScopeHostSharedAcrossLocations(t *testing.T) {
 			t.Fatalf("%s/b after an unrelated reload: %d, want 429 (shared budget kept)", host, got)
 		}
 	}
+}
+
+// TestRateLimitZonedPeerOwnBucket proves a peer whose address carries a zone
+// ("[fe80::1%eth0]:port"), which parses to no client IP, gets the bucket of its
+// zone (one per interface) instead of the bucket shared by every unresolvable
+// peer, that rotating its self-assigned address inside the zone, at any
+// ipv6Prefix, never earns a fresh bucket, and that an access list still denies
+// it.
+func TestRateLimitZonedPeerOwnBucket(t *testing.T) {
+	for _, bits := range []int{0, model.MinRateLimitIPv6Prefix} {
+		cfg := model.Config{
+			Middlewares: []model.Middleware{{
+				ObjectMeta: model.ObjectMeta{Name: "rl"},
+				Type:       model.MWTypeRateLimit,
+				RateLimit:  &model.RateLimitMiddleware{RequestsPerSecond: 0.001, Burst: 2, IPv6Prefix: bits},
+			}},
+			AccessLists: []model.AccessList{{
+				ObjectMeta:    model.ObjectMeta{Name: "allow-all"},
+				Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "::/0"}, {Action: model.ActionAllow, CIDR: "0.0.0.0/0"}},
+				DefaultAction: model.ActionAllow,
+			}},
+		}
+		reg := buildRegistry(cfg)
+		h := buildChain(okHandler(), model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "app"}, Middlewares: []string{"rl"}}, reg, nil)
+		serve := func(remote string, want int) {
+			t.Helper()
+			if rec := serveRL(h, remote, "http://app/"); rec.Code != want {
+				t.Fatalf("ipv6Prefix=%d: %s: got %d, want %d", bits, remote, rec.Code, want)
+			}
+		}
+
+		// One peer rotating its source through fe80::/10 in one zone: the
+		// burst of 2, then 429 whatever address it picks.
+		for i := 0; i < 50; i++ {
+			want := http.StatusOK
+			if i >= 2 {
+				want = http.StatusTooManyRequests
+			}
+			serve(fmt.Sprintf("[fe80:0:0:%x::1%%eth0]:1", i), want)
+		}
+		serve("[fe80::1%eth1]:1", http.StatusOK) // another interface has its own bucket
+		serve("[fe80::1%eth1]:2", http.StatusOK)
+		serve("[fe80::1%eth1]:3", http.StatusTooManyRequests)
+		// An interface may be named like an address; its zone's bucket is
+		// still not that client's bucket.
+		serve("[fe80::1%192.0.2.7]:1", http.StatusOK)
+		serve("[fe80::1%192.0.2.7]:2", http.StatusOK)
+		serve("192.0.2.7:1", http.StatusOK)
+		// A peer without a zone that parses to no address (the zone branch is
+		// reached, the port splits off) still shares the old nil bucket, and
+		// the zones did not touch it.
+		serve("not-an-address:1", http.StatusOK)
+		serve("also-not-an-address:1", http.StatusOK)
+		serve("third-not-an-address:1", http.StatusTooManyRequests)
+
+		// Access lists keep denying a client without a parsed address.
+		al := buildChain(okHandler(), model.ProxyHost{ObjectMeta: model.ObjectMeta{Name: "app"}, AccessLists: []string{"allow-all"}}, reg, nil)
+		if rec := serveRL(al, "[fe80::1%eth0]:1", "http://app/"); rec.Code != http.StatusForbidden {
+			t.Fatalf("access list on a zoned peer: got %d, want 403", rec.Code)
+		}
+	}
+}
+
+// TestDisabledAccessListExemptsNobody proves an "@<list>" allowFrom entry
+// naming a disabled list exempts nobody, from a rate limit and from a path
+// block alike, and that toggling the list takes effect on the next reload.
+func TestDisabledAccessListExemptsNobody(t *testing.T) {
+	upstream := chainStateUpstream(t)
+	mk := func(disabled bool) model.Config {
+		return model.Config{
+			AccessLists: []model.AccessList{{
+				ObjectMeta:    model.ObjectMeta{Name: "lan", Disabled: disabled},
+				Rules:         []model.IPRule{{Action: model.ActionAllow, CIDR: "203.0.113.0/24"}},
+				DefaultAction: model.ActionDeny,
+			}},
+			Middlewares: []model.Middleware{{
+				ObjectMeta: model.ObjectMeta{Name: "block"},
+				Type:       model.MWTypePathBlock,
+				PathBlock:  &model.PathBlockMiddleware{Names: []string{".env"}, AllowFrom: []string{"@lan"}},
+			}},
+			ProxyHosts: []model.ProxyHost{{
+				ObjectMeta: model.ObjectMeta{Name: "app"}, Domains: []string{"app.example.com"}, Upstream: upstream,
+				Middlewares: []string{"block"},
+				RateLimit:   &model.RateLimitMiddleware{RequestsPerSecond: 0.001, Burst: 1, AllowFrom: []string{"@lan"}},
+			}},
+		}
+	}
+	s := New(Config{})
+	check := func(disabled bool) {
+		t.Helper()
+		if err := s.Reload(mk(disabled)); err != nil {
+			t.Fatal(err)
+		}
+		wantBlock, wantSecond := http.StatusOK, http.StatusOK
+		if disabled {
+			wantBlock, wantSecond = http.StatusNotFound, http.StatusTooManyRequests
+		}
+		if got := chainStateDo(s.dispatchHTTP, "app.example.com", "/.env", ""); got != wantBlock {
+			t.Fatalf("disabled=%v: blocked path -> %d, want %d", disabled, got, wantBlock)
+		}
+		if got := chainStateDo(s.dispatchHTTP, "app.example.com", "/", ""); got != wantSecond {
+			t.Fatalf("disabled=%v: request after the burst -> %d, want %d", disabled, got, wantSecond)
+		}
+	}
+	check(false)
+	check(true)
+	check(false)
 }

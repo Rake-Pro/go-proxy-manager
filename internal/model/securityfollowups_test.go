@@ -198,3 +198,87 @@ func TestConfigWarningsRequiredRoles(t *testing.T) {
 		}
 	}
 }
+
+// A forward-auth gate admits only a user the provider's roleMapping gives a
+// role, so on a provider that maps no role it refuses every request even
+// without requiredRoles. Warned, never refused at load.
+func TestConfigWarningsForwardAuthWithoutRoleMapping(t *testing.T) {
+	fa := func(name string, rm *RoleMapping) IdentityProvider {
+		return IdentityProvider{ObjectMeta: ObjectMeta{Name: name}, Type: IdPTypeForwardAuth, RoleMapping: rm,
+			ForwardAuth: &ForwardAuthSpec{TrustedProxies: []string{"192.0.2.0/24"}, UserHeader: "X-User"}}
+	}
+	cfg := Config{
+		IdentityProviders: []IdentityProvider{
+			fa("mapped", &RoleMapping{DefaultRole: "user"}),
+			fa("unmapped", nil),
+			fa("empty-map", &RoleMapping{}),
+		},
+		Middlewares: []Middleware{
+			{ObjectMeta: ObjectMeta{Name: "fa-unmapped"}, Type: MWTypeAuth, Auth: &AuthMiddleware{IdentityProvider: "unmapped", Mode: AuthModeForwardAuth}},
+			{ObjectMeta: ObjectMeta{Name: "fa-ok"}, Type: MWTypeAuth, Auth: &AuthMiddleware{IdentityProvider: "mapped", Mode: AuthModeForwardAuth}},
+		},
+		ProxyHosts: []ProxyHost{
+			// Mode left unset: forward-auth comes from the provider type.
+			proxyHost("inline", func(h *ProxyHost) { h.Auth = &AuthMiddleware{IdentityProvider: "empty-map"} }),
+			proxyHost("scoped", func(h *ProxyHost) {
+				h.Locations = []Location{{Path: "/admin", Auth: &AuthMiddleware{IdentityProvider: "unmapped", Mode: AuthModeForwardAuth}}}
+			}),
+			proxyHost("clean", func(h *ProxyHost) { h.Auth = &AuthMiddleware{IdentityProvider: "mapped"} }),
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the config must still load: %v", err)
+	}
+	got := cfg.Warnings()
+	want := []string{
+		`middleware "fa-unmapped": auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "unmapped" gives no user a role, so every request is refused; map groups to roles on the provider (roleMapping.adminGroups, userGroups or defaultRole)`,
+		`proxy host "inline": auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "empty-map" gives no user a role, so every request is refused; map groups to roles on the provider (roleMapping.adminGroups, userGroups or defaultRole)`,
+		`proxy host "scoped": location "/admin": auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "unmapped" gives no user a role, so every request is refused; map groups to roles on the provider (roleMapping.adminGroups, userGroups or defaultRole)`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// With allowInsecureLocal set, a DNS provider URL whose host is an address
+// literal the outbound client's dial guard refuses (link-local unicast or
+// multicast, IPv4-mapped included) still loads and is warned about. Every
+// literal the guard lets through, a hostname and a placeholder are not.
+func TestConfigWarningsAllowInsecureLocalDialRefused(t *testing.T) {
+	acme := func(name, base string) DNSProvider {
+		return DNSProvider{ObjectMeta: ObjectMeta{Name: name}, Provider: DNSProviderACMEDNS, Config: map[string]Secret{
+			"baseURL": Secret(base), "username": "u", "password": "p", "subdomain": "s", "allowInsecureLocal": "true"}}
+	}
+	hook := func(name, raw string) DNSProvider {
+		return DNSProvider{ObjectMeta: ObjectMeta{Name: name}, Provider: DNSProviderWebhook, Config: map[string]Secret{
+			"url": Secret(raw), "token": "t", "allowInsecureLocal": "yes"}}
+	}
+	cfg := Config{DNSProviders: []DNSProvider{
+		acme("metadata", "http://169.254.169.254/"),
+		hook("zoned", "https://[fe80::1%25eth0]:8443/hook"),
+		acme("mapped", "http://[::ffff:169.254.1.1]:8053"),
+		hook("mdns", "http://224.0.0.251/"),
+		hook("v6-multicast", "http://[ff02::fb]/"),
+		// The dial guard lets these through, so no warning.
+		acme("loopback", "http://127.0.0.1:8053"),
+		hook("unspecified", "http://0.0.0.0:8080/"),
+		hook("multicast", "http://239.1.1.1/"),
+		acme("name", "https://acme-dns.example.com"),
+		acme("placeholder", "${ENV:GPM_TEST_ACME_DNS_URL}"),
+		{ObjectMeta: ObjectMeta{Name: "flag-off"}, Provider: DNSProviderWebhook, Config: map[string]Secret{"url": "https://192.0.2.10/hook", "token": "t"}},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the config must still load: %v", err)
+	}
+	got := cfg.Warnings()
+	want := []string{
+		`dns provider "metadata": config.baseURL points at the link-local address 169.254.169.254, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.baseURL at the service's own address`,
+		`dns provider "zoned": config.url points at the link-local address fe80::1%eth0, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.url at the service's own address`,
+		`dns provider "mapped": config.baseURL points at the link-local address ::ffff:169.254.1.1, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.baseURL at the service's own address`,
+		`dns provider "mdns": config.url points at the link-local address 224.0.0.251, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.url at the service's own address`,
+		`dns provider "v6-multicast": config.url points at the link-local address ff02::fb, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.url at the service's own address`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}

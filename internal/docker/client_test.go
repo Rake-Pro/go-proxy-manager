@@ -310,7 +310,6 @@ func TestRefuseLinkLocal(t *testing.T) {
 		{"private IPv4 is allowed", "10.0.0.5:2375", false},
 		{"public IPv4 is allowed", "203.0.113.5:2375", false},
 		{"host with no port falls back to the whole address", "169.254.169.254", true},
-		{"unparseable address is not refused (nothing to compare)", "docker.example.com:2375", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

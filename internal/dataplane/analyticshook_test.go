@@ -100,3 +100,45 @@ func guardSpec(t *testing.T) model.GuardMiddleware {
 		{Paths: []string{"/wp-login.php"}},
 	}}
 }
+
+// switchingOnSink is inactive on its first Active call and active afterwards:
+// analytics switched on while a request is in flight.
+type switchingOnSink struct {
+	fakeSink
+	calls int
+}
+
+func (f *switchingOnSink) Active() bool {
+	f.calls++
+	return f.calls > 1
+}
+
+// The host label of an analytics event comes from the same read of the
+// collector state as the decision to record it, so a request in flight while
+// analytics is switched on is never recorded under the unknown-host label.
+func TestObserveHostLabelReadsAnalyticsStateOnce(t *testing.T) {
+	sink := &switchingOnSink{}
+	SetAnalyticsSink(sink)
+	t.Cleanup(func() { SetAnalyticsSink(nil) })
+
+	s := New(Config{})
+	if err := s.Reload(model.Config{ProxyHosts: []model.ProxyHost{{
+		ObjectMeta: model.ObjectMeta{Name: "app"}, Domains: []string{"app.example.com"}, Upstream: chainStateUpstream(t),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	h := s.observe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "http://app.example.com/", nil)
+		req.RemoteAddr = "203.0.113.9:4000"
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if len(sink.events) == 0 {
+		t.Fatal("no event recorded once analytics was on")
+	}
+	for _, ev := range sink.events {
+		if ev.Host != "app" {
+			t.Errorf("event host = %q, want %q", ev.Host, "app")
+		}
+	}
+}
