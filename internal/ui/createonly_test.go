@@ -147,7 +147,6 @@ func TestListsAndShellBatchMarkers(t *testing.T) {
 		"{ key: 'upstream', label: 'Upstream', cls: 'col-upstream hide-sm hide-md' },",
 		`<table class="hosts-table">`,
 		"Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance",
-		", ${maintHosts.length} in maintenance",
 		"domainFirst: true,",
 		"if (v == null || typeof v === 'boolean') return;",
 		"aria-controls=\"tok-form\"",

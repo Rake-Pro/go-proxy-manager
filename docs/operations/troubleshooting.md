@@ -5,12 +5,12 @@ to the page that explains the mechanism behind it.
 
 ## Start at the Overview
 
-The admin panel's Overview page is a single "Needs attention" list, refreshed
-on every visit or with its Refresh button. It shows nothing but problems: when
-it reads "Nothing needs attention" the summary line under it (hosts live,
-certificates valid and next expiry, upstream members healthy) is the whole
-status. Problems sort before warnings, and every row links to the object or
-page that fixes it.
+- **Panels.** The Overview opens with three panels (this instance, hosts by
+  status and source, certificates by type and state with the next expiry);
+  every non-zero count opens the list filtered to what it counts.
+- **Needs attention.** Below them, refreshed on every visit or with its Refresh
+  button, a list of problems only: problems sort before warnings, then hosts in
+  maintenance, and every row links to the object or page that fixes it.
 
 | Row | Severity | Source | Link |
 |---|---|---|---|
@@ -20,9 +20,11 @@ page that fixes it.
 | Ingress or Docker discovery failed | problem | `GET /api/ingress-discovery/status`, `GET /api/docker-discovery/status` `error` | Integrations |
 | Discovery skipped a host | warning | The same status routes, `hosts[]` with `action: skipped` and a `reason` | Integrations |
 | Config warning | warning | `GET /api/health` `configWarnings[]` (an unknown YAML key, see [Upgrading](upgrading.md)) | History |
-| Could not read a source | warning | The corresponding request failed | The page that owns it |
+| Could not read a source | warning | The certificates, health or discovery status request failed | The page that owns it |
+| Proxy host is in maintenance | info | `GET /api/proxy-hosts`, `maintenance: true` on an enabled host | The host |
 
-A disabled integration (its status route answers 501) adds no row. The tables
+A disabled integration (its status route answers 501) adds no row. A failed
+proxy hosts read adds no row either: the Hosts panel says so instead. The tables
 below map each row's wording to its cause and fix.
 
 ## Startup and admin access
@@ -68,6 +70,10 @@ below map each row's wording to its cause and fix.
 | TLS handshake fails with an unknown SNI | No enabled certificate covers the requested name | Add the domain to a certificate, or issue one |
 | The wrong certificate is served | Selection is by SNI across every certificate, not by `tls.certificateRef` | Check which certificate's `domains` cover the name ([Certificate](../reference/config/certificate.md)) |
 | Wildcard issuance refused at validation | A wildcard cannot be proven over HTTP-01 | Use DNS-01 ([DNS-01 with Cloudflare](../how-to/dns-01-cloudflare.md)) |
+| Certificate wizard: `dns-01` is greyed out, or a wildcard stops at `dns-01 needs a DNS provider` | No DNS provider is configured | Add one under DNS Providers ([DNSProvider](../reference/config/dns-provider.md)) and open the wizard again, or use `http-01` for names without a wildcard |
+| Certificate wizard: `Enter the CA's directory URL, or pick a CA from the list.`; editor: `Directory URL required` | Custom is picked with a blank URL, and a blank `directoryURL` means Let's Encrypt | Enter the CA's directory URL, or pick a CA from the list ([CA directories](../reference/config/certificate.md#certificate-ca-directories)) |
+| Certificate wizard: `ZeroSSL requires external account binding` (or Google Public CA) | The directory URL to be written belongs to a CA that requires EAB | Enter the EAB key ID and HMAC key, the key as a `${ENV:...}` or `${FILE:...}` placeholder |
+| Import from YAML: `A literal EAB HMAC key is not carried over by an import` | The API never returns a literal secret, so the parsed document reads `***` | Enter the key as a `${ENV:...}` or `${FILE:...}` placeholder on the Authority step |
 | ACME fails with a `dns-01` provider error | Wrong credential, missing zone scope, or a `dnsProvider` name typo | Check the provider object and test the token directly ([DNSProvider](../reference/config/dns-provider.md)) |
 | `lastError` contains `x509: certificate signed by unknown authority` for a private CA | The CA's own TLS certificate is not signed by a root gpm trusts for that certificate | Set `acme.caBundle` to the CA's root ([Private step-ca](../how-to/step-ca.md)) |
 | `lastError` starts with `the attempt did not finish within 13m0s` | The attempt (order, DNS propagation wait and validation) ran past the propagation timeout plus 10 minutes, so it was cancelled | Find the slow step (the CA, the DNS provider or the endpoint); the retry backoff applies and the TXT records are still cleaned up ([Renewal](../reference/config/certificate.md#renewal)) |

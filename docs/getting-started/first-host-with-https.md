@@ -65,7 +65,9 @@ External Account Binding (ZeroSSL, Google Public CA) takes `acme.eab.kid` +
    curl -sI http://app.example.com/
    ```
 
-3. **Create the certificate** using one of the two blocks below.
+3. **Create the certificate** using one of the two blocks below, or in the
+   admin UI with **Certificates -> Add certificate**, whose wizard writes the
+   same YAML.
 4. **Order the certificate.** The ACME manager orders it at its next pass (the next
    regular 12-hour pass or a restart), not when you save it; use **Renew now** on the
    Certificates page, or `POST /api/certificates/<name>/renew`, to order at once. The

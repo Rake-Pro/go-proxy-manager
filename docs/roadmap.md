@@ -8,7 +8,6 @@ table below is the themes, the issues carry the detail and the state.
 
 | Theme | Why it matters | Where |
 |---|---|---|
-| Admin UI: certificate wizard with CA presets, Overview panels | Finishes the 2026-10 redesign on the same `wizard()` primitive the proxy host uses | [#54](https://github.com/Rake-Pro/go-proxy-manager/issues/54), [#56](https://github.com/Rake-Pro/go-proxy-manager/issues/56) |
 | HTTP/3 (QUIC) | Faster, more resilient connections for clients that support it | Held until the Go standard library ships an HTTP/3 server (golang/go#58547); no third-party QUIC stack is light enough for the dependency budget. Design: [design/http3-geoip-mtls.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/http3-geoip-mtls.md) |
 | High availability, phase 2 | Lease-file election, shared bare repo, active/active; phase 1 (static leader, read-only follower, keepalived VIP) ships | Design sketch in [design/ha.md](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/ha.md) |
 

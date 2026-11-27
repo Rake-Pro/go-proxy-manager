@@ -102,7 +102,7 @@ func TestCertEditorBoundsMirrorModel(t *testing.T) {
 	}
 }
 
-// renewAt / renewReason: shown on the status card, in the list's expiry cell
+// renewAt / renewReason: shown on the editor's rail, in the list's expiry cell
 // and in the state chip's tooltip; a past renewAt is "due", not a date.
 func TestCertStatusShowsRenewAt(t *testing.T) {
 	js := loadAppJS(t)
@@ -125,10 +125,10 @@ func TestCertStatusShowsRenewAt(t *testing.T) {
 	requireAll(t, "renew reasons", js,
 		"const CERT_RENEW_REASONS = { ari: 'time requested by the CA (ARI)', lifetime: 'lifetime rule' };",
 	)
-	card := jsRegion(t, js, "function certStatusCardHtml(ct) {", "\n}")
-	requireAll(t, "status card", card,
+	card := jsRegion(t, js, "function certRailHtml(ct, isNew) {", "\n}")
+	requireAll(t, "certificate rail", card,
 		"const renew = acme ? certRenewInfo(ct) : null;",
-		"${renewHtml ? row('Renews', renewHtml) : ''}",
+		"(renewHtml ? row('Renews', renewHtml) : '')",
 		"<span class=\"warn-text\">${esc(renew.label)}</span>",
 		"(renew.why ? ` <span class=\"faint\" title=\"${esc(CERT_RENEW_RULE)}\">- ${esc(renew.why)}</span>` : '')",
 	)
