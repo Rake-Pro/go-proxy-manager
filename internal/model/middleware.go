@@ -5,9 +5,12 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // validCIDROrIP reports whether s parses as a CIDR or a bare IP.
@@ -29,6 +32,7 @@ const (
 	MWTypeRateLimit = "rate-limit" // per-host, per-client-IP token bucket
 	MWTypeRewrite   = "rewrite"    // upstream-facing request-path replacement (exact, prefix or regex)
 	MWTypeBouncer   = "bouncer"    // deny hook: ask an external bouncer/WAF about the client IP
+	MWTypePathBlock = "path-block" // deny by path shape: extension, segment name or glob
 )
 
 // Bouncer providers. crowdsec speaks the CrowdSec LAPI bouncer protocol; http is
@@ -673,6 +677,254 @@ func durationOr(s string, def time.Duration) time.Duration {
 	return d
 }
 
+// PathBlockMiddleware refuses a request by the shape of its path alone: a file
+// extension, a path segment name or a glob. It exists for the scanner noise a
+// public host sees all day (dotfiles, VCS directories, PHP drop paths, dumps):
+// one list answers them at the edge, so they never reach an upstream, an
+// identity provider or an access list. It inspects nothing but the path.
+//
+// The same spec is a `type: path-block` middleware (referenced by a host or a
+// location) and settings.pathBlock (applied to every proxy host that has not
+// set pathBlock: off).
+//
+// Matching runs on the cleaned, decoded request path and is case-insensitive
+// throughout. A segment is compared without trailing dots and spaces and up to
+// its first NUL byte, the spellings a lenient backend or filesystem folds onto
+// the plain name.
+type PathBlockMiddleware struct {
+	// Extensions are file extensions with their leading dot (".php", ".env",
+	// ".tar.gz"). One matches when ANY path segment ends with it, not only the
+	// last: "/a.php/b" runs a.php on a backend that reads the rest as path
+	// info. A segment that is the extension alone ("/.env") matches too.
+	Extensions []string `json:"extensions,omitempty" yaml:"extensions,omitempty"`
+	// Names are whole path segments (".git", "wp-admin", "wp-login.php"). One
+	// matches when any segment of the path equals it, at any depth.
+	Names []string `json:"names,omitempty" yaml:"names,omitempty"`
+	// Globs are patterns over the WHOLE path in path.Match syntax ("*" and "?"
+	// never match "/", "[a-z]" is a class and can match "/" when it is negated
+	// or its range spans it, a backslash quotes the next character). Each must
+	// start with "/".
+	Globs []string `json:"globs,omitempty" yaml:"globs,omitempty"`
+	// AllowFrom lists the clients the block does not apply to: CIDRs, bare IPs
+	// and "@<access-list>" references. A list reference exempts a client whose
+	// first matching rule in that list is an allow rule, exactly like a rate
+	// limit's allowFrom.
+	AllowFrom []string `json:"allowFrom,omitempty" yaml:"allowFrom,omitempty"`
+	// DenyStatus is the status a blocked request gets (default 404: a blocked
+	// path answers like one that does not exist).
+	DenyStatus int `json:"denyStatus,omitempty" yaml:"denyStatus,omitempty"`
+	// DenyWith selects the body: "error-page" (default) renders the host's
+	// custom error page for the status when one is configured, "plain" always
+	// writes the bare status text.
+	DenyWith string `json:"denyWith,omitempty" yaml:"denyWith,omitempty"`
+}
+
+// Bounds of a path block list. Extensions and names are set lookups, so their
+// cap is about config size; globs are tried one by one on every request.
+const (
+	MaxPathBlockEntries  = 256
+	MaxPathBlockGlobs    = 64
+	MaxPathBlockEntryLen = 128
+	// MaxPathBlockGlobBytes caps all globs of one list together: the work a
+	// request causes grows with the pattern bytes times the path length.
+	MaxPathBlockGlobBytes = 2048
+	// DefaultPathBlockDenyStatus is the status of a blocked request when
+	// denyStatus is unset.
+	DefaultPathBlockDenyStatus = 404
+)
+
+// ProxyHost.PathBlock values. Empty means PathBlockInherit.
+const (
+	PathBlockInherit = "inherit" // settings.pathBlock applies to this host
+	PathBlockOff     = "off"     // settings.pathBlock does not apply to this host
+)
+
+// validatePathBlockSwitch checks a host's or a discovery template's pathBlock
+// switch.
+func validatePathBlockSwitch(v string) error {
+	switch v {
+	case "", PathBlockInherit, PathBlockOff:
+		return nil
+	}
+	return fmt.Errorf("pathBlock: must be %q or %q, got %q", PathBlockInherit, PathBlockOff, v)
+}
+
+// DenyStatusOrDefault returns the status a blocked request gets.
+func (p PathBlockMiddleware) DenyStatusOrDefault() int {
+	if p.DenyStatus == 0 {
+		return DefaultPathBlockDenyStatus
+	}
+	return p.DenyStatus
+}
+
+// AccessListRefs returns the access list names allowFrom references.
+func (p PathBlockMiddleware) AccessListRefs() []string {
+	var out []string
+	for _, c := range p.AllowFrom {
+		if name, ok := AccessListRef(c); ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// pathBlockEntryError checks what every extension and name must satisfy: a
+// bounded length, no "/" (an entry is compared with one path segment), no
+// control character and no trailing dot or space (the matcher drops those from
+// a segment, so such an entry could never match).
+func pathBlockEntryError(e string) error {
+	switch {
+	case e == "":
+		return fmt.Errorf("must not be empty")
+	case len(e) > MaxPathBlockEntryLen:
+		return fmt.Errorf("is %d bytes, at most %d are allowed", len(e), MaxPathBlockEntryLen)
+	case strings.Contains(e, "/"):
+		return fmt.Errorf("must not contain %q", "/")
+	case strings.HasSuffix(e, ".") || strings.HasSuffix(e, " "):
+		return fmt.Errorf("must not end with a dot or a space")
+	}
+	if !utf8.ValidString(e) {
+		return fmt.Errorf("must be valid UTF-8")
+	}
+	for _, c := range e {
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("must not contain a control character")
+		}
+	}
+	return nil
+}
+
+// globShapeError refuses a glob that could never match the form a request path
+// is compared in (see dataplane's foldPath): that form has no trailing slash,
+// no empty segment and no segment ending in a dot or a space. Refusing these
+// is clearer than a pattern that silently blocks nothing, and it keeps a
+// trailing slash from being read as "everything below".
+func globShapeError(g string) error {
+	if g == "/" {
+		return nil
+	}
+	for _, c := range g {
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("must not contain a control character")
+		}
+	}
+	if t := strings.TrimRight(g, "/"); t != g && t != "" {
+		return fmt.Errorf("must not end with %q (a path is compared without its trailing slash; write %q)", "/", t)
+	}
+	for _, seg := range strings.Split(g[1:], "/") {
+		switch {
+		case seg == "":
+			return fmt.Errorf("must not contain an empty segment (%q)", "//")
+		case strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " "):
+			return fmt.Errorf("has a segment ending with a dot or a space, which a path is compared without")
+		}
+	}
+	return nil
+}
+
+// globClassHasUpper reports whether a path.Match pattern holds an upper-case
+// letter inside a [...] class. A pattern is lower-cased before use, which
+// would turn a range written across cases ("[Z-a]") into one that matches
+// nothing; outside a class the letter is simply compared without case.
+func globClassHasUpper(g string) bool {
+	inClass := false
+	for i := 0; i < len(g); {
+		r, n := utf8.DecodeRuneInString(g[i:])
+		i += n
+		switch {
+		case r == '\\' && i < len(g):
+			// The quoted character: still part of a class it stands in.
+			q, m := utf8.DecodeRuneInString(g[i:])
+			i += m
+			if inClass && unicode.ToLower(q) != q {
+				return true
+			}
+		case !inClass && r == '[':
+			inClass = true
+		case inClass && r == ']':
+			inClass = false
+		case inClass && unicode.ToLower(r) != r:
+			return true
+		}
+	}
+	return false
+}
+
+// validate checks one path block spec. prefix leads every error up to the field
+// name ("middleware \"probes\": pathBlock." or "pathBlock."), so the
+// middleware and the settings block share one set of rules.
+func (p *PathBlockMiddleware) validate(prefix string) error {
+	if len(p.Extensions) == 0 && len(p.Names) == 0 && len(p.Globs) == 0 {
+		return fmt.Errorf("%srequires at least one extensions, names or globs entry", strings.TrimSuffix(prefix, ".")+": ")
+	}
+	if n := len(p.Extensions); n > MaxPathBlockEntries {
+		return fmt.Errorf("%sextensions: has %d entries, at most %d are allowed", prefix, n, MaxPathBlockEntries)
+	}
+	for i, e := range p.Extensions {
+		if err := pathBlockEntryError(e); err != nil {
+			return fmt.Errorf("%sextensions[%d]: %q %w", prefix, i, e, err)
+		}
+		if !strings.HasPrefix(e, ".") {
+			return fmt.Errorf("%sextensions[%d]: %q must be a dot followed by the extension (e.g. %q)", prefix, i, e, ".php")
+		}
+	}
+	if n := len(p.Names); n > MaxPathBlockEntries {
+		return fmt.Errorf("%snames: has %d entries, at most %d are allowed", prefix, n, MaxPathBlockEntries)
+	}
+	for i, e := range p.Names {
+		if err := pathBlockEntryError(e); err != nil {
+			return fmt.Errorf("%snames[%d]: %q %w", prefix, i, e, err)
+		}
+	}
+	if n := len(p.Globs); n > MaxPathBlockGlobs {
+		return fmt.Errorf("%sglobs: has %d entries, at most %d are allowed", prefix, n, MaxPathBlockGlobs)
+	}
+	globBytes := 0
+	for i, g := range p.Globs {
+		if globBytes += len(g); globBytes > MaxPathBlockGlobBytes {
+			return fmt.Errorf("%sglobs: are more than %d bytes in total", prefix, MaxPathBlockGlobBytes)
+		}
+		if !strings.HasPrefix(g, "/") {
+			return fmt.Errorf("%sglobs[%d]: %q must start with %q (a glob is matched against the whole path)", prefix, i, g, "/")
+		}
+		if len(g) > MaxPathBlockEntryLen {
+			return fmt.Errorf("%sglobs[%d]: is %d bytes, at most %d are allowed", prefix, i, len(g), MaxPathBlockEntryLen)
+		}
+		if _, err := path.Match(g, "/"); err != nil {
+			return fmt.Errorf("%sglobs[%d]: %q is not a valid pattern: %w", prefix, i, g, err)
+		}
+		if !utf8.ValidString(g) {
+			return fmt.Errorf("%sglobs[%d]: %q is not valid UTF-8", prefix, i, g)
+		}
+		if globClassHasUpper(g) {
+			return fmt.Errorf("%sglobs[%d]: %q has an upper-case letter inside [...]: matching is case-insensitive, write the class in lower case", prefix, i, g)
+		}
+		if err := globShapeError(g); err != nil {
+			return fmt.Errorf("%sglobs[%d]: %q %w", prefix, i, g, err)
+		}
+	}
+	for _, c := range p.AllowFrom {
+		if name, ok := AccessListRef(c); ok {
+			if err := ValidateName(name); err != nil {
+				return fmt.Errorf("%sallowFrom: %q is not a valid access list reference: %w", prefix, c, err)
+			}
+			continue
+		}
+		if !validCIDROrIP(c) {
+			return fmt.Errorf("%sallowFrom: has invalid CIDR/IP or @access-list %q", prefix, c)
+		}
+	}
+	if s := p.DenyStatus; s != 0 && (s < 400 || s > 599) {
+		return fmt.Errorf("%sdenyStatus: must be a 4xx/5xx code, got %d", prefix, s)
+	}
+	switch p.DenyWith {
+	case "", BouncerDenyWithErrorPage, BouncerDenyWithPlain:
+	default:
+		return fmt.Errorf("%sdenyWith: must be error-page|plain, got %q", prefix, p.DenyWith)
+	}
+	return nil
+}
+
 // Middleware is a reusable, named processing step referenced by hosts/locations.
 type Middleware struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
@@ -684,6 +936,7 @@ type Middleware struct {
 	RateLimit *RateLimitMiddleware `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
 	Rewrite   *RewriteMiddleware   `json:"rewrite,omitempty" yaml:"rewrite,omitempty"`
 	Bouncer   *BouncerMiddleware   `json:"bouncer,omitempty" yaml:"bouncer,omitempty"`
+	PathBlock *PathBlockMiddleware `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
 }
 
 func (m Middleware) Kind() string { return "Middleware" }
@@ -752,6 +1005,15 @@ func (m Middleware) Validate() error {
 			return fmt.Errorf("middleware %q: bouncer: spec required", m.Name)
 		}
 		if err := m.Bouncer.validate(m.Name); err != nil {
+			return err
+		}
+	case MWTypePathBlock:
+		// A nil spec is an empty one: both lack a list entry.
+		var pb PathBlockMiddleware
+		if m.PathBlock != nil {
+			pb = *m.PathBlock
+		}
+		if err := pb.validate(fmt.Sprintf("middleware %q: pathBlock.", m.Name)); err != nil {
 			return err
 		}
 	default:

@@ -8,7 +8,6 @@ table below is the themes, the issues carry the detail and the state.
 
 | Theme | Why it matters | Where |
 |---|---|---|
-| Path block list | Deny requests by extension, file name or glob, fleet-wide with a per-host switch, so scanner paths (`/.env`, `*.php`) never reach an upstream | [#75](https://github.com/Rake-Pro/go-proxy-manager/issues/75) |
 | Admin UI: certificate wizard with CA presets, Overview panels | Finishes the 2026-10 redesign on the same `wizard()` primitive the proxy host uses | [#54](https://github.com/Rake-Pro/go-proxy-manager/issues/54), [#56](https://github.com/Rake-Pro/go-proxy-manager/issues/56) |
 | Certificate providers | A step-ca how-to and a how-to for a registrar without an API; a generic webhook DNS-01 solver; ARI polling, ACME profiles, lifetime-relative renewal, private CA trust (`acme.caBundle`) | [#60](https://github.com/Rake-Pro/go-proxy-manager/issues/60), [#61](https://github.com/Rake-Pro/go-proxy-manager/issues/61), [#62](https://github.com/Rake-Pro/go-proxy-manager/issues/62) |
 | Discovery template parity | `trustedProxies` on the template (unset keeps the host's own value) and hand-added tags surviving a reconcile | [#53](https://github.com/Rake-Pro/go-proxy-manager/issues/53) |

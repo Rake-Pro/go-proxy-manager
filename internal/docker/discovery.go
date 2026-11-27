@@ -740,6 +740,7 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 		Middlewares:       append([]string(nil), tmpl.Middlewares...),
 		AccessLists:       append([]string(nil), tmpl.AccessLists...),
 		AccessListsMode:   tmpl.AccessListsMode,
+		PathBlock:         tmpl.PathBlock,
 	}
 	if len(tmpl.StripResponseHeaders) > 0 {
 		host.StripResponseHeaders = append([]string(nil), tmpl.StripResponseHeaders...)

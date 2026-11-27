@@ -215,6 +215,7 @@ Every list has the same filter box.
 - With `GPM_GEOIP_DB` set, a **Country** column shows the client's ISO code
   (private and unknown addresses stay blank); the CSV export gains the same
   column and the JSON log line a `country` field.
+- A request that an access-control tier refused carries the reason in a `deny` field on the JSON log line and on each `GET /api/logs` entry (omitted when nothing refused it). The reasons are the denial reasons listed under [`gpm_denials_total`](../reference/metrics.md).
 - Host, path, client and country cells copy on hover: a small copy button
   appears on the row; a path with control characters is copied percent-encoded.
 - `client` matches by address: a CIDR (`client:10.0.0.0/8`,

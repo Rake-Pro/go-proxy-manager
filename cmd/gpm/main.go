@@ -331,6 +331,10 @@ func main() {
 	// reason: buildRouter unions it into each proxy host's effective list.
 	dataplane.SetStripResponseHeaders(settings.StripResponseHeaders)
 
+	// Settings-level path block list, installed for the same reason: buildRouter
+	// wraps it around every proxy host that has not opted out.
+	dataplane.SetPathBlock(settings.PathBlock)
+
 	// Fleet-wide maintenance switch, installed before the first request for the
 	// same reason as the error pages: it is read live on every request, so a
 	// deployment that boots with maintenance on must never serve a single request
@@ -458,6 +462,7 @@ func main() {
 		// buildRouter composes each host's set from the new default.
 		dataplane.SetSecurityHeaders(st2.SecurityHeaders)
 		dataplane.SetStripResponseHeaders(st2.StripResponseHeaders)
+		dataplane.SetPathBlock(st2.PathBlock)
 		// Fleet-wide maintenance, applied BEFORE the compile like every other
 		// settings-level switch above: turning it on takes the edge out of service
 		// on the very next request rather than after the router build. If the

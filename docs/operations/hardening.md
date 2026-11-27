@@ -8,6 +8,7 @@ The settings to check before an instance faces the internet.
   not on every interface, and reach it from elsewhere through an SSH tunnel or
   the HTTPS admin hostname
   ([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
+- Answer scanner paths at the edge: [`settings.pathBlock`](../reference/config/settings/path-block.md) refuses dotfiles, VCS directories and script drop paths with a `404` by default before any upstream sees them ([how-to](../how-to/block-scanner-paths.md)). It is off until set.
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
 - Keep `-pprof` off unless actively profiling; it is admin-role **and**
   admin-scope gated but still needless attack surface when idle.

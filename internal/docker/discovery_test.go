@@ -328,6 +328,7 @@ func TestDerive(t *testing.T) {
 func TestDeriveInheritsResponseHeaderFields(t *testing.T) {
 	conf := testConf(func(s *model.Settings) {
 		s.DockerDiscovery.Template.StripResponseHeaders = []string{"Server"}
+		s.DockerDiscovery.Template.PathBlock = model.PathBlockOff
 		s.DockerDiscovery.Template.SecurityHeaders = map[string]model.SecurityHeaderValue{
 			"X-Content-Type-Options": {Value: "nosniff"},
 		}
@@ -338,6 +339,9 @@ func TestDeriveInheritsResponseHeaderFields(t *testing.T) {
 	}
 	if strings.Join(host.StripResponseHeaders, ",") != "Server" {
 		t.Errorf("stripResponseHeaders = %v, want the template's", host.StripResponseHeaders)
+	}
+	if host.PathBlock != model.PathBlockOff {
+		t.Errorf("pathBlock = %q, want the template's", host.PathBlock)
 	}
 	if got := host.SecurityHeaders["X-Content-Type-Options"].Value; got != "nosniff" {
 		t.Errorf("securityHeaders X-Content-Type-Options = %q, want the template's", got)

@@ -143,6 +143,10 @@
     "text": "Extra header names removed from proxied upstream responses on this host, on top of the fleet strip list. The two lists are unioned.",
     "doc": "reference/config/proxy-host.md#proxy-host-strip-response-headers"
   },
+  "proxyHost.pathBlock": {
+    "text": "inherit (the default) applies the fleet path block list from Settings to this host. off removes only the fleet list from this host, for an application that serves those paths on purpose; a path-block middleware attached to the host or a location still applies.",
+    "doc": "reference/config/proxy-host.md#proxy-host-path-block"
+  },
   "proxyHost.trustedProxies.mode": {
     "text": "Whether this host inherits the fleet trusted-proxy list, trusts nobody, or replaces it with its own. A custom list replaces the fleet list, it never extends it.",
     "doc": "reference/config/proxy-host.md#proxy-host-trusted-proxies"
@@ -596,7 +600,7 @@
     "doc": "reference/config/identity-provider.md#identity-provider-role-mapping"
   },
   "middleware.type": {
-    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.",
+    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, path block, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.auth.identityProvider": {
@@ -750,6 +754,30 @@
   "middleware.bouncer.stream": {
     "text": "CrowdSec only: pull the whole decision set once and then deltas, so each request is a local lookup with no call to the API.",
     "doc": "reference/config/middleware.md"
+  },
+  "middleware.pathBlock.extensions": {
+    "text": "File extensions with the leading dot (.php, .env, .tar.gz), blocked wherever this middleware is attached. One matches when ANY path segment ends with it, not only the last, so /a.php/extra is blocked too, and a segment that is the extension alone (/.env) matches as well. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/middleware.md#middleware-path-block-extensions"
+  },
+  "middleware.pathBlock.names": {
+    "text": "Whole path segments that are blocked when any segment of the path equals one, at any depth: .git also blocks /app/.git/config. This is how to block everything under a directory. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/middleware.md#middleware-path-block-names"
+  },
+  "middleware.pathBlock.globs": {
+    "text": "path.Match patterns over the whole decoded path, each starting with /. * and ? never match / and there is no **: block a directory at any depth with a Names entry. A trailing / on the path is ignored and a pattern other than / must not end with one. Case-insensitive, so write [...] classes in lower case. Where a list with globs applies, a path longer than 4096 bytes counts as listed. At most 64 entries and 2048 bytes in total.",
+    "doc": "reference/config/middleware.md#middleware-path-block-globs"
+  },
+  "middleware.pathBlock.allowFrom": {
+    "text": "Clients the block does not apply to. @name exempts a client whose first matching rule in that access list is an allow rule, the same test a rate limit's exemption uses; a client whose address cannot be resolved is never exempt.",
+    "doc": "reference/config/middleware.md#middleware-path-block-allow-from"
+  },
+  "middleware.pathBlock.denyStatus": {
+    "text": "The status a blocked request gets, 400 to 599. Blank means 404, so a blocked path answers like one that does not exist.",
+    "doc": "reference/config/middleware.md#middleware-path-block-deny-status"
+  },
+  "middleware.pathBlock.denyWith": {
+    "text": "error-page (the default) renders the host's custom error page for the status when one exists; plain always writes the bare status text.",
+    "doc": "reference/config/middleware.md#middleware-path-block-deny-with"
   },
   "middleware.rewrite.replacePath": {
     "text": "Exact-match rules: the request path must equal the key, and is replaced by the value.",
@@ -951,6 +979,30 @@
     "text": "Fleet-default header names removed from proxied upstream responses. Only what the upstream sent is touched, never a header gpm adds.",
     "doc": "reference/config/settings/security-headers.md#strip-response-headers-section"
   },
+  "settings.pathBlock.extensions": {
+    "text": "File extensions with the leading dot (.php, .env, .tar.gz), blocked on every proxy host that has not turned the fleet list off. One matches when ANY path segment ends with it, not only the last, so /a.php/extra is blocked too, and a segment that is the extension alone (/.env) matches as well. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-extensions"
+  },
+  "settings.pathBlock.names": {
+    "text": "Whole path segments that are blocked when any segment of the path equals one, at any depth: .git also blocks /app/.git/config. This is how to block everything under a directory. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-names"
+  },
+  "settings.pathBlock.globs": {
+    "text": "path.Match patterns over the whole decoded path, each starting with /. * and ? never match / and there is no **: block a directory at any depth with a Names entry. A trailing / on the path is ignored and a pattern other than / must not end with one. Case-insensitive, so write [...] classes in lower case. Where a list with globs applies, a path longer than 4096 bytes counts as listed. At most 64 entries and 2048 bytes in total.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-globs"
+  },
+  "settings.pathBlock.allowFrom": {
+    "text": "Clients the block does not apply to. @name exempts a client whose first matching rule in that access list is an allow rule, the same test a rate limit's exemption uses; a client whose address cannot be resolved is never exempt. A named list must exist, and cannot be deleted while this names it.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-allow-from"
+  },
+  "settings.pathBlock.denyStatus": {
+    "text": "The status a blocked request gets, 400 to 599. Blank means 404, so a blocked path answers like one that does not exist.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-deny-status"
+  },
+  "settings.pathBlock.denyWith": {
+    "text": "error-page (the default) renders the host's custom error page for the status when one exists; plain always writes the bare status text.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-deny-with"
+  },
   "settings.proxyProtocol.enabled": {
     "text": "Reads the real client address out of the HAProxy PROXY protocol header on the HTTP and TCP stream listeners, honoured only from the trusted peers below.",
     "doc": "reference/config/settings/proxy-protocol.md#settings-proxy-protocol-enabled"
@@ -1111,6 +1163,10 @@
     "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-robots-no-index"
   },
+  "settings.ingressDiscovery.template.pathBlock": {
+    "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
+    "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-path-block"
+  },
   "settings.ingressDiscovery.template.middlewares": {
     "text": "Middlewares applied, in order, to every derived host.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-middlewares"
@@ -1233,6 +1289,10 @@
   },
   "settings.dockerDiscovery.template.robotsNoIndex": {
     "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
+  },
+  "settings.dockerDiscovery.template.pathBlock": {
+    "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.timeouts": {

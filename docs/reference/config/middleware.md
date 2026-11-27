@@ -13,6 +13,23 @@ object carries exactly one `type` and its matching spec.
 | `rate-limit` | RateLimitMiddleware | Per-client rate limiting, per route or per host (`scope`). |
 | `rewrite` | RewriteMiddleware | Request-path replacement (upstream-facing): exact, prefix or regex rules. |
 | `bouncer` | BouncerMiddleware | Deny hook: ask an external bouncer (CrowdSec LAPI or any HTTP endpoint) whether the client IP is banned. |
+| `path-block` | PathBlockMiddleware | Deny a request by the shape of its path: file extension, segment name or glob. |
+
+## Middleware object
+
+Every object also carries the shared keys `displayName`, `labels`, `tags` and `disabled`, documented under [Common fields](../../concepts/config-model.md#common-fields-every-object).
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="middleware-name"></span>  `name` | string | none | yes | Unique name that hosts and locations reference. |
+| <span id="middleware-type"></span>  `type` | string | none | yes | One of the types above. Selects which spec key below is read. |
+| <span id="middleware-auth"></span>  `auth` | AuthMiddleware | none | with `type: auth` | Spec for `auth`. |
+| <span id="middleware-headers"></span>  `headers` | HeadersMiddleware | none | with `type: headers` | Spec for `headers`. |
+| <span id="middleware-guard"></span>  `guard` | GuardMiddleware | none | with `type: guard` | Spec for `guard`. |
+| <span id="middleware-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | none | with `type: rate-limit` | Spec for `rate-limit`. |
+| <span id="middleware-rewrite"></span>  `rewrite` | RewriteMiddleware | none | with `type: rewrite` | Spec for `rewrite`. |
+| <span id="middleware-bouncer"></span>  `bouncer` | BouncerMiddleware | none | with `type: bouncer` | Spec for `bouncer`. |
+| <span id="middleware-path-block"></span>  `pathBlock` | PathBlockMiddleware | none | with `type: path-block` | Spec for `path-block`. |
 
 ## AuthMiddleware (`auth`)
 
@@ -318,8 +335,8 @@ a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches
 `allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
 so a flood is shed before it can drive an auth subrequest or any other
-per-request work: rate-limit -> access-list -> bouncer -> auth -> guard -> headers ->
-rewrite -> upstream.
+per-request work: rate-limit -> path-block -> access-list -> bouncer -> auth -> guard ->
+headers -> rewrite -> upstream.
 
 `blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
 harsher penalty on top of the token bucket: the first request that exceeds
@@ -570,4 +587,74 @@ type: rewrite
 rewrite:
   replacePath:
     /application/o/token: /application/o/token/
+```
+
+## PathBlockMiddleware (`pathBlock`)
+
+Refuses a request by the shape of its path alone. The same spec is also
+[`settings.pathBlock`](settings/path-block.md), the fleet list that covers every
+proxy host. For a task walkthrough see [Block scanner paths](../../how-to/block-scanner-paths.md).
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="middleware-path-block-extensions"></span>  `extensions` | []string | none | one of `extensions`, `names`, `globs` | File extensions **with the leading dot** (`.php`, `.env`, `.tar.gz`). Matches when any path segment ends with one, so `/a.php/extra` is blocked too, and when a segment is the extension alone (`/.env`). At most 256 entries. |
+| <span id="middleware-path-block-names"></span>  `names` | []string | none | one of `extensions`, `names`, `globs` | Whole path segments (`.git`, `wp-admin`, `wp-login.php`). Matches any segment, directories included, at any depth. At most 256 entries. |
+| <span id="middleware-path-block-globs"></span>  `globs` | []string | none | one of `extensions`, `names`, `globs` | `path.Match` patterns over the whole path, tried on the path as it is and on the folded form described below. Each must start with `/`. `*` and `?` never match `/`, `[a-z]` is a class (written in lower case), a backslash quotes the next character. There is no `**`. At most 64 entries, 128 bytes each and 2048 bytes for all globs of one list together. |
+| <span id="middleware-path-block-allow-from"></span>  `allowFrom` | []string | none | no | Clients the block does not apply to: CIDRs, bare IPs and `@<access-list>` references. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays blocked, and a path-scoped rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-path-block-deny-status"></span>  `denyStatus` | int | `404` | no | Status of a blocked request: `400` to `599` when set, and unset or `0` means `404`. The default answers like a path that does not exist. |
+| <span id="middleware-path-block-deny-with"></span>  `denyWith` | string | `error-page` | no | `error-page` renders the host's custom error page for the status when one exists; `plain` always writes the bare status text. |
+
+Matching rules:
+
+- Matching is case-insensitive throughout.
+- It runs on the cleaned, decoded client path, after dot-segment and percent-decoding normalisation, and before `stripPrefix`, `rewrite` and the upstream `path` are applied. gpm does not decode that path a second time.
+- A segment is compared without its trailing dots and spaces, and only up to its first NUL byte, so `/x.php.` and `/x.php%00.txt` are treated as `x.php`.
+- A glob is tried on the lower-cased request path as it is, and on a folded form of it: cut at the path's first NUL byte as a whole (so `/backup/site.zip%00/x` is matched by `/backup/*.zip`), each segment without trailing dots and spaces, a segment that is only dots and spaces dropped, and **without a trailing slash**. So `/server-status` also blocks `/server-status/` and `/Server-Status.`. The folded form only ever adds matches.
+- A glob must be writable in the folded form, so validation refuses one that ends with `/` (other than `/` itself), one with an empty segment (`//`), one with a segment ending in a dot or a space, and one with a control character. A trailing slash on a pattern is refused, not ignored: write `/old`, not `/old/`.
+- Extensions and names still look at every segment, each cut at its own first NUL byte.
+- `*` and `?` never match `/`. A `[...]` class can: a negated class (`[^x]`) or a range that spans `/` matches a slash like any other character. A class must be written in lower case: validation refuses an upper-case letter inside a class, because the pattern is lower-cased before use.
+- `/dir/*` covers `/dir/` and one level below it. It does not cover `/dir` itself, and does not cover deeper levels, because `*` never matches `/`. To block a directory at any depth use a `names` entry; with globs it takes both `/dir` and `/dir/*`, and still covers one level only.
+- The query string is never looked at. Every method is blocked alike.
+- A client whose address cannot be resolved is never exempt. An `@list` that does not resolve exempts nobody.
+
+<span id="path-block-limits"></span>
+
+Limits:
+
+- At least one of `extensions`, `names`, `globs` is required.
+- Every entry is at most 128 bytes.
+- Extensions and names contain no `/` and no control character, and do not end with a dot or a space. An extension starts with `.`.
+- At most 256 `extensions`, 256 `names` and 64 `globs`, and 2048 bytes for all globs of one list together.
+- Entries must be valid UTF-8.
+- **Long paths.** On a route covered by a list that has `globs`, a request path longer than 4096 bytes counts as listed: it is refused with the list's `denyStatus` unless the client is exempt. The length is measured after lower-casing, which can lengthen a path that is not valid UTF-8. A list with only `extensions` and `names` has no such bound.
+
+Where the step runs:
+
+- It sits just inside the rate limit and ahead of the access list, bouncer and authentication. See [Request pipeline](../../concepts/request-pipeline.md#how-the-chain-is-compiled).
+- Maintenance mode and the `forceSSL` redirect run before it: a listed path on a host in maintenance gets the maintenance response, and on plain HTTP a `forceSSL` host answers its redirect first.
+- Blocked requests are counted with the denial reason `path-block`, and the access log line and `GET /api/logs` entry of a blocked request carry `deny: path-block`.
+- It is a filter on path shape, not content inspection and not a substitute for hardening the upstream.
+
+<span id="path-block-not-caught"></span>
+
+What it does not catch:
+
+- Names that only a double-decoding upstream produces (`/x.ph%2570`).
+- Platform-specific spellings other than trailing dots and spaces, for example an NTFS stream suffix (`x.php::$DATA`).
+- Characters that only compare equal under Unicode case folding.
+- Content negotiation that maps another name onto a listed file (`/wp-login` served as `wp-login.php`).
+
+gpm matches the cleaned client path and does not decode it a second time.
+
+```yaml
+# Answer 404 for scanner paths on one host, except from the office network
+name: scanner-paths
+type: path-block
+pathBlock:
+  extensions: [".php", ".env", ".sql", ".bak"]
+  names: [".git", ".htaccess", "wp-admin", "wp-login.php"]
+  globs: ["/server-status"]
+  allowFrom: [192.0.2.0/24, "@office"]
+  denyStatus: 404
+  denyWith: plain
 ```

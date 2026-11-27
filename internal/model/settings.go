@@ -1262,6 +1262,15 @@ type Settings struct {
 	//
 	// Empty (the default) strips nothing.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
+
+	// PathBlock is the fleet path block list: a request whose path matches is
+	// refused on every proxy host that has not set pathBlock: off, ahead of the
+	// host's access lists and authentication (see PathBlockMiddleware). nil (the
+	// default) blocks nothing. The admin edge host (settings.adminEdge) is
+	// never covered, so a list that blocks too much cannot lock the edge panel
+	// out; a hand-written proxy host in front of the panel is covered like any
+	// other.
+	PathBlock *PathBlockMiddleware `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
 }
 
 // ClientLimitsSettings is the per-client in-flight request limit of the
@@ -1482,6 +1491,32 @@ func (s Settings) Validate() error {
 	}
 	if err := validateStripResponseHeaders(s.StripResponseHeaders); err != nil {
 		return err
+	}
+	if s.PathBlock != nil {
+		if err := s.PathBlock.validate("pathBlock."); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidatePathBlockRefs cross-checks the access lists settings.pathBlock names
+// in allowFrom against cfg. Settings.Validate can only check the shape of a
+// reference; a name that does not resolve exempts nobody, so it is refused on
+// the write that creates it (a settings write naming a missing list, or a
+// config write removing a named one).
+func (s Settings) ValidatePathBlockRefs(cfg Config) error {
+	if s.PathBlock == nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, a := range cfg.AccessLists {
+		have[a.Name] = true
+	}
+	for _, name := range s.PathBlock.AccessListRefs() {
+		if !have[name] {
+			return fmt.Errorf("pathBlock.allowFrom: references unknown accessList %q", name)
+		}
 	}
 	return nil
 }

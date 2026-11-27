@@ -69,6 +69,8 @@ nav:
           - mTLS client certificates: how-to/mtls-client-certs.md
           - TOTP for the local admin: how-to/totp.md
           - Migrate access-list basic auth: how-to/migrate-basic-auth.md
+      - Traffic filtering:
+          - Block scanner paths: how-to/block-scanner-paths.md
       - Automation:
           - DNS sync: how-to/dns-sync.md
           - Kubernetes Ingress discovery: how-to/expose-k8s-ingress.md
@@ -101,6 +103,7 @@ nav:
               - Client limits: reference/config/settings/client-limits.md
               - TLS: reference/config/settings/tls.md
               - Security headers: reference/config/settings/security-headers.md
+              - Path block list: reference/config/settings/path-block.md
               - Error pages: reference/config/settings/error-pages.md
               - Maintenance mode: reference/config/settings/maintenance.md
               - Analytics: reference/config/settings/analytics.md

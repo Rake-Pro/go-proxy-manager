@@ -55,6 +55,7 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
   client-certificate and basic auth are validated objects with referential
   integrity. The admin panel adds a local bcrypt login with optional TOTP,
   group-to-role mapping, a read-only viewer role and scoped API tokens.
+- **Path block list.** One fleet-wide list of extensions, path segment names and globs answers scanner paths (`/.env`, `*.php`, `.git`) with a `404` by default before any access list, auth or upstream sees them, with a per-host `pathBlock: off` switch.
 - **Composable middleware chain.** Ordered per host and per location: rate
   limits, guards, rewrites, scoped security headers, response-header stripping,
   a CrowdSec or generic HTTP bouncer hook, and maintenance mode.
