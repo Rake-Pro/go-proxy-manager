@@ -331,6 +331,10 @@ func main() {
 	// reason: buildRouter unions it into each proxy host's effective list.
 	dataplane.SetStripResponseHeaders(settings.StripResponseHeaders)
 
+	// Settings-level path block list, installed for the same reason: buildRouter
+	// wraps it around every proxy host that has not opted out.
+	dataplane.SetPathBlock(settings.PathBlock)
+
 	// Fleet-wide maintenance switch, installed before the first request for the
 	// same reason as the error pages: it is read live on every request, so a
 	// deployment that boots with maintenance on must never serve a single request
@@ -458,6 +462,7 @@ func main() {
 		// buildRouter composes each host's set from the new default.
 		dataplane.SetSecurityHeaders(st2.SecurityHeaders)
 		dataplane.SetStripResponseHeaders(st2.StripResponseHeaders)
+		dataplane.SetPathBlock(st2.PathBlock)
 		// Fleet-wide maintenance, applied BEFORE the compile like every other
 		// settings-level switch above: turning it on takes the edge out of service
 		// on the very next request rather than after the router build. If the
@@ -1030,6 +1035,28 @@ func sessionGC(ctx context.Context, st *session.Store) {
 	}
 }
 
+// certDigestLists sorts the ACME certificates into the two digest lists at
+// time now: expired, and expiring (expiry before cutoff). A certificate whose
+// renewal is not due yet is healthy however close its expiry is, since a
+// short-lived one always expires inside the threshold, so it is listed as
+// expiring only once its renewal time has passed (or is unknown).
+func certDigestLists(obs []acme.CertObservation, now, cutoff time.Time) (expiring, expired []string) {
+	for _, o := range obs {
+		if o.NotAfter.IsZero() {
+			continue
+		}
+		switch {
+		case o.NotAfter.Before(now):
+			expired = append(expired, fmt.Sprintf("%s (expired %s)", o.Name, o.NotAfter.Format("2006-01-02")))
+		case o.NotAfter.Before(cutoff) && (o.RenewAt.IsZero() || !o.RenewAt.After(now)):
+			expiring = append(expiring, fmt.Sprintf("%s (expires %s)", o.Name, o.NotAfter.Format("2006-01-02")))
+		}
+	}
+	sort.Strings(expiring)
+	sort.Strings(expired)
+	return expiring, expired
+}
+
 // certExpiryDigest runs an initial pass then once a day until ctx is done,
 // mirroring acme.Manager.Run's "initial pass, then interval" shape. Each pass
 // emits at most two notifications - a cert.expiring digest and a cert.expired
@@ -1047,20 +1074,7 @@ func certExpiryDigest(ctx context.Context, st *store.Store, acmeMgr *acme.Manage
 		cutoff := time.Now().Add(time.Duration(thresholdDays) * 24 * time.Hour)
 		now := time.Now()
 
-		var expiring, expired []string
-		for _, o := range acmeMgr.CertObservations() {
-			if o.NotAfter.IsZero() {
-				continue
-			}
-			switch {
-			case o.NotAfter.Before(now):
-				expired = append(expired, fmt.Sprintf("%s (expired %s)", o.Name, o.NotAfter.Format("2006-01-02")))
-			case o.NotAfter.Before(cutoff):
-				expiring = append(expiring, fmt.Sprintf("%s (expires %s)", o.Name, o.NotAfter.Format("2006-01-02")))
-			}
-		}
-		sort.Strings(expiring)
-		sort.Strings(expired)
+		expiring, expired := certDigestLists(acmeMgr.CertObservations(), now, cutoff)
 
 		if len(expiring) > 0 {
 			notifier.Emit(ctx, notify.Event{

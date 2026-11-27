@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -340,8 +341,52 @@ func TestStoredSourceSetOverCoverageBudgetMatchesNothing(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("got %d want %d", rec.Code, tc.want)
 			}
-			if n := len(accessListAllowNets(al)); (n > 0) != (tc.want == http.StatusOK) {
-				t.Fatalf("accessListAllowNets returned %d networks", n)
+			exempt := buildRegistry(model.Config{AccessLists: []model.AccessList{al}}).rateLimitExemption("l")
+			if got := exempt(net.ParseIP("11.1.2.3")); got != (tc.want == http.StatusOK) {
+				t.Fatalf("rate-limit exemption = %v, want %v", got, tc.want == http.StatusOK)
+			}
+		})
+	}
+}
+
+// An expired source (maxAge passed with no successful fetch) resolves to the
+// empty set: an allow rule over it admits nobody, a deny rule over it matches
+// nobody. That holds for the ledger shape the fetcher writes (no entries) and
+// for one that still carries entries next to expiredAt.
+func TestExpiredSourceResolvesToTheEmptySet(t *testing.T) {
+	expired := func(entries ...string) model.AccessListSourceLedger {
+		l := sourceLedger("l", "feed", entries...)
+		l.Sources[0].FetchedAt = "2026-09-01T00:00:00Z"
+		l.Sources[0].ExpiredAt = "2026-09-04T00:00:00Z"
+		return l
+	}
+	src := []model.AccessListSource{{Name: "feed", URL: "https://example.com/i.txt", MaxAge: "72h"}}
+	for _, tc := range []struct {
+		name   string
+		ledger model.AccessListSourceLedger
+		action string
+		deflt  string
+		want   int
+	}{
+		{"healthy allow admits the feed", sourceLedger("l", "feed", "203.0.113.0/24"), model.ActionAllow, model.ActionDeny, http.StatusOK},
+		{"expired allow admits nobody", expired(), model.ActionAllow, model.ActionDeny, http.StatusForbidden},
+		{"expired allow with stale entries admits nobody", expired("203.0.113.0/24"), model.ActionAllow, model.ActionDeny, http.StatusForbidden},
+		{"healthy deny refuses the feed", sourceLedger("l", "feed", "203.0.113.0/24"), model.ActionDeny, model.ActionAllow, http.StatusForbidden},
+		{"expired deny matches nobody", expired("203.0.113.0/24"), model.ActionDeny, model.ActionAllow, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installSources(t, tc.ledger)
+			al := model.AccessList{
+				ObjectMeta:    model.ObjectMeta{Name: "l"},
+				DefaultAction: tc.deflt,
+				Sources:       src,
+				Rules:         []model.IPRule{{Action: tc.action, Source: "feed"}},
+			}
+			h := accessListHandler(compileAccessList(al), ipFrom("203.0.113.7"), nil, nil, "", nil, okHandler())
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+			if rec.Code != tc.want {
+				t.Fatalf("got %d want %d", rec.Code, tc.want)
 			}
 		})
 	}

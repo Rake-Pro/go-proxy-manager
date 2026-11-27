@@ -111,7 +111,7 @@ follower that committed locally would break its fast-forward-only pull. A
 follower still serves the sets, because it replicates the ledger file.
 
 **Ledger file.** The fetched sets live in `config/access-list-sources.yaml`
-(`list`, `source`, `url`, `fetchedAt`, `sha256`, sorted `entries`), committed like
+(`list`, `source`, `url`, `fetchedAt`, `expiredAt` when expired, `maxAgeSince` when `maxAge` is set, `sha256`, sorted `entries`), committed like
 everything else: diffable, auditable and reverted with the rest of the config.
 **Do not hand-edit it:** every entry carries a `sha256` over its network set, and
 a mismatch fails the load rather than serving a set somebody widened by hand. A
@@ -124,7 +124,9 @@ deliberately does **not** advance `fetchedAt`, because doing so would commit a
 timestamp-only diff to the config repo every interval, forever; the process keeps
 the last attempt in memory instead, so a re-fetch still waits out the interval. A
 restart therefore re-fetches each source once, finds it unchanged, and commits
-nothing.
+nothing. A source with `maxAge` is the exception: its unchanged fetch advances
+`fetchedAt` (one commit per `interval`, without a data-plane reload on the leader), and adding
+or removing `maxAge` writes or removes `maxAgeSince` (one commit, no reload).
 
 **Refusals fail closed.** A fetch is rejected **whole** (keeping whatever was
 fetched before) when the source answers anything but `200`, returns no valid
@@ -139,6 +141,14 @@ on the next poll tick (`pollInterval`, default 15m) rather than after the
 source's own `interval` (up to a day). One transient blip therefore costs minutes
 of staleness, not a day of it, and the previously fetched set is served
 throughout.
+
+**Optional expiry.** Without `maxAge` the previously fetched set is served for as
+long as fetches keep failing. With `maxAge: 72h` (say) on the source, once the
+set is older than that and a fetch is refused, the set is emptied in the ledger
+(one commit, one `WARN`), the status reports `expired: true`, and every rule
+naming the source matches nothing: an `allow` rule admits nobody and a `deny`
+rule denies nobody. The age is measured from the last successful fetch recorded in the ledger (`fetchedAt`), or from when `maxAge` was first applied to the source (`maxAgeSince`) if that is later; a success that could not be committed before a restart is not counted. The next successful fetch restores it. See
+[source expiry](../reference/config/access-list.md#access-list-sources-expiry).
 
 **What a feed may contain.** Individual entries are bounded as well as counted. A
 line is refused (and with it the whole fetch) when it is a default route
@@ -192,6 +202,7 @@ curl -s https://<admin>/api/access-list-sources/status -H 'Authorization: Bearer
 # {"enabled":true,"lastRun":"...","refused":0,"sources":[
 #   {"list":"lan-vpn","name":"uptimerobot","url":"https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt",
 #    "fetchedAt":"...","entryCount":206,"lastAttempt":"..."}]}
+# An expired source (maxAge passed) adds "expired":true and reports "entryCount":0.
 
 # Fetch every due source now.
 curl -s -X POST https://<admin>/api/access-list-sources/reconcile -H 'Authorization: Bearer gpm_...' | jq
@@ -213,6 +224,8 @@ list is being served from a set that is no longer being refreshed.
 |---|---|---|
 | `refused > 0` in the status | The feed answered non-`200`, was empty, exceeded `maxEntries` or `maxCoverage`, sent over 1 MiB, or held one unparseable line. A fetch is refused **whole** | Fix the feed; the previously fetched set keeps serving, and the retry is on the next poll tick rather than after the source's own interval |
 | A `source` rule matches nothing | The source has never been fetched, so it resolves to the **empty set** | Trigger a reconcile and check `fetchedAt`; an unfetched feed can never widen access |
+| A `source` rule matches nothing; the status says `expired: true` and the log `access-list source expired` | The source sets `maxAge` and its feed has not been fetched successfully for longer than that; the stored set was emptied | Fix the feed (see `lastError`); the next successful fetch restores the set. To keep serving an old set instead, raise or remove `maxAge`; that does not bring back an already expired set |
+| Config write refused: `maxAge must not be shorter than its fetch interval` | `maxAge` is below the source's `interval` (or the `24h` default), so every set would expire between fetches | Raise `maxAge`, ideally to two or three intervals |
 | `coverage budget` in `lastError`, or the log says the stored set is over its coverage budget | The source sets `maxCoverage` and the feed's entries together cover more (a family left at `0` allows one /8 of IPv4 or one /24 of IPv6) | If the feed really publishes that much, raise `maxCoverage` on the source; otherwise take it up with the feed publisher |
 | The log says `access-list source is broad` | The source has no `maxCoverage` and its feed covers more than one /8 of IPv4 or one /24 of IPv6 in total. The feed is still served | If the feed should be that large, nothing to do; to bound it, set `maxCoverage` on the source with room for what it publishes |
 | The whole fetch is refused over one line | The feed carries a default route, a prefix broader than `/8` (v4) or `/32` (v6), or a non-public address | That bound is deliberate: one hijacked `0.0.0.0/0` would otherwise allow the internet. Take it up with the feed publisher |

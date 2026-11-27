@@ -100,7 +100,9 @@ func (a AdminAuthSettings) ValidateRefs(cfg Config) error {
 type WebhookConfig struct {
 	// Name is a stable identifier for the target (shown in logs).
 	Name string `json:"name" yaml:"name"`
-	// URL is the absolute http(s) endpoint that receives the POST.
+	// URL is the absolute http(s) endpoint that receives the POST, or a value
+	// that is wholly a ${ENV:...} / ${FILE:...} placeholder resolved at dispatch
+	// (see ResolveURL).
 	URL string `json:"url" yaml:"url"`
 	// Secret, if set, signs every delivery: the receiver gets the signing time in
 	// X-GPM-Webhook-Timestamp and "v1=" + hex(HMAC-SHA256(secret, time + "." +
@@ -174,7 +176,8 @@ type NotificationTarget struct {
 	Type string `json:"type" yaml:"type"`
 	// URL is the absolute http(s) endpoint that receives the notification: an
 	// ntfy topic URL, a Discord webhook URL (must contain "/api/webhooks/"), or
-	// any http(s) endpoint for "generic".
+	// any http(s) endpoint for "generic". It may instead be wholly a
+	// ${ENV:...} / ${FILE:...} placeholder, resolved at dispatch (see ResolveURL).
 	URL string `json:"url" yaml:"url"`
 	// Secret, if set, authenticates the call: an ntfy access token or a generic
 	// bearer token, sent as "Authorization: Bearer <value>". Unused for discord
@@ -186,6 +189,46 @@ type NotificationTarget struct {
 	// Events is the subset of notification kinds this target receives. Empty
 	// selects DefaultNotificationEvents().
 	Events []string `json:"events,omitempty" yaml:"events,omitempty"`
+}
+
+// ResolveURL returns the URL a delivery to this webhook is sent to.
+func (w WebhookConfig) ResolveURL() (string, error) {
+	return resolveOutboundURL("webhook", w.Name, w.URL, false)
+}
+
+// ResolveURL returns the URL a send to this notification target goes to.
+func (t NotificationTarget) ResolveURL() (string, error) {
+	return resolveOutboundURL("notification target", t.Name, t.URL, t.Type == NotificationTypeDiscord)
+}
+
+// resolveOutboundURL returns a literal url unchanged: it was shape-checked at
+// write time. A url that is wholly a placeholder (Secret.IsPlaceholder) cannot
+// be checked there, so it is resolved here and held to the same rules: an
+// absolute http(s) URL, and for discord a path containing "/api/webhooks/".
+// The resolved value is the credential, so no error from here carries it or
+// any part of it, host included; errors name the target and the placeholder
+// instead. The senders hide the transport errors of such a url the same way
+// (webhook.PlaceholderTransportCause). A url that mixes
+// literal text and a placeholder is a literal, as it always was.
+func resolveOutboundURL(what, name, raw string, discord bool) (string, error) {
+	ref := Secret(raw)
+	if !ref.IsPlaceholder() {
+		return raw, nil
+	}
+	placeholder := strings.TrimSpace(raw)
+	v, err := ref.Resolve()
+	if err != nil {
+		return "", fmt.Errorf("%s %q: url %s: %w", what, name, placeholder, err)
+	}
+	v = strings.TrimSpace(v)
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("%s %q: url %s does not resolve to an absolute http(s) URL", what, name, placeholder)
+	}
+	if discord && !strings.Contains(v, "/api/webhooks/") {
+		return "", fmt.Errorf("%s %q is a discord target, so url %s must resolve to a URL containing \"/api/webhooks/\"", what, name, placeholder)
+	}
+	return v, nil
 }
 
 // NotificationsSettings configures outbound alerting (settings.notifications).
@@ -231,12 +274,16 @@ func (n NotificationsSettings) validate() error {
 			return fmt.Errorf("notifications.targets: target %q type must be one of %s/%s/%s, got %q",
 				t.Name, NotificationTypeNtfy, NotificationTypeDiscord, NotificationTypeGeneric, t.Type)
 		}
-		u, err := url.Parse(t.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("notifications.targets: target %q url must be an absolute http(s) URL, got %q", t.Name, t.URL)
-		}
-		if t.Type == NotificationTypeDiscord && !strings.Contains(t.URL, "/api/webhooks/") {
-			return fmt.Errorf("notifications.targets: target %q is a discord target, so its url must contain \"/api/webhooks/\"", t.Name)
+		// A placeholder url is shape-checked once resolved, at send time
+		// (ResolveURL): the secret may not exist where the config is edited.
+		if !Secret(t.URL).IsPlaceholder() {
+			u, err := url.Parse(t.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("notifications.targets: target %q url must be an absolute http(s) URL, got %q", t.Name, t.URL)
+			}
+			if t.Type == NotificationTypeDiscord && !strings.Contains(t.URL, "/api/webhooks/") {
+				return fmt.Errorf("notifications.targets: target %q is a discord target, so its url must contain \"/api/webhooks/\"", t.Name)
+			}
 		}
 		for _, ev := range t.Events {
 			if !isNotificationEventKind(ev) {
@@ -1215,6 +1262,15 @@ type Settings struct {
 	//
 	// Empty (the default) strips nothing.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
+
+	// PathBlock is the fleet path block list: a request whose path matches is
+	// refused on every proxy host that has not set pathBlock: off, ahead of the
+	// host's access lists and authentication (see PathBlockMiddleware). nil (the
+	// default) blocks nothing. The admin edge host (settings.adminEdge) is
+	// never covered, so a list that blocks too much cannot lock the edge panel
+	// out; a hand-written proxy host in front of the panel is covered like any
+	// other.
+	PathBlock *PathBlockMiddleware `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
 }
 
 // ClientLimitsSettings is the per-client in-flight request limit of the
@@ -1384,6 +1440,9 @@ func (s Settings) Validate() error {
 			return fmt.Errorf("webhooks: duplicate webhook name %q", w.Name)
 		}
 		seen[w.Name] = struct{}{}
+		if Secret(w.URL).IsPlaceholder() {
+			continue // shape-checked once resolved, at send time (ResolveURL)
+		}
 		u, err := url.Parse(w.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("webhooks: webhook %q url must be an absolute http(s) URL, got %q", w.Name, w.URL)
@@ -1432,6 +1491,32 @@ func (s Settings) Validate() error {
 	}
 	if err := validateStripResponseHeaders(s.StripResponseHeaders); err != nil {
 		return err
+	}
+	if s.PathBlock != nil {
+		if err := s.PathBlock.validate("pathBlock."); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidatePathBlockRefs cross-checks the access lists settings.pathBlock names
+// in allowFrom against cfg. Settings.Validate can only check the shape of a
+// reference; a name that does not resolve exempts nobody, so it is refused on
+// the write that creates it (a settings write naming a missing list, or a
+// config write removing a named one).
+func (s Settings) ValidatePathBlockRefs(cfg Config) error {
+	if s.PathBlock == nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, a := range cfg.AccessLists {
+		have[a.Name] = true
+	}
+	for _, name := range s.PathBlock.AccessListRefs() {
+		if !have[name] {
+			return fmt.Errorf("pathBlock.allowFrom: references unknown accessList %q", name)
+		}
 	}
 	return nil
 }

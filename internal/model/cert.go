@@ -1,11 +1,17 @@
 package model
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +40,7 @@ const (
 	DNSProviderDesec        = "desec"
 	DNSProviderRFC2136      = "rfc2136"  // dynamic DNS UPDATE with a TSIG key
 	DNSProviderACMEDNS      = "acme-dns" // joohoi/acme-dns, reached over a CNAME
+	DNSProviderWebhook      = "webhook"  // an operator's own HTTP endpoint that writes the record
 )
 
 // KnownDNSProviders lists the dns-01 providers with a built-in solver. The UI
@@ -46,6 +53,7 @@ var KnownDNSProviders = []string{
 	DNSProviderDesec,
 	DNSProviderRFC2136,
 	DNSProviderACMEDNS,
+	DNSProviderWebhook,
 }
 
 // TokenDNSProviders are the providers whose entire credential is a single API
@@ -55,6 +63,31 @@ var TokenDNSProviders = []string{
 	DNSProviderDigitalOcean,
 	DNSProviderHetzner,
 	DNSProviderDesec,
+}
+
+// dnsProviderPlainKeys lists, per provider, the config keys that are
+// settings rather than credentials. See DNSProviderPlainKey.
+var dnsProviderPlainKeys = map[string][]string{
+	DNSProviderRFC2136: {"server", "zone", "tsigKeyName", "tsigAlgorithm", "transport", "ttl", "timeout"},
+	DNSProviderACMEDNS: {"baseURL", "subdomain", "allowInsecureLocal"},
+	DNSProviderWebhook: {"url", "allowInsecureLocal"},
+}
+
+// DNSProviderPlainKey reports whether a DNS provider config key is a plain
+// setting rather than a secret. A plain key may hold a literal value: the
+// store commits it to git as written and the API returns it as written,
+// instead of refusing it (LiteralSecrets) and showing it as "***"
+// (DNSProvider.MarshalJSON). A placeholder still works for it. Every other key
+// is a secret: rfc2136 tsigSecret, acme-dns username and password, webhook
+// token, the REST providers' apiToken, and any key of an unknown provider or
+// unknown to its provider.
+//
+// A webhook url is plain even though a credential could be put in its query
+// string: the bearer token is the place for the credential. Anyone who can
+// read DNS providers sees a literal url, and it is in the config history;
+// when the URL itself is sensitive, write it as a placeholder.
+func DNSProviderPlainKey(provider, key string) bool {
+	return slices.Contains(dnsProviderPlainKeys[provider], key)
 }
 
 // TSIGAlgorithms are the TSIG MAC algorithms the rfc2136 solver will sign with.
@@ -85,6 +118,64 @@ type ACMESpec struct {
 	DNSProvider string `json:"dnsProvider,omitempty" yaml:"dnsProvider,omitempty"`
 	// EAB binds this ACME account to an external CA account, when the CA needs it.
 	EAB *EABSpec `json:"eab,omitempty" yaml:"eab,omitempty"`
+	// Profile names the CA's issuance profile for every order of this
+	// certificate (the CA lists its profiles in its directory). Empty means the
+	// CA's default.
+	Profile string `json:"profile,omitempty" yaml:"profile,omitempty"`
+	// CABundle is the trust anchor set for a private CA's ACME directory: inline
+	// PEM CERTIFICATE blocks, or a ${FILE:...} / ${ENV:...} placeholder that
+	// resolves to them. When set, the directory's TLS certificate is checked
+	// against these certificates only, never the system roots. A trust anchor is
+	// not a secret, so this is a plain string, not a Secret: an inline bundle is
+	// committed and returned by the API as written.
+	CABundle string `json:"caBundle,omitempty" yaml:"caBundle,omitempty"`
+}
+
+// maxCABundle bounds acme.caBundle, as written and as resolved: a few
+// certificates fit in a few KiB, so this leaves room for a long chain while
+// keeping a mistaken file reference from loading something large.
+const maxCABundle = 64 << 10
+
+// acmeProfileRe is the accepted form of acme.profile.
+var acmeProfileRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ParseCABundle parses an acme.caBundle value (already resolved, if it was a
+// placeholder) into its certificates. It accepts one or more PEM CERTIFICATE
+// blocks and nothing else: another block type, text outside the blocks or a
+// certificate that does not parse is an error, so a pasted private key or a
+// truncated bundle is refused instead of being half used.
+func ParseCABundle(bundle string) ([]*x509.Certificate, error) {
+	if len(bundle) > maxCABundle {
+		return nil, fmt.Errorf("must be at most %d bytes, got %d", maxCABundle, len(bundle))
+	}
+	errText := errors.New("contains text that is not a PEM CERTIFICATE block")
+	var certs []*x509.Certificate
+	rest := bytes.TrimSpace([]byte(bundle))
+	for len(rest) > 0 {
+		// pem.Decode skips text before a block, and a malformed block along with
+		// it; requiring every block to start right after the previous one (bar
+		// whitespace) keeps any part of the value from being silently ignored.
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return nil, errText
+		}
+		block, next := pem.Decode(rest)
+		if block == nil || bytes.Count(rest[:len(rest)-len(next)], []byte("-----BEGIN ")) != 1 {
+			return nil, errText
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("contains a %q PEM block; only CERTIFICATE blocks are allowed", block.Type)
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("certificate %d does not parse: %v", len(certs)+1, err)
+		}
+		certs = append(certs, c)
+		rest = bytes.TrimSpace(next)
+	}
+	if len(certs) == 0 {
+		return nil, errors.New("contains no PEM CERTIFICATE block")
+	}
+	return certs, nil
 }
 
 // EffectiveChallenge resolves the challenge type actually used: the explicit
@@ -172,6 +263,21 @@ func (c Certificate) Validate() error {
 				return fmt.Errorf("certificate %q: acme.eab.hmacKey: is required when eab is set", c.Name)
 			}
 		}
+		if p := c.ACME.Profile; p != "" && !acmeProfileRe.MatchString(p) {
+			return fmt.Errorf("certificate %q: acme.profile: must be 1 to 64 characters of letters, digits, \"_\" or \"-\", got %q", c.Name, p)
+		}
+		if b := c.ACME.CABundle; b != "" {
+			// A placeholder has no value at write time; it is resolved and parsed
+			// at every renewal attempt instead.
+			if len(b) > maxCABundle {
+				return fmt.Errorf("certificate %q: acme.caBundle: must be at most %d bytes, got %d", c.Name, maxCABundle, len(b))
+			}
+			if !Secret(b).IsPlaceholder() {
+				if _, err := ParseCABundle(b); err != nil {
+					return fmt.Errorf("certificate %q: acme.caBundle: %w", c.Name, err)
+				}
+			}
+		}
 	case CertTypeCustom:
 		if c.Custom == nil || c.Custom.CertFile == "" || c.Custom.KeyFile == "" {
 			return fmt.Errorf("certificate %q: custom: certFile and keyFile are required", c.Name)
@@ -196,7 +302,7 @@ func (c Certificate) Validate() error {
 // as its own object so multiple certificates can share one credential set and so
 // new providers are added by implementing an interface, not editing core. The
 // REST providers authenticate with a single API token under config.apiToken;
-// rfc2136 and acme-dns take their own key sets. The Config map stays
+// rfc2136, acme-dns and webhook take their own key sets. The Config map stays
 // provider-specific and secret-valued.
 type DNSProvider struct {
 	ObjectMeta `json:",inline" yaml:",inline"`
@@ -206,6 +312,31 @@ type DNSProvider struct {
 }
 
 func (p DNSProvider) Kind() string { return "DNSProvider" }
+
+// MarshalJSON keeps the struct's JSON shape and the redaction of secret
+// config values (Secret.MarshalJSON: a placeholder verbatim, a literal as
+// "***"), and returns a plain key's value as written (see
+// DNSProviderPlainKey). YAML is not affected: the stored file keeps every
+// value as written.
+func (p DNSProvider) MarshalJSON() ([]byte, error) {
+	type fields DNSProvider // the same fields without this method
+	out := struct {
+		fields
+		// Shadows fields.Config: the shallower field wins in encoding/json.
+		Config map[string]any `json:"config,omitempty"`
+	}{fields: fields(p)}
+	if len(p.Config) > 0 {
+		out.Config = make(map[string]any, len(p.Config))
+		for k, v := range p.Config {
+			if DNSProviderPlainKey(p.Provider, k) {
+				out.Config[k] = string(v)
+			} else {
+				out.Config[k] = v
+			}
+		}
+	}
+	return json.Marshal(out)
+}
 
 func (p DNSProvider) Validate() error {
 	if err := ValidateName(p.Name); err != nil {
@@ -229,6 +360,8 @@ func (p DNSProvider) Validate() error {
 		return p.validateRFC2136()
 	case DNSProviderACMEDNS:
 		return p.validateACMEDNS()
+	case DNSProviderWebhook:
+		return p.validateWebhook()
 	default:
 		if p.Config["apiToken"].IsEmpty() {
 			return fmt.Errorf("dns provider %q: config.apiToken: is required", p.Name)
@@ -298,6 +431,25 @@ func (p DNSProvider) validateACMEDNS() error {
 	return nil
 }
 
+// validateWebhook checks the webhook solver's endpoint and bearer token. The
+// URL is checked like an acme-dns baseURL: the token is sent to it.
+func (p DNSProvider) validateWebhook() error {
+	if err := p.requireConfig("url", "token"); err != nil {
+		return err
+	}
+	if !p.Config["url"].IsPlaceholder() {
+		raw := strings.TrimSpace(string(p.Config["url"]))
+		allowLocal := IsTruthyConfig(string(p.Config["allowInsecureLocal"]))
+		if err := ValidateOutboundBaseURL(fmt.Sprintf("dns provider %q: config.url", p.Name), raw, allowLocal); err != nil {
+			return err
+		}
+		if HasURLUserInfo(raw) {
+			return fmt.Errorf("dns provider %q: config.url: must not contain user info (user:password@); it is never sent, put the credential in config.token", p.Name)
+		}
+	}
+	return nil
+}
+
 // IsTruthyConfig reads an opt-in flag out of a string-valued config map. Only an
 // explicit affirmative counts; anything else (including an unset key) is false,
 // so a typo can never turn a guard off.
@@ -315,13 +467,36 @@ func IsTruthyConfig(v string) bool {
 // an outbound integration: loopback, link-local (the cloud metadata range
 // 169.254.169.254 / fe80::), unspecified or multicast.
 //
+// allowLocal (config.allowInsecureLocal) skips all of these address-literal
+// checks at validation time, not just the loopback one: with it set, a
+// link-local, unspecified or multicast literal is accepted here too. A
+// link-local destination is still refused when the client connects (the
+// shared outbound client's dial guard, see webhook.NewSecureClient).
+//
 // A hostname is not resolved here (validation is offline and a name can be
 // re-pointed later); the runtime guard on the shared outbound HTTP client
 // refuses a link-local destination post-DNS, which is what closes the rebinding
 // case. This is the write-time half of that pair.
 func ValidateOutboundBaseURL(field, raw string, allowLocal bool) error {
+	return checkOutboundBaseURL(field, raw, allowLocal, true)
+}
+
+// ValidateResolvedOutboundURL is ValidateOutboundBaseURL for a value resolved
+// from a ${ENV:...} / ${FILE:...} placeholder at run time: the same rules, but
+// no error ever contains the value or any part of it, since the URL can carry
+// a credential (user info, a query key) and the error reaches the
+// certificate's last error, notifications and logs. ValidateOutboundBaseURL
+// may echo the value: at write time it is what the caller just sent.
+func ValidateResolvedOutboundURL(field, raw string, allowLocal bool) error {
+	return checkOutboundBaseURL(field, raw, allowLocal, false)
+}
+
+func checkOutboundBaseURL(field, raw string, allowLocal, echo bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		if !echo {
+			return fmt.Errorf("%s: is not an http or https URL (the value is not shown, it may hold a credential)", field)
+		}
 		return fmt.Errorf("%s: must be an http or https URL, got %q", field, raw)
 	}
 	host := u.Hostname()
@@ -332,11 +507,29 @@ func ValidateOutboundBaseURL(field, raw string, allowLocal bool) error {
 	ip := net.IP(addr.WithZone("").AsSlice())
 	switch {
 	case ip.IsLoopback():
+		if !echo {
+			return fmt.Errorf("%s: points at a loopback address; set config.allowInsecureLocal: \"true\" if the service really runs beside gpm", field)
+		}
 		return fmt.Errorf("%s: points at the loopback address %s; set config.allowInsecureLocal: \"true\" if the service really runs beside gpm", field, ip)
 	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		if !echo {
+			return fmt.Errorf("%s: points at a link-local address, which is the cloud metadata range and never a DNS provider", field)
+		}
 		return fmt.Errorf("%s: points at the link-local address %s, which is the cloud metadata range and never a DNS provider", field, ip)
 	case ip.IsUnspecified() || ip.IsMulticast():
+		if !echo {
+			return fmt.Errorf("%s: points at an unspecified or multicast address, which is not a destination gpm can send credentials to", field)
+		}
 		return fmt.Errorf("%s: points at %s, which is not a destination gpm can send credentials to", field, ip)
 	}
 	return nil
+}
+
+// HasURLUserInfo reports whether raw parses as a URL with user info
+// (user:password@host). The webhook solver never sends it (it sets its own
+// Authorization header), so a webhook url carrying it is refused rather than
+// silently dropping the credential.
+func HasURLUserInfo(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && u.User != nil
 }

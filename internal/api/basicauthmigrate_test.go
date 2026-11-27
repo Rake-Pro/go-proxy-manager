@@ -116,7 +116,7 @@ func TestMigrateBasicAuthPlanIsADryRun(t *testing.T) {
 // middleware exists with mode basic, both references gained it, and the list is
 // cleared.
 func TestMigrateBasicAuthApply(t *testing.T) {
-	h, _ := newHandler(t)
+	h, st := newHandlerStore(t)
 	seedLegacyBasicAuth(t, h, "legacy", true)
 
 	w := do(t, h, "POST", "/access-lists/legacy/migrate-basic-auth", "")
@@ -146,8 +146,11 @@ func TestMigrateBasicAuthApply(t *testing.T) {
 		t.Fatalf("middleware = %+v", mw)
 	}
 	if mw.Auth.Basic == nil || len(mw.Auth.Basic.Users) != 1 ||
-		mw.Auth.Basic.Users[0].Username != "admin" || mw.Auth.Basic.Users[0].PasswordHash != bcryptFixture {
-		t.Fatalf("credentials did not carry over: %+v", mw.Auth.Basic)
+		mw.Auth.Basic.Users[0].Username != "admin" || mw.Auth.Basic.Users[0].PasswordHash != "***" {
+		t.Fatalf("credentials did not carry over, or the read did not redact the hash: %+v", mw.Auth.Basic)
+	}
+	if got := storedMiddleware(t, st, "legacy-basic").Auth.Basic.Users[0].PasswordHash; got != bcryptFixture {
+		t.Fatalf("stored passwordHash = %q, want the list's hash carried over", got)
 	}
 	if mw.Auth.Basic.Realm != "legacy" {
 		t.Fatalf("realm = %q, want the access list name", mw.Auth.Basic.Realm)
@@ -289,7 +292,7 @@ func TestMigrateBasicAuthWarnsOnUnrepresentableRules(t *testing.T) {
 // caller may POST a plaintext "password" and the API stores only a bcrypt
 // passwordHash, never echoing the plaintext back.
 func TestBasicAuthMiddlewareHashesPlaintextPassword(t *testing.T) {
-	h, _ := newHandler(t)
+	h, st := newHandlerStore(t)
 	body := `{"name":"gate","type":"auth","auth":{"mode":"basic","basic":{
 		"realm":"Internal","users":[{"username":"admin","password":"hunter2"}]}}}`
 	w := do(t, h, "PUT", "/middlewares/gate", body)
@@ -299,12 +302,7 @@ func TestBasicAuthMiddlewareHashesPlaintextPassword(t *testing.T) {
 	if got := w.Body.String(); strings.Contains(got, "hunter2") {
 		t.Fatalf("response echoed the plaintext password: %s", got)
 	}
-	w = do(t, h, "GET", "/middlewares/gate", "")
-	var mw model.Middleware
-	if err := json.Unmarshal(w.Body.Bytes(), &mw); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	stored := mw.Auth.Basic.Users[0].PasswordHash
+	stored := storedMiddleware(t, st, "gate").Auth.Basic.Users[0].PasswordHash
 	if len(stored) != 60 || stored[:4] != "$2a$" {
 		t.Fatalf("passwordHash = %q, want a bcrypt hash", stored)
 	}
@@ -315,10 +313,7 @@ func TestBasicAuthMiddlewareHashesPlaintextPassword(t *testing.T) {
 	if w := do(t, h, "PUT", "/middlewares/gate", edit); w.Code != http.StatusOK {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}
-	w = do(t, h, "GET", "/middlewares/gate", "")
-	if err := json.Unmarshal(w.Body.Bytes(), &mw); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	mw := storedMiddleware(t, st, "gate")
 	if mw.Auth.Basic.Users[0].PasswordHash != stored || mw.Auth.Basic.Realm != "Changed" {
 		t.Fatalf("edit changed the hash or lost the realm: %+v", mw.Auth.Basic)
 	}
@@ -337,7 +332,7 @@ func TestBasicAuthMiddlewareHashesPlaintextPassword(t *testing.T) {
 // terms a `type: auth` middleware write does: hashed server-side, stored as
 // passwordHash only, never echoed.
 func TestInlineBasicAuthHashesPlaintextPassword(t *testing.T) {
-	h, _ := newHandler(t)
+	h, st := newHandlerStore(t)
 	body := `{"name":"app","domains":["app.example.com"],
 		"upstream":{"scheme":"http","host":"10.0.0.5","port":8080},
 		"auth":{"mode":"basic","basic":{"realm":"Host","users":[
@@ -353,11 +348,7 @@ func TestInlineBasicAuthHashesPlaintextPassword(t *testing.T) {
 		t.Fatalf("response echoed a plaintext password: %s", got)
 	}
 
-	w = do(t, h, "GET", "/proxy-hosts/app", "")
-	var host model.ProxyHost
-	if err := json.Unmarshal(w.Body.Bytes(), &host); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	host := storedProxyHost(t, st, "app")
 	hostHash := host.Auth.Basic.Users[0].PasswordHash
 	locHash := host.Locations[0].Auth.Basic.Users[0].PasswordHash
 	for _, c := range []struct{ where, hash string }{{"host", hostHash}, {"location", locHash}} {
@@ -383,10 +374,7 @@ func TestInlineBasicAuthHashesPlaintextPassword(t *testing.T) {
 	if w := do(t, h, "PUT", "/proxy-hosts/app", edit); w.Code != http.StatusOK {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}
-	w = do(t, h, "GET", "/proxy-hosts/app", "")
-	if err := json.Unmarshal(w.Body.Bytes(), &host); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	host = storedProxyHost(t, st, "app")
 	if host.Auth.Basic.Users[0].PasswordHash != hostHash ||
 		host.Locations[0].Auth.Basic.Users[0].PasswordHash != locHash {
 		t.Fatal("an edit with no plaintext password changed a stored hash")

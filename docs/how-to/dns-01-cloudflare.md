@@ -35,7 +35,7 @@ token scoped to one zone.
 
 3. Reference the certificate from a host (`tls.certificateRef: wildcard`).
 
-The manager issues on first load and renews automatically 30 days before expiry.
+The manager orders the certificate at its next pass, not when you save it: that is the next regular 12-hour pass or a restart. To order at once, use **Renew now** in the admin UI or `POST /api/certificates/wildcard/renew`. It then renews automatically when `min(30 days, lifetime / 3)` of the certificate's life remains (30 days for a 90-day certificate, see [Renewal](../reference/config/certificate.md#renewal)).
 DNS-01 needs no inbound port: it works from behind a firewall. **Tip:** validate
 against the Let's Encrypt **staging** directory first by setting
 `acme.directoryURL: https://acme-staging-v02.api.letsencrypt.org/directory` on a
@@ -55,4 +55,4 @@ serving real traffic. Switch to production (omit `directoryURL`) once it issues.
 |---|---|---|
 | `lastError` mentions "no zone found" | The token cannot see the zone | Recheck the token's zone scope; it must include the exact zone (`example.com`), not just a subdomain |
 | `lastError` reports a Cloudflare API failure | Wrong token, revoked token, or missing `Zone:DNS:Edit` permission | Regenerate the token with both **Zone:DNS:Edit** and **Zone:Read** on the target zone |
-| Certificate stuck at `state: pending` | The TXT record has not propagated yet, or the token cannot write it | Wait one poll cycle; confirm the token's permissions match above |
+| Certificate stuck at `state: pending` | The TXT record has not propagated yet, or the token cannot write it | Wait for the next pass or use Renew now; confirm the token's permissions match above |

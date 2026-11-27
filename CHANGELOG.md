@@ -7,6 +7,81 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Config warnings for `auth.requiredRoles` that does not do what it says
+  (#65): an entry that is not a role (`admin`, `user`), typically a group
+  name; `requiredRoles` on an `oidc` or `forward-auth` gate whose provider
+  maps no role; and `requiredRoles` on a gate that takes `auth-request` mode
+  from its provider, where it is not applied. All three load and behave as
+  before.
+- Admin UI certificate wizard (#54): **Add certificate** opens a four-step
+  wizard (Domains, Authority, Validation, Review) for ACME certificates, with a
+  Review dry run, Import from YAML and a create-only save, like the proxy host
+  wizard. Without a DNS provider `dns-01` is offered only for a wildcard, which
+  forces it. A custom certificate (PEM files on the server) uses the full
+  editor, which stays at `#/certs/_new`.
+- Admin UI CA picker (#54): Let's Encrypt, Let's Encrypt (staging), ZeroSSL,
+  Google Public CA, SSL.com (ECC directory, since gpm issues ECDSA keys) and
+  Custom, in the wizard's Authority step and the certificate editor. It fills
+  the plain `acme.directoryURL`; ZeroSSL and Google Public CA turn external
+  account binding on and lock it, and Custom needs a directory URL (a blank one
+  means Let's Encrypt). No config key changed.
+- Admin UI Overview panels (#56): "This instance" (version, config commit,
+  listener addresses, request capture, metrics, HA role), "Hosts" (counts by
+  status and discovery source) and "Certificates" (counts by type and state,
+  next expiry of an enabled certificate), each non-zero count linking to the
+  filtered list (a zero is plain text).
+- Admin UI deep links (#56): `#/hosts?filter=<text>` and
+  `#/certs?filter=<text>` open that list with the filter applied. The filter
+  replaces the one remembered for the list (on the proxy hosts list it also
+  switches every zone chip back on), and the address drops back to `#/hosts`
+  or `#/certs`.
+
+- ACME profiles (#62): `acme.profile` names the CA's issuance profile for a
+  certificate's orders (1 to 64 characters of letters, digits, `_` or `-`). A CA
+  that does not offer it fails the order; changing it on an issued certificate
+  makes it due for renewal at the next pass.
+- Private CA trust (#62): `acme.caBundle` (inline PEM or a `${FILE:}` /
+  `${ENV:}` placeholder, at most 65536 bytes) makes every exchange with that
+  certificate's ACME directory trust only the bundle. Setting or changing it
+  through the API needs the `admin` scope. New how-to: issuing from a private
+  step-ca (#60).
+- ACME Renewal Information (#62): when the CA's directory advertises
+  `renewalInfo` (RFC 9773), gpm polls it on every pass (early wakes included) and renews at
+  the earlier of the CA's time and the lifetime rule. Polling only: orders do
+  not send `replaces`.
+- Webhook DNS-01 solver (#61): `provider: webhook` (`url`, `token`,
+  `allowInsecureLocal`) POSTs each challenge record to an operator endpoint.
+  New how-tos: DNS-01 through your own endpoint, and certificates for a domain
+  whose DNS host has no API (#60).
+- Certificate status `renewAt` and `renewReason` (`lifetime`, `ari`, or
+  `changed` when the domains or profile changed and the certificate is due now)
+  on `GET /api/certificates` and `GET /api/certificates/{name}` (#62).
+- Discovery templates and profiles accept `trustedProxies` (#53), with the proxy
+  host's three states. Unset leaves a managed host's own value alone. A value a
+  template stamped is marked with the label `<prefix>/trusted-proxies-by`
+  (`gpm.rake.pro/trusted-proxies-by` by default, value `ingress-discovery` or
+  `docker-discovery`): when the template or profile stops setting the key, a
+  labelled host loses the value and the label, and a host without the label
+  keeps its own.
+
+- Access log: every access-control refusal is recorded with its reason. The
+  JSON log line of a refused request carries `"deny":"<reason>"` and each
+  `GET /api/logs` entry carries `deny` (omitted when nothing refused the
+  request). Reasons are the `gpm_denials_total` labels: `path-block`,
+  `access-list`, `guard`, `rate-limit`, the auth reasons and the rest.
+- Path block list (#75): a `type: path-block` middleware (spec key `pathBlock`:
+  `extensions`, `names`, `globs`, `allowFrom`, `denyStatus` default `404`,
+  `denyWith`) and `settings.pathBlock`, the same spec applied to every proxy
+  host. A request whose cleaned path has a listed extension, segment name or
+  glob match is refused before any access list, bouncer, auth gate or the
+  upstream, and counts as `reason="path-block"` in `gpm_denials_total` and
+  analytics. It sits just inside the rate limit, so a blocked request spends
+  rate-limit budget. `pathBlock: inherit | off` on a proxy host, an Ingress or
+  Docker discovery template and each profile opts a host out of the fleet list.
+  Off by default: unset blocks nothing, and existing configs are unchanged. The
+  synthesized admin edge host (`settings.adminEdge`) is not covered by the fleet
+  list; a hand-written host that fronts the admin panel is, so check the list
+  against the panel's paths first.
 - Access-list composition: `accessListsMode: any` on a proxy host or location
   passes a request when at least one of its `accessLists` allows it. It
   composes allow-lists only: it needs at least one list, refuses a list with
@@ -121,6 +196,31 @@ All notable changes to go-proxy-manager are documented here. The format follows
   route, and the docs now say so (#148).
 - Stream hosts: optional TCP `idleTimeout` and `maxConnsPerSource` (IPv6 by
   /56). Both are off unless set and refused on `protocol: udp` (#114).
+- Access-list sources: optional `maxAge`. The age of a source's stored set is
+  measured from the last successful fetch recorded in the ledger, or from when
+  `maxAge` was first applied to the source if that is later. Once it exceeds
+  `maxAge` and a fetch is refused, the set is emptied in the ledger (one
+  commit, one `WARN`) and every rule naming the source matches nothing: an
+  `allow` rule admits nobody through it, a `deny` rule denies nobody. The next
+  successful fetch restores it. It must not be shorter than the source's
+  `interval`; status reports `expired: true`. The ledger gains `expiredAt` and
+  `maxAgeSince`, written only for sources with `maxAge`. Unset keeps the
+  previous set however old it is, as before (#172).
+- Stream hosts: optional `newSessionsPerMinute` (UDP only) limits how many new
+  sessions one client address (IPv6 by /56) may open per minute; it counts
+  session attempts that reach the dial. Unset keeps today's behaviour and it is
+  refused on `protocol: tcp` (#172).
+- Rate limit `ipv6Prefix` (48 to 64, default 64): the prefix length IPv6
+  clients are grouped by, so one large delegation cannot spread a flood over
+  many buckets (#172).
+- `GET /health` `configWarnings` (the Needs attention list) names every
+  access-list deny rule whose source the data plane resolves to the empty set
+  (never fetched successfully, expired under `maxAge`, over `maxCoverage`, or
+  every stored entry refused by the entry guard), since such a rule denies no
+  one (#172).
+- Docker discovery `allowLinkLocal` (default `false`): accept a container
+  whose address is link-local, as before this release (#172).
+- OpenAPI documents `settings.dockerDiscovery`.
 
 ### Security
 
@@ -372,7 +472,109 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
   loopback, unspecified or multicast address; config git calls ignore the
   system git config.
 
+Hardening follow-ups from the 2026-11 review (#172), none a known
+vulnerability:
+
+- `stripResponseHeaders` now also applies to interim `1xx` responses relayed
+  from an upstream. At most 16 interim responses are relayed per request, and
+  an upstream that sends more than 256 gets a `502`.
+- A lifecycle webhook `url` and a notification target `url` may be a
+  whole-value `${ENV:...}` / `${FILE:...}` placeholder, resolved and checked at
+  each delivery, so a credential-bearing url (a Discord webhook, an ntfy topic,
+  a token in the path) no longer has to be committed to the config repository
+  or included in backups. The whole resolved url, host included, is hidden in
+  the API, UI, delivery status, test results and logs; a failed delivery to
+  such a url reports only its cause (name resolution, connection, TLS
+  handshake, timeout, outbound policy, other) or the HTTP status. Plain urls
+  are unchanged, including their error text.
+- The dry-run plan routes (`GET /api/dns-sync/plan`,
+  `/api/ingress-discovery/plan`, `/api/docker-discovery/plan`) share one
+  provider query between concurrent callers. A successful plan is reused for up
+  to 5 seconds unless a config commit lands or a reconcile runs through the
+  API; a failed plan, including a DNS plan reporting an unreachable backend, is
+  never reused. A read-scoped token can no longer drive unlimited provider API
+  calls, and concurrent callers get the shared result instead of `409`.
+- `POST /api/{plural}/_parse` refuses a YAML document whose aliases add more
+  than 100,000 nodes once expanded. The check runs on the parsed tree before
+  any value is decoded, so a small body can no longer allocate tens of MiB.
+  Ordinary anchors, aliases and merge keys are still accepted.
+- API reads no longer return basic-auth `passwordHash` values: every JSON
+  reply shows the user's hash as `***` (except `_parse`, which echoes the
+  document it was sent), and dry-run previews and history diffs
+  show `***` for every `passwordHash` value. A write that sends `***` back
+  keeps the stored hash of the user of that name in the same user list; a new
+  list, or the one list that replaces the single gone list of its level, may
+  take the one hash that username has in the stored object, and anything else
+  is refused. The backup archive is unchanged (#172).
+- Config store: a symbolic link in the config directory is read only when it
+  resolves to a file inside that directory (the resolved target is compared
+  with the resolved config directory, so ConfigMap `..data` layouts and a
+  linked config directory keep working). A link that resolves outside it, or
+  not at all, fails the load, backup, revert or restore with an error naming
+  the file. Writes, revert and restore no longer write or delete through such
+  a link; before, a revert or restore could write a token file or remove files
+  outside the config directory through one (#172).
+- `clientCertRoles`: the bare-common-name fallback is skipped when the CN
+  contains `=`, so a certificate's CN can no longer spell another
+  certificate's full subject and take its role (#172).
+- Several auth gates on one route: a request on an `auth-request` gate's
+  outpost `pathPrefix` or an `oidc` gate's callback now also has to pass the
+  route's `basic`, `client-cert` and `forward-auth` gates (with their
+  `allowFrom` exemptions), wherever they sit in the run order. Other `oidc` /
+  `auth-request` gates that run after it still step aside there, so a sign-in
+  flow never waits on a gate that runs after it (#172).
+
+- `POST /api/certificates/{name}/revert` needs the `admin` scope (it was
+  `certificates:write`), like the middleware revert: a revert restores a stored
+  certificate without the admin check on `acme.directoryURL`, `acme.eab` and
+  `acme.caBundle`. (#62)
+
 ### Changed
+
+- Docs (#65): the per-host SSO how-to is corrected after the walk. Its
+  example put a group name in `requiredRoles`, which denies everyone; it now
+  also covers the per-domain redirect URI, the port 443 requirement, the
+  default scopes, how a session ends and the missing per-user sign-out.
+- Admin UI certificate editor (#54): same layout as the proxy host editor, with
+  tabs in the title band (Certificate, Authority, Validation for ACME;
+  Certificate, Files for custom) and a rail with status, renewal, issuer,
+  covered names, last attempt and the config file path.
+- Admin UI: **Add certificate** (the list toolbar, the empty list and the
+  Overview) opens the certificate wizard instead of the editor (#54); a
+  middle-click still opens the full editor.
+- Admin UI Overview (#56): the one-line summary under Needs attention now holds
+  only the upstream members sentence; the host and certificate counts moved
+  into the panels.
+- Renewal is lifetime-relative (#62): an ACME certificate renews when
+  `min(30 days, lifetime / 3)` remains, so a certificate living less than 90
+  days no longer renews on every pass. The `expiring` state of an ACME certificate, the
+  `expiring` count of `GET /api/health` and the `cert.expiring` digest follow
+  the same rule (a custom certificate keeps the fixed 30 days), and the digest lists an ACME certificate only when its renewal
+  is already due.
+- The renewal loop wakes early when the next certificate enters its window
+  (never sooner than one minute), besides the regular 12-hour pass (#62).
+- A failed renewal is retried after a backoff that grows with consecutive
+  failures (it used to wait for the next 12-hour pass): the base is a quarter of
+  the certificate's renewal window (5 minutes to 1 hour), and the n-th failure
+  waits `min(base * 2^(n-1), 12 hours)` from when the attempt started, so 1 h,
+  2 h, 4 h, 8 h, then every 12 h for a 90-day certificate. A success resets it,
+  and a restart starts again at the base. A pass that cannot load the config is
+  retried every 5 minutes (#62).
+- Every renewal attempt has a deadline of the DNS propagation timeout plus 10
+  minutes (13 minutes by default): an order that hangs fails with `the attempt
+  did not finish within 13m0s: ...`, the backoff applies and its TXT records
+  are still cleaned up (#62).
+- ACME renewal information is bounded: the `renewalInfo` URL must match the
+  directory's scheme, host and port, the suggested window is cut to the
+  certificate's validity, an ARI time cannot renew a certificate younger than
+  `min(72 hours, lifetime / 3)`, and each request times out after 10 seconds
+  (#62).
+- Discovery keeps tags added by hand to a managed host (#53): the template's
+  tags come first, then the host's other tags. A template tag removed from the
+  template is dropped while gpm keeps running; after a restart it stays until
+  removed by hand.
+- An unset template `trustedProxies` no longer wipes a managed host's own value
+  on reconcile (#53).
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an
   access-list denial decided by a **country rule** under `geo` (before: under
@@ -406,8 +608,67 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
 - Saving an object stored under a file name that is not its own moves it to
   `<name>.yaml` in the same commit; a write that would overwrite another
   object's file is refused (#159).
+- Bouncer live lookups: concurrent requests that miss the cache with the same
+  lookup share one call to the bouncer. The shared call is bounded by `timeout`
+  and is not cancelled when the request that started it goes away (#172).
+- UDP stream sessions take their read buffers from a pool instead of allocating
+  64 KiB each (#172).
+- Guard triggers that list `GET` now also match `HEAD`. Method-override
+  parameters (`_method`, `X-HTTP-Method-Override`) are not read; list `POST`
+  too if your backend honours them (#172).
+- Documented the run order of several auth gates on one route (location
+  inline, host inline, then referenced auth middlewares last-referenced
+  first); the order itself is unchanged (#172).
+- Auth-request outpost passthrough: the outpost's response headers must arrive
+  within 10 s (the subrequest's bound), and the passthrough sends the derived
+  client IP in `X-Forwarded-For` (as the auth subrequest does) and in
+  `X-Real-Ip` (#172).
+- A rate limit's `allowFrom: ["@<list>"]` entry now exempts a client only when
+  the first rule of that access list matching it is an allow rule, checked per
+  request like the list's own gate; a client a `deny` rule above that allow
+  rule matches is now rate limited (#172).
+- TCP stream hosts forward a half-close: when one side finishes sending, gpm
+  shuts only the write side toward the other peer (after a TLS `close_notify`
+  in terminate mode) and keeps the other direction open until it finishes too.
+  On a host with `idleTimeout` the idle deadline is the only bound after a
+  half-close, so an active transfer is never cut; on a host without it, a pair
+  whose other side has not finished 60 s after the first half-close is reset
+  (TCP RST to both peers), so a cut reply is not read as complete. A read or
+  write error still closes both sides at once, and the connection keeps its
+  `maxConnsPerSource` slot until it closes. Before, the first EOF from either
+  side closed the connection, so a reply sent after a client's half-close was
+  lost (#172).
+- Docker discovery: a container whose address is link-local (`169.254.0.0/16`,
+  `fe80::/10`) is now skipped, with the reason in the reconcile status; a
+  host already derived for it is kept as it is while its profile is unchanged.
+  `dockerDiscovery.allowLinkLocal: true` restores the previous behaviour
+  (#172).
+- Restore logs each symbolic-link or hard-link archive entry it skips.
 
 ### Fixed
+
+- Per-host SSO on a location (#65): a sign-in started by an `oidc` or
+  `auth-request` gate that only a `locations` entry carries now completes. The
+  gate's own path (`/__gpm/oidc/callback`, the outpost `pathPrefix`) lies
+  outside the location and used to reach the upstream instead of the gate.
+  Found in the first walk of `oidc` mode against a real identity provider.
+- The path of such a gate (#65) now meets the host's rate limit, path block,
+  access lists, bouncer and auth gates, then that gate (not the guard, headers
+  or rewrite, as on any gate path). It routes as before when another location
+  covers the path, the host carries an `oidc` or `auth-request` gate of its
+  own, two different gates of the host's locations own the path, the outpost
+  `pathPrefix` is `/`, or the gate's provider is of another type.
+- An auth gate that cannot be built (`oidc` or `auth-request` mode on a
+  provider of another type) now answers `503` on another gate's sign-in paths
+  too. It used to step aside there, so on a host with such a gate and a
+  second, working gate the callback or outpost path was still served.
+- Non-secret DNS provider settings can be written as literals through the API
+  and the UI (#61): rfc2136 `server`, `zone`, `tsigKeyName`, `tsigAlgorithm`,
+  `transport`, `ttl`, `timeout`; acme-dns `baseURL`, `subdomain`,
+  `allowInsecureLocal`. They are stored and returned as written. rfc2136 and
+  acme-dns providers could not be saved from the UI before, and the webhook
+  provider's `url` and `allowInsecureLocal` follow the same rule. Credentials (`apiToken`, `tsigSecret`, `username`,
+  `password`, `token`) still need a placeholder.
 
 - A batch save (import) whose objects are all unchanged no longer makes a
   commit, and unchanged members of a mixed batch keep their file and
@@ -463,6 +724,54 @@ Follow-ups to the 2026-11-18 review (items that needed a decision first):
   return path lands on `/` instead of failing.
 - The upstream-group retry-buffer budget is returned only once the buffered
   body is no longer being sent.
+- A headers middleware's `setResponse` / `removeResponse` rules now apply to
+  `101 Switching Protocols` (WebSocket) responses, in the same order as other
+  responses. `Connection`, `Upgrade`, `Sec-WebSocket-Accept`,
+  `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions` are never changed on
+  a 101 (#172).
+- A config reload closes the idle upstream connections of the per-host timeout
+  transports, auth-request clients and bouncer clients it replaces, instead of
+  leaving them open until their idle timeout (#172).
+- UDP stream hosts: a new session's backend is dialled without holding the
+  listener, so a slow dial (for example a DNS lookup for a hostname target) no
+  longer stalls every other session on that port. At most 64 dials run at once
+  per listener and 8 per source address, and at most 32 datagrams (64 KiB) are
+  queued per session being dialled (#172).
+- Discovery: a host whose source cannot be derived, or that is skipped for a
+  domain conflict, is now compared with its profile on the upstream and
+  upstream group (Ingress discovery), `timeouts` and `robotsNoIndex` too, and
+  on its derived `dns` policy when the source still derives, so it no longer
+  keeps those old values after the profile changes (#172).
+- DNS sync: a failed retarget no longer ends the run. The remaining retargets,
+  creates and deletes still run, the backend reports `ok: false`, and the
+  ledger records what the backend holds for that name (#172).
+- Hetzner and deSEC DNS-01 solvers follow API pagination (Hetzner zone and
+  record listings, deSEC domain listing), capped at 100 pages with an error
+  instead of a partial result (#172).
+- Discovery: references in a template or profile are now checked like a proxy
+  host's, at host level and per location (unknown or disabled upstream groups,
+  location middlewares and access lists, `rateLimit.allowFrom` lists, inline
+  auth providers), on settings writes and on object saves, deletes, reverts,
+  scoped reverts and restores, with the settings write's error text. Docker
+  discovery does not check a template's or profile's own `upstream` /
+  `upstreamGroupRef`, which it ignores. A config already stored with a broken
+  reference still loads, with a config warning (#90).
+- Discovery: a derived host whose name is already used by a redirect, parked or
+  stream host is skipped with a reason instead of failing the whole reconcile
+  on every poll (#90).
+- Docker discovery: a host restamped after a domain conflict now takes the
+  container's current upstream address instead of keeping the one stored
+  earlier, and is restamped when only that address changed while the conflict
+  lasts; after a container was recreated the stored address could be another
+  container's.
+- An access-list rule written as a bare IPv4-mapped IPv6 address (`cidr:
+  "::ffff:203.0.113.5"`) now matches that IPv4 address, as a bare IPv4 address
+  does; it was read as the IPv6 network `::/32`, so the rule missed its
+  address and matched unrelated `::/32` clients instead.
+- DigitalOcean DNS-01 solver: a domain listing with more than 20 pages is now
+  an error instead of being matched against a partial list.
+- The admin UI says that webhook and notification URLs accept `${ENV:...}` /
+  `${FILE:...}` placeholders.
 
 ## [2.5.0] - 2026-10-20
 

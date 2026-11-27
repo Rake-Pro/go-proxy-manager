@@ -17,7 +17,10 @@
 //   - a non-200, an empty result, a result over the source's maxEntries or
 //     maxCoverage (when set), or a SINGLE unparseable line refuses the fetch and
 //     KEEPS the previously fetched set, rather than replacing it with
-//     something gpm does not understand.
+//     something gpm does not understand,
+//   - unless the source sets maxAge: once its last successful fetch is older
+//     than that, the kept set is emptied in the ledger (one commit) and the
+//     source matches nothing until a fetch succeeds again.
 package accesssync
 
 import (
@@ -73,6 +76,9 @@ type SourceStatus struct {
 	EntryCount  int       `json:"entryCount"`
 	LastError   string    `json:"lastError,omitempty"`
 	LastAttempt time.Time `json:"lastAttempt,omitempty"`
+	// Expired is true when maxAge passed with no successful fetch: the set is
+	// empty and FetchedAt is the last successful fetch.
+	Expired bool `json:"expired,omitempty"`
 }
 
 // Status is the result of the last reconcile, served by
@@ -113,6 +119,9 @@ type Syncer struct {
 	// without this every poll would re-fetch every source. See
 	// docs/reference/config/settings/access-list-sync.md.
 	attempts map[string]time.Time
+	// hashes is the sha256 of the set each recorded attempt fetched, so a
+	// success is only credited to the ledger entry holding that same set.
+	hashes map[string]string
 
 	// single serialises reconciles so two runs never race the same ledger.
 	single sync.Mutex
@@ -133,6 +142,7 @@ func New(load func(context.Context) (model.Config, model.Settings, error), ledge
 		onChange: onChange,
 		now:      time.Now,
 		attempts: map[string]time.Time{},
+		hashes:   map[string]string{},
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -501,7 +511,10 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	entries := ledger.AccessListSourceMap()
 
 	st := Status{Enabled: true, LastRun: now}
-	changed := false
+	// changed means the ledger must be saved; reload means the save changes what
+	// the data plane serves. A save that only advances fetchedAt (maxAge
+	// bookkeeping) is committed, and so replicated, without a reload.
+	changed, reload := false, false
 	// Only sources the config still declares survive into the next ledger, so a
 	// source an operator removed stops being carried (and stops being served)
 	// rather than lingering as an allow list nothing references.
@@ -516,16 +529,57 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 				// The URL moved: the old body is no longer an answer to the
 				// question the config asks, so it is dropped and re-fetched now
 				// (the attempt recorded against the old URL is forgotten too).
-				changed = true
+				changed, reload = true, true
 				s.clearAttempt(key)
 			}
 			ss := SourceStatus{List: al.Name, Name: src.Name, URL: src.URL}
 			if e, ok := next[key]; ok {
 				ss.FetchedAt = e.Fetched()
 				ss.EntryCount = len(e.Entries)
+				ss.Expired = e.ExpiredAt != ""
 			}
 			ss.LastAttempt = s.attempt(key)
 
+			// maxAge. The age of a set is measured from the last successful
+			// fetch recorded in the ledger (fetchedAt, advanced on every success
+			// while maxAge is set), or from maxAgeSince, when maxAge was first
+			// applied to the source, if that is later. A success this process
+			// made but could not commit counts only while the process runs and
+			// only for the set the ledger holds; after a restart it is lost.
+			// Every write here changes timestamps only: saved, never reloaded.
+			maxAge, hasMaxAge := src.MaxAgeLimit()
+			stale := false
+			if e, ok := next[key]; ok {
+				switch {
+				case hasMaxAge && e.MaxAgeSince == "":
+					e.MaxAgeSince = now.UTC().Format(time.RFC3339)
+					changed = true
+				case !hasMaxAge && e.MaxAgeSince != "":
+					e.MaxAgeSince = ""
+					changed = true
+				}
+				if hasMaxAge && e.ExpiredAt == "" {
+					// Compared at the ledger's one-second resolution, so it is
+					// written once, not every tick.
+					at, hash := s.success(key)
+					if at = at.UTC().Truncate(time.Second); hash == e.SHA256 && at.After(e.Fetched()) {
+						e.FetchedAt = at.Format(time.RFC3339)
+						changed = true
+						ss.FetchedAt = at
+					}
+					base := e.Fetched()
+					if since, err := time.Parse(time.RFC3339, e.MaxAgeSince); err == nil && since.After(base) {
+						base = since
+					}
+					stale = now.Sub(base) > maxAge
+				}
+				next[key] = e
+			}
+
+			// A stale set needs no extra fetch: its baseline is at least one
+			// interval old, so it is due anyway, and a refused fetch is retried
+			// on every poll. The one exception is a changed set whose commit
+			// failed; that waits for its interval like any other.
 			if !s.due(key, next[key], src, now) {
 				st.Sources = append(st.Sources, ss)
 				continue
@@ -541,38 +595,74 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 				// 24 hours.
 				st.Refused++
 				ss.LastError = err.Error()
-				st.Sources = append(st.Sources, ss)
 				log.Warn().Err(err).Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
 					Msg("accesssync: refused a source fetch; keeping the previously fetched set")
+				// A stale set is emptied, once: ExpiredAt then marks it and it is
+				// no longer stale.
+				if stale {
+					e := next[key]
+					next[key] = model.AccessListSourceEntry{
+						List:        al.Name,
+						Source:      src.Name,
+						URL:         src.URL,
+						FetchedAt:   e.FetchedAt,
+						ExpiredAt:   now.UTC().Format(time.RFC3339),
+						MaxAgeSince: e.MaxAgeSince,
+						SHA256:      model.AccessListSourceHash(key, src.URL, nil),
+					}
+					changed, reload = true, true
+					ss.EntryCount = 0
+					ss.Expired = true
+					log.Warn().Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
+						Str("maxAge", src.MaxAge).Str("lastSuccess", e.FetchedAt).Str("maxAgeSince", e.MaxAgeSince).
+						Msg("accesssync: access-list source expired (maxAge passed with no successful fetch); rules referencing it match nothing until a fetch succeeds")
+				}
+				st.Sources = append(st.Sources, ss)
 				continue
 			}
+			hash := model.AccessListSourceHash(key, src.URL, fetched)
 			// Success: this is what starts the interval clock (see due()).
-			s.markAttempt(key, now)
+			s.markAttempt(key, now, hash)
 			if src.MaxCoverage == nil && checkCoverage(entryNets(fetched), model.BroadAccessListSourceCoverageV4, model.BroadAccessListSourceCoverageV6) != nil {
 				log.Warn().Str("accessList", al.Name).Str("source", src.Name).Str("host", sourceHost(src.URL)).
 					Msg("accesssync: access-list source is broad (more than one /8 of IPv4 or one /24 of IPv6 in total) and has no maxCoverage; set maxCoverage on the source to bound it")
 			}
-			hash := model.AccessListSourceHash(key, src.URL, fetched)
 			if prevEntry, ok := next[key]; ok && prevEntry.SHA256 == hash {
 				// Unchanged. fetchedAt is deliberately NOT advanced: doing so would
 				// commit a timestamp-only diff on every interval forever. The
 				// in-memory attempt above is what stops the next poll re-fetching.
+				// The exception is a source with maxAge, whose expiry is measured
+				// from fetchedAt after a restart: it must name the last successful
+				// fetch, so it is advanced (one commit per interval, opt-in, with
+				// no data-plane reload since the set is unchanged).
+				if hasMaxAge {
+					prevEntry.FetchedAt = now.UTC().Format(time.RFC3339)
+					next[key] = prevEntry
+					changed = true
+					ss.FetchedAt = now.UTC()
+				}
 				ss.EntryCount = len(prevEntry.Entries)
 				st.Sources = append(st.Sources, ss)
 				continue
 			}
 			added, removed := diffCounts(next[key].Entries, fetched)
-			next[key] = model.AccessListSourceEntry{
-				List:      al.Name,
-				Source:    src.Name,
-				URL:       src.URL,
-				FetchedAt: now.UTC().Format(time.RFC3339),
-				SHA256:    hash,
-				Entries:   fetched,
+			since := next[key].MaxAgeSince
+			if hasMaxAge && since == "" {
+				since = now.UTC().Format(time.RFC3339)
 			}
-			changed = true
+			next[key] = model.AccessListSourceEntry{
+				List:        al.Name,
+				Source:      src.Name,
+				URL:         src.URL,
+				FetchedAt:   now.UTC().Format(time.RFC3339),
+				MaxAgeSince: since,
+				SHA256:      hash,
+				Entries:     fetched,
+			}
+			changed, reload = true, true
 			ss.FetchedAt = now.UTC()
 			ss.EntryCount = len(fetched)
+			ss.Expired = false
 			st.Sources = append(st.Sources, ss)
 			log.Info().Str("accessList", al.Name).Str("source", src.Name).
 				Int("entries", len(fetched)).Int("added", added).Int("removed", removed).
@@ -582,7 +672,7 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 	// A source the config dropped is a change even though nothing was fetched.
 	for key := range entries {
 		if _, kept := next[key]; !kept {
-			changed = true
+			changed, reload = true, true
 			break
 		}
 	}
@@ -594,7 +684,7 @@ func (s *Syncer) reconcileLocked(ctx context.Context) error {
 			s.setStatus(st)
 			return err
 		}
-		if s.onChange != nil {
+		if reload && s.onChange != nil {
 			s.onChange()
 		}
 	}
@@ -622,16 +712,26 @@ func (s *Syncer) attempt(key string) time.Time {
 	return s.attempts[key]
 }
 
-func (s *Syncer) markAttempt(key string, t time.Time) {
+// success returns this process's last successful fetch of key and the hash
+// of the set it fetched.
+func (s *Syncer) success(key string) (time.Time, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[key], s.hashes[key]
+}
+
+func (s *Syncer) markAttempt(key string, t time.Time, hash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attempts[key] = t
+	s.hashes[key] = hash
 }
 
 func (s *Syncer) clearAttempt(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.attempts, key)
+	delete(s.hashes, key)
 }
 
 func (s *Syncer) setStatus(st Status) {

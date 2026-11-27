@@ -40,6 +40,7 @@ Docker-specific items below differ. Design note:
 | <span id="settings-docker-discovery-tls-key"></span> `tlsKey` | string | none | no | Absolute path to the client key. Set with `tlsCert`. |
 | <span id="settings-docker-discovery-tls-ca"></span> `tlsCA` | string | none | no | Absolute path to the PEM bundle verifying the endpoint. There is no skip-verify option. |
 | <span id="settings-docker-discovery-network"></span> `network` | string | first non-`host` network | no | Docker network whose per-container IP becomes the upstream host. Mutually exclusive with `usePublishedPorts`. |
+| <span id="settings-docker-discovery-allow-link-local"></span> `allowLinkLocal` | bool | `false` | no | Accept a link-local container address (`169.254.0.0/16`, `fe80::/10`) as the upstream. Off: a link-local address is not used (with `network` set the container is skipped with the reason in the status; unset, its address on the next network by name is tried). Ignored with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-use-published-ports"></span> `usePublishedPorts` | bool | `false` | no | Forward to the host-published port instead of the container IP. |
 | <span id="settings-docker-discovery-published-host"></span> `publishedHost` | string | `127.0.0.1` | no | Address a published port is reached on. Only valid with `usePublishedPorts`. |
 | <span id="settings-docker-discovery-include-stopped"></span> `includeStopped` | bool | `false` | no | List non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived. |
@@ -60,10 +61,10 @@ sub-key is settable and applied verbatim:
 | `template.timeouts` | `HostTimeouts` | [ProxyHost: `timeouts`](../proxy-host.md#proxy-host-timeouts): `connectSeconds`, `readSeconds` |
 | `template.defaultDNS` | `DNSSyncPolicy` | [ProxyHost: `dns`](../proxy-host.md#proxy-host-dns): `lanDirect`, `publicCname` |
 
-Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`,
-`stripResponseHeaders`, `securityHeaders`, `allowedDomainSuffixes`, `allowedHostnames`) is documented on
+Every other template key (`middlewares`, `accessLists`, `accessListsMode`, `robotsNoIndex`, `tags`, `trustedProxies`,
+`stripResponseHeaders`, `pathBlock`, `securityHeaders`, `allowedDomainSuffixes`, `allowedHostnames`) is documented on
 [Kubernetes Ingress discovery](ingress-discovery.md), which uses the identical
-type.
+type. That includes the [`trustedProxies` states](ingress-discovery.md#settings-ingress-discovery-template-trusted-proxies) and the [tag rule](ingress-discovery.md#tags-on-managed-hosts), which apply to Docker discovery unchanged.
 
 ## Container labels
 
@@ -119,6 +120,11 @@ Two modes, one choice, decided by where gpm itself runs.
   unreachable. The event stream keeps that window at seconds.
 - `network: host` containers have no per-container address; use
   `usePublishedPorts` for them.
+- Loopback, unspecified and multicast container addresses are never used, and
+  link-local ones only with `allowLinkLocal: true`. With `network` unset such an
+  address is passed over for the next network by name; with `network` set the
+  container is skipped. A host already derived for a skipped container is kept
+  as it is (not rewritten, not deleted) while its profile is unchanged.
 
 ## Derived objects and ownership
 
@@ -130,12 +136,16 @@ Two modes, one choice, decided by where gpm itself runs.
   `labels["gpm.rake.pro/managed-by"] = "docker-discovery"`.
 - Only objects carrying that exact label pair are created, updated or deleted. A
   hand-written host (or an Ingress-derived one) with the same name is skipped
-  with a warning, never overwritten.
+  with a warning, never overwritten. So is a derived name already used by a
+  redirect, parked or stream host, since host names are shared across those
+  kinds; the rest of the reconcile still applies.
 - Ownership covers the **domain** as well as the name: a derived host whose
   domains include one already claimed by a host this reconciler does not own is
   skipped, with the owner and its kind named in the status `reason`. If the
   skipped host already exists, it keeps its current domains, but a stored chain
-  that differs from the resolved profile is restamped on them, and a stored
+  (or `dns` policy) that differs from what the container derives under its
+  resolved profile is restamped on them, together with the container's current
+  upstream address, and a stored
   domain the profile no longer allows disables it, as for a bad label below.
 - A derived host can take a new domain in one reconcile when that domain is free
   or is released by another derived host updated or deleted in the same commit,
@@ -147,7 +157,8 @@ Two modes, one choice, decided by where gpm itself runs.
   a newer version) never moves: it keeps every domain it serves and nothing may
   take one.
 - `disabled` and `maintenance` are operator-owned and carried forward across a
-  reconcile, exactly as for Ingress discovery.
+  reconcile, exactly as for Ingress discovery. So are tags added by hand and a
+  per-host `trustedProxies` while the template leaves it unset (the `<prefix>/trusted-proxies-by: docker-discovery` label marks a stamped value, see [trustedProxies on managed hosts](ingress-discovery.md#trustedproxies-on-managed-hosts)).
 - Two containers deriving the same name: first by derived name wins, the rest
   are skipped.
 
@@ -160,14 +171,25 @@ Two modes, one choice, decided by where gpm itself runs.
 - **A bad label freezes one host.** A container that cannot be derived (bad
   hostname, ambiguous port) is skipped **and** protects its existing host from
   deletion, as long as the stored host still carries the chain its resolved
-  profile renders today. When the stored chain differs (TLS, middlewares,
-  access lists and mode, locations, response-header policy), or a stored domain
+  profile renders today. When the stored chain differs (TLS, `timeouts`,
+  `robotsNoIndex`, middlewares, access lists and mode, locations,
+  response-header policy; not the upstream, which is the container's own
+  address), or a stored domain
   is no longer allowed by the suffix lists or `allowedHostnames`, the host is
   disabled the same way as for an unresolvable profile.
 - **An unresolvable profile fails closed.** The existing host is updated with
   `disabled: true` and `gpm.rake.pro/disabled-by: docker-discovery`, so a
   retired chain cannot be pinned by naming a profile that no longer exists.
   Re-adding the profile re-enables it on the next reconcile.
+- **Template references stay resolvable.** The objects the template and profiles
+  name are cross-checked on a settings write and again on every object write,
+  delete, revert and restore, as for
+  [Ingress discovery](ingress-discovery.md), except a template's or profile's own
+  `upstream`/`upstreamGroupRef`, which Docker discovery ignores (a location's
+  group is still checked). A stored config already failing the
+  check loads with a config warning; object writes on it are accepted, a
+  settings write is refused until it fixes the reference, and the check is off
+  for object writes, reverts and restores until the stored state passes again.
 - **One commit per reconcile**, authored by `docker-discovery`
   (`Docker discovery: reconcile (+N ~M -K)`). A reconcile that finds no drift
   writes nothing.

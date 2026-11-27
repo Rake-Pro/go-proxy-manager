@@ -457,6 +457,13 @@ type ProxyHost struct {
 	// from what the upstream sent, never from headers gpm adds.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 
+	// PathBlock is this host's switch for the fleet path block list
+	// (settings.pathBlock): "inherit" (the default, also when unset) applies it,
+	// "off" does not, for an application that serves the blocked paths on
+	// purpose. It has no effect on a `type: path-block` middleware the host or a
+	// location references, which always applies.
+	PathBlock string `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
+
 	// TrustedProxies REPLACES settings.trustedProxies for this host (it does not
 	// merge): the L7 proxies whose X-Forwarded-For gpm believes when it derives
 	// this host's client IP.
@@ -512,6 +519,9 @@ func (h ProxyHost) Validate() error {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	if err := validateStripResponseHeaders(h.StripResponseHeaders); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := validatePathBlockSwitch(h.PathBlock); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	if h.TrustedProxies != nil {
@@ -771,6 +781,11 @@ type StreamHost struct {
 	// (IPv6 by /56, as the UDP per-source session cap) may hold to this host; a
 	// connection over the cap is closed before the backend is dialled. 0: no cap.
 	MaxConnsPerSource int `json:"maxConnsPerSource,omitempty" yaml:"maxConnsPerSource,omitempty"`
+	// NewSessionsPerMinute (UDP only) caps how many new sessions one client
+	// address (IPv6 by /56) may open per minute, with a burst of the same size;
+	// a packet that would open one over the limit is dropped before the backend
+	// is dialled. Packets on an open session are never limited. 0: no limit.
+	NewSessionsPerMinute int `json:"newSessionsPerMinute,omitempty" yaml:"newSessionsPerMinute,omitempty"`
 }
 
 func (h StreamHost) Kind() string { return "StreamHost" }
@@ -805,7 +820,13 @@ func (h StreamHost) Validate() error {
 		return fmt.Errorf("stream host %q: maxConnsPerSource: must be >= 0, got %d", h.Name, h.MaxConnsPerSource)
 	}
 	if h.Protocol == "udp" && (h.IdleTimeout != "" || h.MaxConnsPerSource != 0) {
-		return fmt.Errorf("stream host %q: idleTimeout and maxConnsPerSource apply to TCP only; protocol is udp (UDP sessions have fixed limits)", h.Name)
+		return fmt.Errorf("stream host %q: idleTimeout and maxConnsPerSource apply to TCP only; protocol is udp (see newSessionsPerMinute for UDP)", h.Name)
+	}
+	if h.NewSessionsPerMinute < 0 {
+		return fmt.Errorf("stream host %q: newSessionsPerMinute: must be >= 0, got %d", h.Name, h.NewSessionsPerMinute)
+	}
+	if h.Protocol == "tcp" && h.NewSessionsPerMinute != 0 {
+		return fmt.Errorf("stream host %q: newSessionsPerMinute applies to UDP only; protocol is tcp (see maxConnsPerSource for TCP)", h.Name)
 	}
 	return nil
 }

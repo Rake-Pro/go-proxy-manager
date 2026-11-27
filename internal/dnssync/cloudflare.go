@@ -309,31 +309,29 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 	st.Skipped = len(d.skip)
 	st.Untouched = d.untouched
 
-	live := map[string]model.DNSClaim{}
-	for k, v := range owned {
-		live[k] = v
-	}
-	fail := func(err error) (BackendStatus, map[string]model.DNSClaim) {
-		st.Error = err.Error()
-		st.Managed = len(live)
-		return st, live
-	}
-
+	// The planned ledger (d.owned) already records adoptions as such.
 	for _, name := range d.adopt {
-		live[name] = model.DNSClaim{Target: apex, Adopted: true}
 		st.Adopted++
 		log.Info().Str("name", name).Str("target", apex).
 			Msg("dnssync: cloudflare CNAME already present, correct and gpm-commented; adopted as gpm-managed (gpm will never delete it, only release it)")
 	}
+	// A refused retarget, create or delete is recorded and the run goes on, so one
+	// name the zone will not accept cannot hold back every later write. The ledger
+	// entry of a failed write is set to what the zone holds afterwards.
+	var failed []string
 	for _, name := range d.retarget {
 		// Delete then create, with no atomic update in between: the counter is bumped
 		// as soon as the DELETE lands so a failure afterwards cannot be reported as a
 		// run that changed nothing.
 		rec := state.byName[name]
 		if err := c.deleteRecord(ctx, state.zoneID, rec); err != nil {
-			return fail(err)
+			// Nothing changed: the original record and its claim both stand.
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("name", name).
+				Msg("dnssync: cloudflare retarget failed: the original record could not be deleted; continuing with the remaining names")
+			continue
 		}
-		delete(live, name)
 		st.Retargeted++
 		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
 			// Restore the record exactly as it was rather than leaving the name
@@ -341,20 +339,24 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 			if rbErr := c.createCNAME(ctx, state.zoneID, name, rec.Content, rec.Proxied); rbErr != nil {
 				log.Error().Err(rbErr).Str("name", name).Str("content", rec.Content).
 					Msg("dnssync: cloudflare retarget failed AND the original record could not be restored; the name is currently unresolved")
-				return fail(fmt.Errorf("cloudflare: retarget %s: %w (restoring the original record also failed: %v)", name, err, rbErr))
+				failed = append(failed, fmt.Sprintf("cloudflare: retarget %s: %v (restoring the original record also failed: %v)", name, err, rbErr))
+				// No record stands, so there is nothing to claim; the next run sees
+				// the name missing and creates it.
+				delete(d.owned, name)
+				continue
 			}
-			live[name] = owned[name]
 			log.Error().Err(err).Str("name", name).Str("content", rec.Content).
 				Msg("dnssync: cloudflare retarget failed; the original record was restored")
-			return fail(fmt.Errorf("cloudflare: retarget %s: %w (the original record was restored)", name, err))
+			failed = append(failed, fmt.Sprintf("cloudflare: retarget %s: %v (the original record was restored)", name, err))
+			// The original record is back (with the gpm comment createCNAME always
+			// writes), so its claim from before the run is what the next run
+			// retargets again.
+			keepClaim(d.owned, owned, name)
+			continue
 		}
-		live[name] = model.DNSClaim{Target: apex}
 		log.Info().Str("name", name).Str("from", state.present[name]).Str("to", apex).
 			Msg("dnssync: cloudflare CNAME retargeted")
 	}
-	// A refused create or delete is recorded and the run goes on, so one name the
-	// zone will not accept cannot hold back every later create and every delete.
-	var failed []string
 	for _, name := range d.create {
 		if err := c.createCNAME(ctx, state.zoneID, name, apex, conf.Proxied); err != nil {
 			failed = append(failed, err.Error())
@@ -379,7 +381,7 @@ func (s *Syncer) syncCloudflare(ctx context.Context, cfg model.Config, conf mode
 		}
 		st.Deleted++
 	}
-	live = d.owned
+	live := d.owned
 
 	st.Managed = len(live)
 	if len(failed) > 0 {

@@ -156,7 +156,7 @@ func TestNewACMEDNSSolverValidation(t *testing.T) {
 		wantErr string
 	}{
 		{"missing baseURL", func(c *ACMEDNSConfig) { c.BaseURL = "" }, "baseURL is required"},
-		{"bad baseURL", func(c *ACMEDNSConfig) { c.BaseURL = "acme-dns.example.com" }, "must be an http or https URL"},
+		{"bad baseURL", func(c *ACMEDNSConfig) { c.BaseURL = "acme-dns.example.com" }, "acme-dns: baseURL: is not an http or https URL (the value is not shown, it may hold a credential)"},
 		{"missing username", func(c *ACMEDNSConfig) { c.Username = "" }, "username is required"},
 		{"missing password", func(c *ACMEDNSConfig) { c.Password = "" }, "password is required"},
 		{"missing subdomain", func(c *ACMEDNSConfig) { c.Subdomain = "" }, "subdomain is required"},

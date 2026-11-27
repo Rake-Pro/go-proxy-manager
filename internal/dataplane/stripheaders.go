@@ -90,9 +90,9 @@ func mergedStripResponseHeaders(override []string) []string {
 // ModifyResponse hook, which is the only point where the backend's headers exist
 // on their own, before httputil.ReverseProxy copies them onto the client
 // response (and, for a 101, before handleUpgradeResponse writes them to the
-// hijacked connection). An interim 1xx is the exception: the stdlib forwards it
-// through Got1xxResponse, which does not run this hook, and then clears the
-// header map - so interim headers are neither stripped nor carried forward.
+// hijacked connection). An interim 1xx never reaches this hook: the stdlib
+// forwards it through Got1xxResponse, and interimTransport strips the same list
+// from it before the proxy relays it.
 //
 // Doing it here rather than on the way out of the dispatch writer is what keeps
 // the removal honest: the writer sees ONE merged header map, so a name in the

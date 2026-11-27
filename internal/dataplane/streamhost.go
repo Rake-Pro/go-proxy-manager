@@ -37,7 +37,11 @@ const (
 //   - maxUDPSessionsPerSource bounds what one client address (IPv6 by /56,
 //     see udpSourceKey) may hold inside it, so a single source cannot fill
 //     the table.
+//   - streamHalfCloseLinger bounds how long a TCP stream pair of a host
+//     without idleTimeout stays open after one side finished sending, waiting
+//     for the other side to finish; the pair is then reset.
 var (
+	streamHalfCloseLinger     = 60 * time.Second
 	streamTLSHandshakeTimeout = 10 * time.Second
 	maxUDPSessions            = 4096
 	maxUDPSessionsPerSource   = 64
@@ -157,6 +161,8 @@ type streamTarget struct {
 	// maxConnsPerSource; 0 means no limit.
 	idle         time.Duration
 	maxPerSource int
+	// newPerMinute is the host's UDP newSessionsPerMinute; 0 means no limit.
+	newPerMinute int
 }
 
 // allow evaluates every attached access list against the client IP. All lists
@@ -248,6 +254,7 @@ func buildStreamRoutes(cfg model.Config, certs *certResolver) (map[int]*streamRo
 			geoLoaded:  geoLoaded,
 
 			maxPerSource: h.MaxConnsPerSource,
+			newPerMinute: h.NewSessionsPerMinute,
 		}
 		if d, err := time.ParseDuration(h.IdleTimeout); err == nil && d > 0 {
 			target.idle = d
@@ -376,6 +383,10 @@ type tcpForwarder struct {
 	// forwarder, so connections opened before a reload still count after it.
 	mu        sync.Mutex
 	perSource map[string]int
+
+	// linger is streamHalfCloseLinger, read once at start so a test that
+	// shrinks the var does not race with connections of other forwarders.
+	linger time.Duration
 }
 
 func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyProtoConfig, lc *net.ListenConfig) (*tcpForwarder, error) {
@@ -386,7 +397,7 @@ func startTCPForwarder(port int, routes *streamRoutes, proxyProto func() *proxyP
 	if err != nil {
 		return nil, err
 	}
-	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto), perSource: map[string]int{}}
+	f := &tcpForwarder{port: port, ln: wrapProxyProtocol(ln, proxyProto), perSource: map[string]int{}, linger: streamHalfCloseLinger}
 	f.routes.Store(routes)
 	go f.acceptLoop()
 	log.Info().Int("port", port).Bool("sniRouted", routes.sni).Msg("stream: tcp listener started")
@@ -503,15 +514,72 @@ func (f *tcpForwarder) handle(client net.Conn) {
 		mh.StreamOpened(target.name)
 		defer mh.StreamClosed(target.name)
 	}
+	// Half-close needs both sockets to shut their write side on its own. The
+	// client is a *net.TCPConn, possibly under the PROXY-protocol wrapper; any
+	// other conn (a test pipe) ends the pair at the first EOF instead.
+	type closeWriter interface{ CloseWrite() error }
+	rawClient := client
+	if pc, ok := client.(*proxyProtoConn); ok {
+		rawClient = pc.Conn
+	}
+	clientCW, okClient := rawClient.(closeWriter)
+	backendCW, okBackend := backend.(closeWriter)
+	rawBackend := backend
+	halfClose := okClient && okBackend
+	closeFront := func() error { return clientCW.CloseWrite() }
+	if tc, ok := front.(*tls.Conn); ok {
+		// close_notify first, then the FIN: tls.Conn.CloseWrite only sends the alert.
+		closeFront = func() error {
+			if err := tc.CloseWrite(); err != nil {
+				return err
+			}
+			return clientCW.CloseWrite()
+		}
+	}
 	if target.idle > 0 {
 		front, backend = idleConn{front, target.idle}, idleConn{backend, target.idle}
 	}
-	// Bidirectional copy. When either side ends, the deferred Close on both conns
-	// unblocks the other io.Copy so the goroutine exits.
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(backend, front); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(front, backend); done <- struct{}{} }()
-	<-done
+	// Bidirectional copy. A direction that reaches EOF shuts the write side
+	// toward the other peer and the other direction keeps copying until it ends
+	// too: with idleTimeout set, the idle deadline bounds it; otherwise the
+	// linger bound does. A read or write error in either direction ends the pair
+	// at once. Returning runs the deferred Close on both conns, which unblocks a
+	// copy still running so its goroutine exits.
+	done := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(backend, front)
+		if err == nil && halfClose {
+			err = backendCW.CloseWrite()
+		}
+		done <- err
+	}()
+	go func() {
+		_, err := io.Copy(front, backend)
+		if err == nil && halfClose {
+			err = closeFront()
+		}
+		done <- err
+	}()
+	if err := <-done; err != nil || !halfClose {
+		return
+	}
+	if target.idle > 0 {
+		<-done
+		return
+	}
+	linger := time.NewTimer(f.linger)
+	defer linger.Stop()
+	select {
+	case <-done:
+	case <-linger.C:
+		// Reset both peers instead of a clean FIN, so a reply cut here is not
+		// read as a complete one.
+		for _, c := range []net.Conn{rawClient, rawBackend} {
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetLinger(0)
+			}
+		}
+	}
 }
 
 // acquireSource takes one of the max connection slots of key, reporting false
@@ -555,6 +623,26 @@ func (c idleConn) Write(p []byte) (int, error) {
 
 // --- UDP ---------------------------------------------------------------------
 
+// Bounds on a UDP session that is still being dialled: at most maxUDPDials
+// dials run at once per listener and maxUDPDialsPerSource per source
+// (udpSourceKey), and the datagrams queued for one pending session are capped
+// at udpPendingMaxPackets and udpBufSize bytes in total, counting
+// udpPendingEntryOverhead per datagram so empty datagrams are not free. The
+// queue is flushed to the new backend under udpFlushTimeout.
+const (
+	maxUDPDials             = 64
+	maxUDPDialsPerSource    = 8
+	udpPendingMaxPackets    = 32
+	udpPendingEntryOverhead = 64
+	udpFlushTimeout         = time.Second
+)
+
+// udpBufPool holds the per-session backend read buffers, so session churn does
+// not allocate and discard udpBufSize bytes per session. A live session still
+// holds one buffer while its goroutine waits in Read; the session caps are what
+// bound how many are out at once.
+var udpBufPool = sync.Pool{New: func() any { b := make([]byte, udpBufSize); return &b }}
+
 type udpForwarder struct {
 	port     int
 	pc       net.PacketConn
@@ -563,7 +651,35 @@ type udpForwarder struct {
 	mu       sync.Mutex
 	sessions map[string]*udpSession // client addr -> backend session
 	// perSource counts the sessions of each source (udpSourceKey), guarded by mu.
+	// A session being dialled counts too, from the moment it is reserved.
 	perSource map[string]int
+	// pending holds the sessions whose backend is being dialled, by client addr.
+	// They count against maxUDPSessions, and packets from the client meanwhile
+	// are queued on the entry instead of opening a second session. Guarded by mu.
+	pending map[string]*udpPending
+	// dialsPerSource counts the entries of pending per source, guarded by mu.
+	dialsPerSource map[string]int
+	// newSessions is the newSessionsPerMinute limiter state, and rateReclaimAt
+	// the earliest time a full limiter table is scanned again; guarded by mu.
+	newSessions   map[string]*udpRate
+	rateReclaimAt time.Time
+	// dial opens the backend socket. A test seam; read under mu.
+	dial func(addr string) (net.Conn, error)
+}
+
+// udpPending is a session reserved but not yet dialled: the packets that
+// arrived for it in order. size counts their bytes plus udpPendingEntryOverhead
+// each; the first packet is always kept, later ones only within the caps.
+type udpPending struct {
+	queue [][]byte
+	size  int
+}
+
+// udpRate is one source's newSessionsPerMinute token bucket: up to the limit
+// in a burst, refilled at limit tokens per minute.
+type udpRate struct {
+	tokens float64
+	last   time.Time
 }
 
 type udpSession struct {
@@ -588,7 +704,12 @@ func startUDPForwarder(port int, target streamTarget) (*udpForwarder, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &udpForwarder{port: port, pc: pc, sessions: map[string]*udpSession{}, perSource: map[string]int{}}
+	f := &udpForwarder{
+		port: port, pc: pc,
+		sessions: map[string]*udpSession{}, perSource: map[string]int{},
+		pending: map[string]*udpPending{}, dialsPerSource: map[string]int{}, newSessions: map[string]*udpRate{},
+		dial: func(addr string) (net.Conn, error) { return net.DialTimeout("udp", addr, streamDialTimeout) },
+	}
 	f.target.Store(&target)
 	go f.readLoop()
 	go f.reapLoop()
@@ -611,6 +732,20 @@ func (f *udpForwarder) closeSession(s *udpSession) {
 	}
 }
 
+// releaseSourceLocked gives back one of src's session slots. f.mu must be held.
+func (f *udpForwarder) releaseSourceLocked(src string) {
+	if f.perSource[src]--; f.perSource[src] <= 0 {
+		delete(f.perSource, src)
+	}
+}
+
+// releaseDialLocked gives back one of src's dial slots. f.mu must be held.
+func (f *udpForwarder) releaseDialLocked(src string) {
+	if f.dialsPerSource[src]--; f.dialsPerSource[src] <= 0 {
+		delete(f.dialsPerSource, src)
+	}
+}
+
 // dropLocked removes s from the table and releases its source slot. f.mu must
 // be held. A key that was meanwhile reused by another session is left alone.
 func (f *udpForwarder) dropLocked(key string, s *udpSession) {
@@ -618,9 +753,7 @@ func (f *udpForwarder) dropLocked(key string, s *udpSession) {
 		return
 	}
 	delete(f.sessions, key)
-	if f.perSource[s.src]--; f.perSource[s.src] <= 0 {
-		delete(f.perSource, s.src)
-	}
+	f.releaseSourceLocked(s.src)
 }
 
 // evictOldestLocked closes the session whose client was silent the longest, to
@@ -641,6 +774,41 @@ func (f *udpForwarder) evictOldestLocked() bool {
 	f.dropLocked(oldKey, old)
 	f.closeSession(old)
 	return true
+}
+
+// rateLocked returns src's newSessionsPerMinute bucket, refilled up to now;
+// the caller takes a token only once the session is actually reserved. The
+// tracked sources are bounded by maxUDPSessions. When the table is full, the
+// sources whose bucket has refilled (the same as not being tracked) are
+// reclaimed, at most once a second so a flood of new sources does not scan it
+// per packet, and if none could be the result is nil and the new session is
+// refused, as a full session table refuses one. f.mu must be held.
+func (f *udpForwarder) rateLocked(src string, limit int, now time.Time) *udpRate {
+	r := f.newSessions[src]
+	if r == nil {
+		if len(f.newSessions) >= maxUDPSessions && !now.Before(f.rateReclaimAt) {
+			f.reclaimRatesLocked(limit, now)
+			f.rateReclaimAt = now.Add(time.Second)
+		}
+		if len(f.newSessions) >= maxUDPSessions {
+			return nil
+		}
+		r = &udpRate{tokens: float64(limit), last: now}
+		f.newSessions[src] = r
+	}
+	r.tokens = min(float64(limit), r.tokens+now.Sub(r.last).Minutes()*float64(limit))
+	r.last = now
+	return r
+}
+
+// reclaimRatesLocked forgets the sources whose bucket has refilled to limit by
+// now (all of them when the limit is off). f.mu must be held.
+func (f *udpForwarder) reclaimRatesLocked(limit int, now time.Time) {
+	for k, r := range f.newSessions {
+		if limit <= 0 || r.tokens+now.Sub(r.last).Minutes()*float64(limit) >= float64(limit) {
+			delete(f.newSessions, k)
+		}
+	}
 }
 
 func (f *udpForwarder) stop() {
@@ -665,50 +833,136 @@ func (f *udpForwarder) readLoop() {
 	}
 }
 
+// forward hands one client packet to its session. A packet that would open a
+// session is checked (access lists, caps, newSessionsPerMinute, dial slots) and
+// its slot reserved under f.mu, and the backend is dialled by open in its own
+// goroutine, so a slow dial (a DNS lookup for a hostname target) never holds up
+// packets for the other sessions on the listener. data is only borrowed.
 func (f *udpForwarder) forward(clientAddr net.Addr, data []byte) {
 	key := clientAddr.String()
 	f.mu.Lock()
-	s := f.sessions[key]
-	if s == nil {
-		target := *f.target.Load()
-		// Access lists are evaluated once per session, before the backend is
-		// dialled, so a denied source never causes an upstream socket to exist.
-		if !target.allow(addrIP(clientAddr)) {
+	if s := f.sessions[key]; s != nil {
+		f.mu.Unlock()
+		s.last.Store(time.Now().UnixNano())
+		_, _ = s.backend.Write(data)
+		return
+	}
+	if p := f.pending[key]; p != nil {
+		// The first packet's dial is still running: keep this one for it.
+		if n := p.size + len(data) + udpPendingEntryOverhead; len(p.queue) < udpPendingMaxPackets && n <= udpBufSize {
+			p.queue = append(p.queue, append([]byte(nil), data...))
+			p.size = n
+		}
+		f.mu.Unlock()
+		return
+	}
+	target := *f.target.Load()
+	// Access lists are evaluated once per session, before the backend is
+	// dialled, so a denied source never causes an upstream socket to exist.
+	if !target.allow(addrIP(clientAddr)) {
+		f.mu.Unlock()
+		if udpDeniedPeers.first(strconv.Itoa(f.port) + "/" + ipBucketKey(addrIP(clientAddr))) {
+			log.Warn().Int("port", f.port).Str("streamHost", target.name).Str("client", key).
+				Msg("stream: access list denied the udp source")
+		}
+		return
+	}
+	src := udpSourceKey(addrIP(clientAddr))
+	if f.perSource[src] >= maxUDPSessionsPerSource {
+		f.mu.Unlock()
+		return // this source already holds its share of the table
+	}
+	// Dial slots are checked before the limiter, so a datagram dropped for lack
+	// of one takes neither a token nor a limiter-table entry.
+	if len(f.pending) >= maxUDPDials || f.dialsPerSource[src] >= maxUDPDialsPerSource {
+		f.mu.Unlock()
+		return // every dial slot (of the listener or the source) is busy; drop
+	}
+	var rate *udpRate
+	if target.newPerMinute > 0 {
+		rate = f.rateLocked(src, target.newPerMinute, time.Now())
+		if rate == nil {
 			f.mu.Unlock()
-			if udpDeniedPeers.first(strconv.Itoa(f.port) + "/" + ipBucketKey(addrIP(clientAddr))) {
+			if udpRateLimitedPeers.first(strconv.Itoa(f.port) + "/table-full") {
 				log.Warn().Int("port", f.port).Str("streamHost", target.name).Str("client", key).
-					Msg("stream: access list denied the udp source")
+					Msg("stream: newSessionsPerMinute source table is full; new sessions from untracked sources dropped")
 			}
 			return
 		}
-		src := udpSourceKey(addrIP(clientAddr))
-		if f.perSource[src] >= maxUDPSessionsPerSource {
+		if rate.tokens < 1 {
 			f.mu.Unlock()
-			return // this source already holds its share of the table
-		}
-		if len(f.sessions) >= maxUDPSessions && !f.evictOldestLocked() {
-			f.mu.Unlock()
-			return // table full of active sessions; drop (anti-amplification)
-		}
-		backend, err := net.DialTimeout("udp", target.addr, streamDialTimeout)
-		if err != nil {
-			f.mu.Unlock()
-			log.Warn().Int("port", f.port).Err(err).Msg("stream: udp dial failed")
+			if udpRateLimitedPeers.first(strconv.Itoa(f.port) + "/" + src) {
+				log.Warn().Int("port", f.port).Str("streamHost", target.name).Str("client", key).
+					Msg("stream: udp source is over newSessionsPerMinute; new sessions dropped")
+			}
 			return
 		}
-		s = &udpSession{backend: backend, host: target.name, src: src}
-		// Stamped before it is visible, so eviction never sees a zero time.
-		s.last.Store(time.Now().UnixNano())
-		f.sessions[key] = s
-		f.perSource[src]++
-		if mh := metricsHook(); mh != nil {
-			mh.StreamOpened(s.host)
-		}
-		go f.backendToClient(clientAddr, key, s)
 	}
+	if len(f.sessions)+len(f.pending) >= maxUDPSessions && !f.evictOldestLocked() {
+		f.mu.Unlock()
+		return // table full of active sessions; drop (anti-amplification)
+	}
+	// The token is taken only now that the slot is reserved; a dial that then
+	// fails still costs it.
+	if rate != nil {
+		rate.tokens--
+	}
+	f.pending[key] = &udpPending{queue: [][]byte{append([]byte(nil), data...)}, size: len(data) + udpPendingEntryOverhead}
+	f.perSource[src]++
+	f.dialsPerSource[src]++
+	dial := f.dial
 	f.mu.Unlock()
+	go f.open(clientAddr, key, src, target, dial)
+}
+
+// open dials the backend for a session forward reserved and then makes it
+// live. The reserved source slot is handed to the session, or released when
+// the dial fails or the forwarder stopped meanwhile, in which case the socket
+// is closed and no session is created.
+func (f *udpForwarder) open(clientAddr net.Addr, key, src string, target streamTarget, dial func(string) (net.Conn, error)) {
+	backend, err := dial(target.addr)
+	if err != nil {
+		f.mu.Lock()
+		delete(f.pending, key)
+		f.releaseDialLocked(src)
+		f.releaseSourceLocked(src)
+		f.mu.Unlock()
+		log.Warn().Int("port", f.port).Err(err).Msg("stream: udp dial failed")
+		return
+	}
+	f.mu.Lock()
+	queue := f.pending[key].queue
+	delete(f.pending, key)
+	f.releaseDialLocked(src)
+	if f.closed.Load() {
+		f.releaseSourceLocked(src)
+		f.mu.Unlock()
+		_ = backend.Close()
+		return
+	}
+	s := &udpSession{backend: backend, host: target.name, src: src}
+	// Stamped before it is visible, so eviction never sees a zero time.
 	s.last.Store(time.Now().UnixNano())
-	_, _ = s.backend.Write(data)
+	f.sessions[key] = s
+	if mh := metricsHook(); mh != nil {
+		mh.StreamOpened(s.host)
+	}
+	// The queued packets are written before f.mu is released, so a packet that
+	// forward writes to the session afterwards cannot overtake them. A UDP write
+	// waits only for local send-buffer space, and the queue (at most udpBufSize
+	// bytes in total counting the first packet, or that packet alone when it is
+	// larger) normally fits in a fresh
+	// socket's buffer; the deadline bounds the wait under f.mu when it does not,
+	// and the rest of the queue is then dropped. The session is installed either way.
+	_ = backend.SetWriteDeadline(time.Now().Add(udpFlushTimeout))
+	for _, pkt := range queue {
+		if _, err := backend.Write(pkt); err != nil {
+			break
+		}
+	}
+	_ = backend.SetWriteDeadline(time.Time{})
+	f.mu.Unlock()
+	go f.backendToClient(clientAddr, key, s)
 }
 
 // udpSourceKey is the per-source session-cap key: an IPv4 address, or the
@@ -722,7 +976,9 @@ func udpSourceKey(ip net.IP) string {
 }
 
 func (f *udpForwarder) backendToClient(clientAddr net.Addr, key string, s *udpSession) {
-	buf := make([]byte, udpBufSize)
+	bp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bp)
+	buf := *bp
 	for {
 		_ = s.backend.SetReadDeadline(time.Now().Add(udpSessionIdle))
 		n, err := s.backend.Read(buf)
@@ -737,8 +993,12 @@ func (f *udpForwarder) backendToClient(clientAddr net.Addr, key string, s *udpSe
 	f.closeSession(s)
 }
 
-// udpDeniedPeers keeps a denied UDP source from writing one log line per packet.
-var udpDeniedPeers = &peerWarnSet{}
+// udpDeniedPeers and udpRateLimitedPeers keep a denied or rate-limited UDP
+// source from writing one log line per packet.
+var (
+	udpDeniedPeers      = &peerWarnSet{}
+	udpRateLimitedPeers = &peerWarnSet{}
+)
 
 // reapLoop closes sessions whose client has been silent past the idle window
 // (the backend read-deadline handles the backend-silent case separately).
@@ -749,7 +1009,8 @@ func (f *udpForwarder) reapLoop() {
 		if f.closed.Load() {
 			return
 		}
-		cutoff := time.Now().Add(-udpSessionIdle).UnixNano()
+		now := time.Now()
+		cutoff := now.Add(-udpSessionIdle).UnixNano()
 		f.mu.Lock()
 		for k, s := range f.sessions {
 			if s.last.Load() < cutoff {
@@ -757,6 +1018,7 @@ func (f *udpForwarder) reapLoop() {
 				f.dropLocked(k, s)
 			}
 		}
+		f.reclaimRatesLocked(f.target.Load().newPerMinute, now)
 		f.mu.Unlock()
 	}
 }

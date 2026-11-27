@@ -28,7 +28,7 @@ Pick the challenge that fits the deployment:
   way to get a wildcard. Needs a DNSProvider credential
   (`cloudflare`, `digitalocean`, `hetzner`, `desec`, `rfc2136` for any
   nameserver that accepts TSIG-signed dynamic updates, or `acme-dns` for
-  anything else: see
+  a DNS host with no API, or `webhook` for your own endpoint: see
   [DNSProvider](../reference/config/dns-provider.md) for the
   `config` keys each one takes).
 
@@ -65,9 +65,13 @@ External Account Binding (ZeroSSL, Google Public CA) takes `acme.eab.kid` +
    curl -sI http://app.example.com/
    ```
 
-3. **Create the certificate** using one of the two blocks below.
-4. **Wait for issuance.** The ACME manager issues on the next load and logs the
-   outcome; the Certificates page shows `state` and `daysRemaining`.
+3. **Create the certificate** using one of the two blocks below, or in the
+   admin UI with **Certificates -> Add certificate**, whose wizard writes the
+   same YAML.
+4. **Order the certificate.** The ACME manager orders it at its next pass (the next
+   regular 12-hour pass or a restart), not when you save it; use **Renew now** on the
+   Certificates page, or `POST /api/certificates/<name>/renew`, to order at once. The
+   manager logs the outcome, and the Certificates page shows `state` and `daysRemaining`.
 5. **Attach TLS to the host** and force the redirect:
 
    ```yaml

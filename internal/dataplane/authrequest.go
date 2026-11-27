@@ -17,6 +17,10 @@ import (
 // defaultOutpostPrefix is Authentik's canonical proxy-outpost path namespace.
 const defaultOutpostPrefix = "/outpost.goauthentik.io"
 
+// authRequestTimeout bounds the whole auth subrequest and the wait for the
+// response headers of an outpost passthrough.
+const authRequestTimeout = 10 * time.Second
+
 // defaultAuthRequestHeaders mirrors the X-authentik-* headers an Authentik
 // forward-auth outpost sends.
 var defaultAuthRequestHeaders = []string{
@@ -47,10 +51,7 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse outpostURL: %w", err)
 	}
-	prefix := spec.PathPrefix
-	if prefix == "" {
-		prefix = defaultOutpostPrefix
-	}
+	prefix := outpostPrefix(spec)
 	authPath := spec.AuthPath
 	if authPath == "" {
 		authPath = prefix + "/auth/nginx"
@@ -64,14 +65,17 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 	// caps idle connections per host at 2, which starves the per-request auth
 	// subrequest under load. The outpost URL is internal, so proxy env vars are
 	// deliberately not honoured. The subrequest and the outpost passthrough
-	// share it, so both reach the outpost the same way.
+	// share it, so both reach the outpost the same way. ResponseHeaderTimeout
+	// stops a stalled outpost from holding a passthrough request; it ends once
+	// the headers arrive, so a response body is never cut.
 	tr := &http.Transport{
-		Proxy:               nil,
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:        64,
-		MaxIdleConnsPerHost: 64,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 5 * time.Second,
+		Proxy:                 nil,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: authRequestTimeout,
 	}
 
 	outpost := &httputil.ReverseProxy{
@@ -81,6 +85,14 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 			pr.Out.URL.Opaque = ""   // request target not in origin form: send Path only
 			pr.Out.Host = pr.In.Host // preserve the browser-facing host
 			pr.SetXForwarded()
+			// The derived client IP, as the auth subrequest sends it, in place of
+			// the connection peer SetXForwarded wrote.
+			if ip := requestClientIP(pr.In); ip != nil {
+				pr.Out.Header.Set("X-Forwarded-For", ip.String())
+				pr.Out.Header.Set("X-Real-Ip", ip.String())
+			} else {
+				pr.Out.Header.Del("X-Real-Ip")
+			}
 			pr.Out.Header.Set("X-Original-URL", absoluteURL(pr.In))
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -95,7 +107,7 @@ func compileAuthRequest(spec model.AuthRequestSpec) (*authRequestProxy, error) {
 		copyHeaders: headers,
 		outpost:     outpost,
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: authRequestTimeout,
 			// Never follow the auth server's redirects: we want its 200/401/403
 			// verdict, not the HTML of a login page.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -122,8 +134,10 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 		}
 
 		// The auth server owns its sign-in/callback/sign-out endpoints; pass them
-		// through untouched (and ungated - the sign-in flow must be reachable).
-		if r.URL.Path == p.prefix || strings.HasPrefix(r.URL.Path, p.prefix+"/") {
+		// through untouched and ungated by this gate (the sign-in flow must be
+		// reachable). The route's non-interactive gates inside this one still
+		// run first (see passThroughGate).
+		if p.owns(r.URL.Path) {
 			p.outpost.ServeHTTP(w, r)
 			return
 		}
@@ -172,6 +186,22 @@ func (p *authRequestProxy) handler(clientIP func(*http.Request) net.IP, allowNet
 			refuse(w, http.StatusBadGateway, ep, hostName, "authentication backend error")
 		}
 	})
+}
+
+// owns reports whether path is under the auth server's own namespace.
+func (p *authRequestProxy) owns(path string) bool { return ownsOutpostPath(p.prefix, path) }
+
+// outpostPrefix is the path namespace an auth-request provider's outpost owns
+// on a gated host.
+func outpostPrefix(spec model.AuthRequestSpec) string {
+	if spec.PathPrefix == "" {
+		return defaultOutpostPrefix
+	}
+	return spec.PathPrefix
+}
+
+func ownsOutpostPath(prefix, path string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // authenticate performs the per-request GET subrequest to the auth server,

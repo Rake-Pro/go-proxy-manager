@@ -215,6 +215,38 @@ func TestAccessListSourceAndPathRuleValidation(t *testing.T) {
 			},
 			wantErr: "maxCoverage.ipv6",
 		},
+		{
+			name: "maxAge at least the interval",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", Interval: "6h", MaxAge: "6h"}},
+			},
+		},
+		{
+			name: "unparseable maxAge",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", MaxAge: "3d"}},
+			},
+			wantErr: "maxAge must be a Go duration",
+		},
+		{
+			name: "maxAge below the interval",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", Interval: "6h", MaxAge: "5h"}},
+			},
+			wantErr: "maxAge must not be shorter than its fetch interval (6h0m0s)",
+		},
+		{
+			// The interval is the 24h default when unset.
+			name: "maxAge below the default interval",
+			al: AccessList{
+				ObjectMeta: ObjectMeta{Name: "l"},
+				Sources:    []AccessListSource{{Name: "a", URL: "https://example.com/i.txt", MaxAge: "12h"}},
+			},
+			wantErr: "maxAge must not be shorter than its fetch interval (24h0m0s)",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -245,6 +277,13 @@ func TestAccessListSourceDefaults(t *testing.T) {
 	}
 	if got := s.EntryLimit(); got != 5 {
 		t.Fatalf("maxEntries = %d", got)
+	}
+	if _, ok := s.MaxAgeLimit(); ok {
+		t.Fatal("an unset maxAge must mean no expiry")
+	}
+	s.MaxAge = "72h"
+	if got, ok := s.MaxAgeLimit(); !ok || got.Hours() != 72 {
+		t.Fatalf("maxAge = %s, %v", got, ok)
 	}
 }
 
@@ -394,6 +433,36 @@ func TestAccessListSourceLedgerValidate(t *testing.T) {
 				List: "l", Source: "s", Entries: good, SHA256: AccessListSourceHash("l/s", "", []string{"1.2.3.0/24"}),
 			}}},
 			wantErr: "does not match its list/source, url and entries",
+		},
+		{
+			name: "expired entry",
+			ledger: AccessListSourceLedger{Sources: []AccessListSourceEntry{{
+				List: "l", Source: "s", FetchedAt: "2026-09-01T00:00:00Z", ExpiredAt: "2026-09-04T00:00:00Z",
+				SHA256: AccessListSourceHash("l/s", "", nil),
+			}}},
+		},
+		{
+			name: "non-RFC3339 expiredAt",
+			ledger: AccessListSourceLedger{Sources: []AccessListSourceEntry{{
+				List: "l", Source: "s", ExpiredAt: "last week", SHA256: AccessListSourceHash("l/s", "", nil),
+			}}},
+			wantErr: "expiredAt \"last week\" is not RFC3339",
+		},
+		{
+			// expiredAt next to entries is a contradiction a hand edit produces.
+			name: "expired entry that still carries entries",
+			ledger: AccessListSourceLedger{Sources: []AccessListSourceEntry{{
+				List: "l", Source: "s", ExpiredAt: "2026-09-04T00:00:00Z", Entries: good,
+				SHA256: AccessListSourceHash("l/s", "", good),
+			}}},
+			wantErr: "an expired entry must carry no entries",
+		},
+		{
+			name: "non-RFC3339 maxAgeSince",
+			ledger: AccessListSourceLedger{Sources: []AccessListSourceEntry{{
+				List: "l", Source: "s", MaxAgeSince: "monday", SHA256: AccessListSourceHash("l/s", "", nil),
+			}}},
+			wantErr: "maxAgeSince \"monday\" is not RFC3339",
 		},
 	}
 	for _, tt := range tests {

@@ -35,9 +35,11 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 
 **Certificates**
 
-- **ACME issuance and renewal.** HTTP-01 or DNS-01 against any ACME CA, including
-  EAB-gated ones, with four named DNS providers plus the generic RFC2136 and
-  acme-dns solvers, and renewal 30 days before expiry.
+- **ACME issuance.** HTTP-01 or DNS-01 against any ACME CA, including
+  EAB-gated ones and private CAs, with four named DNS providers plus the generic
+  RFC2136, acme-dns and webhook solvers.
+- **Renewal.** Certificates renew when `min(30 days, lifetime / 3)` remains, a CA's
+  renewal information (ARI) can bring that forward, and ACME profiles are supported.
 - **Built-in client CA.** Generate a CA, mint mTLS client certificates as
   password-protected PKCS#12 bundles, and enforce them per host with CRL
   revocation.
@@ -55,6 +57,7 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
   client-certificate and basic auth are validated objects with referential
   integrity. The admin panel adds a local bcrypt login with optional TOTP,
   group-to-role mapping, a read-only viewer role and scoped API tokens.
+- **Path block list.** One fleet-wide list of extensions, path segment names and globs answers scanner paths (`/.env`, `*.php`, `.git`) with a `404` by default before any access list, auth or upstream sees them, with a per-host `pathBlock: off` switch.
 - **Composable middleware chain.** Ordered per host and per location: rate
   limits, guards, rewrites, scoped security headers, response-header stripping,
   a CrowdSec or generic HTTP bouncer hook, and maintenance mode.
@@ -86,8 +89,12 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 - **Guided from the first sign-in.** A setup wizard names the instance, sets
   its public URL and the proxies to trust, then hands over to the host wizard.
 - **Wizards that show their work.** Creating a host walks Service, Certificate,
-  Access and Review; the Review step prints the exact YAML the server would
-  commit, and a pasted YAML document fills the steps back in.
+  Access and Review; adding an ACME certificate walks Domains, Authority (with
+  a CA picker), Validation and Review. The Review step prints the exact YAML
+  the server would commit, and a pasted YAML document fills the steps back in.
+- **Overview panels.** The Overview shows this instance's facts and the host
+  and certificate counts, each non-zero count opening the matching filtered
+  list.
 - **Everything is a file.** Every save is a git commit with history and revert;
   the panel, the API and a text editor edit the same objects.
 

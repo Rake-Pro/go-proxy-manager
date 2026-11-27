@@ -88,6 +88,12 @@ DNS-synced hosts, run `/api/dns-sync/plan` before letting a reconcile proceed
 
 Scopes: `dns-sync:read` for status and plan, `dns-sync:write` for reconcile.
 
+Concurrent `/plan` calls share one read of the backends, and a successful plan
+is reused for up to 5 seconds unless a config commit lands or
+`POST /api/dns-sync/reconcile` runs in between. A plan that failed or reports a
+backend `error` is never reused; a scheduled reconcile can still leave a reused
+plan up to 5 seconds old.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

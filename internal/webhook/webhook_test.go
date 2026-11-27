@@ -1,7 +1,6 @@
 package webhook
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,8 +15,6 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 // waitDrained blocks until every currently in-flight delivery goroutine has
@@ -417,23 +414,14 @@ func TestTransportErrorOmitsReceiverURL(t *testing.T) {
 }
 
 func TestDeliveryFailureLogOmitsReceiverURL(t *testing.T) {
-	var buf bytes.Buffer
-	prev := log.Logger
-	log.Logger = zerolog.New(&buf)
-	t.Cleanup(func() { log.Logger = prev })
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
+	buf := captureLog(t)
+	addr := closedAddr(t)
 	const secretPath = "hooks/123/receiver-path-token"
 	d := New(func() []model.WebhookConfig {
 		return []model.WebhookConfig{{Name: "down", URL: "http://" + addr + "/" + secretPath}}
 	})
 	d.Dispatch(Event{Action: "save", Kind: "ProxyHost", Name: "app"})
-	waitDrained(t, d)
+	d.Close() // the delivery goroutine has exited: no log write races the restore or the read
 	if !strings.Contains(buf.String(), "webhook: delivery failed") {
 		t.Fatalf("no delivery-failure log line: %s", buf.String())
 	}

@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 	"github.com/rs/zerolog/log"
@@ -51,6 +53,36 @@ type registry struct {
 	// Set by buildRouter; nil (a fresh instance per compiled step) in chains
 	// built without a router.
 	states *chainStates
+	// owned collects the connection pools the build creates (see registry.own).
+	owned []idleCloser
+	// rateLimitExempt holds each access list an "@<list>" rate-limit exemption
+	// of this build names, compiled once (see registry.rateLimitExemption).
+	// Filled and read only while handlers are built, under rateLimitExemptMu;
+	// requests use the compiled lists, never the map.
+	rateLimitExempt   map[string]*rateLimitExemptList
+	rateLimitExemptMu sync.Mutex
+	// pathBlocks holds each path block list of this build, compiled once and
+	// shared by every route that takes it (see registry.pathBlockFor).
+	pathBlocks   map[string]*pathBlock
+	pathBlocksMu sync.Mutex
+}
+
+// pathBlockFor returns the compiled path block list for key ("fleet" for
+// settings.pathBlock, "mw:<name>" for a middleware). A compiled list is
+// immutable, so the fleet list is compiled once per build instead of once per
+// route of every host.
+func (reg *registry) pathBlockFor(key string, spec model.PathBlockMiddleware) *pathBlock {
+	reg.pathBlocksMu.Lock()
+	defer reg.pathBlocksMu.Unlock()
+	if p := reg.pathBlocks[key]; p != nil {
+		return p
+	}
+	if reg.pathBlocks == nil {
+		reg.pathBlocks = map[string]*pathBlock{}
+	}
+	p := compilePathBlock(spec, reg.rateLimitExemption)
+	reg.pathBlocks[key] = p
+	return p
 }
 
 // rateLimiterFor returns the limiter for one rate-limit step. owner names the
@@ -317,9 +349,10 @@ func hostIdentityTrust(h model.ProxyHost, reg *registry) (headers []string, trus
 	return identityTrust(hostAuthSpecs(h, reg), reg)
 }
 
-// hostAuthSpecs collects every auth spec that applies anywhere on h, in chain
-// order: the host's referenced auth middlewares and its inline auth block, then
-// the same for each location. Both sources are gates of equal standing, so both
+// hostAuthSpecs collects every auth spec that applies anywhere on h, in
+// declaration order (not run order, which does not matter for the trust sets
+// built from it): the host's referenced auth middlewares and its inline auth
+// block, then the same for each location. Both sources are gates of equal standing, so both
 // must contribute their provider's identity headers and trusted proxies - an
 // inline block that did not would leave a forward-auth header forgeable.
 func hostAuthSpecs(h model.ProxyHost, reg *registry) []model.AuthMiddleware {
@@ -413,13 +446,14 @@ func unresolvedRefs(host model.ProxyHost, inline inlineChain, reg *registry) str
 }
 
 // buildChain wraps the terminal proxy handler in the host's middleware chain.
-// Steps run in a fixed canonical order regardless of reference order:
+// The tiers run in a fixed canonical order regardless of reference order
+// (within a tier, reference order does matter; see the auth tier below):
 //
-//	rate-limit -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> proxy
+//	rate-limit -> path-block -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> proxy
 //
 // Rewrite is innermost (closest to upstream), so the path replacement it applies
-// is upstream-facing only: rate-limit/access-list/bouncer/auth/guard all evaluate
-// the ORIGINAL client path, never the rewritten one.
+// is upstream-facing only: rate-limit/path-block/access-list/bouncer/auth/guard
+// all evaluate the ORIGINAL client path, never the rewritten one.
 //
 // A host's (or location's) INLINE auth / rateLimit block occupies the same
 // position as a middleware of that kind and compiles through the same function,
@@ -581,18 +615,28 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		h = guardHandler(compileGuard(*mw.Guard), clientIP, host.Name, ep, h)
 	}
 
-	// Authentication: forward-auth / auth-request / per-host OIDC gating.
+	// Authentication: forward-auth / auth-request / per-host OIDC gating. Each
+	// gate wraps the previous one, so several gates run in this order: a
+	// location's inline block, the host's inline block, then the referenced
+	// auth middlewares LAST-referenced first (a location's references follow
+	// its host's in host.Middlewares, so they run before the host's). The order
+	// matters: the first gate that refuses or redirects answers the request.
+	// A request on an interactive gate's own pass-through path (the
+	// auth-request outpost prefix, the OIDC callback) still meets the
+	// non-interactive gates that run after it, while the interactive ones step
+	// aside; see passThroughGate.
+	h = passThroughTerminal(h)
 	for _, name := range host.Middlewares {
 		mw, ok := reg.middlewares[name]
 		if !ok || mw.Type != model.MWTypeAuth || mw.Auth == nil {
 			continue
 		}
-		h = authHandlerFor(*mw.Auth, host, reg, clientIP, ep, h)
+		h = passThroughGate(authHandlerFor(*mw.Auth, host, reg, clientIP, ep, h), h)
 	}
 	// Inline auth blocks wrap OUTSIDE the referenced auth middlewares, so they
-	// run first; both must pass, exactly as two referenced auth middlewares do.
+	// run first (the location's, appended last, outermost); all must pass.
 	for _, a := range inline.auth {
-		h = authHandlerFor(a, host, reg, clientIP, ep, h)
+		h = passThroughGate(authHandlerFor(a, host, reg, clientIP, ep, h), h)
 	}
 
 	// Bouncer deny hooks, just outside auth: an IP an operator-run bouncer
@@ -604,7 +648,9 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		if !ok || mw.Type != model.MWTypeBouncer || mw.Bouncer == nil {
 			continue
 		}
-		h = bouncerHandler(compileBouncer(mw.Name, *mw.Bouncer), host.Name, clientIP, ep, h)
+		b := compileBouncer(mw.Name, *mw.Bouncer)
+		reg.own(b.client)
+		h = bouncerHandler(b, host.Name, clientIP, ep, h)
 	}
 
 	// Access lists, wrapped outside auth so an IP the list would deny is
@@ -646,17 +692,35 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 	wrapAccessLists(host.AccessLists, host.AccessListsMode)
 	wrapAccessLists(inline.accessLists, inline.accessListsMode)
 
+	// An "@<list>" exemption (path block and rate limit allowFrom) walks that
+	// list's rules first-match per request, compiled once per build (see
+	// registry.rateLimitExemption).
+	listExempt := reg.rateLimitExemption
+
+	// Path block lists, outside the access lists and authentication: a request
+	// for a listed path (a dotfile, a ".php" drop path) is answered here, so it
+	// never drives an access-list lookup, a bouncer call or an auth subrequest,
+	// and is never proxied. Still inside the rate limit, so a scanner working
+	// through a word list spends its budget like any other client. The
+	// referenced middlewares are wrapped first (so the last-referenced one runs
+	// first among them, a location's before its host's), then the fleet list
+	// (settings.pathBlock) outermost, unless the host turned it off; the admin
+	// edge host never takes the fleet list, so a list that blocks too much
+	// cannot lock the edge panel out.
+	for _, name := range host.Middlewares {
+		mw, ok := reg.middlewares[name]
+		if !ok || mw.Type != model.MWTypePathBlock || mw.PathBlock == nil {
+			continue
+		}
+		h = pathBlockHandler(reg.pathBlockFor("mw:"+name, *mw.PathBlock), clientIP, host.Name, ep, h)
+	}
+	if fleet := currentPathBlock(); fleet != nil && host.PathBlock != model.PathBlockOff && !host.AdminEdge {
+		h = pathBlockHandler(reg.pathBlockFor("fleet", *fleet), clientIP, host.Name, ep, h)
+	}
+
 	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
 	// flood is rejected (429) before it can drive an auth subrequest or any other
-	// per-request work. An "@<list>" exemption resolves against the registry's
-	// access lists at build time, like the lists themselves.
-	listNets := func(name string) []*net.IPNet {
-		al, ok := reg.accessLists[name]
-		if !ok {
-			return nil
-		}
-		return accessListAllowNets(al)
-	}
+	// per-request work.
 	// Limiter state is per route (host route or one location) and per step; a
 	// name referenced twice on one route gets one limiter per reference. A step
 	// with scope: host drops the route from its key, so the host route and every
@@ -677,13 +741,13 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 		}
 		refs[name]++
 		l := reg.rateLimiterFor(scoped(*mw.RateLimit)+"mw:"+name+"#"+strconv.Itoa(refs[name]), *mw.RateLimit)
-		h = rateLimitHandlerWith(l, *mw.RateLimit, clientIP, host.Name, ep, h, listNets)
+		h = rateLimitHandlerWith(l, *mw.RateLimit, clientIP, host.Name, ep, h, listExempt)
 	}
 	// Inline rate-limit blocks, outside the referenced ones for the same reason:
 	// an inline limit sheds the flood first, and every limit still applies.
 	for i, rl := range inline.rateLimit {
 		l := reg.rateLimiterFor(scoped(rl)+"inline#"+strconv.Itoa(i), rl)
-		h = rateLimitHandlerWith(l, rl, clientIP, host.Name, ep, h, listNets)
+		h = rateLimitHandlerWith(l, rl, clientIP, host.Name, ep, h, listExempt)
 	}
 
 	return h
@@ -711,5 +775,56 @@ func authHandlerFor(a model.AuthMiddleware, host model.ProxyHost, reg *registry,
 		}
 		countDenial(r, "auth-client-cert")
 		refuse(w, http.StatusUnauthorized, ep, host.Name, "authentication required")
+	})
+}
+
+// passThroughKey carries, on a request for an interactive gate's own
+// pass-through path, the gate that serves it (see passThroughGate).
+type passThroughKey struct{}
+
+// passThroughGate wraps one compiled auth gate; next is the rest of the chain
+// inside it. A non-interactive gate (basic, client-cert, forward-auth) is
+// returned unchanged, so it applies its full rule to every request, including
+// another gate's pass-through. An interactive gate (oidc, auth-request) that
+// owns the request path does not serve it here: it hands the request on to the
+// gates inside it, tagged with itself, and passThroughTerminal serves it once
+// they have passed. An interactive gate that sees a request already tagged by
+// an outer gate steps aside, as a sign-in flow must never wait on another
+// gate's sign-in. Every other request reaches the gate as before.
+func passThroughGate(gate, next http.Handler) http.Handler {
+	ig, ok := gate.(interactiveGate)
+	if !ok {
+		return gate
+	}
+	if ig.owns == nil {
+		// An interactive gate that failed to compile: it refuses every request
+		// and has no sign-in flow to protect, so it must not step aside for a
+		// request another gate tagged.
+		return ig.Handler
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, tagged := r.Context().Value(passThroughKey{}).(http.Handler); tagged {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if ig.owns(r.URL.Path) {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), passThroughKey{}, ig.Handler)))
+			return
+		}
+		ig.Handler.ServeHTTP(w, r)
+	})
+}
+
+// passThroughTerminal sits just inside the innermost auth gate. A request
+// tagged by passThroughGate is served by the gate that tagged it (which, on
+// its own pass-through path, answers without calling its next handler), so it
+// never reaches the guard, headers, rewrite or proxy steps, exactly as before.
+func passThroughTerminal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gate, ok := r.Context().Value(passThroughKey{}).(http.Handler); ok {
+			gate.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }

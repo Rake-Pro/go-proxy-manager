@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/acme"
+	"github.com/Rake-Pro/go-proxy-manager/internal/dataplane"
 	"github.com/Rake-Pro/go-proxy-manager/internal/model"
 )
 
@@ -26,16 +28,31 @@ const (
 // certExpiringWindow matches the default ACME renewal window (30 days): a
 // certificate at or inside it is "expiring", the same threshold the ACME
 // manager itself renews at, so the two never disagree about a certificate on
-// the edge.
+// the edge. A certificate that lives less than 90 days uses a third of its
+// lifetime instead, as the manager does (see expiringWindow).
 const certExpiringWindow = 30 * 24 * time.Hour
+
+// expiringWindow is the "expiring" window of one certificate:
+// min(certExpiringWindow, lifetime/3), the ACME manager's renewal rule. With
+// the fixed window alone a 6-day certificate would read "expiring" from the
+// moment it is issued.
+func expiringWindow(notBefore, notAfter time.Time) time.Duration {
+	if notBefore.IsZero() {
+		return certExpiringWindow
+	}
+	if lifetime := notAfter.Sub(notBefore).Round(time.Minute); lifetime > 0 {
+		return min(certExpiringWindow, lifetime/3)
+	}
+	return certExpiringWindow
+}
 
 // maxLastErrorLen bounds the lastError field: an ACME CA's rejection detail or a
 // Go file error can run long, and this is a status summary, not a log.
 const maxLastErrorLen = 300
 
 // UpstreamGroupHealth is one upstream group's healthy/unhealthy upstream count,
-// for GET /health. The API package does not import internal/dataplane's
-// per-upstream type; the daemon derives this from it (see Deps.UpstreamGroupSummary).
+// for GET /health. The daemon derives it from internal/dataplane's
+// per-upstream state (see Deps.UpstreamGroupSummary).
 type UpstreamGroupHealth struct {
 	Name      string `json:"name"`
 	Healthy   int    `json:"healthy"`
@@ -58,13 +75,14 @@ func (d Deps) certObservation(name string) (acme.CertObservation, bool) {
 }
 
 // certState derives the expiry state at time now. A certificate at or inside
-// certExpiringWindow of its expiry is "expiring", matching the ACME manager's
-// own renewal threshold.
-func certState(now, notAfter time.Time) string {
+// its expiring window (see expiringWindow) is "expiring", matching the ACME
+// manager's own renewal threshold. A zero notBefore selects the fixed
+// certExpiringWindow (used for custom certificates).
+func certState(now, notBefore, notAfter time.Time) string {
 	switch {
 	case !now.Before(notAfter):
 		return CertStateExpired
-	case notAfter.Sub(now) <= certExpiringWindow:
+	case notAfter.Sub(now) <= expiringWindow(notBefore, notAfter):
 		return CertStateExpiring
 	default:
 		return CertStateValid
@@ -150,7 +168,23 @@ func (d Deps) certStatus(c model.Certificate, admin bool) map[string]any {
 		if len(info.SANs) > 0 {
 			out["sans"] = info.SANs
 		}
-		out["state"] = certState(now, info.NotAfter)
+		// The lifetime-relative window is the ACME manager's renewal rule. A
+		// custom certificate is renewed by nobody, so it keeps the fixed
+		// window: the warning must not come later because the certificate is
+		// short-lived.
+		notBefore := info.NotBefore
+		if c.Type != model.CertTypeACME {
+			notBefore = time.Time{}
+		}
+		out["state"] = certState(now, notBefore, info.NotAfter)
+		// When the ACME manager next renews this certificate, and whether the
+		// lifetime rule or the CA's renewal information (ARI) set that time.
+		// Omitted when unknown: a custom certificate, a follower, or before the
+		// manager's first pass.
+		if c.Type == model.CertTypeACME && hasObs && !obs.RenewAt.IsZero() {
+			out["renewAt"] = obs.RenewAt
+			out["renewReason"] = obs.RenewReason
+		}
 	}
 	return out
 }
@@ -182,8 +216,7 @@ func (d Deps) decorateCertificate(c model.Certificate, r *http.Request) any {
 }
 
 // handleRenewCertificate is POST /certificates/{name}/renew: force an
-// immediate ACME order for one certificate, ignoring the normal 30-day renewal
-// window. It responds as soon as the order has started (or is refused), not
+// immediate ACME order for one certificate, ignoring its renewal window. It responds as soon as the order has started (or is refused), not
 // once it completes - see acme.Manager.RenewNow.
 func (d Deps) handleRenewCertificate(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
@@ -316,8 +349,25 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp.HARole = d.Role.String()
 	resp.ConfigHead = head
 	resp.ConfigWarnings = cfg.Warnings()
+	resp.ConfigWarnings = append(resp.ConfigWarnings, denySourceWarnings(r.Context(), cfg.AccessLists, d.Store.LoadAccessListSourceLedger)...)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// denySourceWarnings names every deny rule whose source the data plane
+// resolves to the empty set, so it denies no one. That is the decided
+// behaviour, so it is a warning rather than an error. The ledger is only
+// loaded when some enabled list has a deny rule with a source.
+func denySourceWarnings(ctx context.Context, lists []model.AccessList, load func(context.Context) (model.AccessListSourceLedger, string, error)) []string {
+	refs := model.DenySourceRefs(lists)
+	if len(refs) == 0 {
+		return nil
+	}
+	ledger, _, err := load(ctx)
+	if err != nil {
+		return []string{"the access-list source ledger could not be loaded, so deny rules that name a source may match nothing and deny no one"}
+	}
+	return dataplane.UnresolvedDenySourceWarnings(refs, ledger)
 }
 
 // latestACMEError names the certificate whose most recent attempt failed most

@@ -272,7 +272,7 @@ function $$(sel, root) { return Array.from((root || document).querySelectorAll(s
 
 // The UI's word for a middleware type where it differs from the YAML value:
 // the rail, the check-lists and the summaries all read from here.
-const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit' };
+const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit', 'path-block': 'path block' };
 
 // ---------- list filter ----------
 // Every list filter box takes plain words and field-scoped terms. parseFilter
@@ -612,10 +612,12 @@ function wireFilter(id, fields, values, onChange, list) {
   }
 
   // The last filter used on this list comes back with the page.
+  // A deep link (route() parsed it) replaces the remembered filter.
   if (memKey) {
     let stored = '';
     try { stored = localStorage.getItem(memKey) || ''; } catch (e) { /* ignore */ }
-    if (stored) setQuery(stored);
+    if (deepFilter && deepFilter.list === list) { setQuery(deepFilter.text); deepFilter = null; }
+    else if (stored) setQuery(stored);
   }
   return { terms, set: setQuery };
 }
@@ -831,6 +833,7 @@ const ENUM_LABELS = {
     'rate-limit': 'Rate limit',
     'rewrite': 'Path rewrite',
     'bouncer': 'Bouncer (external deny hook)',
+    'path-block': 'Path block (deny by path shape)',
   },
   authMode: {
     '': 'Take the mode from the identity provider',
@@ -949,6 +952,10 @@ const ENUM_LABELS = {
   bouncerDenyWith: {
     'error-page': 'The configured error page',
     'plain': 'A plain-text body',
+  },
+  pathBlockSwitch: {
+    'inherit': 'Apply the fleet path block list (default)',
+    'off': 'Do not apply the fleet path block list',
   },
 };
 
@@ -2543,6 +2550,69 @@ function hasWildcardProxy(list) {
 // it is surfaced permanently in the card and the save stays enabled.
 const TRUSTED_WILDCARD_WARNING = '0.0.0.0/0 trusts every peer, so any client can set its own address and every IP rule below becomes spoofable. List your proxies\' real addresses instead.';
 
+// Discovery templates and profiles carry the proxy host's three-state
+// trustedProxies and the same three-way control, but "unset" means something
+// else there: the template does not own the field, so a managed host keeps its
+// own value across a reconcile and a new host inherits settings.trustedProxies.
+// [] (trust nobody) and a list are stamped onto every derived host, which then
+// carries the <prefix>/trusted-proxies-by label; a stamped value is removed
+// again when the template stops setting the key. The API
+// omits an unset value, so only `undefined` is unset: a present null is a set,
+// empty value and reads as "trust nobody", as it does in the model.
+const TP_TEMPLATE_NOTES = {
+  unset: 'Not owned by discovery: a value set by hand on a derived host is kept, a value this template or profile stamped is removed from its hosts, and a new host uses the fleet list in Settings.',
+  none: 'Stamped onto every derived host: the client address is the connection address, X-Forwarded-For is ignored.',
+  custom: 'Stamped onto every derived host, replacing the fleet list there.',
+};
+function tpTemplateMode(v) {
+  if (v === undefined) return 'unset';
+  return arr(v).length ? 'custom' : 'none';
+}
+function tpTemplateHtml(v, hint) {
+  const mode = tpTemplateMode(v);
+  const btn = (m, label) => `<button type="button" class="seg-btn${mode === m ? ' on' : ''}" data-tp="${m}" aria-pressed="${mode === m}">${label}</button>`;
+  return `<div class="tp-tmpl">
+    <div class="seg tp-seg" data-hint="${esc(hint)}">${btn('unset', 'Not set')}${btn('none', 'Trust nobody')}${btn('custom', 'Custom list')}</div>
+    <div class="tp-custom"${mode === 'custom' ? '' : ' hidden'}><div class="chip-input tp-list" data-hint="${esc(hint)}"></div></div>
+    <div class="hint tp-note">${esc(TP_TEMPLATE_NOTES[mode])}</div>
+    <div class="hint warn tp-warn" hidden>${esc(TRUSTED_WILDCARD_WARNING)}</div>
+  </div>`;
+}
+// Wires one tpTemplateHtml block. get() returns undefined for unset (the save
+// omits the key), [] for trust nobody and the list otherwise, or null after
+// reporting an invalid list, so the caller stops.
+function wireTpTemplate(wrap, v, where) {
+  const warn = wrap.querySelector('.tp-warn');
+  const mode = () => { const on = wrap.querySelector('.tp-seg .seg-btn.on'); return on ? on.dataset.tp : 'unset'; };
+  const ctl = makeChipInput(wrap.querySelector('.tp-list'), arr(v), '10.0.0.0/8 or 192.0.2.10', (list) => {
+    warn.hidden = mode() !== 'custom' || !hasWildcardProxy(list);
+  });
+  function sync() {
+    const m = mode();
+    wrap.querySelector('.tp-custom').hidden = m !== 'custom';
+    wrap.querySelector('.tp-note').textContent = TP_TEMPLATE_NOTES[m];
+    warn.hidden = m !== 'custom' || !hasWildcardProxy(ctl.get());
+  }
+  wrap.querySelectorAll('.tp-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
+    wrap.querySelectorAll('.tp-seg .seg-btn').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+    sync();
+    b.dispatchEvent(new CustomEvent('switchchange', { bubbles: true }));
+  }));
+  sync();
+  return {
+    get() {
+      const m = mode();
+      if (m === 'unset') return undefined;
+      if (m === 'none') return [];
+      const list = ctl.get();
+      if (!list.length) { showInvalid('Trusted proxies empty', `${where}: add at least one CIDR or IP, or choose "Not set" or "Trust nobody".`, wrap.querySelector('.tp-list')); return null; }
+      const bad = firstBadCidr(list);
+      if (bad) { showInvalid('Invalid trusted proxy', `${where}: "${bad}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, wrap.querySelector('.tp-list')); return null; }
+      return list;
+    },
+  };
+}
+
 // A hostname, optionally with a port - what upstream.hostHeader accepts.
 const HOSTHEADER_RE = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:\d{1,5})?$/;
 
@@ -2581,8 +2651,9 @@ function deliveryChipHtml(st, disabled) {
 // ---------- basic-auth credential rows ----------
 // Shared by the auth middleware editor and every inline auth block (host and
 // location). The UI posts the PLAINTEXT password; the API bcrypts it and stores
-// only passwordHash, so nothing here ever hashes and nothing ever renders a
-// stored hash into a visible input.
+// only passwordHash, so nothing here ever hashes. A read returns each stored
+// hash as the placeholder "***", and sending that back keeps the stored hash of
+// the user of that name, so a renamed user needs a new password.
 const BASIC_MAX_USERS = 64;
 function makeBasicUserRows(wrap, users) {
   function addRow(u) {
@@ -2591,6 +2662,7 @@ function makeBasicUserRows(wrap, users) {
     const div = document.createElement('div');
     div.className = 'loc-row';
     div._hash = u.passwordHash || '';
+    div._user = u.username || '';
     div._new = !existing;
     div.innerHTML = `<input class="field mono bu-user" data-hint="middleware.auth.basic.users.username" style="flex:1 1 130px" value="${esc(u.username || '')}" placeholder="username" aria-label="Username" />
       <input class="field mono bu-pw" data-hint="middleware.auth.basic.users.password" type="password" autocomplete="new-password" style="flex:2 1 170px" placeholder="${existing ? 'Unchanged' : 'Set a password'}" aria-label="Password" />
@@ -2637,6 +2709,8 @@ function makeBasicUserRows(wrap, users) {
         if (seen[name]) { err = markRowError(r, `Duplicate username "${name}".`); return; }
         seen[name] = true;
         if (!pw && !r._hash) { err = markRowError(r, 'A password is required for a new user.'); return; }
+        // The kept hash belongs to the stored name, so the API refuses it under another.
+        if (!pw && r._hash && name !== r._user) { err = markRowError(r, `Renaming "${r._user}" to "${name}" needs a new password.`); return; }
       });
       if (!err && !rows().length) err = 'Add at least one user.';
       return err;
@@ -2893,11 +2967,180 @@ function wireRateLimitBlock(p, rl) {
         if (!GO_DURATION_RE.test(blockMax)) { showInvalid('Invalid block max', where + 'Block max must be a duration such as 1h or 24h.', $('#' + p + '-blockmax')); return null; }
         spec.blockMax = blockMax;
       }
-      // The form has no scope control; keep a scope set through the API or YAML.
+      // The form has no scope or IPv6 prefix control; keep a value set through
+      // the API or YAML.
       if (rl.scope) spec.scope = rl.scope;
+      if (rl.ipv6Prefix) spec.ipv6Prefix = rl.ipv6Prefix;
       return spec;
     },
   };
+}
+
+// ---------- path block list block (middleware, settings.pathBlock) ----------
+// model.PathBlockMiddleware is one spec in two places: a `type: path-block`
+// middleware and the fleet list settings.pathBlock. Both editors render this
+// block; the help ids differ per place, so they are looked up by scope.
+const PATH_BLOCK_HINTS = {
+  middleware: {
+    extensions: 'middleware.pathBlock.extensions', names: 'middleware.pathBlock.names', globs: 'middleware.pathBlock.globs',
+    allowFrom: 'middleware.pathBlock.allowFrom', denyStatus: 'middleware.pathBlock.denyStatus', denyWith: 'middleware.pathBlock.denyWith',
+  },
+  settings: {
+    extensions: 'settings.pathBlock.extensions', names: 'settings.pathBlock.names', globs: 'settings.pathBlock.globs',
+    allowFrom: 'settings.pathBlock.allowFrom', denyStatus: 'settings.pathBlock.denyStatus', denyWith: 'settings.pathBlock.denyWith',
+  },
+};
+// The model's bounds (model.MaxPathBlockEntries, MaxPathBlockGlobs,
+// MaxPathBlockEntryLen). The server is authoritative; these only block a save
+// the API would refuse anyway.
+const PATH_BLOCK_MAX_ENTRIES = 256;
+const PATH_BLOCK_MAX_GLOBS = 64;
+const PATH_BLOCK_MAX_LEN = 128;
+const PATH_BLOCK_MAX_GLOB_BYTES = 2048;
+function pathBlockBlockHtml(p, pb, scope) {
+  pb = pb || {};
+  const hn = PATH_BLOCK_HINTS[scope];
+  return `
+    <div class="field-group"><label>Extensions</label><div class="chip-input" id="${p}-ext" data-hint="${hn.extensions}" data-path="pathBlock.extensions"></div>
+      <div class="hint">With the leading dot: <span class="mono">.php</span>, <span class="mono">.env</span>, <span class="mono">.tar.gz</span>.</div>
+    </div>
+    <div class="field-group"><label>Names</label><div class="chip-input" id="${p}-names" data-hint="${hn.names}" data-path="pathBlock.names"></div>
+      <div class="hint">Whole path segments: <span class="mono">.git</span>, <span class="mono">wp-admin</span>, <span class="mono">wp-login.php</span>.</div>
+    </div>
+    <div class="field-group"><label>Globs</label><div class="chip-input" id="${p}-globs" data-hint="${hn.globs}" data-path="pathBlock.globs"></div>
+      <div class="hint">Patterns over the whole path, starting with <span class="mono">/</span>: <span class="mono">/server-status</span>. Write classes in lower case (<span class="mono">[a-z]</span>) and no trailing <span class="mono">/</span>: a path is compared without its own.</div>
+    </div>
+    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="${hn.allowFrom}" data-path="pathBlock.allowFrom"></div>
+      <div class="hint">CIDRs, bare IPs, or <span class="mono">@access-list</span> (a client whose first matching rule in that list is an allow rule) that the block does not apply to.</div>
+    </div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Deny status</label><input class="field mono" id="${p}-denystatus" data-hint="${hn.denyStatus}" data-path="pathBlock.denyStatus" type="number" value="${esc(pb.denyStatus != null ? pb.denyStatus : '')}" placeholder="404" /></div>
+      <div class="field-group"><label>Deny with</label><select class="field mono" id="${p}-denywith" data-hint="${hn.denyWith}" data-path="pathBlock.denyWith">
+        ${enumOptions('bouncerDenyWith', ['error-page', 'plain'], pb.denyWith || 'error-page')}
+      </select></div>
+    </div>`;
+}
+// pathBlockEntryError mirrors model.pathBlockEntryError for one extension or
+// name: '' when it is fine, else the complaint.
+function pathBlockEntryError(e) {
+  if (new TextEncoder().encode(e).length > PATH_BLOCK_MAX_LEN) return `is longer than ${PATH_BLOCK_MAX_LEN} bytes`;
+  if (e.indexOf('/') !== -1) return 'must not contain "/" (it is compared with one path segment)';
+  if (/[. ]$/.test(e)) return 'must not end with a dot or a space';
+  if (/[\x00-\x1f\x7f]/.test(e)) return 'must not contain a control character';
+  return '';
+}
+// globClassHasUpper mirrors model.globClassHasUpper: whether a glob holds an
+// upper-case letter inside a [...] class, counting a backslash-quoted
+// character as part of the class it stands in. Patterns are lower-cased before
+// use, so such a class would match something other than what it says.
+function globClassHasUpper(g) {
+  const cs = Array.from(g);
+  let inClass = false;
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    if (c === '\\' && i + 1 < cs.length) {
+      const q = cs[++i];
+      if (inClass && q.toLowerCase() !== q) return true;
+    } else if (!inClass && c === '[') inClass = true;
+    else if (inClass && c === ']') inClass = false;
+    else if (inClass && c.toLowerCase() !== c) return true;
+  }
+  return false;
+}
+// globShapeError mirrors model.globShapeError: '' when the glob can match the
+// form a path is compared in (no trailing slash, no empty segment, no segment
+// ending in a dot or a space, no control character), else the complaint.
+function globShapeError(g) {
+  if (g === '/') return '';
+  if (/[\x00-\x1f\x7f]/.test(g)) return 'must not contain a control character';
+  const t = g.replace(/\/+$/, '');
+  if (t !== g && t !== '') return `must not end with "/" (a path is compared without its trailing slash; write "${t}")`;
+  for (const seg of g.slice(1).split('/')) {
+    if (seg === '') return 'must not contain an empty segment ("//")';
+    if (seg.endsWith('.') || seg.endsWith(' ')) return 'has a segment ending with a dot or a space, which a path is compared without';
+  }
+  return '';
+}
+function wirePathBlockBlock(p, pb) {
+  pb = pb || {};
+  const extCtl = makeChipInput($('#' + p + '-ext'), arr(pb.extensions), 'add extension...');
+  const namesCtl = makeChipInput($('#' + p + '-names'), arr(pb.names), 'add name...');
+  const globsCtl = makeChipInput($('#' + p + '-globs'), arr(pb.globs), 'add glob...');
+  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(pb.allowFrom), 'add CIDR or @list...');
+  return {
+    // The spec; undefined when no extension, name or glob is set (the caller
+    // decides whether that means "no list" or is an error); null once
+    // showInvalid has flagged a field.
+    get() {
+      const extensions = extCtl.get(), names = namesCtl.get(), globs = globsCtl.get();
+      if (!extensions.length && !names.length && !globs.length) return undefined;
+      const lists = [
+        ['Extensions', extensions, PATH_BLOCK_MAX_ENTRIES, '-ext', (e) => pathBlockEntryError(e) || (e[0] !== '.' ? 'must be a dot followed by the extension, such as .php' : '')],
+        ['Names', names, PATH_BLOCK_MAX_ENTRIES, '-names', pathBlockEntryError],
+        ['Globs', globs, PATH_BLOCK_MAX_GLOBS, '-globs', (e) => (e[0] !== '/' ? 'must start with "/" (a glob is matched against the whole path)'
+          : (new TextEncoder().encode(e).length > PATH_BLOCK_MAX_LEN ? `is longer than ${PATH_BLOCK_MAX_LEN} bytes`
+            : (globClassHasUpper(e) ? 'has an upper-case letter inside [...]: matching is case-insensitive, write the class in lower case' : globShapeError(e))))],
+      ];
+      if (globs.reduce((n, g) => n + new TextEncoder().encode(g).length, 0) > PATH_BLOCK_MAX_GLOB_BYTES) {
+        showInvalid('Globs too large', `Globs: at most ${PATH_BLOCK_MAX_GLOB_BYTES} bytes in total are allowed.`, $('#' + p + '-globs'));
+        return null;
+      }
+      for (const [label, list, max, suffix, check] of lists) {
+        const el = $('#' + p + suffix);
+        if (list.length > max) { showInvalid('Too many entries', `${label}: at most ${max} entries are allowed.`, el); return null; }
+        for (const e of list) {
+          const err = check(e);
+          if (err) { showInvalid('Invalid path block entry', `${label}: "${e}" ${err}.`, el); return null; }
+        }
+      }
+      const spec = {};
+      if (extensions.length) spec.extensions = extensions;
+      if (names.length) spec.names = names;
+      if (globs.length) spec.globs = globs;
+      const allow = allowCtl.get();
+      if (allow.length) {
+        const bad = allow.find(v => !(v.startsWith('@') ? ACCESS_LIST_REF_RE.test(v) : isCidrOrIP(v)));
+        if (bad) { showInvalid('Invalid network', `"${bad}" is not a CIDR, an IP address or an @access-list name.`, $('#' + p + '-allow')); return null; }
+        spec.allowFrom = allow;
+      }
+      const ds = parseInt($('#' + p + '-denystatus').value, 10);
+      if (!isNaN(ds)) {
+        if (ds < 400 || ds > 599) { showInvalid('Invalid deny status', 'Deny status must be a 4xx or 5xx code. Leave it blank for 404.', $('#' + p + '-denystatus')); return null; }
+        spec.denyStatus = ds;
+      }
+      // error-page is the default, so it is only written when the stored
+      // object already spelled it out.
+      const dw = $('#' + p + '-denywith').value;
+      if (dw !== 'error-page' || pb.denyWith) spec.denyWith = dw;
+      return spec;
+    },
+  };
+}
+// The pathBlock switch of a proxy host, a discovery template and a discovery
+// profile: inherit (the default, also when unset) or off.
+// cls is an extra class for the select (a profile row finds its own select by
+// it); it is merged into the one class attribute, since a second class
+// attribute in attrs would be dropped by the browser.
+function pathBlockSwitchHtml(attrs, stored, hint, cls) {
+  return `<select class="field mono${cls ? ' ' + cls : ''}" ${attrs} data-hint="${esc(hint)}">${enumOptions('pathBlockSwitch', ['inherit', 'off'], stored === 'off' ? 'off' : 'inherit')}</select>`;
+}
+// pathBlockSwitchValue is the pathBlock to send for one select: "off", else
+// the stored value ("inherit" stays "inherit", unset stays unset), so a save
+// that does not touch the select writes nothing new. No select rendered means
+// the stored value is carried forward as it is.
+function pathBlockSwitchValue(el, stored) {
+  if (!el) return stored || undefined;
+  if (el.value === 'off') return 'off';
+  return stored === 'inherit' ? 'inherit' : undefined;
+}
+// pathBlockSummary is a path block spec as one line: "3 extensions, 2 names".
+function pathBlockSummary(pb) {
+  pb = pb || {};
+  return [
+    arr(pb.extensions).length ? plural(arr(pb.extensions).length, 'extension', 'extensions') : '',
+    arr(pb.names).length ? plural(arr(pb.names).length, 'name', 'names') : '',
+    arr(pb.globs).length ? plural(arr(pb.globs).length, 'glob', 'globs') : '',
+  ].filter(Boolean).join(', ') || 'no entries';
 }
 
 // ---------- inline auth / rate-limit folds ----------
@@ -3042,6 +3285,8 @@ function certStateChip(ct) {
     titleBits.push(days >= 0 ? `${plural(days, 'day', 'days')} remaining` : `Expired ${plural(-days, 'day', 'days')} ago`);
   }
   if (ct.notAfter) titleBits.push(fmtTime(ct.notAfter));
+  const renew = certRenewInfo(ct);
+  if (renew) titleBits.push(renew.text);
   const title = titleBits.join('; ');
   const chipCls = flat ? `chip flat${cls ? ' ' + cls : ''}` : `chip ${cls}`;
   return `<span class="${chipCls}" title="${esc(title)}"><span class="dot ${cls}"></span>${esc(label)}</span>`;
@@ -3073,7 +3318,36 @@ function certCoverHtml(ct, domain) {
 function certExpiryCellHtml(ct) {
   ct = ct || {};
   const date = ct.notAfter ? fmtDate(ct.notAfter) : '';
-  return `<span class="cert-expiry">${certStateChip(ct)}${date ? `<span class="expiry-date" title="${esc(fmtTime(ct.notAfter))}">${esc(date)}</span>` : ''}</span>`;
+  const cell = `<span class="cert-expiry">${certStateChip(ct)}${date ? `<span class="expiry-date" title="${esc(fmtTime(ct.notAfter))}">${esc(date)}</span>` : ''}</span>`;
+  const renew = certRenewInfo(ct);
+  if (!renew) return cell;
+  return `${cell}<div class="cell-sub"><span class="${renew.due ? 'warn-text' : 'mono'}" title="${esc(renew.text)}">${esc(renew.short)}</span></div>`;
+}
+// renewAt / renewReason (GET /api/certificates): when the ACME manager next
+// renews an issued certificate, and which rule set that time - "ari" is a time
+// the CA asked for through its renewal information, "lifetime" the
+// min(30 days, lifetime / 3) rule. A renewAt in the past means the renewal is
+// due and has not succeeded yet, so it is said in words, never shown as a
+// plain past date. Both are absent for custom and pending certificates, on an
+// HA follower and before the manager's first pass: null then.
+// "changed" (domains or profile changed) is due now whatever the time, which
+// is then the pass that noticed it. A reason this build does not know is shown
+// raw rather than dropped or mislabelled.
+const CERT_RENEW_REASONS = { ari: 'time requested by the CA (ARI)', lifetime: 'lifetime rule' };
+const CERT_RENEW_RULE = 'An ACME certificate renews when min(30 days, lifetime / 3) remains (the lifetime rule). A CA that publishes renewal information (ARI) can only bring that time forward, never past the lifetime rule. A failed attempt is retried after a wait that starts at a quarter of the renewal window (5 minutes to 1 hour) and doubles with each further failure, up to 12 hours.';
+function certRenewInfo(ct) {
+  if (!ct || !ct.renewAt) return null;
+  const t = new Date(ct.renewAt).getTime();
+  if (isNaN(t)) return null;
+  if (ct.renewReason === 'changed') {
+    return { due: true, label: 'Due now: domains or profile changed', short: 'due now: domains or profile changed', text: `Due now: domains or profile changed (noticed ${fmtTime(ct.renewAt)})` };
+  }
+  const why = CERT_RENEW_REASONS[ct.renewReason] || ct.renewReason || '';
+  const tail = why ? ` (${why})` : '';
+  if (t <= Date.now()) {
+    return { due: true, label: 'Due now, not yet succeeded', why, short: 'renewal due, not yet succeeded', text: `Renewal due since ${fmtTime(ct.renewAt)} and not yet succeeded${tail}` };
+  }
+  return { due: false, why, short: 'renews ' + fmtDate(ct.renewAt), text: `Renews ${fmtTime(ct.renewAt)}${tail}` };
 }
 // POST /api/certificates/{name}/renew starts an order and returns immediately -
 // DNS-01 propagation alone can take minutes, so there is no spinner and no poll:
@@ -3081,7 +3355,7 @@ function certExpiryCellHtml(ct) {
 async function renewCertificate(name) {
   const ok = await confirmModal({
     title: 'Renew this certificate now?',
-    body: `<p>Forces an immediate renewal of <b>${esc(name)}</b>. This starts a new ACME order now, ignoring the 30-day schedule.</p>`
+    body: `<p>Forces an immediate renewal of <b>${esc(name)}</b>. This starts a new ACME order now, ignoring the renewal window and any time the CA asked for.</p>`
       + '<p>The order runs in the background; DNS-01 validation can take several minutes.</p>',
     confirmLabel: 'Renew now',
     danger: false,
@@ -3229,11 +3503,24 @@ function wireCloneButton(section, orig, btnId) {
 // data in the new page's fields, its save handler on the new page's Save).
 let routeSeq = 0;
 const INNER_HTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+// The lists a #/<section>?filter=... link can open, by the list name
+// wireFilter keys them with.
+const DEEP_FILTER_LISTS = { hosts: 'hosts', certs: 'certificates' };
+let deepFilter = null;
 async function route() {
-  const raw = location.hash.replace(/^#/, '');
+  // A query on the hash (#/hosts?filter=status:live) is a one-shot deep link:
+  // it is stripped before the path is read, and wireFilter takes the filter.
+  const hashQ = location.hash.replace(/^#/, '').split('?');
+  const raw = hashQ[0];
   const parts = raw.split('/').filter(Boolean);
   if (!parts.length) { location.hash = '#/overview'; return; }
   const section = parts[0];
+  deepFilter = null;
+  if (hashQ.length > 1 && !parts[1] && DEEP_FILTER_LISTS[section]) {
+    const f = new URLSearchParams(hashQ.slice(1).join('?')).get('filter');
+    if (f !== null) deepFilter = { list: DEEP_FILTER_LISTS[section], text: f };
+  }
+  const deepLink = !!deepFilter;
   // A malformed escape in the hash keeps the raw segment rather than throwing
   // before any view renders.
   let sub = null;
@@ -3301,6 +3588,10 @@ async function route() {
       default: location.hash = '#/overview'; return;
     }
     if (seq !== routeSeq) return;
+    // The link has been applied (or the list was empty): leave the bare route,
+    // without a hashchange, so a later edit of the filter is not contradicted.
+    if (deepLink) history.replaceState(null, '', '#/' + section);
+    deepFilter = null;
     c.classList.add('view');
     applyRefListGuard(c);
     applyMaintenanceBanner(c);
@@ -3608,6 +3899,8 @@ async function viewIntegrations(c, tab) {
             <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required: point this at your wildcard certificate.</div></div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
+            <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-id-pathblock" data-path="ingressDiscovery.template.pathBlock"', idt.pathBlock, 'settings.ingressDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
+            <div class="field-group" id="set-id-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(idt.trustedProxies, 'settings.ingressDiscovery.template.trustedProxies')}</div>
           </div>
           <div>
             <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw" data-hint="settings.ingressDiscovery.template.middlewares"></div><div class="hint">Applied to every derived host, in order.</div></div>
@@ -3683,6 +3976,7 @@ async function viewIntegrations(c, tab) {
             <div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Use published ports</div><div class="ds">Forward to the host-published port instead of the container IP.</div></div>${switchHtml('set-dkr-pubports', !!dd.usePublishedPorts, 'Use published ports', 'settings.dockerDiscovery.usePublishedPorts')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Include stopped containers</div><div class="ds">List non-running containers too.</div></div>${switchHtml('set-dkr-stopped', !!dd.includeStopped, 'Include stopped containers', 'settings.dockerDiscovery.includeStopped')}</div>
+              <div class="toggle-line"><div class="tl-text"><div class="nm">Allow link-local addresses</div><div class="ds">Accept a container address in 169.254.0.0/16 or fe80::/10 as the upstream. Off skips such a container.</div></div>${switchHtml('set-dkr-linklocal', !!dd.allowLinkLocal, 'Allow link-local addresses', 'settings.dockerDiscovery.allowLinkLocal')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Allowed domain suffixes</label>
                 <div class="chip-input" id="set-dkr-suffixes" data-hint="settings.dockerDiscovery.allowedDomainSuffixes" data-path="dockerDiscovery.allowedDomainSuffixes"></div>
@@ -3697,6 +3991,8 @@ async function viewIntegrations(c, tab) {
               <div class="field-group"><label>Certificate</label><input class="field mono" id="set-dkr-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" data-path="dockerDiscovery.template.tls.certificateRef" value="${esc(ddt.tls.certificateRef || '')}" placeholder="wildcard" /></div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-dkr-forcessl', !!ddt.tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-dkr-robots', !!ddt.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
+              <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-dkr-pathblock" data-path="dockerDiscovery.template.pathBlock"', ddt.pathBlock, 'settings.dockerDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
+              <div class="field-group" id="set-dkr-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(ddt.trustedProxies, 'settings.dockerDiscovery.template.trustedProxies')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Upstream timeouts (seconds)</label>
                 <div class="loc-row bare">
@@ -3747,7 +4043,7 @@ async function viewIntegrations(c, tab) {
       <p class="section-label">Lifecycle webhooks</p>
       <div id="set-webhooks" data-hint="settings.webhooks" data-path="webhooks"></div>
       <button class="btn ghost sm" id="addWebhook" type="button" style="margin-top:6px">${ICON.plus}Add webhook</button>
-      <div class="hint" style="margin-top:8px">Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
+      <div class="hint" style="margin-top:8px">A URL may be a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder, resolved when an event is sent, so a URL that carries a token stays out of git. Delivery state is kept in memory and resets when gpm restarts. Test sends <span class="mono">{"action":"test","kind":"Webhook","name":"&lt;target&gt;","time":"&lt;RFC3339&gt;"}</span> to the target URL, signed with the same <span class="mono">X-GPM-Webhook-Signature</span> and <span class="mono">X-GPM-Webhook-Timestamp</span> headers a real event carries.</div>
       ${intSaveBar()}
     </div>
     </div>
@@ -3845,6 +4141,7 @@ async function viewIntegrations(c, tab) {
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
   wireAlMode($('#set-id-alm').parentNode);
   const idTagCtl = makeChipInput($('#set-id-tags'), arr(idt.tags), 'add tag...');
+  const idTpCtl = wireTpTemplate($('#set-id-tp'), idt.trustedProxies, 'Ingress discovery template');
   const idTemplateSuffixCtl = makeChipInput($('#set-id-suffixes-override'), arr(idt.allowedDomainSuffixes), 'add suffix...');
 
   // Same MERGE invariant as the tls object in the save handler: `timeouts` is
@@ -3919,6 +4216,8 @@ async function viewIntegrations(c, tab) {
           <div class="field-group"><label>Tags</label><div class="chip-input pf-tags" data-hint="settings.ingressDiscovery.template.tags"></div><div class="hint">Applied to every host that selects this profile.</div></div>
           <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input pf-suffixes" data-hint="settings.ingressDiscovery.template.allowedDomainSuffixes"></div><div class="hint">Narrows the global list for hosts using this profile. Must be a subset.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('pf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
+          <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.ingressDiscovery.template.pathBlock', 'pf-pathblock')}</div>
+          <div class="field-group pf-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(p.trustedProxies, 'settings.ingressDiscovery.template.trustedProxies')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct', 'settings.ingressDiscovery.template.defaultDNS.lanDirect')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div></div>${switchHtml('pf-dns-pub-' + i, !!dns.publicCname, 'Default public CNAME', 'settings.ingressDiscovery.template.defaultDNS.publicCname')}</div>
         </div>
@@ -3933,6 +4232,9 @@ async function viewIntegrations(c, tab) {
     div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
     wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.pf-tags'), arr(p.tags), 'add tag...');
+    // Read from the loaded profile, so a row nobody opens sends back exactly
+    // what it was loaded with; a new row starts unset.
+    div._tp = wireTpTemplate(div.querySelector('.pf-tp'), p.trustedProxies, 'Ingress discovery profile');
     div._suffixes = makeChipInput(div.querySelector('.pf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
   Object.keys(idProfiles).sort().forEach((n) => profileRow(n, idProfiles[n]));
@@ -4037,6 +4339,7 @@ async function viewIntegrations(c, tab) {
   const dkrAlCtl = makeChipInput($('#set-dkr-al'), arr(ddt.accessLists), 'add access list...');
   wireAlMode($('#set-dkr-alm').parentNode);
   const dkrTagCtl = makeChipInput($('#set-dkr-tags'), arr(ddt.tags), 'add tag...');
+  const dkrTpCtl = wireTpTemplate($('#set-dkr-tp'), ddt.trustedProxies, 'Docker discovery template');
   const dkrTemplateSuffixCtl = makeChipInput($('#set-dkr-suffixes-override'), arr(ddt.allowedDomainSuffixes), 'add suffix...');
 
   const dpfWrap = $('#set-dkr-profiles');
@@ -4062,6 +4365,8 @@ async function viewIntegrations(c, tab) {
           <div class="field-group"><label>Certificate</label><input class="field mono dpf-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" value="${esc(tls.certificateRef || '')}" placeholder="wildcard" aria-label="Certificate" /></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('dpf-forcessl-' + i, !!tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('dpf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
+          <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.dockerDiscovery.template.pathBlock', 'dpf-pathblock')}</div>
+          <div class="field-group dpf-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(p.trustedProxies, 'settings.dockerDiscovery.template.trustedProxies')}</div>
           <div class="field-group" style="margin-top:10px">
             <label>Upstream timeouts (seconds)</label>
             <div class="loc-row bare">
@@ -4087,6 +4392,7 @@ async function viewIntegrations(c, tab) {
     div._al = makeChipInput(div.querySelector('.dpf-al'), arr(p.accessLists), 'add access list...');
     wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.dpf-tags'), arr(p.tags), 'add tag...');
+    div._tp = wireTpTemplate(div.querySelector('.dpf-tp'), p.trustedProxies, 'Docker discovery profile');
     div._suffixes = makeChipInput(div.querySelector('.dpf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
   Object.keys(ddProfiles).sort().forEach((n) => dockerProfileRow(n, ddProfiles[n]));
@@ -4180,7 +4486,7 @@ async function viewIntegrations(c, tab) {
           <td class="mono col-name"><span class="trunc" title="${esc(r.name || '')}">${esc(r.name || '')}</span></td>
           <td class="faint col-time" data-v="${esc(r.fetchedAt || '')}"${r.fetchedAt ? ` title="${esc(fmtTime(r.fetchedAt))}"` : ''}>${esc(r.fetchedAt ? relTime(r.fetchedAt) : 'Never')}</td>
           <td class="mono col-num">${esc(r.entryCount || 0)}</td>
-          <td class="warn-text col-reason">${esc(r.lastError || '')}</td>
+          <td class="warn-text col-reason">${esc([r.expired ? 'Expired (maxAge passed), matching nothing' : '', r.lastError || ''].filter(Boolean).join('; '))}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="hint">No access list declares a remote source yet.</div>';
       wireMiniTables(el);
     } catch (e) {
@@ -4263,9 +4569,9 @@ async function viewIntegrations(c, tab) {
   let ntfStatus = [];
   const ntfWrap = $('#set-notifications');
   const NTF_URL_HINTS = {
-    ntfy: { ph: 'https://ntfy.example.com/gpm-alerts', hint: 'The topic URL.', secret: 'Access token (optional), sent as Authorization: Bearer <token>.' },
-    discord: { ph: 'https://discord.com/api/webhooks/123.../abc...', hint: 'Must contain /api/webhooks/ - the server rejects a URL that does not.', secret: 'Not used for Discord - the webhook URL itself is the credential.' },
-    generic: { ph: 'https://hooks.example.com/gpm-notify', hint: 'Any http(s) endpoint. Receives a JSON envelope.', secret: 'Bearer token (optional), sent as Authorization: Bearer <token>.' },
+    ntfy: { ph: 'https://ntfy.example.com/gpm-alerts', hint: 'The topic URL, or a ${ENV:...} or ${FILE:...} placeholder that resolves to it.', secret: 'Access token (optional), sent as Authorization: Bearer <token>.' },
+    discord: { ph: 'https://discord.com/api/webhooks/123.../abc...', hint: 'A literal URL must contain /api/webhooks/ - the server rejects one that does not. The URL is the credential, so a ${ENV:...} or ${FILE:...} placeholder keeps it out of git.', secret: 'Not used for Discord - the webhook URL itself is the credential.' },
+    generic: { ph: 'https://hooks.example.com/gpm-notify', hint: 'Any http(s) endpoint, or a ${ENV:...} or ${FILE:...} placeholder. Receives a JSON envelope.', secret: 'Bearer token (optional), sent as Authorization: Bearer <token>.' },
   };
   function notificationRow(t) {
     t = t || {};
@@ -4341,6 +4647,9 @@ async function viewIntegrations(c, tab) {
     if (alsPollVal) alsBody.pollInterval = alsPollVal;
     if (Object.keys(alsBody).length) body.accessListSync = alsBody; else delete body.accessListSync;
 
+    // A url that is wholly a ${ENV:...}/${FILE:...} placeholder is resolved by
+    // the server at send time, which checks its shape there.
+    const urlRef = (u) => /^(\$\{(ENV|FILE):[^}]+\}\s*)+$/.test(u);
     const webhooks = [];
     let whErr = '';
     clearRowErrors(whWrap);
@@ -4353,7 +4662,7 @@ async function viewIntegrations(c, tab) {
       // bounced by the API with no indication of which row; now the row says so.
       if (!nm) { whErr = markRowError(row, 'Name is required.'); return; }
       if (!url) { whErr = markRowError(row, 'URL is required.'); return; }
-      if (!/^https?:\/\//.test(url)) { whErr = markRowError(row, 'URL must start with http:// or https://.'); return; }
+      if (!urlRef(url) && !/^https?:\/\//.test(url)) { whErr = markRowError(row, 'URL must start with http:// or https://, or be a ${ENV:...} or ${FILE:...} placeholder.'); return; }
       const wh = { name: nm, url };
       const secret = row.querySelector('.wh-secret').value.trim();
       // A literal secret is redacted on read; saving it back would commit "***".
@@ -4380,8 +4689,8 @@ async function viewIntegrations(c, tab) {
       if (ntfSeen[nm]) { ntfErr = markRowError(row, `Duplicate name "${nm}" - target names must be unique.`); return; }
       ntfSeen[nm] = true;
       if (!url) { ntfErr = markRowError(row, 'URL is required.'); return; }
-      if (!/^https?:\/\//.test(url)) { ntfErr = markRowError(row, 'URL must start with http:// or https://.'); return; }
-      if (type === 'discord' && url.indexOf('/api/webhooks/') === -1) {
+      if (!urlRef(url) && !/^https?:\/\//.test(url)) { ntfErr = markRowError(row, 'URL must start with http:// or https://, or be a ${ENV:...} or ${FILE:...} placeholder.'); return; }
+      if (type === 'discord' && !urlRef(url) && url.indexOf('/api/webhooks/') === -1) {
         ntfErr = markRowError(row, 'A Discord webhook URL must contain /api/webhooks/.'); return;
       }
       const t = { name: nm, type, url };
@@ -4419,6 +4728,12 @@ async function viewIntegrations(c, tab) {
     dnsSync.cloudflare.apexTarget = $('#set-cf-apex').value.trim();
     if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
     body.dnsSync = dnsSync;
+
+    // trustedProxies keeps its three states on all four discovery blocks:
+    // undefined (unset) is dropped by JSON.stringify, so the key is omitted,
+    // and an explicit [] (trust nobody) is sent as [].
+    const idTp = idTpCtl.get();
+    if (idTp === null) return;
 
     // annotationPrefix and annotationPrefixMigrate belong to Settings ->
     // Advanced, so they are carried forward from the loaded block rather than
@@ -4468,6 +4783,8 @@ async function viewIntegrations(c, tab) {
         // strips the template's strip list / security headers and the next
         // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue($('#set-id-pathblock'), idt.pathBlock),
+        trustedProxies: idTp,
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
@@ -4485,11 +4802,17 @@ async function viewIntegrations(c, tab) {
     // the profile. Here it becomes a normal key the server rejects by name.
     const profiles = Object.create(null);
     let pfDup = '';
+    let pfTpBad = false;
     $$('#set-id-profiles .id-profile').forEach((row) => {
+      if (pfTpBad) return;
       const pname = row.querySelector('.pf-name').value.trim();
       if (!pname) return; // an untouched blank row is not a profile
       if (pname in profiles) pfDup = pname;
       const uid = row.dataset.uid;
+      // Read off the row's own control, which was loaded from row._orig, so a
+      // renamed row keeps its value and a new row (loaded from {}) is unset.
+      const tp = row._tp.get();
+      if (tp === null) { pfTpBad = true; return; }
       const group = row.querySelector('.pf-up-group').value.trim();
       const prof = {
         upstream: group ? undefined
@@ -4512,6 +4835,8 @@ async function viewIntegrations(c, tab) {
         tags: row._tags.get(),
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue(row.querySelector('.pf-pathblock'), (row._orig || {}).pathBlock),
+        trustedProxies: tp,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -4522,6 +4847,7 @@ async function viewIntegrations(c, tab) {
       }
       profiles[pname] = prof;
     });
+    if (pfTpBad) return;
     if (pfDup) {
       showInvalid('Duplicate profile', `Two discovery profiles are both called "${pfDup}". Profile names must be unique - an Ingress selects one by name.`);
       return;
@@ -4571,6 +4897,8 @@ async function viewIntegrations(c, tab) {
     if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Published host applies only with Use published ports on. Turn it on, or clear Published host.', $('#set-dkr-pubhost')); return; }
     if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Network and Use published ports cannot both be set. Clear Network, or turn Use published ports off.', $('#set-dkr-network')); return; }
     if (dkrOn && !$('#set-dkr-cert').value.trim()) { showInvalid('Docker discovery', 'Set the template Certificate. It is required while Docker discovery is on.', $('#set-dkr-cert')); return; }
+    const dkrTp = dkrTpCtl.get();
+    if (dkrTp === null) return;
     const dockerDiscovery = {
       socket: dkrSocket || undefined,
       host: dkrHost || undefined,
@@ -4594,6 +4922,8 @@ async function viewIntegrations(c, tab) {
         accessListsMode: alModeValue($('#set-dkr-alm'), ddt.accessListsMode),
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue($('#set-dkr-pathblock'), ddt.pathBlock),
+        trustedProxies: dkrTp,
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
@@ -4603,16 +4933,21 @@ async function viewIntegrations(c, tab) {
     if (dkrOn) dockerDiscovery.enabled = true;
     if (isOn('set-dkr-pubports')) dockerDiscovery.usePublishedPorts = true;
     if (isOn('set-dkr-stopped')) dockerDiscovery.includeStopped = true;
+    if (isOn('set-dkr-linklocal')) dockerDiscovery.allowLinkLocal = true;
     if (isOn('set-dkr-dns-lan') || isOn('set-dkr-dns-pub')) {
       dockerDiscovery.template.defaultDNS = { lanDirect: isOn('set-dkr-dns-lan'), publicCname: isOn('set-dkr-dns-pub') };
     }
     const dkrProfiles = Object.create(null);
     let dpfDup = '';
+    let dpfTpBad = false;
     $$('#set-dkr-profiles .dkr-profile').forEach((row) => {
+      if (dpfTpBad) return;
       const pname = row.querySelector('.dpf-name').value.trim();
       if (!pname) return;
       if (pname in dkrProfiles) dpfDup = pname;
       const uid = row.dataset.uid;
+      const tp = row._tp.get();
+      if (tp === null) { dpfTpBad = true; return; }
       const prof = {
         tls: Object.assign({}, (row._orig || {}).tls, {
           certificateRef: row.querySelector('.dpf-cert').value.trim(),
@@ -4626,6 +4961,8 @@ async function viewIntegrations(c, tab) {
         accessListsMode: alModeValue($('#dpf-alm-' + uid), (row._orig || {}).accessListsMode),
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue(row.querySelector('.dpf-pathblock'), (row._orig || {}).pathBlock),
+        trustedProxies: tp,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -4636,6 +4973,7 @@ async function viewIntegrations(c, tab) {
       }
       dkrProfiles[pname] = prof;
     });
+    if (dpfTpBad) return;
     if (dpfDup) {
       showInvalid('Duplicate profile', `Two Docker discovery profiles are both called "${dpfDup}". Profile names must be unique.`);
       return;
@@ -4682,23 +5020,110 @@ function attnRow(sev, title, detail, href, action) {
     </div>`;
 }
 
+// The Overview's three panels. Each count is a link into the list filtered to
+// exactly the rows it counts (the filter fields are the lists' own).
+const OV_DASH = '<span class="muted">unavailable</span>';
+function ovFilterHref(section, text) { return `#/${section}?filter=${encodeURIComponent(text)}`; }
+function ovRow(label, valueHtml, dot) {
+  return `<span class="k">${dot ? `<span class="dot ${dot}"></span> ` : ''}${label}</span><span class="v">${valueHtml}</span>`;
+}
+// A count row. The number links into the list filtered to the rows it counts,
+// and the link's name says what the number is; a zero is plain text.
+function ovCountRow(label, n, section, filter, dot) {
+  const v = n ? `<a href="${ovFilterHref(section, filter)}" aria-label="${esc(label)}: ${n}">${n}</a>` : '<span class="muted">0</span>';
+  return ovRow(label, v, dot);
+}
+function overviewInstancePanel(rt, health) {
+  const r = rt.ok ? rt.data : null;
+  const onOff = (label, v, href) => `<a href="${href}" aria-label="${label}: ${v ? 'on' : 'off'}">${v ? 'On' : 'Off'}</a>`;
+  const head = health && health.configHead;
+  const role = r && (r.haRole === 'follower' ? 'Follower (read-only)' : 'Leader');
+  return `<div class="card ov-panel" id="ov-instance">
+    <h3>This instance</h3>
+    <div class="kv">
+      ${ovRow('Version', r ? `<span class="mono">${esc(r.version || 'unknown')}</span>` : OV_DASH)}
+      ${ovRow('Config commit', head ? `<a class="mono" href="#/history" aria-label="Config commit ${esc(shortSha(head))}, open History">${esc(shortSha(head))}</a>` : OV_DASH)}
+      ${ovRow('Listeners', r && r.listeners ? ['https', 'http', 'admin'].map((k) => `<span class="mono">${k} ${esc(r.listeners[k] || '-')}</span>`).join('<br>') : OV_DASH)}
+      ${ovRow('Request capture', r ? onOff('Request capture', r.accessLogEnabled, '#/logs') : OV_DASH)}
+      ${ovRow('Metrics', r ? onOff('Metrics', r.metricsEnabled, '#/settings/advanced') : OV_DASH)}
+      ${ovRow('HA role', r ? esc(role) : OV_DASH)}
+    </div>
+  </div>`;
+}
+function overviewHostsPanel(agg) {
+  // The hosts read failed. The sidebar's summary read, when it worked, still
+  // knows how many hosts there are and how many are disabled; it cannot tell
+  // live from maintenance (its maintenance count includes disabled hosts), so
+  // no bar and no status counts are shown.
+  if (!agg) {
+    const total = state.counts.proxyHosts;
+    const sm = state.summary || {};
+    const known = total != null
+      ? `<div class="kv">${ovRow('Total', String(total))}${ovRow('Disabled', String((sm.disabled && sm.disabled['proxy-hosts']) || 0))}</div>` : '';
+    return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>${known}
+      <p class="muted ov-note">Could not read the proxy hosts, so the counts by status and by discovery source are unavailable.</p>
+    </div>`;
+  }
+  if (!agg.total) {
+    return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>
+      <p class="muted ov-note">No proxy hosts yet.</p>
+      ${isReadOnly() ? '' : `<a class="btn primary sm" href="#/hosts/_new" data-wizard="hosts">${ICON.plus}Add proxy host</a>`}
+    </div>`;
+  }
+  const SEGS = [['live', 'Live', 'ok'], ['maintenance', 'Maintenance', 'warn'], ['disabled', 'Disabled', 'muted']];
+  const bar = SEGS.filter((sg) => agg[sg[0]]).map((sg) => `<i class="${sg[2]}" style="width:${(agg[sg[0]] * 100 / agg.total).toFixed(2)}%"></i>`).join('');
+  const rows = SEGS.map((sg) => ovCountRow(sg[1], agg[sg[0]], 'hosts', 'status:' + sg[0], sg[2])).join('');
+  const managed = Object.keys(agg.managed).filter((k) => agg.managed[k] > 0)
+    .map((k) => ovCountRow(MANAGED_CHIPS[k].text, agg.managed[k], 'hosts', 'source:' + k)).join('');
+  return `<div class="card ov-panel" id="ov-hosts"><h3>Hosts</h3>
+    <div class="meter ov-bar" aria-hidden="true">${bar}</div>
+    <div class="kv">${rows}${managed}</div>
+  </div>`;
+}
+function overviewCertsPanel(agg) {
+  if (!agg) {
+    return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3><p class="muted ov-note">Could not read the certificates.</p></div>`;
+  }
+  if (!agg.total) {
+    return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3>
+      <p class="muted ov-note">No certificates yet.</p>
+      ${isReadOnly() ? '' : `<a class="btn primary sm" href="#/certs/_new" data-wizard="certs">${ICON.plus}Add certificate</a>`}
+    </div>`;
+  }
+  const next = agg.soonest
+    ? `<p class="muted ov-note">Next expiry ${agg.soonest.days < 1 ? 'within a day' : 'in ' + plural(agg.soonest.days, 'day', 'days')}: <a href="#/certs/${encodeURIComponent(agg.soonest.name)}">${esc(agg.soonest.name)}</a></p>` : '';
+  return `<div class="card ov-panel" id="ov-certs"><h3>Certificates</h3>
+    <div class="kv">
+      ${ovCountRow('ACME', agg.acme, 'certs', 'type:acme')}
+      ${ovCountRow('Custom', agg.custom, 'certs', 'type:custom')}
+      ${ovCountRow('Expiring', agg.expiring, 'certs', 'state:expiring')}
+      ${ovCountRow('Failed', agg.error, 'certs', 'state:error')}
+      ${agg.expired ? ovCountRow('Expired', agg.expired, 'certs', 'state:expired') : ''}
+    </div>${next}
+  </div>`;
+}
+
 async function viewOverview(c) {
-  // Four independent reads, issued together, each tolerated on its own: a
-  // source that fails contributes one warn row ("Could not read ...") instead
+  // Independent reads, issued together, each tolerated on its own: a source
+  // that fails contributes one warn row or an "unavailable" panel line instead
   // of failing the whole view. The two discovery status routes 501/404 when
   // the integration is not wired at all, which is not a failure - it just
   // means that source has nothing to report.
-  const [healthR, certsR, idR, dkrR, hostsR] = await Promise.all([
+  const [healthR, certsR, idR, dkrR, hostsR, runtimeR] = await Promise.all([
     api('/api/health').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/certificates').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
     api('/api/ingress-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     api('/api/docker-discovery/status').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
     // For the hosts in maintenance: the summary counts only enabled and disabled.
     memoGet('/api/proxy-hosts').then((r) => ({ ok: true, data: arr(r.data) })).catch((e) => ({ ok: false, err: e })),
+    // Fresh, not loadRuntime(): the cached copy goes stale when request capture
+    // is toggled on the Logs page.
+    api('/api/runtime').then((r) => ({ ok: true, data: r.data || {} })).catch((e) => ({ ok: false, err: e })),
   ]);
-  // Only for the empty-state summary's "hosts live" figure. GET /config/summary
-  // is the sidebar's counts-only read and is memoized per route, so this adds
-  // no extra request beyond what the shell already made for the nav.
+  // For the setup card and the Hosts panel's fallback when the hosts read
+  // fails. GET /config/summary is the sidebar's counts-only read and is
+  // memoized per route, so this adds no extra request beyond what the shell
+  // already made for the nav.
   await loadCounts();
 
   const health = healthR.ok ? healthR.data : null;
@@ -4725,8 +5150,9 @@ async function viewOverview(c) {
           href, 'Open'));
       } else if (ct.state === 'expiring') {
         const days = ct.daysRemaining;
+        const renew = certRenewInfo(ct);
         warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${plural(days, 'day', 'days')}`,
-          [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : ''].filter(Boolean).join(' &middot; '),
+          [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : '', renew ? esc(renew.short) : ''].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       }
     });
@@ -4787,7 +5213,9 @@ async function viewOverview(c) {
   // ---- hosts in maintenance: GET /api/proxy-hosts ----
   // A host in maintenance answers every request with a 503: not a fault, but
   // the one host state an operator must not forget, so each gets an info row.
-  const maintHosts = hostsR.ok ? hostsR.data.filter((h) => !h.disabled && h.maintenance) : [];
+  const hostAgg = hostsR.ok ? hostAggregate(hostsR.data) : null;
+  const certAgg = certsR.ok ? certAggregate(certsWithStatus) : null;
+  const maintHosts = hostsR.ok ? hostsR.data.filter((h) => hostStatus(h) === 'maintenance') : [];
   const infoRows = maintHosts.map((h) => attnRow('info',
     `Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance`,
     'It answers 503 instead of passing requests to its upstream.',
@@ -4796,24 +5224,11 @@ async function viewOverview(c) {
   const errCount = errRows.length;
   const warnCount = warnRows.length;
 
-  // The one-line summary: "N hosts live, M in maintenance", certificates,
-  // upstream members.
-  const disabledHosts = hostsR.ok ? hostsR.data.filter((h) => h.disabled).length
-    : ((state.summary && state.summary.disabled && state.summary.disabled['proxy-hosts']) || 0);
-  const totalHosts = hostsR.ok ? hostsR.data.length : (state.counts.proxyHosts || 0);
-  const liveHosts = Math.max(0, totalHosts - disabledHosts - maintHosts.length);
-  const validCerts = certsWithStatus.filter((ct) => ct.state === 'valid');
+  // The one-line summary keeps what no panel shows: the upstream members.
   const upGroups = arr(health && health.upstreamGroups);
   const upHealthy = upGroups.reduce((n, g) => n + (g.healthy || 0), 0);
   const upTotal = upGroups.reduce((n, g) => n + (g.healthy || 0) + (g.unhealthy || 0), 0);
-  const parts = [`${plural(liveHosts, 'host', 'hosts')} live` + (maintHosts.length ? `, ${maintHosts.length} in maintenance` : '')];
-  if (validCerts.length) {
-    const soonest = validCerts.reduce((min, ct) =>
-      (ct.daysRemaining != null && (min == null || ct.daysRemaining < min)) ? ct.daysRemaining : min, null);
-    parts.push(`${plural(validCerts.length, 'certificate', 'certificates')} valid`
-      + (soonest != null ? `, next expiry in ${plural(soonest, 'day', 'days')}` : ''));
-  }
-  parts.push(upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups');
+  const parts = [upGroups.length ? `${upHealthy} of ${upTotal} upstream members healthy` : 'no upstream groups'];
 
   let body;
   if (errCount + warnCount + infoRows.length > 0) {
@@ -4843,6 +5258,7 @@ async function viewOverview(c) {
   c.innerHTML = `
     ${pageHead('Overview', `Status of <span class="mono">${esc(state.instance)}</span>: what needs attention right now.`)}
     ${setupOffered() ? setupCardHtml() : ''}
+    <div class="ov-panels">${overviewInstancePanel(runtimeR, health)}${overviewHostsPanel(hostAgg)}${overviewCertsPanel(certAgg)}</div>
     ${body}`;
   wireSetupCard(c);
 
@@ -4876,13 +5292,46 @@ function managedBy(h) {
   }
   return '';
 }
+// The fleet counts, computed once: the hosts list's Status column, the
+// Overview panels and its attention rows all read these, never their own copy
+// of the rule.
+function hostStatus(h) {
+  return h.disabled ? 'disabled' : (h.maintenance ? 'maintenance' : 'live');
+}
+function hostAggregate(hosts) {
+  const a = { total: 0, live: 0, disabled: 0, maintenance: 0, managed: { 'ingress-discovery': 0, 'docker-discovery': 0 } };
+  arr(hosts).forEach((h) => {
+    a.total++;
+    a[hostStatus(h)]++;
+    // The rule the list's source: filter applies (lowercased, substring), so
+    // a count and the list it links to agree whatever the label's spelling.
+    const m = managedBy(h).toLowerCase();
+    Object.keys(a.managed).forEach((k) => { if (m.indexOf(k) !== -1) a.managed[k]++; });
+  });
+  return a;
+}
+// certs as GET /api/certificates returns them. soonest is the valid or
+// expiring certificate in service (not disabled) with the fewest days left;
+// a pending certificate is in total only.
+function certAggregate(certs) {
+  const a = { total: 0, acme: 0, custom: 0, valid: 0, expiring: 0, expired: 0, error: 0, soonest: null };
+  arr(certs).forEach((ct) => {
+    a.total++;
+    if (ct.type === 'acme') a.acme++;
+    else if (ct.type === 'custom') a.custom++;
+    if (['valid', 'expiring', 'expired', 'error'].indexOf(ct.state) !== -1) a[ct.state]++;
+    if (!ct.disabled && (ct.state === 'valid' || ct.state === 'expiring') && ct.daysRemaining != null
+      && (a.soonest === null || ct.daysRemaining < a.soonest.days)) a.soonest = { name: ct.name, days: ct.daysRemaining };
+  });
+  return a;
+}
 // The one "disabled" marker: a muted dot plus the word, the quiet style of the
 // hosts list's Status column. Every list that shows a disabled object (cards,
 // the certificates table, API tokens) uses this, so it means one thing.
 const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>Disabled</span>';
 const MANAGED_CHIPS = {
-  'ingress-discovery': { text: 'k8s-managed', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
-  'docker-discovery': { text: 'docker-managed', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
+  'ingress-discovery': { text: 'k8s-managed', title: 'Derived from an annotated Kubernetes Ingress. The next reconcile reverts edits other than disable, maintenance, tags added by hand, and trusted proxies set by hand while the discovery template leaves them unset; a trusted-proxy value the template stamped follows the template.' },
+  'docker-discovery': { text: 'docker-managed', title: 'Derived from a labelled Docker container. The next reconcile reverts edits other than disable, maintenance, tags added by hand, and trusted proxies set by hand while the discovery template leaves them unset; a trusted-proxy value the template stamped follows the template.' },
 };
 
 async function listHosts(c) {
@@ -4923,6 +5372,10 @@ async function listHosts(c) {
   function saveZonesOff() {
     try { localStorage.setItem(ZONES_OFF_KEY, JSON.stringify(Array.from(zonesOff))); } catch (e) { /* ignore */ }
   }
+  // A deep link names the rows to show (an Overview count links here): it
+  // replaces the remembered zone choice as it replaces the remembered filter,
+  // or a zone switched off earlier would hide rows the link counts.
+  if (deepFilter && deepFilter.list === 'hosts' && zonesOff.size) { zonesOff.clear(); saveZonesOff(); }
 
   const zoneCounts = {};
   // One record per host, holding the values the filter, the sort and the row
@@ -4942,7 +5395,7 @@ async function listHosts(c) {
     // so an inline auth block reads the same in this column as an attached auth
     // middleware does.
     const authInline = !!h.auth;
-    const status = h.disabled ? 'disabled' : (h.maintenance ? 'maintenance' : 'live');
+    const status = hostStatus(h);
     const tags = arr(h.tags);
     const managed = managedBy(h);
     const mc = MANAGED_CHIPS[managed];
@@ -5175,27 +5628,19 @@ async function listHosts(c) {
   async function runBulk(action) {
     if (action === 'clear') { selected.clear(); render(); return; }
     const names = Array.from(selected);
-    let targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
+    const targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
     if (!targets.length) return;
-    // Discovery rewrites a managed host's tags from its template on the next
-    // reconcile, so a tag change there would be reverted: those are skipped,
-    // and the dialog and the result say so.
-    let skipped = [];
-    if (action === 'tag-add' || action === 'tag-remove') {
-      skipped = targets.filter((h) => managedBy(h));
-      targets = targets.filter((h) => !managedBy(h));
-      if (!targets.length) {
-        toast('No hosts to change', `The selected host${skipped.length === 1 ? ' is' : 's are'} discovery-managed: tags come from the discovery template.`, 'err');
-        return;
-      }
-    }
+    // Tags apply to discovery-managed hosts too: a reconcile keeps a host's
+    // hand-added tags after the template's. Only removing a tag the template
+    // stamps does not stick, which the remove dialog says.
+    const managedTargets = targets.filter((h) => managedBy(h));
     const one = targets.length === 1;
     const many = `<b>${targets.length}</b> proxy host${one ? '' : 's'}`;
     // Every confirm names its targets, so a selection is never acted on blind.
     const shownNames = targets.slice(0, 12).map((h) => `<li class="mono">${esc(arr(h.domains)[0] || h.name)}</li>`).join('');
     const listHtml = `<ul class="bulk-targets">${shownNames}${targets.length > 12 ? `<li class="muted">and ${targets.length - 12} more</li>` : ''}</ul>`;
-    const skipHtml = skipped.length
-      ? `<p class="muted">${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped (${skipped.map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}): tags come from the discovery template.</p>`
+    const managedHtml = (action === 'tag-remove' && managedTargets.length)
+      ? `<p class="muted">${managedTargets.length === targets.length ? (one ? 'This host is' : 'These hosts are') : plural(managedTargets.length, 'of these hosts is', 'of these hosts are')} discovery-managed (${managedTargets.slice(0, 12).map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}${managedTargets.length > 12 ? ', ...' : ''}). A tag that comes from the discovery template or profile is stamped again at the next reconcile; a tag added by hand stays removed.</p>`
       : '';
     let mutate, title, confirmLabel, body, tag = '';
 
@@ -5219,7 +5664,7 @@ async function listHosts(c) {
       const add = action === 'tag-add';
       const answered = await confirmModal({
         title: add ? 'Add a tag to the selected hosts?' : 'Remove a tag from the selected hosts?',
-        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>${listHtml}${skipHtml}`,
+        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>${listHtml}${managedHtml}`,
         confirmLabel: add ? 'Add tag' : 'Remove tag',
         danger: false,
         prompt: { label: add ? 'Tag to add' : 'Tag to remove', placeholder: 'e.g. internal' },
@@ -5262,8 +5707,7 @@ async function listHosts(c) {
         return;
       }
     }
-    prog.done('Done', `${plural(done, 'host', 'hosts')} updated and committed.`
-      + (skipped.length ? ` ${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped.` : ''), 'ok');
+    prog.done('Done', `${plural(done, 'host', 'hosts')} updated and committed.`, 'ok');
     refreshHeadSha();
     if (c.isConnected) await route();
   }
@@ -5342,10 +5786,11 @@ function revealTabPanel(el) {
 }
 
 // The rail's request chain, in the order the data plane evaluates it: rate
-// limit, access lists, bouncer, sign-in, guard, headers, rewrite, then the
-// upstream. An inline block sits at its kind's position, just before the
-// referenced middlewares of that kind.
-const CHAIN_TYPE_ORDER = ['rate-limit', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
+// limit, path block, access lists, bouncer, sign-in, guard, headers, rewrite,
+// then the upstream. An inline block sits at its kind's position, just before
+// the referenced middlewares of that kind; the fleet path block list sits
+// ahead of the referenced path-block middlewares.
+const CHAIN_TYPE_ORDER = ['rate-limit', 'path-block', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
 function renderRailChain(el, ctx) {
   if (!el) return;
   const KIND_LABEL = MW_TYPE_LABEL;
@@ -5353,6 +5798,8 @@ function renderRailChain(el, ctx) {
   const items = [];
   if (ctx.inlineRateLimit) items.push({ name: 'rate limit', kind: 'on this host' });
   items.push(...byType('rate-limit'));
+  if (ctx.fleetPathBlock) items.push({ name: 'path block list', kind: 'fleet, from Settings' });
+  items.push(...byType('path-block'));
   if (ctx.alMode === 'any' && ctx.alSelected.length) items.push({ name: ctx.alSelected.join(' or '), kind: 'access lists, any' });
   else ctx.alSelected.forEach((a) => items.push({ name: a, kind: 'access list' }));
   items.push(...byType('bouncer'));
@@ -5406,6 +5853,8 @@ async function hostEditor(c, name) {
   ]);
   const idps = arr(idpList);
   const fleetProxies = arr((setR.data || {}).trustedProxies);
+  // Whether settings.pathBlock holds a list at all, for the rail and the fold.
+  const fleetPathBlock = !!(setR.data || {}).pathBlock;
   const certs = arr(certList);
   const mwListOK = mwList !== null;
   const alListOK = alList !== null;
@@ -5514,6 +5963,11 @@ async function hostEditor(c, name) {
 
   const stripCount = arr(h.stripResponseHeaders).length;
   const stripSummary = stripCount ? `${plural(stripCount, 'header', 'headers')}` : 'none';
+
+  // pathBlock: this host's switch for the fleet path block list. Only "off"
+  // says anything a reader of the summary needs; inherit is the default.
+  const pbSwitchSummary = (v) => (v === 'off' ? 'off - the fleet list does not apply here'
+    : (fleetPathBlock ? 'fleet list applies' : 'inherit (no fleet list set in Settings)'));
 
   const dnsParts = [];
   if (h.dns && h.dns.lanDirect) dnsParts.push('LAN direct');
@@ -5722,6 +6176,11 @@ ${panel('access', `        <div class="card form-section">
 
         ${inlineFoldHtml('f-rl', 'Rate limit', 'Throttle this host per client IP. For a limit shared by several hosts, use a middleware instead.',
     !!h.rateLimit, rateFoldSummary(h.rateLimit), rateLimitBlockHtml('f-rl', h.rateLimit), 'proxyHost.rateLimit')}
+
+        ${foldHtml('f-pathblock-card', 'Fleet path block list', pbSwitchSummary(h.pathBlock), h.pathBlock === 'off', `
+          <div class="field-group"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="f-pathblock" data-path="pathBlock"', h.pathBlock, 'proxyHost.pathBlock')}</div>
+          <div class="hint">The list is set under <a href="#/settings/general">Settings &gt; General</a>. A path-block middleware attached above applies either way.</div>
+        `)}
 `)}
 ${panel('headers', `        ${foldHtml('f-sech-card', 'Response security headers', secHdrSummary, secHdrCount > 0, `
           <div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>
@@ -5853,6 +6312,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   $('#f-auth-on').addEventListener('switchchange', () => { syncInlineOrderHint(); refreshFlow(); });
   $('#f-rl-on').addEventListener('switchchange', () => { syncInlineOrderHint(); refreshFlow(); });
   $('#f-auth-idp').addEventListener('change', refreshFlow);
+  $('#f-pathblock').addEventListener('change', refreshFlow);
 
   // These two DNS toggles stay USABLE when their backend is not configured, and
   // say so inline instead. Deliberately unlike every other capability-gated
@@ -5905,6 +6365,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     },
     'f-sech-card': () => { const n = $$('#f-secheaders > .loc-row').length; return n ? `${n} set` : 'fleet defaults'; },
     'f-strip-card': () => { const n = stripCtl.get().length; return n ? `${plural(n, 'header', 'headers')}` : 'none'; },
+    'f-pathblock-card': () => pbSwitchSummary($('#f-pathblock').value),
     'f-adv-card': () => {
       const mode = tpChoice();
       if (mode === 'custom') { const l = trustedCtl.get(); return l.length ? `trusted proxies: ${l.join(', ')}` : 'trusted proxies: custom list (empty)'; }
@@ -6103,6 +6564,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       mwSelected: curMw(), mwType, alSelected: curAl(), alMode: curAlMode(),
       inlineAuth: isOn('f-auth-on') ? (($('#f-auth-idp') && $('#f-auth-idp').value) || 'credentials') : '',
       inlineRateLimit: isOn('f-rl-on'),
+      fleetPathBlock: fleetPathBlock && $('#f-pathblock').value !== 'off',
     });
   }
   // rail: the certificate the handshake will present for the first domain,
@@ -6244,6 +6706,12 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     const stripErr = stripHeaderListError(stripHdrs);
     if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#f-striphdrs')); return; }
     if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;
+
+    // pathBlock (this host's switch for the fleet path block list): "off" is
+    // sent, the inherit default is left off the body unless the stored host
+    // spelled it out.
+    const pathBlock = pathBlockSwitchValue($('#f-pathblock'), h.pathBlock);
+    if (pathBlock) obj.pathBlock = pathBlock;
 
     // certificateRef and http2 have no control on this form any more - the L7
     // listener picks the certificate by SNI and negotiates h2 over ALPN, so
@@ -6471,6 +6939,66 @@ function certChallenge(ct) {
   return a.dnsProvider ? 'dns-01' : 'http-01';
 }
 
+// acme.profile and acme.caBundle bounds, as model.ACMESpec checks them.
+const ACME_PROFILE_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ACME_CA_BUNDLE_MAX_BYTES = 65536;
+// The bundle to send: the stored text when the textarea still shows it (a
+// textarea turns CRLF into LF, which would otherwise rewrite an untouched
+// bundle on every save), the typed text otherwise; blank means none.
+function caBundleValue(typed, stored) {
+  if (stored && typed === stored.replace(/\r\n?/g, '\n')) return stored;
+  return typed.trim() ? typed.trim() : '';
+}
+
+// ACME CA presets. UI sugar only: what is stored stays a plain
+// acme.directoryURL. eab is 'required', 'optional' or 'no'; also lists other
+// directories recognised as the same CA but never written by the picker
+// (SSL.com's RSA directory: gpm issues ECDSA keys only).
+const CA_PRESETS = [
+  { id: 'letsencrypt', label: "Let's Encrypt", url: 'https://acme-v02.api.letsencrypt.org/directory', eab: 'no',
+    line: 'The default: used when no directory URL is set.' },
+  { id: 'letsencrypt-staging', label: "Let's Encrypt (staging)", url: 'https://acme-staging-v02.api.letsencrypt.org/directory', eab: 'no',
+    line: 'Issues untrusted test certificates, for trying a setup without using production rate limits.' },
+  { id: 'zerossl', label: 'ZeroSSL', url: 'https://acme.zerossl.com/v2/DV90', eab: 'required',
+    line: 'Needs the EAB key ID and HMAC key from your ZeroSSL account.' },
+  { id: 'google', label: 'Google Public CA', url: 'https://dv.acme-v02.api.pki.goog/directory', eab: 'required',
+    line: 'Needs an EAB key ID and HMAC key created in your Google Cloud project.' },
+  { id: 'sslcom', label: 'SSL.com', url: 'https://acme.ssl.com/sslcom-dv-ecc', also: ['https://acme.ssl.com/sslcom-dv-rsa'], eab: 'optional',
+    line: 'The ECC directory, since gpm issues ECDSA keys. Its directory does not require EAB.' },
+  { id: 'custom', label: 'Custom', url: '', eab: 'optional',
+    line: 'Any other ACME directory, for example a private CA: enter its directory URL.' },
+];
+// Trimmed, trailing slash dropped, scheme and host lowercased: the spellings
+// of one directory compare equal.
+function caURLKey(url) {
+  const s = String(url || '').trim().replace(/\/+$/, '');
+  const m = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)(.*)$/i.exec(s);
+  return m ? m[1].toLowerCase() + m[2] : s;
+}
+// The preset a stored directory URL belongs to: blank is Let's Encrypt, an
+// unknown URL is Custom.
+function caPresetFor(url) {
+  const k = caURLKey(url);
+  if (!k) return CA_PRESETS[0];
+  return CA_PRESETS.find((p) => p.url && [p.url].concat(p.also || []).some((u) => caURLKey(u) === k)) || CA_PRESETS[CA_PRESETS.length - 1];
+}
+// The URL picking a preset writes: blank for Let's Encrypt (the key is then
+// omitted, as for a certificate saved without a URL), the current text for
+// Custom.
+function caPresetURL(id, current) {
+  if (id === 'letsencrypt') return '';
+  if (id === 'custom') return current || '';
+  const p = CA_PRESETS.find((x) => x.id === id);
+  return p ? p.url : (current || '');
+}
+// The line under the EAB switch for a preset, and the reason the switch is
+// locked on when the preset requires it.
+function caEABText(p) {
+  if (p.eab === 'required') return `${p.label} requires external account binding`;
+  if (p.eab === 'optional') return p.id === 'custom' ? 'Only when the CA asks for it' : `Optional for ${p.label}`;
+  return `${p.label} does not use it`;
+}
+
 // ---------- CERTIFICATES LIST ----------
 // A table rather than a card grid, because the questions asked of this page are
 // comparative ("which of these expires first", "which one covers this domain")
@@ -6484,13 +7012,15 @@ function certExpiry(ct) {
 
 async function listCerts(c) {
   const certs = arr((await api('/api/certificates')).data);
-  const addBtn = `<a class="btn primary" href="#/certs/_new">${ICON.plus}Add certificate</a>`;
+  const addBtn = `<a class="btn primary" href="#/certs/_new" data-wizard="certs">${ICON.plus}Add certificate</a>`;
   const head = viewHead('Certificates',
     'The certificates gpm presents at the edge. The handshake picks one by domain; a host never names one.');
   if (!certs.length) {
     c.innerHTML = head + emptyState('No certificates yet',
       'Request an ACME certificate for the domains you serve - dns-01 if you need a wildcard, http-01 otherwise - or point gpm at PEM files already on the server.',
       'Add certificate', '#/certs/_new');
+    const es = c.querySelector('.empty-state a.btn');
+    if (es) es.setAttribute('data-wizard', 'certs');
     return;
   }
 
@@ -6618,26 +7148,39 @@ async function listCerts(c) {
 }
 
 // ---------- CERTIFICATE EDITOR ----------
-// Read-only card describing the material currently installed, not the config
-// that asked for it. Omitted entirely when the API reports no state (an older
-// build), rather than rendering a wall of dashes.
-function certStatusCardHtml(ct) {
+// The rail rows: the material currently installed, not the config that asked
+// for it, then the config file. A new certificate has nothing installed yet.
+// The config path is the one the store writes (a dry run reports
+// certificates/<name>.yaml).
+function certRailHtml(ct, isNew) {
+  const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
+  const file = row('Config file', `<span class="mono" id="ct-railPath">${esc('certificates/' + (ct.name || '<name>') + '.yaml')}</span><span class="muted">${isNew ? 'written by the first save' : 'one git commit per save, see <a href="#/history">History</a>'}</span>`);
+  if (isNew) return row('Status', '<span class="chip flat ok"><span class="dot ok"></span>New</span>') + file;
   const acme = ct.type === 'acme';
-  const days = ct.daysRemaining;
   const sans = arr(ct.sans).length ? arr(ct.sans) : arr(ct.domains);
-  const row = (k, v, cls) => `<span class="k">${esc(k)}</span><span class="v ${cls || ''}">${v}</span>`;
-  return `<div class="card form-section" id="ct-status">
-    <p class="section-label">Status</p>
-    <div class="kv">
-      ${row('State', certStateChip(ct))}
-      ${row('Expiry', `<span class="mono">${esc(ct.notAfter ? fmtTime(ct.notAfter) : '-')}</span>`)}
-      ${row('Days remaining', `<span class="mono${days != null && days < 0 ? ' err-text' : ''}">${days != null ? esc(days) : '-'}</span>`)}
-      ${row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)}
-      ${row('SANs', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')}
-      ${acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : ''}
-      ${acme && ct.lastError ? row('Last error', `<span class="err-text" style="word-break:break-word">${esc(ct.lastError)}</span>`) : ''}
-    </div>
-  </div>`;
+  const renew = acme ? certRenewInfo(ct) : null;
+  const renewHtml = !renew ? ''
+    : (renew.due
+      ? `<span class="warn-text">${esc(renew.label)}</span> <span class="mono faint">since ${esc(fmtTime(ct.renewAt))}</span>`
+      : `<span class="mono">${esc(fmtTime(ct.renewAt))}</span>`)
+      + (renew.why ? ` <span class="faint" title="${esc(CERT_RENEW_RULE)}">- ${esc(renew.why)}</span>` : '');
+  // The state chip already says the days remaining ("In 60 days").
+  return row('Status', certStateChip(ct) + (ct.disabled ? ' ' + DISABLED_CHIP : '')
+      + (ct.notAfter ? `<span class="muted">${ct.daysRemaining < 0 ? 'expired' : 'expires'} <span class="mono">${esc(fmtTime(ct.notAfter))}</span></span>` : ''))
+    + (renewHtml ? row('Renews', renewHtml) : '')
+    + row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)
+    + row('Covers', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')
+    + (acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : '')
+    + (acme && ct.lastError ? row('Last error', `<span class="err-text">${esc(ct.lastError)}</span>`) : '')
+    + file;
+}
+// Title-band tabs per certificate type; the set follows the Type select.
+const CERT_TABS = {
+  acme: [['cert', 'Certificate'], ['authority', 'Authority'], ['validation', 'Validation']],
+  custom: [['cert', 'Certificate'], ['files', 'Files']],
+};
+function certTabsHtml(type) {
+  return CERT_TABS[type === 'custom' ? 'custom' : 'acme'].map(([id, label]) => `<button class="tab-btn" type="button" role="tab" id="ct-tab-${id}" aria-controls="ct-panel-${id}" data-tab="${id}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
 }
 
 async function certEditor(c, name) {
@@ -6655,58 +7198,59 @@ async function certEditor(c, name) {
   // Default a brand-new (non-cloned) cert to dns-01 only when a provider exists
   // to solve it; a clone carries its source object's real challenge/provider.
   const challenge = (isNew && !seed) ? (dnsProviders.length ? 'dns-01' : 'http-01') : certChallenge(ct);
+  // The CA picker is derived from the stored URL and writes the URL field only
+  // on its own change event, so opening a certificate never rewrites it.
+  let preset = caPresetFor(acme.directoryURL);
+  const panel = (id, body) => `<div class="tab-panel" data-tab="${id}" role="tabpanel" id="ct-panel-${id}" aria-labelledby="ct-tab-${id}" hidden><div class="stack">
+${body}      </div></div>`;
 
   c.innerHTML = `
     ${pageHead(esc(isNew ? 'New certificate' : ct.name), isNew ? 'Add a certificate.' : 'Edit this certificate.',
-      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name, '',
-      editorActions(isNew, (!isNew && type === 'acme') ? '<button class="btn ghost sm" id="ed-renew" type="button">Renew now</button>' : '', 'ct-clone', 'ct-delete'))}
+      `<a href="#/certs">Certificates</a>${ICON.chevron}<span>${isNew ? 'new' : esc(ct.name)}</span>`, isNew ? '' : ct.name,
+      (!isNew && ct.disabled ? DISABLED_CHIP : '') + (ct.updatedAt && !isNew ? `<span class="head-meta">last change ${esc(fmtTime(ct.updatedAt))}</span>` : ''),
+      editorActions(isNew, (!isNew && type === 'acme') ? '<button class="btn ghost sm" id="ed-renew" type="button">Renew now</button>' : '', 'ct-clone', 'ct-delete'),
+      certTabsHtml(type))}
 
-    <div class="form-grid">
-      <div class="stack">
-      ${(!isNew && ct.state) ? certStatusCardHtml(ct) : ''}
-      ${identityCard('ct', ct, { section: 'certs', isNew, placeholder: seed ? seed.origName + '-copy' : 'wild' })}
-      <div class="card form-section">
-        <p class="section-label">Certificate</p>
-        <div class="field-group">
-          <label>Type</label>
-          <select class="field" id="ct-type" data-hint="certificate.type" data-path="type">
-            ${enumOptions('certType', ['acme', 'custom'], type)}
-          </select>
+    <div class="edit-grid">
+      <div class="edit-main">
+${panel('cert', `        ${identityCard('ct', ct, { section: 'certs', isNew, placeholder: seed && seed.origName ? seed.origName + '-copy' : 'wild' })}
+        <div class="card form-section">
+          <p class="section-label">Certificate</p>
+          <div class="field-group">
+            <label>Type</label>
+            <select class="field" id="ct-type" data-hint="certificate.type" data-path="type">
+              ${enumOptions('certType', ['acme', 'custom'], type)}
+            </select>
+          </div>
+          <div class="field-group">
+            <label>Domains</label>
+            <div class="chip-input" id="ct-domains" data-hint="certificate.domains" data-path="domains"></div>
+            <div class="hint">Press Enter after each domain.</div>
+          </div>
         </div>
-        <div class="field-group">
-          <label>Domains</label>
-          <div class="chip-input" id="ct-domains" data-hint="certificate.domains" data-path="domains"></div>
-          <div class="hint">Press Enter after each domain.</div>
-        </div>
-      </div>
-      </div>
-
-      <div class="card form-section">
-        <div id="acme-fields" style="${type === 'custom' ? 'display:none' : ''}">
-          <p class="section-label">ACME</p>
+`)}
+${panel('authority', `        <div class="card form-section">
+          <p class="section-label">Certificate authority</p>
+          <div class="field-group"><label>CA</label>
+            <select class="field" id="ct-ca" data-hint="certificate.acme.directoryURL">
+              ${CA_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
+            </select>
+            <div class="hint" id="ct-ca-line">${esc(preset.line)}</div>
+          </div>
           <div class="field-group"><label>Account email</label><input class="field mono" id="ct-email" data-hint="certificate.acme.email" data-path="acme.email" value="${esc(acme.email || '')}" placeholder="you@example.com" /></div>
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" data-hint="certificate.acme.directoryURL" data-path="acme.directoryURL" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
           <div class="inline-fields">
-            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
-            <div class="field-group"><label>Challenge</label>
-              <select class="field mono" id="ct-challenge" data-hint="certificate.acme.challenge" data-path="acme.challenge">
-                <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>${esc(enumLabel('acmeChallenge', 'http-01'))}</option>
-                <option value="dns-01"${challenge === 'dns-01' ? ' selected' : ''}${(dnsProviders.length || challenge === 'dns-01') ? '' : ' disabled'}>${esc(enumLabel('acmeChallenge', 'dns-01'))}${dnsProviders.length ? '' : ' - no provider configured'}</option>
-              </select>
-              <div class="hint">${dnsProviders.length ? 'http-01 is validated on port 80; dns-01 is the only way to get a wildcard.' : 'dns-01 needs a DNS provider - add one under DNS Providers.'}</div>
+            <div class="field-group"><label>Issuance profile</label><input class="field mono" id="ct-profile" data-hint="certificate.acme.profile" data-path="acme.profile" value="${esc(acme.profile || '')}" placeholder="CA default" />
+              <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div>
             </div>
+            <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
           </div>
-          <div class="field-group" id="ct-dns-group" style="${challenge === 'dns-01' ? '' : 'display:none'}">
-            <label>DNS provider</label>
-            <select class="field mono" id="ct-dns" data-hint="certificate.acme.dnsProvider" data-path="acme.dnsProvider">
-              <option value="">select provider...</option>
-              ${dnsProviders.map((p) => `<option value="${esc(p.name)}"${acme.dnsProvider === p.name ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
-            </select>
-            ${dnsProviders.length ? '' : '<div class="hint">No DNS providers configured yet. Add one under DNS Providers.</div>'}
+          <div class="field-group"><label>CA bundle (private CA)</label><textarea class="field mono" id="ct-cabundle" data-hint="certificate.acme.caBundle" data-path="acme.caBundle" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE----- or \${FILE:/run/secrets/acme-ca.pem}"></textarea>
+            <div class="hint">Only for a CA whose directory is not trusted by the system roots. Paste PEM, or use a <span class="mono">\${FILE:...}</span> or <span class="mono">\${ENV:...}</span> placeholder. Blank trusts the system roots.</div>
           </div>
-          <div class="field-group">
-            <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds">Required by ZeroSSL and Google Public CA</div></div>${switchHtml('ct-eab', !!(acme.eab && acme.eab.kid), 'External account binding', 'certificate.acme.eab')}</div>
-          </div>
+        </div>
+        <div class="card form-section">
+          <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds" id="ct-eab-ds">${esc(caEABText(preset))}</div></div>${switchHtml('ct-eab', !!(acme.eab && acme.eab.kid), 'External account binding', 'certificate.acme.eab')}</div>
           <div id="ct-eab-fields" style="${(acme.eab && acme.eab.kid) ? '' : 'display:none'}">
             <div class="field-group"><label>EAB key ID</label><input class="field mono" id="ct-eab-kid" data-hint="certificate.acme.eab.kid" data-path="acme.eab.kid" value="${esc((acme.eab && acme.eab.kid) || '')}" placeholder="kid from the CA" /></div>
             <div class="field-group"><label>EAB HMAC key</label><input class="field mono" id="ct-eab-hmac" data-hint="certificate.acme.eab.hmacKey" data-path="acme.eab.hmacKey" value="${esc((acme.eab && acme.eab.hmacKey) || '')}" placeholder="\${ENV:ACME_EAB_HMAC}" />
@@ -6714,30 +7258,61 @@ async function certEditor(c, name) {
             </div>
           </div>
         </div>
-        <div id="custom-fields" style="${type === 'custom' ? '' : 'display:none'}">
+`)}
+${panel('validation', `        <div class="card form-section">
+          <p class="section-label">Validation</p>
+          <div class="field-group"><label>Challenge</label>
+            <select class="field mono" id="ct-challenge" data-hint="certificate.acme.challenge" data-path="acme.challenge">
+              <option value="http-01"${challenge === 'http-01' ? ' selected' : ''}>${esc(enumLabel('acmeChallenge', 'http-01'))}</option>
+              <option value="dns-01"${challenge === 'dns-01' ? ' selected' : ''}${(dnsProviders.length || challenge === 'dns-01') ? '' : ' disabled'}>${esc(enumLabel('acmeChallenge', 'dns-01'))}${dnsProviders.length ? '' : ' - no provider configured'}</option>
+            </select>
+            <div class="hint">${dnsProviders.length ? 'http-01 is validated on port 80; dns-01 is the only way to get a wildcard.' : 'dns-01 needs a DNS provider - add one under <a href="#/dns">DNS Providers</a>.'}</div>
+          </div>
+          <div class="field-group" id="ct-dns-group" style="${challenge === 'dns-01' ? '' : 'display:none'}">
+            <label>DNS provider</label>
+            <select class="field mono" id="ct-dns" data-hint="certificate.acme.dnsProvider" data-path="acme.dnsProvider">
+              <option value="">select provider...</option>
+              ${dnsProviders.map((p) => `<option value="${esc(p.name)}"${acme.dnsProvider === p.name ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+            </select>
+            ${dnsProviders.length ? '' : '<div class="hint">No DNS providers configured yet. Add one under <a href="#/dns">DNS Providers</a>.</div>'}
+          </div>
+        </div>
+`)}
+${panel('files', `        <div class="card form-section">
           <p class="section-label">Custom certificate</p>
           <div class="hint" style="margin-bottom:8px">Paths are relative to the cert store on the gpm host (<span class="mono">-cert-dir</span>, default <span class="mono">/data/certs</span>) - there is no upload here, the files must already exist there.</div>
           <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" data-hint="certificate.custom.certFile" data-path="custom.certFile" value="${esc(custom.certFile || '')}" placeholder="fullchain.pem" /></div>
           <div class="field-group"><label>Key file</label><input class="field mono" id="ct-keyfile" data-hint="certificate.custom.keyFile" data-path="custom.keyFile" value="${esc(custom.keyFile || '')}" placeholder="privkey.pem" /></div>
         </div>
-      </div>
-    </div>
-
+`)}
     <div class="panel save-bar">
       <div class="save-note">${ICON.commit}Each save is recorded as one git commit.</div>
       <div style="display:flex;gap:10px">
         <button class="btn primary" id="ct-save" type="button">${isNew ? 'Add certificate' : 'Save changes'}</button>
         <a class="btn ghost" href="#/certs">Cancel</a>
       </div>
-    </div>`;
+    </div>
+      </div>
 
+      <aside class="rail">
+        <div class="card rail-card"><dl class="dl" id="ct-rail">${certRailHtml(ct, isNew)}</dl></div>
+      </aside>
+    </div>`;
+  wirePageTabs('cert');
+
+  // Set as a property, not as markup between the tags: the HTML parser drops a
+  // leading newline there, and the save compares against the loaded text.
+  $('#ct-cabundle').value = acme.caBundle || '';
   const domainsCtl = makeChipInput($('#ct-domains'), arr(ct.domains), 'add domain...');
   const tagsCtl = wireIdentityCard('ct', ct);
   pathsFromHints($('#content'));
+  // A new certificate's config path follows the name being typed.
+  if (isNew) $('#ct-name').addEventListener('input', () => { $('#ct-railPath').textContent = 'certificates/' + ($('#ct-name').value.trim() || '<name>') + '.yaml'; });
+  // The tab set follows the type: the other type's tabs are removed from the
+  // band, not hidden, so neither a click nor an arrow key can reach them.
   $('#ct-type').addEventListener('change', () => {
-    const t = $('#ct-type').value;
-    $('#acme-fields').style.display = t === 'acme' ? '' : 'none';
-    $('#custom-fields').style.display = t === 'custom' ? '' : 'none';
+    $('#pageTabs').innerHTML = certTabsHtml($('#ct-type').value);
+    wirePageTabs('cert');
   });
   // The DNS provider only applies to dns-01; http-01 is solved on port 80.
   $('#ct-challenge').addEventListener('change', () => {
@@ -6745,6 +7320,40 @@ async function certEditor(c, name) {
   });
   $('#ct-eab').addEventListener('switchchange', () => {
     $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+  });
+  // EAB follows the CA: a preset that requires it turns the switch on and
+  // locks it when the operator picks that preset, on a new certificate, or
+  // when EAB is already on. A stored certificate with such a URL and no EAB is
+  // shown as stored and left unlocked, or an untouched save would fail.
+  // Leaving a required preset unlocks the switch, and turns it off only when
+  // both fields are empty.
+  function applyCA(p, picked) {
+    const prev = preset;
+    preset = p;
+    $('#ct-ca-line').textContent = p.line;
+    $('#ct-eab-ds').textContent = caEABText(p);
+    const sw = $('#ct-eab');
+    const lock = p.eab === 'required' && (picked || isNew || isOn('ct-eab'));
+    if (lock) sw.setAttribute('aria-checked', 'true');
+    else if (picked && prev.eab === 'required' && !$('#ct-eab-kid').value.trim() && !$('#ct-eab-hmac').value.trim()) sw.setAttribute('aria-checked', 'false');
+    gateControl(sw, !lock, caEABText(p));
+    $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+  }
+  applyCA(preset, false);
+  $('#ct-ca').addEventListener('change', () => {
+    const p = CA_PRESETS.find((x) => x.id === $('#ct-ca').value);
+    if (p.id === 'custom') $('#ct-dir').focus();
+    else $('#ct-dir').value = caPresetURL(p.id, '');
+    applyCA(p, true);
+  });
+  $('#ct-dir').addEventListener('input', () => {
+    const p = caPresetFor($('#ct-dir').value);
+    if (p.id === preset.id) return;
+    // Emptying the field keeps Custom (and so the save's refusal); going back
+    // to the default is picking Let's Encrypt.
+    if (!$('#ct-dir').value.trim() && preset.id === 'custom') return;
+    $('#ct-ca').value = p.id;
+    applyCA(p, true);
   });
 
   $('#ct-save').addEventListener('click', async () => {
@@ -6764,7 +7373,23 @@ async function certEditor(c, name) {
       const ch = $('#ct-challenge').value;
       const a = { email: $('#ct-email').value.trim(), challenge: ch };
       const dir = $('#ct-dir').value.trim(); if (dir) a.directoryURL = dir;
+      // A blank URL is Let's Encrypt, so Custom with no URL would not save
+      // what the picker says.
+      if (!dir && $('#ct-ca').value === 'custom') { showInvalid('Directory URL required', "Enter the CA's directory URL, or pick Let's Encrypt.", $('#ct-dir')); return; }
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
+      // Both omitted when blank. The profile rule and the bundle's size cap
+      // mirror model.ACMESpec; the PEM itself is parsed by the API.
+      const prof = $('#ct-profile').value.trim();
+      if (prof) {
+        if (!ACME_PROFILE_RE.test(prof)) { showInvalid('Invalid profile', `acme.profile: must be 1 to 64 characters of letters, digits, "_" or "-", got "${prof}".`, $('#ct-profile')); return; }
+        a.profile = prof;
+      }
+      const cab = caBundleValue($('#ct-cabundle').value, acme.caBundle);
+      if (cab) {
+        const n = new TextEncoder().encode(cab).length;
+        if (n > ACME_CA_BUNDLE_MAX_BYTES) { showInvalid('CA bundle too large', `acme.caBundle: must be at most ${ACME_CA_BUNDLE_MAX_BYTES} bytes, got ${n}.`, $('#ct-cabundle')); return; }
+        a.caBundle = cab;
+      }
       if (ch === 'dns-01') {
         a.dnsProvider = $('#ct-dns').value;
         if (!a.dnsProvider) { showInvalid('DNS provider required', 'Select a DNS provider for dns-01.', $('#ct-dns')); return; }
@@ -6788,22 +7413,37 @@ async function certEditor(c, name) {
       toastSaved(r.commit, isNew ? 'Added' : 'Saved'); refreshHeadSha(); clearDirty();
       location.hash = isNew ? '#/certs/' + encodeURIComponent(nm) : '#/certs';
     } catch (e) {
-      if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate');
+      // A file complaint names no field ("custom: ...", "open <dir>/x.pem:
+      // ..."): it is shown on the file whose typed path, or its last
+      // segment (the server quotes a cleaned path), it contains, the longest
+      // match winning; else on the certificate file for a "custom:" message,
+      // or on the key file for one about the private key. The Files tab opens.
+      const msg = String((e && e.message) || '');
+      let field = null;
+      if (t === 'custom') {
+        const hit = [['#ct-certfile', obj.custom.certFile], ['#ct-keyfile', obj.custom.keyFile]]
+          .flatMap(([sel, v]) => [[sel, v], [sel, v.split(/[\\/]/).pop()]])
+          .filter(([, v]) => v && msg.includes(v)).sort((x, y) => y[1].length - x[1].length)[0];
+        if (hit) field = $(hit[0]);
+        else if (/^(?:certificate "[^"]*":\s*)?custom:/.test(msg)) field = $('#ct-certfile');
+        else if (/private key/i.test(msg)) field = $('#ct-keyfile');
+      }
+      if (!(isNew && showNameTaken(e, 'certificate', nm, '#/certs/' + encodeURIComponent(nm), 'Could not add this certificate', $('#ct-name')))) showSaveError(e, 'Could not save this certificate', field);
       btn.disabled = false;
     }
   });
 
   // Renew now: same shared action as the list's per-row button. The order runs
-  // in the background, so this re-reads THIS certificate and repaints its status
-  // card rather than leaving the page stale until the next navigation.
+  // in the background, so this re-reads THIS certificate and repaints the rail
+  // rather than leaving the page stale until the next navigation.
   const renewBtn = $('#ed-renew');
   if (renewBtn) renewBtn.addEventListener('click', async () => {
     renewBtn.disabled = true;
     try {
       if (await renewCertificate(ct.name)) {
         const fresh = (await api('/api/certificates/' + encodeURIComponent(ct.name)).catch(() => ({ data: null }))).data;
-        const card = $('#ct-status');
-        if (fresh && fresh.state && card) card.outerHTML = certStatusCardHtml(fresh);
+        const rail = $('#ct-rail');
+        if (fresh && rail) rail.innerHTML = certRailHtml(fresh, false);
       }
     } finally { renewBtn.disabled = false; }
   });
@@ -6845,7 +7485,7 @@ const SECTION_META = {
       (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v v-list"><span class="chip warn">Deprecated</span> ${plural(arr(o.basicAuth).length, 'basic-auth user', 'basic-auth users')}</span>` : ''),
   },
   middleware: {
-    title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, guards, path rewrites and deny hooks.',
+    title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, path blocks, guards, path rewrites and deny hooks.',
     empty: 'Most installs start with one sign-in middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
     singular: 'middleware', many: 'middleware', addLabel: 'Add middleware',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('middlewareType', o.type || '')}${(o.type === 'auth' && o.auth && o.auth.mode) ? ' - ' + esc(enumLabel('authMode', o.auth.mode).split(' - ')[0]) : ''}</span>` +
@@ -6854,7 +7494,8 @@ const SECTION_META = {
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
       (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}${o.rateLimit.blockBackoff > 1 ? ' x' + esc(o.rateLimit.blockBackoff) + ' up to ' + esc(o.rateLimit.blockMax || '24h') : ''}</span>` : '') +
       (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${plural(Object.keys(o.rewrite.replacePath).length, 'path', 'paths')}</span>` : '') +
-      (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
+      (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : '') +
+      (o.pathBlock ? `<span class="k">Blocks</span><span class="v">${esc(pathBlockSummary(o.pathBlock))}</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into: ACME dns-01 challenges and DNS sync records.',
@@ -7713,11 +8354,12 @@ async function streamEditor(c, name) {
     }
     const als = $$('#ed-stream-al input:checked').map((i) => i.value);
     if (als.length) body.accessLists = als;
-    // The form has no controls for the TCP limits; keep values set through the API or YAML.
+    // The form has no controls for the TCP and UDP limits; keep values set through the API or YAML.
     if (proto !== 'udp') {
       if (o.idleTimeout) body.idleTimeout = o.idleTimeout;
       if (o.maxConnsPerSource) body.maxConnsPerSource = o.maxConnsPerSource;
     }
+    if (proto !== 'tcp' && o.newSessionsPerMinute) body.newSessionsPerMinute = o.newSessionsPerMinute;
     return body;
   });
   wireCloneButton('streams', o);
@@ -7758,8 +8400,11 @@ async function parkedEditor(c, name) {
 
 // DNS-01 providers with a built-in solver (mirrors model.KnownDNSProviders).
 // The four token providers authenticate with a single config key, apiToken;
-// rfc2136 and acme-dns do not, so `fields` (when present) drives a typed form
+// rfc2136, acme-dns and webhook do not, so `fields` (when present) drives a typed form
 // instead of the free-form key/value rows and `required` is per provider.
+// `secret: true` marks exactly the keys model.DNSProviderPlainKey calls
+// secrets: those need a placeholder, and a literal one reads back as ***.
+// Every other key is a plain setting, stored and shown as written.
 const DNS_PROVIDERS = [
   { id: 'cloudflare', label: 'Cloudflare', hint: 'config.apiToken: an API token with Zone:DNS:Edit + Zone:Read on the zone.', required: ['apiToken'] },
   { id: 'digitalocean', label: 'DigitalOcean', hint: 'config.apiToken: a personal access token with write scope on domains.', required: ['apiToken'] },
@@ -7776,7 +8421,7 @@ const DNS_PROVIDERS = [
       { key: 'server', hint: 'dnsProvider.config.server', label: 'Nameserver', placeholder: '192.0.2.53', help: 'Host, <span class="mono">host:port</span>, or <span class="mono">[2001:db8::53]:53</span>. Port defaults to 53.' },
       { key: 'zone', hint: 'dnsProvider.config.zone', label: 'Zone', placeholder: 'example.com', help: 'The zone the UPDATE is addressed to, not the challenge name.' },
       { key: 'tsigKeyName', hint: 'dnsProvider.config.tsigKeyName', label: 'TSIG key name', placeholder: 'gpm-acme', help: 'Exactly the key name configured on the nameserver.' },
-      { key: 'tsigSecret', hint: 'dnsProvider.config.tsigSecret', label: 'TSIG secret', placeholder: '${FILE:/run/secrets/tsig_key}', help: 'Base64 secret from <span class="mono">tsig-keygen</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder so it is not committed.' },
+      { key: 'tsigSecret', hint: 'dnsProvider.config.tsigSecret', label: 'TSIG secret', secret: true, placeholder: '${FILE:/run/secrets/tsig_key}', help: 'Base64 secret from <span class="mono">tsig-keygen</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder so it is not committed.' },
       { key: 'tsigAlgorithm', hint: 'dnsProvider.config.tsigAlgorithm', label: 'TSIG algorithm', select: { group: 'tsigAlgorithm', options: ['hmac-sha1', 'hmac-sha224', 'hmac-sha256', 'hmac-sha384', 'hmac-sha512'], dflt: 'hmac-sha256' }, help: 'Must match the key on the nameserver. <span class="mono">hmac-md5</span> is not offered and is rejected by the API.' },
       { key: 'ttl', hint: 'dnsProvider.config.ttl', label: 'Record TTL (seconds)', placeholder: '60', help: 'TTL of the challenge TXT record, 1 to 86400.' },
       { key: 'transport', hint: 'dnsProvider.config.transport', label: 'Transport', select: { group: 'dnsTransport', options: ['tcp', 'udp'], dflt: 'tcp' }, help: 'UDP is retried over TCP when the reply is truncated.' },
@@ -7791,13 +8436,36 @@ const DNS_PROVIDERS = [
     missing: 'acme-dns needs baseURL, username, password and subdomain.',
     note: 'Add one permanent CNAME per certificate domain in your real zone: <span class="mono">_acme-challenge.example.com. CNAME &lt;subdomain&gt;.acme-dns.example.com.</span> A wildcard validates at the same name, so it needs no second record. gpm warns in the log if the delegation is missing but still attempts issuance.',
     fields: [
-      { key: 'baseURL', hint: 'dnsProvider.config.baseURL', label: 'acme-dns base URL', placeholder: 'https://acme-dns.example.com', help: 'API root of your acme-dns server. Must be http or https.' },
-      { key: 'username', hint: 'dnsProvider.config.username', label: 'Username', placeholder: 'c0f8ba55-0000-4000-8000-000000000001', help: 'The <span class="mono">username</span> from the acme-dns <span class="mono">/register</span> response.' },
-      { key: 'password', hint: 'dnsProvider.config.password', label: 'Password', placeholder: '${FILE:/run/secrets/acme_dns_password}', help: 'The <span class="mono">password</span> from <span class="mono">/register</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'baseURL', hint: 'dnsProvider.config.baseURL', label: 'acme-dns base URL', placeholder: 'https://acme-dns.example.com', help: 'API root of your acme-dns server: an http or https URL, or a <span class="mono">${ENV:...}</span> / <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'username', hint: 'dnsProvider.config.username', label: 'Username', secret: true, placeholder: '${ENV:ACME_DNS_USERNAME}', help: 'The <span class="mono">username</span> from the acme-dns <span class="mono">/register</span> response. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'password', hint: 'dnsProvider.config.password', label: 'Password', secret: true, placeholder: '${FILE:/run/secrets/acme_dns_password}', help: 'The <span class="mono">password</span> from <span class="mono">/register</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
       { key: 'subdomain', hint: 'dnsProvider.config.subdomain', label: 'Subdomain', placeholder: 'd420c923-0000-4000-8000-000000000002', help: 'The <span class="mono">subdomain</span> from <span class="mono">/register</span>; this is what the CNAME points at.' },
+      { key: 'allowInsecureLocal', hint: 'dnsProvider.config.allowInsecureLocal', label: 'Allow a loopback base URL', toggle: true, help: 'For an acme-dns running beside gpm. Link-local addresses stay refused.' },
+    ],
+  },
+  {
+    id: 'webhook',
+    label: 'Webhook (your own endpoint)',
+    hint: 'POSTs each challenge record to an HTTP endpoint you run, which writes it into whatever DNS you have.',
+    required: ['url', 'token'],
+    missing: 'webhook needs url and token.',
+    note: 'For each TXT record gpm sends <span class="mono">POST &lt;url&gt;</span> with <span class="mono">Authorization: Bearer &lt;token&gt;</span>, <span class="mono">Content-Type: application/json</span> and the body <span class="mono">{"action":"present","fqdn":"_acme-challenge.example.com.","value":"&lt;TXT value&gt;"}</span>. <span class="mono">action</span> is <span class="mono">present</span> to create the record and <span class="mono">cleanup</span> to remove it; <span class="mono">fqdn</span> always ends in a dot. Any 2xx answer is success and redirects are not followed. An order for an apex and its wildcard sends two values for the same <span class="mono">fqdn</span>: add each value rather than replacing the record, and on cleanup remove only the value given.',
+    fields: [
+      { key: 'url', hint: 'dnsProvider.config.url', label: 'Endpoint URL', placeholder: 'https://dns-hook.example.com/acme', help: 'http or https. Stored and shown as written, so a URL that itself carries a credential (in its path or query string) should be a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder. Plain http to anything but loopback sends the token unencrypted and is logged as a warning.' },
+      { key: 'token', hint: 'dnsProvider.config.token', label: 'Bearer token', secret: true, placeholder: '${FILE:/run/secrets/dns_hook_token}', help: 'Sent as <span class="mono">Authorization: Bearer &lt;token&gt;</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'allowInsecureLocal', hint: 'dnsProvider.config.webhook.allowInsecureLocal', label: 'Allow a loopback URL', toggle: true, help: 'For an endpoint running beside gpm. Link-local addresses stay refused.' },
     ],
   },
 ];
+// A typed-form switch (allowInsecureLocal) over a string-valued plain key: on
+// for the values model.IsTruthyConfig reads as on, and for a placeholder. The
+// save sends the stored value back unchanged while the switch shows the state
+// that value means.
+const SECRET_REF_RE = /^(\$\{(ENV|FILE):[^}]+\}\s*)+$/;
+function dnsToggleOn(v) {
+  const s = String(v == null ? '' : v).trim();
+  return SECRET_REF_RE.test(s) || /^(true|yes|1|on)$/i.test(s);
+}
 function dnsProvider(id) { return DNS_PROVIDERS.find((p) => p.id === id) || DNS_PROVIDERS[0]; }
 
 // ---------- DNS PROVIDER EDITOR ----------
@@ -7823,34 +8491,47 @@ async function dnsEditor(c, name) {
         <button class="btn ghost sm" id="ed-addcfg" type="button" style="margin-top:6px">${ICON.plus}Add credential</button>
       </div>
       <div class="hint" id="ed-provider-note" style="margin-top:8px"></div>
-      <div class="hint" style="margin-top:8px">Use a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so no secret is committed. A masked secret reads <span class="mono">***</span>.</div>
+      <div class="hint" style="margin-top:8px">Secrets (API tokens, passwords, the TSIG secret, the webhook token) take a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so none is committed; a masked secret reads <span class="mono">***</span>. Settings such as a nameserver, zone or URL may be written as is and are shown as written.</div>
     </div>
   </div>` + saveBar('dns', isNew, meta.addLabel);
 
-  const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:DNS_API_TOKEN}', true);
+  // The stored config, and the type it belongs to. A save for that same type
+  // sends back what the form does not render; a save after the type was changed
+  // sends only the new type's keys.
+  const storedCfg = o.config || {};
+  const kvKey = 'key (e.g. apiToken)';
+  const kvVal = '${ENV:DNS_API_TOKEN}';
+  let cfgCtl = makeKVRows($('#ed-config'), storedCfg, kvKey, kvVal, true);
   $('#ed-addcfg').addEventListener('click', () => cfgCtl.addRow('', ''));
 
-  // Typed form for the providers whose credentials are not one token. Rendered
-  // from the loaded config so a switch away and back does not lose what was
-  // typed; the KV rows stay the control for the four token providers.
-  let typedValues = Object.assign({}, o.config || {});
+  // Typed form for the providers whose credentials are not one token, rendered
+  // from typedValues; the KV rows stay the control for the four token providers.
+  let typedValues = Object.assign({}, storedCfg);
   function renderTyped(p) {
     const wrap = $('#ed-typed');
     if (!p.fields) { wrap.innerHTML = ''; return; }
     wrap.innerHTML = p.fields.map((f) => {
       const v = typedValues[f.key] == null ? '' : String(typedValues[f.key]);
+      if (f.toggle) {
+        const ref = SECRET_REF_RE.test(v.trim());
+        return `<div class="field-group"><div class="toggle-line"><div class="tl-text"><div class="nm">${esc(f.label)}</div><div class="ds">${f.help}</div></div>${switchHtml('dnsf-' + f.key, dnsToggleOn(v), f.label, f.hint)}</div>
+          ${ref ? `<div class="hint">Set from <span class="mono">${esc(v.trim())}</span>, kept as written while the switch stays on.</div>` : ''}</div>`;
+      }
       if (f.select) {
         return `<div class="field-group"><label>${esc(f.label)}</label>
-          <select class="field mono dnsf" data-key="${esc(f.key)}" data-hint="${esc(f.hint)}">${enumOptions(f.select.group, f.select.options, v || f.select.dflt)}</select>
+          <select class="field mono dnsf" data-key="${esc(f.key)}" data-dflt="${esc(f.select.dflt)}" data-hint="${esc(f.hint)}">${enumOptions(f.select.group, v && f.select.options.indexOf(v) === -1 ? f.select.options.concat(v) : f.select.options, v || f.select.dflt)}</select>
           <div class="hint">${f.help}</div></div>`;
       }
       return `<div class="field-group"><label>${esc(f.label)}</label>
-        <input class="field mono dnsf" data-key="${esc(f.key)}" data-hint="${esc(f.hint)}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" />
+        <input class="field mono dnsf" data-key="${esc(f.key)}"${f.secret ? ' data-secret="1" autocomplete="off"' : ''} data-hint="${esc(f.hint)}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" />
         <div class="hint">${f.help}</div></div>`;
     }).join('');
     wrap.querySelectorAll('.dnsf').forEach((el) => {
       el.addEventListener('input', () => { typedValues[el.dataset.key] = el.value; });
       el.addEventListener('change', () => { typedValues[el.dataset.key] = el.value; });
+    });
+    p.fields.filter((f) => f.toggle).forEach((f) => {
+      $('#dnsf-' + f.key).addEventListener('switchchange', () => { typedValues[f.key] = isOn('dnsf-' + f.key) ? 'true' : ''; });
     });
   }
   function syncProvider(reseed) {
@@ -7859,12 +8540,15 @@ async function dnsEditor(c, name) {
     $('#ed-provider-note').innerHTML = p.note || '';
     $('#ed-provider-note').hidden = !p.note;
     $('#ed-kv').hidden = !!p.fields;
-    // Reseeding on a provider CHANGE stops the operator staring at an apiToken
-    // row that no longer applies; the initial render keeps whatever was loaded.
-    if (reseed && p.fields) {
-      const keep = {};
-      p.fields.forEach((f) => { if (typedValues[f.key] != null) keep[f.key] = typedValues[f.key]; });
-      typedValues = keep;
+    // A provider CHANGE starts the new type from its own keys only: none of
+    // the previous type's values (a webhook token is not a Cloudflare one),
+    // or the stored config again when the change goes back to the stored type.
+    // The initial render keeps whatever was loaded.
+    if (reseed) {
+      const back = p.id === current;
+      typedValues = back ? Object.assign({}, storedCfg) : {};
+      $('#ed-config').innerHTML = '';
+      cfgCtl = makeKVRows($('#ed-config'), back ? storedCfg : (p.fields ? {} : { apiToken: '' }), kvKey, kvVal, true);
     }
     renderTyped(p);
   }
@@ -7882,10 +8566,36 @@ async function dnsEditor(c, name) {
         const v = el.value.trim();
         // Optional keys are OMITTED rather than sent empty: an empty value is
         // noise in the committed YAML and the API only validates non-empty ones.
+        // A select showing its default for a key the stored object did not
+        // have stays omitted too, so an untouched save adds nothing.
+        if (el.dataset.dflt && v === el.dataset.dflt && !String((o.config || {})[el.dataset.key] || '').trim()) return;
         if (v) cfg[el.dataset.key] = v;
       });
-      if (Object.values(cfg).some((v) => v === '***')) {
-        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $$('#ed-typed .dnsf').find((el) => el.value.trim() === '***')); return null;
+      // A switch left in the state its stored value means sends that value
+      // back as written ("yes", "false", a placeholder); a switch the operator
+      // changed sends "true" when on and nothing when off.
+      p.fields.filter((f) => f.toggle).forEach((f) => {
+        const on = isOn('dnsf-' + f.key);
+        const was = provId === current ? storedCfg[f.key] : undefined;
+        if (was != null && String(was).trim() !== '' && on === dnsToggleOn(was)) cfg[f.key] = was;
+        else if (on) cfg[f.key] = 'true';
+      });
+      // Keys the stored config holds and this form does not render (written
+      // in the file by hand, or by a newer build) go back unchanged, for the
+      // stored type only. One the API masked cannot be sent back.
+      if (provId === current) {
+        const rendered = p.fields.map((f) => f.key);
+        const extra = Object.keys(storedCfg).filter((k) => rendered.indexOf(k) === -1);
+        const maskedExtra = extra.find((k) => storedCfg[k] === '***');
+        if (maskedExtra) {
+          showInvalid('Secret masked', `config.${maskedExtra} is a literal secret this form does not show (it reads ***). Replace it in the file with a \${ENV:...} or \${FILE:...} placeholder, then save here.`, $('#ed-typed')); return null;
+        }
+        extra.forEach((k) => { cfg[k] = storedCfg[k]; });
+      }
+      // Only a secret key can come back masked; a plain one is shown as written.
+      const masked = $$('#ed-typed .dnsf[data-secret]').find((el) => el.value.trim() === '***');
+      if (masked) {
+        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.', masked); return null;
       }
       if (cfg.ttl != null) {
         const n = Number(cfg.ttl);
@@ -7894,8 +8604,11 @@ async function dnsEditor(c, name) {
       if (cfg.timeout && !GO_DURATION_RE.test(cfg.timeout)) {
         showInvalid('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.', $('#ed-typed .dnsf[data-key="timeout"]')); return null;
       }
-      if (cfg.baseURL && !/^https?:\/\//.test(cfg.baseURL)) {
-        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL.', $('#ed-typed .dnsf[data-key="baseURL"]')); return null;
+      if (cfg.baseURL && !SECRET_REF_RE.test(cfg.baseURL) && !/^https?:\/\//.test(cfg.baseURL)) {
+        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL, or a ${ENV:...} or ${FILE:...} placeholder.', $('#ed-typed .dnsf[data-key="baseURL"]')); return null;
+      }
+      if (cfg.url && !SECRET_REF_RE.test(cfg.url) && !/^https?:\/\//.test(cfg.url)) {
+        showInvalid('Invalid URL', 'config.url must be an http or https URL, or a ${ENV:...} or ${FILE:...} placeholder.', $('#ed-typed .dnsf[data-key="url"]')); return null;
       }
     } else {
       if (cfgCtl.masked()) { showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $('#ed-config')); return null; }
@@ -8039,8 +8752,9 @@ async function accessEditor(c, name) {
       <input class="field mono src-interval" data-hint="accessList.sources.interval" style="flex:0 1 90px" value="${esc(s.interval || '')}" placeholder="24h" aria-label="Interval" />
       <input class="field mono src-maxentries" data-hint="accessList.sources.maxEntries" type="number" min="0" style="flex:0 1 110px" value="${s.maxEntries ? esc(s.maxEntries) : ''}" placeholder="10000" aria-label="Max entries" />
       <button class="icon-btn src-del" type="button" aria-label="Remove">${ICON.x}</button>`;
-    // maxCoverage has no field here; carry it through so a save keeps it.
+    // maxCoverage and maxAge have no field here; carry them through so a save keeps them.
     if (s.maxCoverage) d._maxCoverage = s.maxCoverage;
+    if (s.maxAge) d._maxAge = s.maxAge;
     d.querySelector('.src-del').addEventListener('click', () => { d.remove(); refreshSourceSelects(); });
     d.querySelector('.src-name').addEventListener('input', refreshSourceSelects);
     sourcesWrap.appendChild(d);
@@ -8073,7 +8787,7 @@ async function accessEditor(c, name) {
       card.style.display = '';
       el.innerHTML = mine.length ? `<div class="check-list">${mine.map((s) => `
         <div class="check-item" style="cursor:default"><span class="mono">${esc(s.name)}</span>
-        <span class="muted" style="font-size:12.5px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + plural(s.entryCount || 0, 'entry', 'entries') : 'Never'}</span>
+        <span class="muted" style="font-size:12.5px">${s.fetchedAt ? esc(fmtTime(s.fetchedAt)) + ', ' + (s.expired ? 'expired (maxAge passed), matching nothing' : plural(s.entryCount || 0, 'entry', 'entries')) : 'Never'}</span>
         ${s.lastError ? `<span class="muted" style="font-size:12.5px;color:var(--warn-text)">${esc(s.lastError)}</span>` : ''}</div>`).join('')}</div>`
         : '<p class="hint" style="margin:0">No sources declared yet for this list.</p>';
     } catch (e) {
@@ -8172,6 +8886,7 @@ async function accessEditor(c, name) {
         if (n) src.maxEntries = n;
       }
       if (r._maxCoverage) src.maxCoverage = r._maxCoverage;
+      if (r._maxAge) src.maxAge = r._maxAge;
       sources.push(src);
     });
     if (srcErr) { showInvalid('Source invalid', srcErr, $('#ed-sources .row-bad')); return null; }
@@ -8349,12 +9064,12 @@ async function middlewareEditor(c, name) {
   const idps = arr(idpR);
   const o = seed ? seed.data : (objR.data || {}); const type = o.type || 'headers';
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
-  const bo = o.bouncer || {};
+  const bo = o.bouncer || {}; const pb = o.pathBlock || {};
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="stack">
     ${identityCard('ed', o, { section: 'middleware', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type" data-hint="middleware.type">
-        ${enumOptions('middlewareType', ['auth', 'headers', 'guard', 'rate-limit', 'rewrite', 'bouncer'], type)}
+        ${enumOptions('middlewareType', ['auth', 'headers', 'guard', 'rate-limit', 'rewrite', 'bouncer', 'path-block'], type)}
       </select></div>
     </div>
 
@@ -8405,6 +9120,10 @@ async function middlewareEditor(c, name) {
       </select></div>
       <div class="toggle-line" id="bo-stream-line"><div class="tl-text"><div class="nm">Stream mode (crowdsec only)</div><div class="ds">Pull the whole decision set once, then deltas every cache TTL, so the request path is a local lookup with no per-request LAPI call</div></div>${switchHtml('bo-stream', !!bo.stream, 'Stream mode', 'middleware.bouncer.stream')}</div>
     </div>
+    <div class="card form-section ed-sub" data-type="path-block" style="${type === 'path-block' ? '' : 'display:none'}"><p class="section-label">Path block</p>
+      <div class="hint">Refuses a request by the shape of its path alone. Runs right after the rate limit, ahead of access lists and sign-in, so a blocked path never reaches the upstream or the identity provider. Matching is case-insensitive; the query string is not looked at.</div>
+      <div style="margin-top:12px">${pathBlockBlockHtml('mwpb', pb, 'middleware')}</div>
+    </div>
     <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
       <div class="field-group"><label>Exact</label>
         <div class="hint" style="margin:0 0 6px">The request path must equal "From" exactly.</div>
@@ -8433,6 +9152,7 @@ async function middlewareEditor(c, name) {
   // The same rate-limit block (and the same per-window / per-second forms) the
   // host and location editors use for the same model.
   const rlCtl = wireRateLimitBlock('mwrl', rl);
+  const pbCtl = wirePathBlockBlock('mwpb', pb);
   const rwCtl = makeKVRows($('#rw-replacepath'), rewrite.replacePath || {}, '/application/o/token', '/application/o/token/', false);
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
   $('#rw-add').addEventListener('click', () => rwCtl.addRow('', ''));
@@ -8551,6 +9271,13 @@ async function middlewareEditor(c, name) {
       const denyWith = $('#bo-denywith').value; if (denyWith) spec.denyWith = denyWith;
       if (provider === 'crowdsec' && isOn('bo-stream')) spec.stream = true;
       body.bouncer = spec;
+    } else if (t === 'path-block') {
+      const spec = pbCtl.get();
+      if (spec === null) return null;
+      // Same rule as guard and rewrite: a list with no entry blocks nothing,
+      // and the API refuses it.
+      if (!spec) { showInvalid('Entry required', 'Add at least one extension, name or glob.', $('#mwpb-ext')); return null; }
+      body.pathBlock = spec;
     } else if (t === 'rewrite') {
       const rp = rwCtl.get();
       const entries = Object.entries(rp);
@@ -9787,6 +10514,7 @@ const LOG_FIELDS = {
   client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
   country: 'an ISO country code such as US (needs a GeoIP database)',
   source: 'internal (private, loopback, link-local or a configured internal network) or external',
+  deny: 'the tier that refused the request, such as path-block, access-list or rate-limit; -deny:path-block hides those',
 };
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
@@ -9803,11 +10531,11 @@ function clientHit(client, alt, nets) {
 function logRec(e, nets) {
   const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
   return {
-    blob: [e.method, e.host, e.path, e.status, cls, e.client, e.country].join(' ').toLowerCase(),
+    blob: [e.method, e.host, e.path, e.status, cls, e.client, e.country, e.deny].join(' ').toLowerCase(),
     f: {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
       client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'), country: fvals(e.country || ''),
-      source: fvals(e.source || ''),
+      source: fvals(e.source || ''), deny: fvals(e.deny || ''),
     },
     m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
@@ -9837,7 +10565,7 @@ function logRowHtml(e, i) {
       <td class="mono col-method">${esc(e.method || '')}</td>
       <td class="mono col-host"><span class="cp"><span class="trunc cp-text" title="${esc(e.host || '')}">${esc(e.host || '')}</span>${cpBtn(e.host, 'host')}</span></td>
       <td class="mono col-path"><span class="cp"><span class="trunc cp-text" title="${esc(e.path || '')}">${esc(e.path || '')}</span>${cpBtn(e.path, 'path')}</span></td>
-      <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span></td>
+      <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span>${e.deny ? ` <span class="chip kind cyan" title="${esc('Refused by ' + e.deny)}">${esc(e.deny)}</span>` : ''}</td>
       <td class="mono col-num" data-v="${esc(e.durMs)}">${esc(e.durMs)}ms</td>
       <td class="mono col-num" data-v="${esc(e.bytes || 0)}">${esc(fmtBytes(e.bytes || 0))}</td>
       <td class="mono faint col-client"><span class="cp"><span class="trunc cp-text" title="${esc(e.client || '')}">${esc(e.client || '')}</span>${cpBtn(e.client, 'client address')}</span></td>
@@ -9993,7 +10721,7 @@ async function viewLogs(c) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     let text, type;
     if (fmt === 'csv') {
-      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source']);
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source', 'deny']);
       text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
       type = 'text/csv';
     } else {
@@ -10558,6 +11286,12 @@ async function viewSettings(c, tab) {
         </div>
       </div>
       <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">Path block list</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Refuses a request by the shape of its path on every proxy host that has not set its own switch to <span class="mono">off</span>, right after the rate limit and ahead of access lists and sign-in. The admin front door, redirect, parked and stream hosts are never covered, and gpm's own ACME HTTP-01 challenges are answered before it. Check what each host serves first: an application written in PHP needs <span class="mono">off</span> or a list without <span class="mono">.php</span>, and <span class="mono">.well-known</span> must stay off the list.</p>
+        ${pathBlockBlockHtml('set-pb', s.pathBlock, 'settings')}
+        <div class="hint" style="margin-top:6px">With no extension, name or glob the list is off and nothing in this section is saved.</div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Analytics</p>
         <p class="muted" style="font-size:13.5px;margin:0 0 10px">The traffic collector behind <a href="#/analytics">Analytics</a>: every finished request is handed to a background worker (one queue send on the request path), which resolves the client's country, labels scanner patterns and keeps bounded hourly aggregates. Closed hours are rolled up into <span class="mono">analytics.db</span> next to the session database.</p>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Collect traffic analytics</div><div class="ds">Off costs nothing per request; the Analytics page says it is off</div></div>${switchHtml('set-an-on', !!an.enabled, 'Collect traffic analytics', 'settings.analytics.enabled')}</div>
@@ -10773,6 +11507,7 @@ async function viewSettings(c, tab) {
       added ? `${plural(added, 'header', 'headers')} added. Review them, then save.` : 'Every recommended header is already listed.', added ? 'ok' : '');
   });
   const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');
+  const pathBlockCtl = wirePathBlockBlock('set-pb', s.pathBlock);
 
   // The migrate switch only matters once the prefix field actually differs
   // from what is currently saved, so it stays greyed out (and off) otherwise -
@@ -10932,6 +11667,13 @@ async function viewSettings(c, tab) {
     const stripErr = stripHeaderListError(stripHdrs);
     if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#set-striphdrs')); return; }
     if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;
+
+    // pathBlock (the fleet path block list) is owned by the block above. With
+    // no extension, name or glob the key is left off the body entirely: the API
+    // refuses a list with no entry, and no key is what "nothing blocked" is.
+    const pathBlock = pathBlockCtl.get();
+    if (pathBlock === null) return;
+    if (pathBlock) body.pathBlock = pathBlock;
 
     // ingressDiscovery: this page owns only the shared annotation prefix and its
     // migration flag (Advanced tab); the connection, template and profiles live
@@ -11097,7 +11839,8 @@ function wizard(opts) {
     const nextBtn = wrap.querySelector('#wz-next');
     const backBtn = wrap.querySelector('#wz-back');
     // Typing clears a stale validation message; it comes back on the next Next.
-    const mark = () => { dirty = true; setErr(''); };
+    // The import box is not the draft: typing there leaves it clean.
+    const mark = (e) => { if (!(e && e.target && e.target.id === 'wz-yaml')) dirty = true; setErr(''); };
     wrap.addEventListener('input', mark);
     wrap.addEventListener('change', mark);
     wrap.addEventListener('switchchange', mark);
@@ -11127,7 +11870,9 @@ function wizard(opts) {
       if (closed || cur !== i) return;
       ctl = got || null;
       decorateHints(main);
-      const f = main.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+      let f = main.querySelector('input:not([type=hidden]):not([disabled]), select, textarea');
+      // A radio group takes the focus on its checked member, as Tab gives it.
+      if (f && f.type === 'radio') f = main.querySelector(`input[type=radio][name="${f.name}"]:checked:not([disabled])`) || f;
       if (f) f.focus(); else nextBtn.focus();
     }
     function commit() { if (ctl && ctl.read) ctl.read(draft); }
@@ -11241,8 +11986,6 @@ function wizard(opts) {
         try { r = await opts.importYAML(ta.value); }
         catch (e) { setErr(e && e.message ? e.message : String(e)); btn.disabled = false; return; }
         if (closed) return;
-        draft = r.draft;
-        dirty = true;
         // Walk the imported draft through every step's own checks: the first
         // step that objects is shown with its message, otherwise Review.
         const landing = () => {
@@ -11253,17 +11996,24 @@ function wizard(opts) {
           doneUpTo = steps.length - 2;
           return show(steps.length - 1);
         };
+        // The imported draft replaces the operator's only when they go on
+        // with it; "Back to the steps" returns to exactly what was there, and
+        // a fullOnly document never gets here.
+        const take = () => { draft = r.draft; dirty = true; return landing(); };
         if (r.note) {
+          // fullOnly: a document the steps cannot express at all goes to the
+          // full editor, with no way to continue in the wizard.
           const note = main.querySelector('#wz-import-note');
-          note.innerHTML = `<div class="ro-banner warn" style="margin:16px 0 0"><b>Partly covered.</b> ${esc(r.note)}</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="wz-import-go" type="button">Continue in the wizard</button>${r.full ? '<button class="btn ghost" id="wz-import-full" type="button">Open the full editor with everything</button>' : ''}</div>`;
-          note.querySelector('#wz-import-go').addEventListener('click', landing);
+          note.innerHTML = `<div class="ro-banner warn" style="margin:16px 0 0"><b>${r.fullOnly ? 'Not a wizard case.' : 'Partly covered.'}</b> ${esc(r.note)}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">${r.fullOnly ? '' : '<button class="btn primary" id="wz-import-go" type="button">Continue in the wizard</button>'}${r.full ? `<button class="btn ${r.fullOnly ? 'primary' : 'ghost'}" id="wz-import-full" type="button">Open the full editor with everything</button>` : ''}</div>`;
+          const go = note.querySelector('#wz-import-go');
+          if (go) go.addEventListener('click', take);
           const full = note.querySelector('#wz-import-full');
           if (full) full.addEventListener('click', () => { close(null); r.full(); });
           btn.disabled = false;
           return;
         }
-        await landing();
+        await take();
       });
     }
     document.addEventListener('keydown', onKey, true);
@@ -11305,6 +12055,15 @@ function copyText(text, btn) {
 // ask about keeps its default and is reachable in the editor afterwards; the
 // full editor stays one click away for the cases the steps do not cover.
 const HOST_NAME_RE = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
+// The wizards' domain check: a hostname, optionally behind "*.", in its ASCII
+// (punycode) form. '' when every domain passes.
+function domainsProblem(domains) {
+  const bad = domains.find((x) => !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(x));
+  if (!bad) return '';
+  return /[^\x00-\x7f]/.test(bad)
+    ? `"${bad}" has non-ASCII characters; enter its punycode (xn--) form.`
+    : `"${bad}" is not a valid domain name.`;
+}
 function hostNameFrom(domain) {
   // "*.example.com" names the host after the zone, not after the star.
   const d = String(domain || '').trim().toLowerCase().replace(/^\*\./, '');
@@ -11401,12 +12160,8 @@ async function runHostWizard() {
       },
       validate(d) {
         if (!d.domains.length) return 'Add at least one domain.';
-        const bad = d.domains.find((x) => !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(x));
-        if (bad) {
-          return /[^\x00-\x7f]/.test(bad)
-            ? `"${bad}" has non-ASCII characters; enter its punycode (xn--) form.`
-            : `"${bad}" is not a valid domain name.`;
-        }
+        const bad = domainsProblem(d.domains);
+        if (bad) return bad;
         if (!d.name) return 'Give the host a name.';
         if (d.name.length > 253) return 'The name is too long (253 characters at most).';
         if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
@@ -11606,13 +12361,389 @@ async function runHostWizard() {
   if (r === null && listsDown) toast('Some lists did not load', 'Certificates, identity providers, access lists or middleware could not be read; reload and try again.', 'err');
   return r;
 }
-// Any "Add proxy host" control (the list toolbar, the empty state) opens the
-// wizard; its href stays the full editor for middle-click and no-script cases.
+
+// ---------- new certificate wizard ----------
+// Four steps: Domains, Authority, Validation, Review, on the same primitive
+// and with the same manners as the proxy host wizard. It creates ACME
+// certificates only; a custom certificate (PEM files on the server) is set up
+// in the full editor.
+// "example.com" names the certificate example-com, "*.example.com"
+// wild-example-com.
+function certNameFrom(domain) {
+  let d = String(domain || '').trim().toLowerCase();
+  const wild = d.startsWith('*.');
+  if (wild) d = d.slice(2);
+  const base = d.replace(/[^a-z0-9.-]/g, '').replace(/\./g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  return base ? (wild ? 'wild-' + base : base) : '';
+}
+// The object the wizard writes. dirURL is written as held: a preset sets it
+// when it is picked (blank for Let's Encrypt), an import keeps the document's.
+function certWizardObject(d) {
+  const a = { email: d.email, challenge: d.challenge };
+  if (d.dirURL.trim()) a.directoryURL = d.dirURL.trim();
+  if (d.challenge === 'dns-01' && d.dnsProvider) a.dnsProvider = d.dnsProvider;
+  if (d.eab) a.eab = { kid: d.kid, hmacKey: d.hmac };
+  if (d.profile) a.profile = d.profile;
+  if (d.preset === 'custom' && d.caBundle) a.caBundle = d.caBundle;
+  return { name: d.name, type: 'acme', domains: d.domains.slice(), acme: a };
+}
+let certWizardBusy = false;
+async function openCertWizard() {
+  if (certWizardBusy) return null; // a double click must not stack two wizards
+  certWizardBusy = true;
+  try { return await runCertWizard(); } finally { certWizardBusy = false; }
+}
+async function runCertWizard() {
+  const [dnsR, certsR] = await Promise.all([
+    refList('/api/dns-providers', 'DNS providers'),
+    refList('/api/certificates', 'certificates'),
+  ]);
+  const providers = arr(dnsR);
+  const listsDown = dnsR === null || certsR === null;
+  // PUT is an upsert: the wizard only ever creates, checked here against the
+  // list and again on Review by the server.
+  const existing = new Set(arr(certsR).map((ct) => ct.name));
+  const defaultCh = providers.length ? 'dns-01' : 'http-01';
+  const draft = {
+    name: '', nameTouched: false, domains: [], preset: 'letsencrypt', dirURL: '', email: '',
+    eab: false, kid: '', hmac: '', profile: '', caBundle: '',
+    challenge: defaultCh, challengeTouched: false, dnsProvider: providers.length === 1 ? providers[0].name : '',
+  };
+  const wild = (d) => d.domains.some((x) => x.startsWith('*.'));
+  const presetOf = (d) => CA_PRESETS.find((p) => p.id === d.preset) || CA_PRESETS[0];
+  // The CA is named after the URL that will be written, not the radio alone.
+  const caText = (d) => `${esc(caPresetFor(d.dirURL).label)}${d.dirURL.trim() ? ` <span class="mono">${esc(d.dirURL.trim())}</span>` : ''}`;
+  const chText = (d) => (d.challenge === 'dns-01' ? `dns-01${d.dnsProvider ? ` via <span class="mono">${esc(d.dnsProvider)}</span>` : ''}` : 'http-01');
+  let reviewErr = '';
+  let reviewPending = false;
+  let reviewOffline = false;
+  const REVIEW_WAIT = 'Wait for the server check to finish.';
+  let reviewSeq = 0;
+
+  const steps = [
+    {
+      id: 'domains', title: 'Domains',
+      render(pane, d) {
+        pane.innerHTML = `<h3>Domains</h3><p class="lead">The names this certificate covers.</p>
+          <div class="field-group"><label>Domains</label><div class="chip-input" id="wz-ct-domains" data-hint="certificate.domains"></div>
+            <div class="hint">Press Enter after each domain. A wildcard such as <span class="mono">*.example.com</span> covers one level of subdomains and can only be validated over dns-01.</div></div>
+          <div class="field-group"><label>Name</label><input class="field mono" id="wz-ct-name" value="${esc(d.name)}" placeholder="example-com" autocomplete="off" spellcheck="false" data-auto="${d.nameTouched ? '0' : '1'}" data-hint="common.name" />
+            <div class="hint">Internal name and config file name, fixed after creation. Taken from the first domain; lowercase letters, digits, dots, - and _.</div></div>
+          <p class="hint" style="margin-top:12px">This wizard orders a certificate over ACME. For PEM files already on the server (a custom certificate), use Open the full editor instead.</p>`;
+        const nameEl = pane.querySelector('#wz-ct-name');
+        nameEl.addEventListener('input', () => { nameEl.dataset.auto = '0'; d.nameTouched = true; });
+        const chips = makeChipInput(pane.querySelector('#wz-ct-domains'), d.domains, 'add domain...', (list) => {
+          if (nameEl.dataset.auto === '1') nameEl.value = certNameFrom(list[0]);
+        });
+        return {
+          read(dd) {
+            dd.domains = chips.get().map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+            dd.name = nameEl.value.trim();
+            dd.nameTouched = nameEl.dataset.auto === '0';
+          },
+        };
+      },
+      validate(d) {
+        if (!d.domains.length) return 'Add at least one domain.';
+        const bad = domainsProblem(d.domains);
+        if (bad) return bad;
+        if (!d.name) return 'Give the certificate a name.';
+        if (d.name.length > 253) return 'The name is too long (253 characters at most).';
+        if (!HOST_NAME_RE.test(d.name)) return 'The name must be lowercase letters, digits, dots, - or _, and start and end with a letter or digit.';
+        if (existing.has(d.name)) return `A certificate named "${d.name}" already exists. Pick another name, or edit that certificate from the list.`;
+        return '';
+      },
+      summary(d) {
+        const more = d.domains.length > 1 ? ` +${d.domains.length - 1}` : '';
+        return `${esc(d.domains[0])}${more}, named <span class="mono">${esc(d.name)}</span>`;
+      },
+    },
+    {
+      id: 'authority', title: 'Authority',
+      render(pane, d) {
+        const p = presetOf(d);
+        pane.innerHTML = `<h3>Certificate authority</h3><p class="lead">Who issues the certificate, and the ACME account gpm orders it with.</p>
+          <div class="field-group"><label id="wz-ct-ca-label">CA</label>
+            <div role="radiogroup" aria-labelledby="wz-ct-ca-label">${CA_PRESETS.map((x) => `<label class="radio"><input type="radio" name="wz-ct-ca" value="${x.id}"${x.id === p.id ? ' checked' : ''} data-hint="certificate.acme.directoryURL" /><span class="t">${esc(x.label)}</span><span class="d">${esc(x.line)}</span></label>`).join('')}</div></div>
+          <div class="field-group" id="wz-ct-dir-group"${p.id === 'custom' ? '' : ' hidden'}><label>Directory URL</label><input class="field mono" id="wz-ct-dir" value="${esc(d.dirURL)}" placeholder="https://ca.example.com/acme/directory" autocomplete="off" spellcheck="false" data-hint="certificate.acme.directoryURL" /></div>
+          <div class="field-group"><label>Account email</label><input class="field mono" id="wz-ct-email" value="${esc(d.email)}" placeholder="you@example.com" autocomplete="off" spellcheck="false" data-hint="certificate.acme.email" /></div>
+          <div class="toggle-line"><div class="tl-text"><div class="nm">External account binding</div><div class="ds" id="wz-ct-eab-ds">${esc(caEABText(p))}</div></div>${switchHtml('wz-ct-eab', d.eab, 'External account binding', 'certificate.acme.eab')}</div>
+          <div id="wz-ct-eab-fields"${d.eab ? '' : ' hidden'}>
+            <div class="field-group"><label>EAB key ID</label><input class="field mono" id="wz-ct-kid" value="${esc(d.kid)}" placeholder="kid from the CA" autocomplete="off" spellcheck="false" data-hint="certificate.acme.eab.kid" /></div>
+            <div class="field-group"><label>EAB HMAC key</label><input class="field mono" id="wz-ct-hmac" value="${esc(d.hmac)}" placeholder="\${ENV:ACME_EAB_HMAC}" autocomplete="off" spellcheck="false" data-hint="certificate.acme.eab.hmacKey" />
+              <div class="hint">Use a <span class="mono">\${ENV:...}</span> or <span class="mono">\${FILE:...}</span> placeholder so no secret is committed.</div></div>
+          </div>
+          ${foldHtml('wz-ct-more', 'More', [d.profile ? 'profile ' + d.profile : 'CA default profile', d.caBundle && p.id === 'custom' ? 'CA bundle set' : ''].filter(Boolean).join(', '), !!(d.profile || (d.caBundle && p.id === 'custom')),
+            `<div class="field-group"><label>Issuance profile</label><input class="field mono" id="wz-ct-profile" value="${esc(d.profile)}" placeholder="CA default" autocomplete="off" spellcheck="false" data-hint="certificate.acme.profile" />
+              <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div></div>
+            <div class="field-group" id="wz-ct-bundle-group"${p.id === 'custom' ? '' : ' hidden'}><label>CA bundle (private CA)</label><textarea class="field mono" id="wz-ct-bundle" rows="4" style="min-height:0" spellcheck="false" placeholder="-----BEGIN CERTIFICATE----- or \${FILE:/run/secrets/acme-ca.pem}" data-hint="certificate.acme.caBundle"></textarea>
+              <div class="hint">Only for a CA whose directory is not trusted by the system roots. Blank trusts the system roots.</div></div>`)}`;
+        pane.querySelector('#wz-ct-bundle').value = d.caBundle;
+        const sw = pane.querySelector('#wz-ct-eab');
+        const dirEl = pane.querySelector('#wz-ct-dir');
+        // Same EAB rule as the editor, on a certificate that is always new: a
+        // preset that requires EAB turns the switch on and locks it; leaving it
+        // turns the switch off only when both fields are empty.
+        const applyCA = (np, prev) => {
+          d.preset = np.id;
+          pane.querySelector('#wz-ct-dir-group').hidden = np.id !== 'custom';
+          pane.querySelector('#wz-ct-bundle-group').hidden = np.id !== 'custom';
+          pane.querySelector('#wz-ct-eab-ds').textContent = caEABText(np);
+          const lock = np.eab === 'required';
+          if (lock) sw.setAttribute('aria-checked', 'true');
+          else if (prev && prev.eab === 'required' && !pane.querySelector('#wz-ct-kid').value.trim() && !pane.querySelector('#wz-ct-hmac').value.trim()) sw.setAttribute('aria-checked', 'false');
+          gateControl(sw, !lock, caEABText(np));
+          pane.querySelector('#wz-ct-eab-fields').hidden = !isOn('wz-ct-eab');
+        };
+        applyCA(p, null);
+        pane.querySelectorAll('input[name="wz-ct-ca"]').forEach((r) => r.addEventListener('change', () => {
+          const np = CA_PRESETS.find((x) => x.id === r.value);
+          const prev = presetOf(d);
+          if (np.id !== 'custom') dirEl.value = caPresetURL(np.id, '');
+          // Custom starts blank unless the field holds a URL the operator
+          // typed: a preset's URL left there would order from that CA under
+          // the Custom label (arrowing down the list passes every preset).
+          else if (caPresetFor(dirEl.value).id !== 'custom') dirEl.value = '';
+          applyCA(np, prev);
+        }));
+        // A typed URL that is a preset's directory selects that preset once
+        // the field is left (not while typing, which would hide the field).
+        dirEl.addEventListener('change', () => {
+          const np = caPresetFor(dirEl.value);
+          if (np.id === 'custom' || !dirEl.value.trim()) return;
+          const prev = presetOf(d);
+          pane.querySelector(`input[name="wz-ct-ca"][value="${np.id}"]`).checked = true;
+          applyCA(np, prev);
+        });
+        sw.addEventListener('switchchange', () => { pane.querySelector('#wz-ct-eab-fields').hidden = !isOn('wz-ct-eab'); });
+        return {
+          read(dd) {
+            dd.dirURL = dirEl.value.trim();
+            dd.email = pane.querySelector('#wz-ct-email').value.trim();
+            dd.eab = isOn('wz-ct-eab');
+            dd.kid = pane.querySelector('#wz-ct-kid').value.trim();
+            dd.hmac = pane.querySelector('#wz-ct-hmac').value.trim();
+            dd.profile = pane.querySelector('#wz-ct-profile').value.trim();
+            dd.caBundle = pane.querySelector('#wz-ct-bundle').value.trim();
+          },
+        };
+      },
+      // The model's rules: an email, both EAB values together, the profile
+      // form and the bundle size. A Custom CA also needs its URL, or the
+      // blank would silently order from Let's Encrypt. The EAB rule follows
+      // the URL that will be written, whatever the radio says.
+      validate(d) {
+        const ca = caPresetFor(d.dirURL);
+        if (d.preset === 'custom' && !d.dirURL.trim()) return "Enter the CA's directory URL, or pick a CA from the list.";
+        if (!d.email) return 'Enter the account email; the CA requires one for the ACME account.';
+        if (ca.eab === 'required' && !d.eab) return `${caEABText(ca)}: enter the EAB key ID and the HMAC key.`;
+        if (d.eab && (!d.kid || !d.hmac)) return 'Enter both the EAB key ID and the HMAC key.';
+        if (d.eab && d.hmac === '***') return 'The EAB HMAC key reads *** - replace it with a ${ENV:...} or ${FILE:...} placeholder.';
+        if (d.profile && !ACME_PROFILE_RE.test(d.profile)) return 'The issuance profile must be 1 to 64 letters, digits, "_" or "-".';
+        if (d.preset === 'custom' && d.caBundle && new TextEncoder().encode(d.caBundle).length > ACME_CA_BUNDLE_MAX_BYTES) return `The CA bundle must be at most ${ACME_CA_BUNDLE_MAX_BYTES} bytes.`;
+        return '';
+      },
+      summary(d) {
+        return `${caPresetFor(d.dirURL).id === 'custom' ? caText(d) : esc(caPresetFor(d.dirURL).label)}${d.eab ? ', EAB' : ''}`;
+      },
+    },
+    {
+      id: 'validation', title: 'Validation',
+      render(pane, d) {
+        const w = wild(d);
+        if (w) d.challenge = 'dns-01';
+        else if (!d.challengeTouched) d.challenge = defaultCh;
+        const dnsHtml = dnsR === null
+          ? '<div class="hint warn">The DNS provider list could not be loaded. Reload the page and try again.</div>'
+          : (providers.length
+            ? `<select class="field mono" id="wz-ct-dns" data-hint="certificate.acme.dnsProvider"><option value="">select provider...</option>${providers.map((x) => `<option value="${esc(x.name)}"${d.dnsProvider === x.name ? ' selected' : ''}>${esc(x.name)}${x.provider ? ' (' + esc(x.provider) + ')' : ''}</option>`).join('')}</select>`
+            : `<div class="hint warn">${w ? 'A wildcard needs dns-01, and dns-01' : 'dns-01'} needs a DNS provider: add one under <a href="#/dns">DNS Providers</a> first.</div>`);
+        // No provider configured (the list loaded empty): dns-01 is disabled
+        // with the reason, as in the editor, unless it is the current choice
+        // (a wildcard, or an imported draft); Next then refuses it.
+        const noDNS = dnsR !== null && !providers.length;
+        const dnsOff = noDNS && !w && d.challenge !== 'dns-01';
+        pane.innerHTML = `<h3>Validation</h3><p class="lead">How the CA checks that you control ${esc(d.domains[0] || 'the domains')}.</p>
+          <div class="field-group"><label id="wz-ct-ch-label">Challenge</label>
+            <div role="radiogroup" aria-labelledby="wz-ct-ch-label">
+              <label class="radio"><input type="radio" name="wz-ct-ch" value="http-01"${d.challenge === 'http-01' ? ' checked' : ''}${w ? ' disabled' : ''} data-hint="certificate.acme.challenge" /><span class="t">http-01</span><span class="d">${w ? 'Not available: a wildcard domain can only be validated over dns-01.' : 'The CA fetches a token over port 80, so every domain must resolve to this instance from the internet.'}</span></label>
+              <label class="radio"><input type="radio" name="wz-ct-ch" value="dns-01"${d.challenge === 'dns-01' ? ' checked' : ''}${dnsOff ? ' disabled' : ''} data-hint="certificate.acme.challenge" /><span class="t">dns-01</span><span class="d">gpm writes a TXT record through a DNS provider. Works without an open port, and is the only way to get a wildcard.${dnsOff ? ' Not available: no DNS provider is configured. Add one under <a href="#/dns">DNS Providers</a> first.' : ''}</span></label>
+            </div></div>
+          <div class="field-group" id="wz-ct-dns-group"${d.challenge === 'dns-01' ? '' : ' hidden'}><label>DNS provider</label>${dnsHtml}</div>`;
+        pane.querySelectorAll('input[name="wz-ct-ch"]').forEach((r) => r.addEventListener('change', () => {
+          d.challengeTouched = true;
+          pane.querySelector('#wz-ct-dns-group').hidden = r.value !== 'dns-01';
+        }));
+        return {
+          read(dd) {
+            const on = pane.querySelector('input[name="wz-ct-ch"]:checked');
+            if (on) dd.challenge = on.value;
+            const sel = pane.querySelector('#wz-ct-dns');
+            if (sel) dd.dnsProvider = sel.value;
+          },
+        };
+      },
+      validate(d) {
+        if (d.challenge !== 'dns-01') return wild(d) ? 'A wildcard domain can only be validated over dns-01.' : '';
+        if (dnsR === null) return 'The DNS provider list could not be loaded. Reload the page and try again.';
+        if (!providers.length) return 'dns-01 needs a DNS provider. Add one under DNS Providers first.';
+        if (!d.dnsProvider) return 'Select the DNS provider that writes the TXT record.';
+        return '';
+      },
+      summary(d) { return chText(d); },
+    },
+    {
+      id: 'review', title: 'Review',
+      async render(pane, d) {
+        reviewErr = '';
+        reviewOffline = false;
+        reviewPending = true; // Add waits for the server's answer
+        const tok = ++reviewSeq; // a reply from an earlier render is dropped
+        // The answer clears a wait message left by an early Add.
+        const answered = () => {
+          reviewPending = false;
+          const el = pane.closest('.modal') && pane.closest('.modal').querySelector('#wz-err');
+          if (el && el.textContent === REVIEW_WAIT) el.textContent = '';
+        };
+        pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you add the certificate.</p>
+          <dl class="dl-h" style="margin-bottom:20px">
+            <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
+            <dt>Name</dt><dd class="mono">${esc(d.name)}</dd>
+            <dt>CA</dt><dd>${caText(d)}</dd>
+            <dt>Account email</dt><dd class="mono">${esc(d.email)}</dd>
+            <dt>Account binding</dt><dd>${d.eab ? `EAB key ID <span class="mono">${esc(d.kid)}</span>` : 'none'}</dd>
+            <dt>Profile</dt><dd>${d.profile ? `<span class="mono">${esc(d.profile)}</span>` : 'CA default'}</dd>
+            ${d.preset === 'custom' ? `<dt>CA bundle</dt><dd>${d.caBundle ? 'set' : 'none, system roots'}</dd>` : ''}
+            <dt>Validation</dt><dd>${chText(d)}</dd>
+            <dt>Everything else</dt><dd>defaults</dd>
+          </dl>
+          <div class="loading" id="wz-dry"><span class="spinner"></span>Checking with the server...</div>
+          <p class="hint">gpm orders the certificate at the manager's next pass, not when you add it. To order at once, use Renew now on the certificate's page.</p>`;
+        try {
+          const r = await api('/api/certificates/' + encodeURIComponent(d.name) + '?dryRun=1', { method: 'PUT', body: certWizardObject(d) });
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
+          const y = r.data || {};
+          const slot = pane.querySelector('#wz-dry');
+          if (!slot) return null;
+          if (y.exists) {
+            reviewErr = `A certificate named "${d.name}" already exists. Pick another name on the Domains step, or edit that certificate from the list.`;
+            slot.outerHTML = `<div class="inline-error"><b>This name is taken.</b><br/>${esc(reviewErr)}</div>`;
+            return null;
+          }
+          // The dry run stamps its own createdAt/updatedAt, which Add restamps.
+          const yaml = String(y.yaml || '').split('\n').filter((l) => !/^(createdAt|updatedAt):/.test(l)).join('\n');
+          slot.outerHTML = `<div class="code-head"><span>${esc(y.path || '')}</span><button class="btn plain sm" type="button" id="wz-copy">Copy</button></div><pre class="code">${yamlHtml(yaml)}</pre>
+            <p class="hint">createdAt and updatedAt are stamped when you add the certificate.</p>`;
+          pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(yaml, e.currentTarget));
+        } catch (e) {
+          if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
+          reviewErr = (e && e.message) || String(e);
+          // No HTTP status: the request never reached the server.
+          reviewOffline = !(e && e.status);
+          const slot = pane.querySelector('#wz-dry');
+          if (slot) {
+            slot.outerHTML = reviewOffline
+              ? `<div class="inline-error"><b>The server could not be reached.</b><br/>${esc(reviewErr)}. Go Back, then Next to check again.</div>`
+              : `<div class="inline-error"><b>The server rejected this certificate.</b><br/>${esc(reviewErr)}</div>`;
+          }
+        }
+        return null;
+      },
+      validate() {
+        if (reviewPending) return REVIEW_WAIT;
+        if (reviewOffline) return 'The server could not be reached. Go Back, then Next to check again.';
+        return reviewErr ? 'Fix the rejected step first: ' + reviewErr : '';
+      },
+    },
+  ];
+
+  // The full editor takes an object as a new certificate through the
+  // clone-seed hand-over, minus what a hand-made object must not carry.
+  const toEditor = (o) => {
+    const seed = Object.assign({}, o);
+    delete seed.labels; delete seed.createdAt; delete seed.updatedAt;
+    cloneSeed = { section: 'certs', origName: '', data: seed };
+    location.hash = '#/certs/_new';
+  };
+  const r = await wizard({
+    title: 'New certificate',
+    desc: 'Order an ACME certificate for the domains you serve.',
+    noun: 'certificate',
+    steps, draft,
+    finishLabel: 'Add certificate',
+    altLink: { label: 'Open the full editor instead', href: '#/certs/_new', carry: (d) => toEditor(certWizardObject(d)) },
+    importPlaceholder: 'name: example-com\ntype: acme\ndomains: [example.com]\nacme: { email: you@example.com, challenge: http-01 }',
+    importYAML: async (text) => {
+      if (!String(text).trim()) throw new Error('Paste a YAML document first.');
+      const res = await api('/api/certificates/_parse', { method: 'POST', raw: text, contentType: 'application/yaml' });
+      const data = res.data || {};
+      const o = data.object || {};
+      const full = () => toEditor(o);
+      if (o.type === 'custom') {
+        return { fullOnly: true, full, note: 'This is a custom certificate (PEM files on the server). The wizard orders ACME certificates only; the full editor takes the document as it is.' };
+      }
+      if (o.type !== 'acme') {
+        throw new Error(data.valid === false && /type:/.test(data.error || '') ? data.error : `The document's type is "${o.type || ''}"; a certificate is type acme or custom.`);
+      }
+      const a = o.acme || {};
+      const eab = a.eab || {};
+      const nm = data.name || o.name || '';
+      // A literal HMAC key comes back from _parse as *** (the API never
+      // echoes a secret): it is left out of the draft, and the note says so.
+      const masked = eab.hmacKey === '***';
+      const nd = {
+        name: nm, nameTouched: !!nm, domains: arr(o.domains), preset: caPresetFor(a.directoryURL).id, dirURL: a.directoryURL || '',
+        email: a.email || '', eab: !!a.eab, kid: eab.kid || '', hmac: masked ? '' : (eab.hmacKey || ''), profile: a.profile || '', caBundle: a.caBundle || '',
+        challenge: certChallenge(o), challengeTouched: true, dnsProvider: a.dnsProvider || '',
+      };
+      // Everything the steps do not cover is listed, so an import never
+      // silently drops a field; the full editor keeps all of them.
+      const empty = (v) => v == null || v === false || v === '' || v === 0
+        || (Array.isArray(v) ? !v.length : (typeof v === 'object' && Object.keys(v).every((k) => empty(v[k]))));
+      const skip = ['name', 'type', 'domains', 'acme', 'createdAt', 'updatedAt', 'labels'];
+      const extra = Object.keys(o).filter((k) => skip.indexOf(k) === -1 && !empty(o[k]));
+      Object.keys(a).forEach((k) => { if (['email', 'directoryURL', 'challenge', 'dnsProvider', 'eab', 'profile', 'caBundle'].indexOf(k) === -1 && !empty(a[k])) extra.push('acme.' + k); });
+      if (a.caBundle && nd.preset !== 'custom') extra.push('acme.caBundle');
+      const note = [
+        extra.length ? `The steps cover the basics; this YAML also sets ${extra.join(', ')}, which the wizard would leave out.` : '',
+        masked ? 'A literal EAB HMAC key is not carried over by an import; enter it as a ${ENV:...} or ${FILE:...} placeholder.' : '',
+      ].filter(Boolean).join(' ');
+      return { draft: nd, invalid: data.valid === false ? (data.error || 'The server could not validate this object.') : '', note, full };
+    },
+    onFinish: async (d) => {
+      // Create-only: the server answers 409 for a stored name instead of
+      // replacing it, whatever this wizard believed when it opened.
+      let res;
+      try {
+        res = await api('/api/certificates/' + encodeURIComponent(d.name), { method: 'PUT', body: certWizardObject(d), headers: { 'If-None-Match': '*' } });
+      } catch (e) {
+        if (e && e.status === 409) throw new Error(`A certificate named "${d.name}" was created in the meantime. Pick another name on the Domains step.`);
+        throw e;
+      }
+      toastSaved(res.commit, 'Added');
+      refreshHeadSha();
+      location.hash = '#/certs/' + encodeURIComponent(d.name);
+      return true;
+    },
+  });
+  if (r === null && listsDown) toast('Some lists did not load', 'DNS providers or certificates could not be read; reload and try again.', 'err');
+  return r;
+}
+
+// Any "Add proxy host" or "Add certificate" control (a list toolbar, an empty
+// state, anything carrying data-wizard) opens its wizard on a plain left
+// click; the href stays the full editor for middle-click and no-script cases.
+// A gated control (read-only) opens nothing.
+const WIZARDS = { hosts: openHostWizard, certs: openCertWizard };
 document.addEventListener('click', (e) => {
-  const b = e.target.closest && e.target.closest('[data-wizard="hosts"]');
-  if (!b || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  const b = e.target.closest && e.target.closest('[data-wizard]');
+  const open = b && WIZARDS[b.dataset.wizard];
+  if (!open || e.defaultPrevented || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  if (b.getAttribute('aria-disabled') === 'true') return;
   e.preventDefault();
-  openHostWizard();
+  open();
 });
 
 

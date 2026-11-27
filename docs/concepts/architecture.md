@@ -196,10 +196,12 @@ clean run. Cloudflare pagination terminates on a short page and treats
 `result_info` as advisory, so a response without it cannot truncate the listing
 into a partial view of the zone. Neither backend can update a record in place, so a
 retarget is a delete followed by a create; if the create fails the **original is
-restored** and the run fails loudly, rather than leaving the name unresolved until
-some later reconcile heals it, and the counter is incremented as soon as the delete
-lands so a destructive half-step can never be reported as a run that changed
-nothing. The Pi-hole session is closed on a context detached from the caller's,
+restored** and the failure is reported, rather than leaving the name unresolved
+until some later reconcile heals it, and the counter is incremented as soon as the
+delete lands so a destructive half-step can never be reported as a run that changed
+nothing. A failed retarget, like a failed create or delete, does not stop the run:
+the remaining names are still written, and the ledger records what the backend
+holds for the failed name. The Pi-hole session is closed on a context detached from the caller's,
 because logout is reached by `defer` and the commonest reason to reach it is the
 caller having gone away: cancelling the logout with it leaks one of Pi-hole's few
 session slots per aborted run.
@@ -236,6 +238,15 @@ entry resolves to the **empty set** rather than being dropped, which keeps the
 list's IP dimension intact: dropping the rule would leave a default-deny list
 with nothing to match on, which is exactly the shape that serves open.
 
+A kept set is served however old it is unless the source sets `maxAge`. The age is measured from the last successful fetch recorded in the ledger (`fetchedAt`), or from when `maxAge` was first applied to the source (`maxAgeSince`) if that is later; a success that could not be committed before a restart is not counted. For such a source every successful fetch advances `fetchedAt`, and opting in
+records `maxAgeSince`; both are timestamp-only commits without a data-plane
+reload on the leader (a follower reloads on every commit it pulls). Once the age
+passes `maxAge`, the next refused fetch empties the entry and marks it
+`expiredAt` in one ledger commit; a refused fetch is retried on every poll. That reuses the normal propagation
+(ledger commit, data-plane reload, follower replication), so expiry needs no
+clock in the data plane and is unaffected by restarts; the next successful
+fetch restores the set.
+
 **Kubernetes Ingress discovery** (`internal/k8s`). An optional, read-only poll
 loop that turns annotated cluster `Ingress` objects into gpm-managed proxy hosts,
 which then feed the DNS reconciler above: one DNS code path, not two. The client
@@ -271,6 +282,14 @@ derive: an `Ingress` contributes hostnames from `spec.rules`, a container
 contributes them from one comma-separated label plus a port and scheme within
 its own address.
 
+What the reconciler owns and what it carries forward:
+
+- **Template fields it sets** are stamped onto every derived host.
+- **Tags:** the template's tags come first, then the host's other tags, so a tag added by hand is carried forward.
+- **Stale tags:** the tags stamped at the previous pass are remembered in memory only, which is how a tag dropped from the template is told from one added by hand.
+- **`trustedProxies` set (an empty list included):** stamped, and the host gets a `<prefix>/trusted-proxies-by` label.
+- **`trustedProxies` unset:** a host with the label gives up the stamped value (and the label); a host without it keeps its own.
+
 A derived host is a **full** `ProxyHost`, not a reduced one: the operator's
 template (or the profile an `Ingress` selected by name) supplies the upstream,
 TLS/mTLS, middleware and access-list chains, websockets, `robotsNoIndex`,
@@ -279,16 +298,19 @@ host so two derived hosts never share backing memory with each other or with the
 loaded settings. Parity matters because the alternative is silent: a service
 moved into discovery that loses its no-index header or its upstream timeout keeps
 serving, just differently, and the workaround is a second mechanism (a `headers`
-middleware) for something the model already expresses. The one field a derived
-host deliberately cannot carry is `locations`: path routing belongs to the
-cluster ingress controller, which does it from the same `Ingress` gpm read.
+middleware) for something the model already expresses. `locations` come the same way, but only from the operator's template or
+profile, never from the `Ingress`: an annotation names a profile and nothing
+else, so a tenant cannot add a path, an upstream or a chain of their own.
 
 Three properties define the reconciler. It is **full-state**: the desired set is
 recomputed from a complete list on every poll and compared with the config, so a
 missed event is impossible by construction. It is **ownership-gated**: only
 proxy hosts labelled `gpm.rake.pro/managed-by: ingress-discovery` are ever
 written or deleted, and a collision with a hand-written host is skipped with a
-warning, exactly as the DNS backends treat a record they do not own. Ownership is
+warning, exactly as the DNS backends treat a record they do not own. A derived
+name already used by a redirect, parked or stream host is skipped the same way,
+since host names are shared across those kinds and the write would fail the
+whole batch. Ownership is
 gated on the **domain** as well as the name, because the router keys its
 per-domain maps by hostname and fills them in config load order: without it a
 derived host whose name merely sorts after the operator's could take over
@@ -314,7 +336,20 @@ carries a *name* and never a chain, so a cluster tenant chooses among
 configurations the operator sanctioned but can never invent one, and an undefined
 profile name skips the Ingress rather than silently downgrading it to the
 default. Every profile validates exactly as the template does, at settings-write
-time. Because gpm is off-cluster,
+time, and the objects it names (host level and per location) are cross-checked
+again on every object write, delete, revert and restore, with the reference
+rules a proxy host is held to, so none of them can leave a template naming an
+object that is missing or unusable. A stored config already in that state still
+loads, with a config warning; object writes on it are accepted and a settings
+write must fix the reference, and while the stored state fails the check it is
+off for object writes, reverts and restores. A stored host is compared with its
+profile on every field the profile stamps (the upstream for Ingress discovery,
+TLS, `timeouts`, `robotsNoIndex`, the chain and the header policy), which decides
+whether a host whose source cannot be derived is frozen or disabled. When the
+source still derives but the host is skipped for a domain conflict, the same
+fields plus the derived `dns` policy decide whether the stored host is restamped
+(taking the derived upstream with it, for Docker the container's current
+address) or left as it is. Because gpm is off-cluster,
 in-cluster Service DNS is unusable, so the upstream is the ingress controller's
 address and the data plane's preserved `Host` header is what routes the request
 to the right workload. A whole reconcile lands as **one commit**
@@ -329,13 +364,33 @@ swept into the next unrelated commit.
 renews `Certificate` objects of type `acme`: register/reuse an account key per
 directory URL (per external account when EAB is configured), create the order,
 solve every authorization, finalize the CSR, and write `fullchain.pem` +
-`privkey.pem` atomically. Renewal triggers when a cert is unissued, its domain
-set changed, or it is within 30 days of expiry. On any change it signals the data
-plane to reload.
+`privkey.pem` atomically. A cert is due when it is unissued, its domain set or `acme.profile` changed,
+or `min(30 days, lifetime / 3)` of its life remains (lifetime is the leaf's
+`notAfter - notBefore`). On any change the manager signals the data plane to reload.
+
+Passes and retries:
+
+- **Regular pass:** every 12h, and once at start.
+- **Early wake:** after each pass the loop also wakes when the next issued cert enters its window (never sooner than one minute). Nothing wakes it for a certificate added or changed at runtime: that waits for the next pass.
+- **Failed attempt:** the n-th consecutive failure waits `min(base * 2^(n-1), 12h)` from when the attempt started, the base being a quarter of the cert's renewal window (5 minutes to 1 hour; 1 hour for a never-issued or 90-day cert). A success resets the count, which lives in memory, and a failed manual renew counts. A pass inside the backoff skips the cert.
+- **Attempt deadline:** every attempt fails after the propagation timeout plus 10 minutes (13 minutes by default), and its TXT records are still cleaned up.
+- **Config load failure:** a pass that cannot load the config is retried every 5 minutes.
+
+**ARI.** When a CA's directory advertises `renewalInfo` (RFC 9773), every pass (early wakes included) polls it per issued cert, over the same HTTP client as the order, and picks a time inside the suggested window. The cert renews at the earlier of that time and the lifetime rule, so ARI only brings a renewal forward. The answer is kept in the cert's `meta.json`, and orders do not send `replaces`.
+
+ARI guards:
+
+- **Same origin:** the `renewalInfo` URL must share the directory's scheme, host and port.
+- **Window:** the suggested window is cut to the cert's own validity.
+- **Age:** a time cannot fire before the cert is `min(72h, lifetime / 3)` old.
+- **Timeouts:** each request times out after 10s, and one transport error skips the other polls against that directory for the pass.
+- **Failures:** a failed renewal-information request keeps the previous answer and is retried an hour later. A failed directory fetch, a client that cannot be built, or a leaf without an authority key identifier is retried on the next pass. None of them is a renewal failure.
+
+**Per-certificate trust.** `acme.caBundle` gives one cert's ACME exchanges (account, order, renewal information) an HTTP client that trusts only that bundle, with the shared client's timeout, redirect and body-size limits. A bundle that does not resolve or parse fails the attempt rather than falling back to the system roots. `acme.profile` is passed on the order when set.
 
 Two challenge types are solved. **DNS-01** writes the `_acme-challenge` TXT
 record through the referenced DNS provider and waits for propagation against a
-public resolver before accepting; it is the only way to prove a wildcard. Six
+public resolver before accepting; it is the only way to prove a wildcard. Seven
 solvers sit behind one `DNSSolver` interface:
 
 - **Cloudflare, DigitalOcean, Hetzner, deSEC**: plain REST clients, one API
@@ -345,7 +400,13 @@ solvers sit behind one `DNSSolver` interface:
   walks up the name with SOA queries when no zone is configured.
 - **`acme-dns`**: one HTTP POST to a joohoi/acme-dns account, reached through a
   CNAME the operator places in the real zone once, so gpm never holds a
-  credential with authority over that zone. **HTTP-01** needs no provider: the manager parks the key
+  credential with authority over that zone.
+- **`webhook`**: one JSON `POST` per TXT record (`present` or `cleanup`) with a
+  bearer token to an endpoint the operator runs, over the hardened outbound
+  client (no redirects, link-local refused). The endpoint must add and remove
+  single values, since an apex plus wildcard order shares one name.
+
+**HTTP-01** needs no provider: the manager parks the key
 authorization in an in-memory token store (`HTTP01Store`, entries expiring with
 the order) which the data plane reads through the one-method
 `dataplane.ACMEChallengeStore` interface: the two packages stay decoupled, the
@@ -528,7 +589,22 @@ families, so an inbound IPv6 client is routed, gated and logged as its own v6
 address with no second listener and no toggle. **Stream hosts** add their own raw
 TCP and/or UDP listeners (one per `listenPort`), reconciled on every reload:
 ports added are opened, ports removed are closed, and a changed route table is
-swapped without dropping the port.
+swapped without dropping the port. A TCP stream pair forwards a half-close: EOF
+from one side shuts only the write side toward the other peer (`CloseWrite`,
+after a TLS `close_notify` in terminate mode), and the pair is closed once both
+directions are done or on any read or write error. After a half-close, a host
+with `idleTimeout` is bounded only by the idle deadline, and a host without it
+resets both peers 60 s after the first half-close.
+
+**Upstream connection pools across reloads** (`internal/dataplane/router.go`).
+Hosts without `timeouts` share one pooled upstream transport that survives
+reloads; a router builds its own pools for a host's cloned transport (`timeouts`
+set), each auth-request provider and each bouncer. Once a reload's new router is
+live, the idle connections of every pool only the replaced router owned are
+closed (`CloseIdleConnections`), which leaves in-flight requests and upgraded
+connections running. A connection handed back by a request still finishing on
+the old router is closed on return, or reaped by the pool's 90 s idle timeout
+if another such request reused the pool meanwhile.
 
 **Inbound PROXY protocol** (`internal/dataplane/proxyproto.go`). When
 `settings.proxyProtocol` is on, every data-plane listener (HTTP, HTTPS, and each
@@ -565,6 +641,11 @@ IP/CIDR and geo dimensions are evaluated (basic auth has no challenge/response o
 a raw stream and is rejected at validation), and the gate runs **before the
 backend dial** (for UDP, once per session), so a denied client never causes an
 upstream socket to exist.
+A new UDP session's slot is reserved under the listener lock and its backend is
+dialled in its own goroutine, so a slow dial (a DNS lookup for a hostname target)
+never holds up the listener's other sessions; datagrams from that client meanwhile
+are queued (bounded by count and bytes) for the session rather than opening a
+second one, and at most 64 dials run at once per listener (8 per source).
 
 **Routing.** An HTTP(S) request is dispatched by `Host` to its compiled handler:
 **proxy hosts** run the middleware chain to a reverse proxy; **redirect hosts**
@@ -735,10 +816,25 @@ writer is bypassed entirely by the hijack, so a WebSocket handshake would
 otherwise leak the exact `Server`/`X-Powered-By` fingerprint every other response
 hides. Hop-by-hop names are refused at validation, so `Connection`/`Upgrade`
 survive and the handshake stays intact, and the `Sec-WebSocket-*` trio is refused
-alongside them (a browser aborts a handshake with no `Sec-WebSocket-Accept`). An
-interim `1xx` is the one response the strip does not sit on: the stdlib forwards
-it through `Got1xxResponse` and then clears the header map, so its headers are
-neither stripped nor carried into the final response.
+alongside them (a browser aborts a handshake with no `Sec-WebSocket-Accept`).
+
+**Interim responses** (`interimTransport` in `internal/dataplane/proxy.go`). The
+stdlib relays an upstream `1xx` (other than `101`) from a `Got1xxResponse` trace
+hook, never through `ModifyResponse`, and the Transport stops bounding interim
+responses once such a hook exists; gpm wraps that hook per request. Each relayed
+interim response is stripped of the host's strip list while its header map still
+holds only the upstream's headers, at most 16 are relayed per request (later ones
+are dropped), and an upstream that sends more than 256 has the exchange aborted
+with the normal `502`.
+
+**Headers middleware on a `101`** (`internal/dataplane/headers.go`). A
+`setResponse`/`removeResponse` rule normally runs when the status is written,
+which a hijacked `101` never does, so the rules ride the request context and
+`ModifyResponse` applies them to the `101` in the same order as for any other
+response (the later-listed middleware wins). `Connection`, `Upgrade`,
+`Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` and `Sec-WebSocket-Extensions`
+are exempt on a `101`, so a rule written for ordinary
+responses cannot break the handshake.
 
 gpm-generated responses have no upstream response at all, so nothing runs on
 them, including the `ErrorHandler`'s `502`/`504`, which never reaches
@@ -772,7 +868,9 @@ pull succeeds one request runs it while the others wait for it (at most the
 bouncer `timeout`, so a hung LAPI never queues them one after another), and a
 failed first pull is retried after a backoff. Range decisions are
 indexed by prefix, and each pull is folded into a copy that is swapped in, so
-lookups never wait on a large set. Verdicts are
+lookups never wait on a large set. In live mode, concurrent requests that would
+send the same lookup share one call (detached from any one request, bounded by
+the bouncer `timeout`). Verdicts are
 cached per client IP with a bounded LRU; a verdict derived from an *error* is
 capped at 5s so an outage cannot pin a long TTL of guesses. `onError` decides
 what an unanswerable lookup means and defaults to **fail-open**: an unreachable
@@ -781,6 +879,14 @@ default for auth. It sits between the access list and auth deliberately: an
 explicit operator allow-list (`allowFrom`, or the access list itself) still wins
 outright over an external feed, and a banned IP never reaches the IdP. Denials
 go through the shared per-host denial counter.
+
+**Path block lists** (`internal/dataplane/pathblock.go`, wired in `chain.go`):
+
+- **What it is.** A path-shape filter, not content inspection: a compiled set of extensions, segment names and globs matched against the cleaned, decoded request path, case-insensitively.
+- **Two sources.** A `type: path-block` middleware a host or location references, and `settings.pathBlock`, the fleet list. The fleet list is installed with `SetPathBlock` and compiled into each proxy host's chain at the next router build, unless the host sets `pathBlock: off`. The synthesized admin edge host (`settings.adminEdge`) is not covered by the fleet list, but a `path-block` middleware named in `adminEdge.middlewares` applies to it, and a hand-written proxy host that fronts the admin panel is covered like any other.
+- **Position.** The fleet list is outermost among the path-block steps, then the referenced middlewares, all just inside the rate limit and ahead of the access list, bouncer and auth. A blocked request never reaches an auth subrequest, a sign-in redirect or the upstream, and spends rate-limit budget like any other request.
+- **Exemption and denial.** `allowFrom` resolves `@list` entries through the same first-match exemption a rate limit uses. A hit is counted with the denial reason `path-block` and rendered through the host's error pages.
+- **References.** A settings write whose `pathBlock.allowFrom` names a missing access list is always refused. An object write that would leave such a reference dangling (deleting the list) is refused too, unless the stored state already fails the check, in which case it is accepted with a warning so the state can be repaired.
 
 **A reference that resolves to nothing fails the host closed.** If a host (or one
 of its locations) names a middleware or access list that does not exist in the
@@ -814,7 +920,7 @@ effect of this defence in depth.
   direct client cannot forge an identity. Forward-auth and auth-request handlers
   re-strip their own header sets as a second layer.
 - **Network exemptions are explicit and IP-rooted, and only as good as
-  `trustedProxies`.** A middleware's `allowFrom` (rate limit, guard, bouncer,
+  `trustedProxies`.** A middleware's `allowFrom` (rate limit, guard, path block, bouncer,
   `auth-request` and `client-cert` auth) is evaluated against the derived client
   IP above (the same value the access list compared), with no per-middleware
   notion of its own. With `trustedProxies` empty that is the raw TCP peer, which

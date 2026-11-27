@@ -52,8 +52,19 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		return fmt.Errorf("certificate %q: dns-01 needs a dns provider solver", cert.Name)
 	}
 
-	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
+	// The order carries no ARI "replaces" field: x/crypto/acme has no option for
+	// it, so ARI is used for polling the renewal window only (see ari.go).
+	var opts []acme.OrderOption
+	if p := cert.ACME.Profile; p != "" {
+		// The library checks the profile against the CA's directory before
+		// sending the order and fails with the profiles the CA does offer.
+		opts = append(opts, acme.WithOrderIssuanceProfile(acme.ProfileName(p)))
+	}
+	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...), opts...)
 	if err != nil {
+		if p := cert.ACME.Profile; p != "" {
+			return fmt.Errorf("authorize order with profile %q: %w", p, err)
+		}
 		return fmt.Errorf("authorize order: %w", err)
 	}
 
@@ -153,7 +164,7 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		// failure is recorded for the next attempt.
 		return fmt.Errorf("issued certificate refused: %w", err)
 	}
-	notAfter, err := leafNotAfter(chainPEM)
+	leaf, err := ParseLeaf(chainPEM)
 	if err != nil {
 		return err
 	}
@@ -161,22 +172,32 @@ func (m *Manager) issue(ctx context.Context, client *acme.Client, cert model.Cer
 		Domains:      domains,
 		DirectoryURL: client.DirectoryURL,
 		IssuedAt:     time.Now().UTC(),
-		NotAfter:     notAfter,
+		NotBefore:    leaf.NotBefore.UTC(),
+		NotAfter:     leaf.NotAfter,
+		Profile:      cert.ACME.Profile,
 	}
 	if err := saveIssued(m.certDir, cert.Name, chainPEM, certKey, meta); err != nil {
 		return fmt.Errorf("persist certificate: %w", err)
 	}
-	log.Info().Str("cert", cert.Name).Time("notAfter", notAfter).Strs("domains", domains).Msg("certificate issued")
+	log.Info().Str("cert", cert.Name).Time("notAfter", leaf.NotAfter).Strs("domains", domains).Msg("certificate issued")
 	return nil
 }
 
 func (m *Manager) cleanup(ctx context.Context, solver DNSSolver, records []challengeRecord) {
+	// The records are removed even when the attempt ran out of time or was
+	// cancelled: the cleanup gets its own short deadline instead of the
+	// attempt's.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
 	for _, r := range records {
 		if err := solver.CleanUp(ctx, r.name, r.value); err != nil {
 			log.Warn().Str("record", r.name).Err(err).Msg("failed to clean up DNS-01 TXT record")
 		}
 	}
 }
+
+// cleanupTimeout bounds the removal of an attempt's TXT records.
+const cleanupTimeout = 2 * time.Minute
 
 func findChallenge(authz *acme.Authorization, typ string) *acme.Challenge {
 	for _, c := range authz.Challenges {

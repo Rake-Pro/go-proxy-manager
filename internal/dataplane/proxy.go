@@ -7,11 +7,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rake-Pro/go-proxy-manager/internal/clientip"
@@ -102,8 +105,9 @@ func (p *bufferPool) Put(b []byte) {
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
-// timeouts is nil for the shared, pooled transport, or a per-host override. ep
-// is the host's compiled errorPages override (nil if it has none); it drives
+// transport is the host's RoundTripper from transportFor (nil means the shared
+// pooled transport). ep is the host's compiled errorPages override (nil if it
+// has none); it drives
 // the custom page for a 502/504 upstream-unreachable response and, when
 // configured, InterceptUpstream replacement of the upstream's own error body.
 // strip is the host's compiled stripResponseHeaders list, applied to the
@@ -113,13 +117,16 @@ func (p *bufferPool) Put(b []byte) {
 // target's path with the inbound one, so the base path is prefixed to every
 // forwarded request with no per-request work. up.HostHeader selects the Host
 // header the upstream sees.
-func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
+func newReverseProxy(up model.Upstream, hostName string, transport http.RoundTripper, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	target := &url.URL{
 		Scheme: up.Scheme,
 		Host:   net.JoinHostPort(up.Host, strconv.Itoa(up.Port)),
 		Path:   strings.TrimSuffix(up.Path, "/"),
 	}
-	return newProxyWith(target, transportFor(timeouts), hostName, identityHeaders, ep, strip, up.HostHeader)
+	if transport == nil {
+		transport = dataplaneTransport
+	}
+	return newProxyWith(target, transport, hostName, identityHeaders, ep, strip, up.HostHeader)
 }
 
 // newGroupReverseProxy builds the terminal handler for a host backed by an
@@ -129,10 +136,10 @@ func newReverseProxy(up model.Upstream, hostName string, timeouts *model.HostTim
 // A member's own upstream.path / upstream.hostHeader are applied per attempt by
 // the groupTransport (which is the only layer that knows which candidate a
 // request actually went to), not here.
-func newGroupReverseProxy(gh *groupHealth, hostName string, timeouts *model.HostTimeouts, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
+func newGroupReverseProxy(gh *groupHealth, hostName string, transport http.RoundTripper, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transportFor(timeouts)}, hostName, identityHeaders, ep, strip, "")
+	return newProxyWith(target, &groupTransport{gh: gh, base: transport}, hostName, identityHeaders, ep, strip, "")
 }
 
 // reassertIdentity re-applies the identity headers gpm itself set on the inbound
@@ -327,12 +334,61 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 			stripUpstreamResponseHeaders(resp, strip)
 			rewriteUpstreamRedirect(resp)
 			interceptUpstreamResponse(resp, ep, hostName)
+			applyUpgradeResponseRules(resp)
 			return nil
 		},
-		Transport:  transport,
+		Transport:  &interimTransport{base: transport, strip: strip},
 		BufferPool: proxyBufPool,
 	}
 	return longLivedProxy(rp)
+}
+
+// maxRelayedInterim is the most interim (1xx other than 101) responses relayed
+// to the client for one request; further ones are dropped. A real 100, 102 or
+// 103 flow sends a handful.
+const maxRelayedInterim = 16
+
+// maxUpstreamInterim is the most interim responses an upstream may send for one
+// request; one more aborts the exchange, which the client sees as a 502.
+const maxUpstreamInterim = 256
+
+var errTooManyInterim = errors.New("upstream sent too many interim (1xx) responses")
+
+// interimTransport filters and bounds the interim responses
+// httputil.ReverseProxy relays. The proxy relays them from a Got1xxResponse
+// trace hook it installs on the outbound request context, which runs before
+// ModifyResponse ever sees the final response, and the Transport stops limiting
+// interim responses once such a hook exists. RoundTrip wraps that hook in place,
+// so each interim response is counted, and stripped of the host's
+// stripResponseHeaders before the proxy copies it out: the map passed to the
+// hook holds only the upstream's headers, so nothing gpm adds is removed.
+type interimTransport struct {
+	base  http.RoundTripper
+	strip []string
+}
+
+func (t *interimTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	trace := httptrace.ContextClientTrace(req.Context())
+	if trace == nil || trace.Got1xxResponse == nil {
+		return t.base.RoundTrip(req)
+	}
+	// The trace is the one the proxy built for this request; the transport
+	// reads the field only after base.RoundTrip starts, so the write is safe.
+	relay := trace.Got1xxResponse
+	var n atomic.Int32
+	trace.Got1xxResponse = func(code int, h textproto.MIMEHeader) error {
+		switch c := n.Add(1); {
+		case c > maxUpstreamInterim:
+			return errTooManyInterim
+		case c > maxRelayedInterim:
+			return nil
+		}
+		for _, k := range t.strip {
+			h.Del(k)
+		}
+		return relay(code, h)
+	}
+	return t.base.RoundTrip(req)
 }
 
 // isUpstreamTimeout reports whether err represents a timeout waiting on the
@@ -619,6 +675,11 @@ type hostHandler struct {
 	upstream  string // scheme://host:port, for debug headers/logging only
 	locations []locationRoute
 
+	// passThrough holds one route per interactive gate that only locations of
+	// this host carry, serving that gate's pass-through paths; empty when there
+	// are none. See locationOnlyGates and route.
+	passThrough []passThroughRoute
+
 	// hsts is the precomputed Strict-Transport-Security header value, or "" when
 	// HSTS is disabled for this host. Emitted only on the HTTPS listener.
 	hsts string
@@ -683,11 +744,29 @@ type hostHandler struct {
 // path is matched on a segment boundary (exact, or prefix followed by "/") so
 // "/reports" does not capture "/reports-evil"; callers pass an already-cleaned
 // path (see normalizeRequestPath) so dot-segments cannot dodge the match.
+//
+// A path no location covers, which would go to the host route, goes to the
+// passThrough route instead when it is a pass-through path of a gate that only
+// a location carries: the sign-in that gate started comes back on that path,
+// and on the host route it would reach the upstream instead of the gate. A
+// path a location covers always stays with that location.
 func (hh *hostHandler) route(path string) (http.Handler, string) {
 	for _, l := range hh.locations {
 		if l.prefix == "/" || path == l.prefix || strings.HasPrefix(path, l.prefix+"/") {
 			return l.handler, l.upstream
 		}
 	}
+	for _, pt := range hh.passThrough {
+		if pt.owned.owns(path) {
+			return pt.handler, hh.upstream
+		}
+	}
 	return hh.handler, hh.upstream
+}
+
+// passThroughRoute is the host's chain with one location-only interactive gate
+// added, used only for the paths that gate owns.
+type passThroughRoute struct {
+	owned   ownedPaths
+	handler http.Handler
 }

@@ -380,60 +380,56 @@ func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.Pi
 	st.Skipped = len(d.skip)
 	st.Untouched = d.untouched
 
-	// live is the ledger as it stands after each successful write, so an error part
-	// way through still leaves gpm owning exactly what it managed to create.
-	live := map[string]model.DNSClaim{}
-	for k, v := range owned {
-		live[k] = v
-	}
-	fail := func(err error) (BackendStatus, map[string]model.DNSClaim) {
-		st.Error = err.Error()
-		st.Managed = len(live)
-		return st, live
-	}
-
-	// Adoptions first: they are ledger-only and cannot fail, and doing them before
-	// any write means a later failure still leaves the pre-existing records claimed
-	// rather than looking unowned (and so re-adoptable, or worse, duplicable).
+	// Adoptions first: they are ledger-only and cannot fail, and the planned
+	// ledger (d.owned) already records them as adoptions.
 	for _, name := range d.adopt {
-		live[name] = model.DNSClaim{Target: apex, Adopted: true}
 		st.Adopted++
 		log.Info().Str("domain", name).Str("target", apex).
 			Msg("dnssync: pihole CNAME already present and correct; adopted as gpm-managed (gpm will never delete it, only release it)")
 	}
+	// A refused retarget, create or delete is recorded and the run goes on, so one
+	// name the resolver will not accept cannot hold back every later write. The
+	// ledger entry of a failed write is set to what the resolver holds afterwards.
+	var failed []string
 	for _, name := range d.retarget {
 		// dnsmasq has no update: a retarget is a delete followed by a create, and the
 		// window in between is one where the record does not exist at all. The
 		// counter is bumped as soon as the DELETE lands, so a run that fails after it
 		// can never report "nothing happened" while having removed a record.
 		if err := c.deleteCname(ctx, state.raw[name]); err != nil {
-			return fail(err)
+			// Nothing changed: the original record and its claim both stand.
+			failed = append(failed, err.Error())
+			keepClaim(d.owned, owned, name)
+			log.Error().Err(err).Str("domain", name).
+				Msg("dnssync: pihole retarget failed: the original record could not be deleted; continuing with the remaining names")
+			continue
 		}
-		delete(live, name)
 		st.Retargeted++
 		if err := c.addCname(ctx, name+","+apex); err != nil {
 			// The record is gone and its replacement did not land. Put the ORIGINAL
-			// back before giving up: a later reconcile would heal this, but until then
-			// the name simply does not resolve, and an outage of unbounded length is
-			// not an acceptable cost for a failed write.
+			// back: a later reconcile would heal this, but until then the name simply
+			// does not resolve, and an outage of unbounded length is not an acceptable
+			// cost for a failed write.
 			if rbErr := c.addCname(ctx, state.raw[name]); rbErr != nil {
 				log.Error().Err(rbErr).Str("domain", name).Str("record", state.raw[name]).
 					Msg("dnssync: pihole retarget failed AND the original record could not be restored; the name is currently unresolved")
-				return fail(fmt.Errorf("pihole: retarget %s: %w (restoring the original record also failed: %v)", name, err, rbErr))
+				failed = append(failed, fmt.Sprintf("pihole: retarget %s: %v (restoring the original record also failed: %v)", name, err, rbErr))
+				// No record stands, so there is nothing to claim; the next run sees
+				// the name missing and creates it.
+				delete(d.owned, name)
+				continue
 			}
-			live[name] = owned[name]
 			log.Error().Err(err).Str("domain", name).Str("target", state.present[name]).
 				Msg("dnssync: pihole retarget failed; the original record was restored")
-			return fail(fmt.Errorf("pihole: retarget %s: %w (the original record was restored)", name, err))
+			failed = append(failed, fmt.Sprintf("pihole: retarget %s: %v (the original record was restored)", name, err))
+			// The original record is back, so its claim from before the run is
+			// what the next run retargets again.
+			keepClaim(d.owned, owned, name)
+			continue
 		}
-		live[name] = model.DNSClaim{Target: apex}
 		log.Info().Str("domain", name).Str("from", state.present[name]).Str("to", apex).
 			Msg("dnssync: pihole CNAME retargeted")
 	}
-	// A refused create or delete is recorded and the run goes on, so one name the
-	// resolver will not accept cannot hold back every later create and every
-	// delete.
-	var failed []string
 	for _, name := range d.create {
 		if err := c.addCname(ctx, name+","+apex); err != nil {
 			failed = append(failed, err.Error())
@@ -461,11 +457,11 @@ func (s *Syncer) syncPihole(ctx context.Context, cfg model.Config, conf model.Pi
 		}
 		st.Deleted++
 	}
-	// The ledger is the planned end state, with every failed create or delete put
-	// back to its claim from before the run - including the names gpm disowned
-	// this run (changed or removed out of band), which leave the ledger without
-	// any record being touched.
-	live = d.owned
+	// The ledger is the planned end state, with every failed write set to what
+	// the resolver holds - including the names gpm disowned this run (changed or
+	// removed out of band), which leave the ledger without any record being
+	// touched.
+	live := d.owned
 
 	st.Managed = len(live)
 	if len(failed) > 0 {

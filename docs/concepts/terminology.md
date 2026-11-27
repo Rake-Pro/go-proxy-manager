@@ -24,7 +24,8 @@ brackets where it differs.
 | **Upstream group** (`upstream-groups/`, UI: **Upstream Groups**) | An ordered set of interchangeable upstreams with health checks and a failover policy. |
 | **Location** | A path prefix inside a proxy host with its own upstream and extra policy. Always at least as restrictive as its host. |
 | **Chain** | The ordered sequence of middlewares applied to one host or location. Fixed order, not the order you listed them: see [Request pipeline](request-pipeline.md). |
-| **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite` or `bouncer`. |
+| **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite`, `bouncer` or `path-block`. |
+| **Path block list** (`settings.pathBlock`, the **fleet list**; or a `type: path-block` middleware) | Extensions, segment names and globs answered with a `404` by default before the access list, auth or the upstream. The fleet list covers every proxy host; a host opts out with `pathBlock: off`. |
 | **Inline block** | An `auth` or `rateLimit` block written directly on a host or location instead of referencing a middleware. Same handler, same chain position. |
 
 ## Access and identity
@@ -33,7 +34,7 @@ brackets where it differs.
 |---|---|
 | **Access list** (`access-lists/`, UI: **Access Lists**) | The gate: ordered IP/CIDR allow-deny rules plus optional GeoIP country rules over the derived client IP. Never abbreviated to "ACL" in gpm. |
 | **Saved filter** (`settings.savedFilters[]`, UI: **Saved** beside a list's filter box) | A named filter query for one admin UI list, stored in settings so every browser offers it. |
-| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a bouncer verdict or one auth mode). Never the access list. |
+| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a path block list, a bouncer verdict or one auth mode). Never the access list. |
 | **Trusted proxy** | A peer whose `X-Forwarded-For` gpm believes when deriving the client IP. Distinct from `proxyProtocol.trustedCIDRs` (who may rewrite the connection address) and `forwardAuth.trustedProxies` (who may assert identity headers). |
 | **Identity provider** (`identity-providers/`, UI: **Identity Providers**), **IdP** | An OIDC issuer, a trusted forward-auth proxy, or an `auth_request` outpost, plus its group-to-role mapping. An IdP on its own has no effect at the proxy listeners until an auth gate references it. |
 | **Forward-auth** | Trusting identity headers (`Remote-User` and friends) asserted by a proxy in front of gpm. |
@@ -54,6 +55,9 @@ brackets where it differs.
 | **Reconcile** | One full-state pass of a reconciler: recompute the desired set from the whole config, compare with reality, apply the difference as one commit. |
 | **Ledger** | A committed record of what gpm owns: `config/dns-ledger.yaml` for DNS records, `config/access-list-sources.yaml` for fetched IP feeds. It is what authorises a deletion. |
 | **Adopted** | A record that already existed and gpm claimed rather than created. An adopted record is released, never deleted or retargeted. |
+| **ACME profile** (`acme.profile`) | A named issuance profile a CA offers in its ACME directory (for example a short-lived one). Not a discovery profile. |
+| **CA preset** (UI: the **CA** picker) | A named ACME directory the certificate wizard and editor offer (Let's Encrypt, ZeroSSL, Google Public CA and others; Custom for any other). UI only: picking one fills `acme.directoryURL`, and nothing in the stored object names the preset. See [CA directories](../reference/config/certificate.md#certificate-ca-directories). |
+| **ARI** | ACME Renewal Information (RFC 9773): the CA tells gpm when it wants a certificate renewed. It can only bring a renewal forward. See [Renewal](../reference/config/certificate.md#renewal). |
 | **Apex target** | The single CNAME target every DNS-sync-managed record points at. Not an ownership marker. |
 | **Freeze** | What a discovery reconciler does when it cannot read its source: no creates, no updates, no deletes, managed hosts left exactly as they are. |
 | **Fail closed** | Refusing rather than admitting when a decision cannot be made. The default everywhere except the bouncer's `onError`. |
@@ -96,7 +100,7 @@ Other views with no config object behind them:
 
 | View | What it shows |
 |---|---|
-| **Overview** | Dashboard: instance health, certificate status, discovery status. Not settings, despite the name. |
+| **Overview** | Dashboard: three panels (this instance, hosts, certificates) whose non-zero counts open the filtered lists, then the Needs attention list of problems. Not settings, despite the name. |
 | **Integrations** | `settings.dnsSync`, `settings.ingressDiscovery`, `settings.dockerDiscovery`, `settings.accessListSync`, `settings.webhooks`, `settings.notifications`. |
 | **Error Pages** | `settings.errorPages` and a host's own override. There is no `error-pages` object kind or API route. |
 | **History** | `git log` over the config repo, through `GET /api/history`. Not stored config. |

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,7 +21,13 @@ import (
 type restAPI struct {
 	name    string // provider name, used in error messages
 	baseURL string
-	client  *http.Client
+	// query, when set, is appended to every request URL but never appears in
+	// an error: a query string can carry a credential.
+	query string
+	// hidePath keeps the request path out of every error as well: a webhook
+	// URL is the operator's own and may carry a credential in its path.
+	hidePath bool
+	client   *http.Client
 	// authorize stamps the provider's auth header onto each request.
 	authorize func(*http.Request)
 }
@@ -59,7 +66,15 @@ func (a *restAPI) do(ctx context.Context, method, path string, body, out any) er
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+path, reader)
+	target := a.baseURL + path
+	if a.query != "" {
+		target += "?" + a.query
+	}
+	if a.hidePath {
+		// From here on path is only used to name the call in an error.
+		path = "the configured url"
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return fmt.Errorf("%s: build request: %w", a.name, err)
 	}
@@ -71,6 +86,12 @@ func (a *restAPI) do(ctx context.Context, method, path string, body, out any) er
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		// The client's *url.Error repeats the whole URL, query and user name
+		// included; the method and path above already say which call failed.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
 		return fmt.Errorf("%s: %s %s: %w", a.name, method, path, err)
 	}
 	defer resp.Body.Close()

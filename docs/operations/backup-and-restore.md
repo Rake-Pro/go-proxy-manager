@@ -53,7 +53,8 @@ shell script invoked by cron doesn't have that gotcha.
 
 **Restore** replaces the *entire* current config, validates the result, and
 commits it as one revision. If the archive doesn't validate (a dangling
-reference, a literal un-placeholdered secret, a corrupt/oversized upload) the
+reference, including one a discovery template or profile names, a literal
+un-placeholdered secret, a corrupt/oversized upload) the
 working tree is rolled back to the pre-restore commit and **nothing is
 committed**: a bad restore attempt is a no-op, not a half-applied one:
 
@@ -88,6 +89,17 @@ revertible with `POST /api/revert` like any other change.
   the reason in [APIToken](../reference/config/api-token.md). Restoring onto
   a fresh instance therefore leaves it with no tokens: re-mint the ones your
   automation needs (backup cron, metrics scrapers) afterwards.
+
+**Symbolic links** (see [Symbolic links](../concepts/config-model.md#symbolic-links)):
+
+- **Backup** archives a link that resolves inside the config directory as the
+  regular file it names. A link that resolves outside it, or not at all, fails
+  the backup with an error naming the file.
+- **Restore** writes regular files only: a symbolic-link or hard-link entry is
+  skipped and logged (`restore: archive entry is a link, not a regular file;
+  skipped`), so its file is missing from the result. A restore never removes
+  or writes a file through a kind directory that links outside the config
+  directory: it is refused instead.
 
 Verify a backup is actually restorable periodically, not just that the cron
 job exits `0`: a `GET`/`POST /api/restore` round trip against a disposable

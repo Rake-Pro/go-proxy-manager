@@ -38,6 +38,10 @@ type AccessEntry struct {
 	// internal-network client (settings.analytics.internalNetworks), else
 	// "external"; empty when no client address was resolved.
 	Source string `json:"source,omitempty"`
+	// Deny is the reason an access-control tier refused the request
+	// ("path-block", "access-list", "rate-limit", "guard", ...; the label set of
+	// the denial counter); empty when no tier refused it.
+	Deny string `json:"deny,omitempty"`
 }
 
 // internalNets is the operator's extra internal networks, shared with the
@@ -286,15 +290,21 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				r.Body = body
 			}
 		}
-		// The analytics note: one small allocation per observed request, only
-		// while a collector is switched on. The tiers write the denial reason and
-		// signature into it; the event below is built after the handler returns.
+		// The request note: one small allocation per observed request, only
+		// while a collector or the access log is switched on. The tiers write the
+		// denial reason and signature into it; the analytics event and the log
+		// entry below are built after the handler returns.
 		sink := analyticsSink()
 		var meta *reqMeta
 		var origPath, origQuery string
-		if sink != nil && sink.Active() {
+		// Active is read once: the collector can be switched on between two
+		// reads, and the event below needs the note this decision allocates.
+		active := sink != nil && sink.Active()
+		if accessLog || active {
 			meta = &reqMeta{}
 			r = withReqMeta(r, meta)
+		}
+		if active {
 			// The classifier must see what the client sent, not what a rewrite or
 			// strip-prefix middleware turned it into.
 			origPath, origQuery = r.URL.Path, r.URL.RawQuery
@@ -396,6 +406,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 				Client:  clientStr,
 				Country: country,
 				Source:  source,
+				Deny:    meta.deny,
 			})
 		}
 
@@ -419,6 +430,9 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		}
 		if source != "" {
 			ev = ev.Str("source", source)
+		}
+		if meta != nil && meta.deny != "" {
+			ev = ev.Str("deny", meta.deny)
 		}
 		if rid != "" {
 			ev = ev.Str("rid", rid)

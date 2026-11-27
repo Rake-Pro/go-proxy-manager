@@ -33,6 +33,10 @@ type fakeCloudflare struct {
 	// failCreateName refuses a create for exactly this name, the way a zone
 	// refuses a CNAME on a name that already holds another record type.
 	failCreateName string
+	// failCreateRecord refuses a create for exactly this "name|content".
+	failCreateRecord string
+	// failDeleteID makes a DELETE fail for exactly this record ID.
+	failDeleteID string
 	// omitResultInfo drops result_info from listing responses, the shape that used
 	// to truncate pagination at page 1.
 	omitResultInfo bool
@@ -99,7 +103,8 @@ func (f *fakeCloudflare) handler() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if (f.failCreateContent != "" && body.Content == f.failCreateContent) || (f.failCreateName != "" && body.Name == f.failCreateName) {
+		if (f.failCreateContent != "" && body.Content == f.failCreateContent) || (f.failCreateName != "" && body.Name == f.failCreateName) ||
+			(f.failCreateRecord != "" && body.Name+"|"+body.Content == f.failCreateRecord) {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":1004,"message":"record create failed"}]}`))
 			return
@@ -117,6 +122,11 @@ func (f *fakeCloudflare) handler() http.Handler {
 		id := r.PathValue("id")
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.failDeleteID != "" && id == f.failDeleteID {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":1004,"message":"record delete failed"}]}`))
+			return
+		}
 		f.writes++
 		f.deleted = append(f.deleted, id)
 		out := f.records[:0]
@@ -591,5 +601,64 @@ func TestCloudflareSkipsNamesOutsideTheZone(t *testing.T) {
 	st := s.Status().Cloudflare
 	if !st.OK || st.Created != 1 || st.Skipped != 2 {
 		t.Fatalf("status = %+v, want one create and two skips", st)
+	}
+}
+
+// A failed retarget no longer ends the run: the remaining retargets, creates and
+// deletes still go ahead, the status reports the failure, and the ledger holds
+// what the zone actually holds for the failed name (the old claim while the old
+// record stands, nothing once no record does).
+func TestCloudflareFailedRetargetContinuesTheRun(t *testing.T) {
+	tests := []struct {
+		name           string
+		fail           func(*fakeCloudflare)
+		wantRetargeted int
+		wantErr        string
+		wantA          string // a.example.com's target afterwards, "" = no record
+		wantLedgerA    string // "" = no claim
+	}{
+		{"delete fails", func(f *fakeCloudflare) { f.failDeleteID = "a" }, 1, "", "old-edge.example.com", "old-edge.example.com"},
+		{"create fails, original restored", func(f *fakeCloudflare) { f.failCreateRecord = "a.example.com|edge.example.com" }, 2, "the original record was restored", "old-edge.example.com", "old-edge.example.com"},
+		{"create and restore fail", func(f *fakeCloudflare) { f.failCreateName = "a.example.com" }, 2, "restoring the original record also failed", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeCloudflare{zoneName: "example.com", zoneID: "zone-1", records: []cfRecord{
+				{ID: "a", Type: "CNAME", Name: "a.example.com", Content: "old-edge.example.com", Comment: ManagedComment},
+				{ID: "b", Type: "CNAME", Name: "b.example.com", Content: "old-edge.example.com", Comment: ManagedComment},
+				{ID: "d", Type: "CNAME", Name: "d.example.com", Content: "edge.example.com", Comment: ManagedComment},
+			}}
+			tc.fail(fake)
+			srv := startCloudflare(t, fake)
+			led := ownsCloudflare("a.example.com", "old-edge.example.com", "b.example.com", "old-edge.example.com", "d.example.com", "edge.example.com")
+			hosts := []model.ProxyHost{publicHost("a", "a.example.com"), publicHost("b", "b.example.com"), publicHost("c", "c.example.com")}
+			s := cloudflareSyncerWith(t, srv, hosts, false, led)
+			if err := s.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			st := s.Status().Cloudflare
+			if st.OK || st.Error == "" || !strings.Contains(st.Error, tc.wantErr) {
+				t.Fatalf("status = %+v, want a failed run mentioning %q", st, tc.wantErr)
+			}
+			if st.Retargeted != tc.wantRetargeted || st.Created != 1 || st.Deleted != 1 {
+				t.Fatalf("status = %+v, want %d retargeted, 1 created, 1 deleted", st, tc.wantRetargeted)
+			}
+			want := []string{"b.example.com|edge.example.com|" + ManagedComment, "c.example.com|edge.example.com|" + ManagedComment}
+			if tc.wantA != "" {
+				want = append(want, "a.example.com|"+tc.wantA+"|"+ManagedComment)
+			}
+			sort.Strings(want)
+			if got := fake.names(); strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Fatalf("records = %v, want %v", got, want)
+			}
+			wantL := []string{"b.example.com", "edge.example.com", "c.example.com", "edge.example.com"}
+			if tc.wantLedgerA != "" {
+				wantL = append(wantL, "a.example.com", tc.wantLedgerA)
+			}
+			wantLedger(t, led.cloudflare(), wantL...)
+			if st.Managed != len(wantL)/2 {
+				t.Fatalf("managed = %d, want %d", st.Managed, len(wantL)/2)
+			}
+		})
 	}
 }

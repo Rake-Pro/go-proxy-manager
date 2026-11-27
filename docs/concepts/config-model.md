@@ -46,13 +46,46 @@ that object is next written (including by an automatic reconciler commit, not
 only an operator save), which makes an unsupported rollback the one case this
 leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollback).
 
+## Symbolic links
+
+gpm reads a symbolic link in the config directory only when it resolves to a
+file inside that directory. The check compares the fully resolved target with
+the fully resolved config directory, so a directory reached through a link works.
+
+| Link | What gpm does |
+|---|---|
+| Resolves inside the config directory (relative or absolute, including a Kubernetes ConfigMap or Secret volume's `..data` indirection) | Read like a regular file |
+| Resolves outside the config directory | Refused |
+| Does not resolve (missing target or a link loop) | Refused |
+
+- **Where it applies.** Every file gpm reads from the tree: `settings.yaml`,
+  both ledgers, every object file, and a kind directory that is itself a link.
+- **At load.** A refused link fails the load the same way an unreadable or
+  invalid file does, naming it, for example `proxy-hosts/app.yaml: symbolic
+  link does not resolve to a file inside the config directory: the link target
+  /srv/other/app.yaml is outside the config directory /data/config`. At start
+  gpm exits; a reload (an API write, an HA follower pull) keeps serving the
+  last loaded config.
+- **On write.** A write through the API never creates a link and never writes
+  through one: a save replaces a link at the object's path with a regular file,
+  and a write into a kind directory that resolves outside the config directory
+  is refused. A revert or restore whose resulting tree holds a refused link is
+  refused and rolled back.
+- **Find them before upgrading.** This lists every link in the config
+  directory that resolves outside it or not at all (GNU `realpath`; set
+  `CONFIG` to the config directory):
+
+```
+d=$(realpath -- "$CONFIG"); find "$d" -path "$d/.git" -prune -o -type l -print | while IFS= read -r l; do t=$(realpath -e -- "$l" 2>/dev/null) || { echo "$l: does not resolve"; continue; }; case "$t/" in "$d"/*) ;; *) echo "$l -> $t";; esac; done
+```
+
 ## Common fields (every object)
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `name` | string | yes | Identity and filename. Lowercase alphanumeric plus `-_.`, must start and end alphanumeric, 1-254 chars. |
 | `displayName` | string | no | Human label for the UI. |
-| `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` is reserved**: see below. (The exact key follows `ingressDiscovery.annotationPrefix`; `gpm.rake.pro` is the default and what every example below uses.) |
+| `labels` | map | no | Arbitrary key/value metadata. **`gpm.rake.pro/managed-by` and `gpm.rake.pro/trusted-proxies-by` are reserved**: see below. (The exact key follows `ingressDiscovery.annotationPrefix`; `gpm.rake.pro` is the default and what every example below uses.) |
 | `tags` | []string | no | Flat, free-form labels for grouping/filtering. On the Proxy Hosts list they render as chips and are matched by the filter box. |
 | `disabled` | bool | no | Keep the object in config but exclude it from the running proxy listeners. |
 
@@ -64,12 +97,25 @@ leniency does not cover cleanly; see [Rollback](../operations/upgrading.md#rollb
 > `Ingress` (or labelled container) derives it. Removing the label is the supported
 > way to adopt a discovered host permanently; adding it is never the way to give
 > one away.
+>
+> `gpm.rake.pro/trusted-proxies-by` (value `ingress-discovery` or `docker-discovery`)
+> is written by the reconciler on a host whose `trustedProxies` a template stamped.
+> Removing it by hand turns that value into the operator's own, which is then kept
+> when the template stops setting the key. gpm recognises any label whose key ends in
+> `/trusted-proxies-by` with one of those two values as the marker, whatever its prefix,
+> and rewrites it under the current prefix the next time it writes the host.
 
-> **A managed host is not editable by hand: every edit besides `disabled` and
-> `maintenance` is reverted on the next poll.** Discovery derives the whole object from the
+> **A managed host is not editable by hand: every edit besides `disabled`,
+> `maintenance`, hand-added tags and an unmarked `trustedProxies` is reverted on the
+> next poll.** Discovery derives the whole object from the
 > template and the `Ingress` and writes it back whenever it differs from what is
-> stored, so an edited `displayName`, added `tags`, `timeouts`, `locations` or
-> `robotsNoIndex` all survive at most until the next reconcile (default 60s).
+> stored, so an edited `displayName`, `timeouts`, `locations` or
+> `robotsNoIndex` survives at most until the next reconcile (default 60s).
+>
+> **Two more exceptions are carried forward.** Tags added by hand are kept (the
+> template's tags come first). A `trustedProxies` set by hand is kept while the
+> template leaves the key unset, on a host without the `gpm.rake.pro/trusted-proxies-by`
+> label; a value a template stamped carries that label and follows the template.
 >
 > **`disabled: true` is the exception: it is operator-owned state.** Discovery
 > honours an operator-set `disabled` and never clears it itself: hand-disabling a

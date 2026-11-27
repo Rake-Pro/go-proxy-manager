@@ -62,6 +62,9 @@ nav:
           - Add an HTTPS host: how-to/add-https-host.md
           - Wildcard over DNS-01 (Cloudflare): how-to/dns-01-cloudflare.md
           - DNS-01 for any nameserver: how-to/generic-dns01-rfc2136-acme-dns.md
+          - Certificates from a private step-ca: how-to/step-ca.md
+          - DNS without an API: how-to/dns-without-api.md
+          - DNS-01 through your own endpoint: how-to/dns-webhook.md
       - Authentication:
           - Admin SSO (OIDC): how-to/admin-oidc-sso.md
           - Per-host SSO: how-to/per-host-sso.md
@@ -69,6 +72,8 @@ nav:
           - mTLS client certificates: how-to/mtls-client-certs.md
           - TOTP for the local admin: how-to/totp.md
           - Migrate access-list basic auth: how-to/migrate-basic-auth.md
+      - Traffic filtering:
+          - Block scanner paths: how-to/block-scanner-paths.md
       - Automation:
           - DNS sync: how-to/dns-sync.md
           - Kubernetes Ingress discovery: how-to/expose-k8s-ingress.md
@@ -101,6 +106,7 @@ nav:
               - Client limits: reference/config/settings/client-limits.md
               - TLS: reference/config/settings/tls.md
               - Security headers: reference/config/settings/security-headers.md
+              - Path block list: reference/config/settings/path-block.md
               - Error pages: reference/config/settings/error-pages.md
               - Maintenance mode: reference/config/settings/maintenance.md
               - Analytics: reference/config/settings/analytics.md

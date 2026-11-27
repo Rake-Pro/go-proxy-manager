@@ -143,6 +143,10 @@
     "text": "Extra header names removed from proxied upstream responses on this host, on top of the fleet strip list. The two lists are unioned.",
     "doc": "reference/config/proxy-host.md#proxy-host-strip-response-headers"
   },
+  "proxyHost.pathBlock": {
+    "text": "inherit (the default) applies the fleet path block list from Settings to this host. off removes only the fleet list from this host, for an application that serves those paths on purpose; a path-block middleware attached to the host or a location still applies.",
+    "doc": "reference/config/proxy-host.md#proxy-host-path-block"
+  },
   "proxyHost.trustedProxies.mode": {
     "text": "Whether this host inherits the fleet trusted-proxy list, trusts nobody, or replaces it with its own. A custom list replaces the fleet list, it never extends it.",
     "doc": "reference/config/proxy-host.md#proxy-host-trusted-proxies"
@@ -379,6 +383,14 @@
     "text": "The base64url HMAC key the CA issued alongside the key identifier. Use a ${ENV:...} or ${FILE:...} placeholder so no secret is committed.",
     "doc": "reference/config/certificate.md#certificate-acme-eab"
   },
+  "certificate.acme.profile": {
+    "text": "The CA issuance profile every order of this certificate asks for, for example a short-lived one. 1 to 64 letters, digits, _ or -. A CA that does not advertise this profile fails the order, and changing it on an issued certificate renews it at the next pass.",
+    "doc": "reference/config/certificate.md#certificate-acme-profile"
+  },
+  "certificate.acme.caBundle": {
+    "text": "Trust anchors for this certificate's ACME directory, as inline PEM CERTIFICATE blocks or a ${FILE:...} / ${ENV:...} placeholder, at most 65536 bytes. When set it replaces the system roots for every exchange with this CA (account, order, renewal information); a bundle that does not resolve or parse fails the renewal, with no fallback. Not a secret: stored and shown as written. Setting or changing it through the API needs the admin scope, like directoryURL and eab.",
+    "doc": "reference/config/certificate.md#certificate-acme-ca-bundle"
+  },
   "certificate.custom.certFile": {
     "text": "The full-chain PEM file, relative to the certificate store on the gpm host. There is no upload here; the file must already exist.",
     "doc": "reference/config/certificate.md#certificate-custom"
@@ -452,7 +464,7 @@
     "doc": "how-to/mtls-client-certs.md#issuance-records-expiry-warnings-and-renewal"
   },
   "dnsProvider.provider": {
-    "text": "Which DNS API gpm talks to. The four token providers authenticate with a single API token; rfc2136 and acme-dns take a typed form instead.",
+    "text": "Which DNS API gpm talks to. The four token providers authenticate with a single API token; rfc2136, acme-dns and webhook (your own HTTP endpoint) take a typed form instead.",
     "doc": "reference/config/dns-provider.md#dns-provider-provider"
   },
   "dnsProvider.config": {
@@ -492,11 +504,11 @@
     "doc": "reference/config/dns-provider.md#dns-provider-config-timeout"
   },
   "dnsProvider.config.baseURL": {
-    "text": "The API root of your acme-dns server. Must be an http or https URL.",
+    "text": "The API root of your acme-dns server: an http or https URL, stored and shown as written, or a ${ENV:...} / ${FILE:...} placeholder.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-base-url"
   },
   "dnsProvider.config.username": {
-    "text": "The username from the acme-dns /register response.",
+    "text": "The username from the acme-dns /register response. A secret: use an ${ENV:...} or ${FILE:...} placeholder.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-username"
   },
   "dnsProvider.config.password": {
@@ -506,6 +518,22 @@
   "dnsProvider.config.subdomain": {
     "text": "The subdomain from the acme-dns /register response. This is what your zone's permanent CNAME points at.",
     "doc": "reference/config/dns-provider.md#dns-provider-config-subdomain"
+  },
+  "dnsProvider.config.allowInsecureLocal": {
+    "text": "Allows a baseURL whose host is a loopback address, for an acme-dns running beside gpm. Left as loaded, the stored value (yes, on, false, a placeholder) is saved as written; switched on it saves \"true\", switched off it removes the key. Off, a loopback literal is refused at write time; link-local, unspecified and multicast addresses are refused either way.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-allow-insecure-local"
+  },
+  "dnsProvider.config.url": {
+    "text": "The endpoint gpm POSTs every present and cleanup request to, path and query kept. Not a secret: stored and shown as written, so a URL that itself carries a credential in its path or query belongs in an ${ENV:...} or ${FILE:...} placeholder; user info (user:password@) is refused. http or https; a loopback literal is refused unless allowed below, link-local always, and redirects are never followed, so the token cannot reach another host.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-url"
+  },
+  "dnsProvider.config.token": {
+    "text": "Sent as Authorization: Bearer <token> on every request. Your endpoint must check it. Use an ${ENV:...} or ${FILE:...} placeholder so it is not committed.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-token"
+  },
+  "dnsProvider.config.webhook.allowInsecureLocal": {
+    "text": "Allows a url whose host is a loopback address, for an endpoint running beside gpm. Left as loaded, the stored value (yes, on, false, a placeholder) is saved as written; switched on it saves \"true\", switched off it removes the key. Off, a loopback literal is refused at write time; link-local, unspecified and multicast addresses are refused either way.",
+    "doc": "reference/config/dns-provider.md#dns-provider-config-allow-insecure-local"
   },
   "identityProvider.type": {
     "text": "How this provider asserts identity: an OIDC redirect flow, headers from a trusted proxy, or a subrequest to an external outpost.",
@@ -596,7 +624,7 @@
     "doc": "reference/config/identity-provider.md#identity-provider-role-mapping"
   },
   "middleware.type": {
-    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.",
+    "text": "What this middleware does. The chain order is fixed regardless of type: rate limit, path block, access list, bouncer, sign-in, guard, headers, rewrite, then the upstream.",
     "doc": "reference/config/middleware.md"
   },
   "middleware.auth.identityProvider": {
@@ -750,6 +778,30 @@
   "middleware.bouncer.stream": {
     "text": "CrowdSec only: pull the whole decision set once and then deltas, so each request is a local lookup with no call to the API.",
     "doc": "reference/config/middleware.md"
+  },
+  "middleware.pathBlock.extensions": {
+    "text": "File extensions with the leading dot (.php, .env, .tar.gz), blocked wherever this middleware is attached. One matches when ANY path segment ends with it, not only the last, so /a.php/extra is blocked too, and a segment that is the extension alone (/.env) matches as well. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/middleware.md#middleware-path-block-extensions"
+  },
+  "middleware.pathBlock.names": {
+    "text": "Whole path segments that are blocked when any segment of the path equals one, at any depth: .git also blocks /app/.git/config. This is how to block everything under a directory. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/middleware.md#middleware-path-block-names"
+  },
+  "middleware.pathBlock.globs": {
+    "text": "path.Match patterns over the whole decoded path, each starting with /. * and ? never match / and there is no **: block a directory at any depth with a Names entry. A trailing / on the path is ignored and a pattern other than / must not end with one. Case-insensitive, so write [...] classes in lower case. Where a list with globs applies, a path longer than 4096 bytes counts as listed. At most 64 entries and 2048 bytes in total.",
+    "doc": "reference/config/middleware.md#middleware-path-block-globs"
+  },
+  "middleware.pathBlock.allowFrom": {
+    "text": "Clients the block does not apply to. @name exempts a client whose first matching rule in that access list is an allow rule, the same test a rate limit's exemption uses; a client whose address cannot be resolved is never exempt.",
+    "doc": "reference/config/middleware.md#middleware-path-block-allow-from"
+  },
+  "middleware.pathBlock.denyStatus": {
+    "text": "The status a blocked request gets, 400 to 599. Blank means 404, so a blocked path answers like one that does not exist.",
+    "doc": "reference/config/middleware.md#middleware-path-block-deny-status"
+  },
+  "middleware.pathBlock.denyWith": {
+    "text": "error-page (the default) renders the host's custom error page for the status when one exists; plain always writes the bare status text.",
+    "doc": "reference/config/middleware.md#middleware-path-block-deny-with"
   },
   "middleware.rewrite.replacePath": {
     "text": "Exact-match rules: the request path must equal the key, and is replaced by the value.",
@@ -951,6 +1003,30 @@
     "text": "Fleet-default header names removed from proxied upstream responses. Only what the upstream sent is touched, never a header gpm adds.",
     "doc": "reference/config/settings/security-headers.md#strip-response-headers-section"
   },
+  "settings.pathBlock.extensions": {
+    "text": "File extensions with the leading dot (.php, .env, .tar.gz), blocked on every proxy host that has not turned the fleet list off. One matches when ANY path segment ends with it, not only the last, so /a.php/extra is blocked too, and a segment that is the extension alone (/.env) matches as well. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-extensions"
+  },
+  "settings.pathBlock.names": {
+    "text": "Whole path segments that are blocked when any segment of the path equals one, at any depth: .git also blocks /app/.git/config. This is how to block everything under a directory. Case-insensitive; at most 256 entries.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-names"
+  },
+  "settings.pathBlock.globs": {
+    "text": "path.Match patterns over the whole decoded path, each starting with /. * and ? never match / and there is no **: block a directory at any depth with a Names entry. A trailing / on the path is ignored and a pattern other than / must not end with one. Case-insensitive, so write [...] classes in lower case. Where a list with globs applies, a path longer than 4096 bytes counts as listed. At most 64 entries and 2048 bytes in total.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-globs"
+  },
+  "settings.pathBlock.allowFrom": {
+    "text": "Clients the block does not apply to. @name exempts a client whose first matching rule in that access list is an allow rule, the same test a rate limit's exemption uses; a client whose address cannot be resolved is never exempt. A named list must exist, and cannot be deleted while this names it.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-allow-from"
+  },
+  "settings.pathBlock.denyStatus": {
+    "text": "The status a blocked request gets, 400 to 599. Blank means 404, so a blocked path answers like one that does not exist.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-deny-status"
+  },
+  "settings.pathBlock.denyWith": {
+    "text": "error-page (the default) renders the host's custom error page for the status when one exists; plain always writes the bare status text.",
+    "doc": "reference/config/settings/path-block.md#settings-path-block-deny-with"
+  },
   "settings.proxyProtocol.enabled": {
     "text": "Reads the real client address out of the HAProxy PROXY protocol header on the HTTP and TCP stream listeners, honoured only from the trusted peers below.",
     "doc": "reference/config/settings/proxy-protocol.md#settings-proxy-protocol-enabled"
@@ -1111,6 +1187,14 @@
     "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-robots-no-index"
   },
+  "settings.ingressDiscovery.template.pathBlock": {
+    "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
+    "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-path-block"
+  },
+  "settings.ingressDiscovery.template.trustedProxies": {
+    "text": "The trusted proxies of every host this template or profile derives, in the three states of a proxy host's own. Trust nobody ([]) or a list: stamped onto every derived host, replacing the fleet list there, and the host is labelled <prefix>/trusted-proxies-by; a hand edit of a stamped value follows the template. Not set: discovery does not own the field. A value set by hand on a host is kept, a value the template stamped is removed along with the label, and a new host uses the fleet list in Settings.",
+    "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-trusted-proxies"
+  },
   "settings.ingressDiscovery.template.middlewares": {
     "text": "Middlewares applied, in order, to every derived host.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-middlewares"
@@ -1128,7 +1212,7 @@
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-timeouts"
   },
   "settings.ingressDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
+    "text": "Tags stamped onto every derived host, for grouping and filtering in the host list; they have no effect on how a host is served. A reconcile puts these first and keeps the tags added to a host by hand. A template tag removed by hand from a host comes back at the next reconcile, and a tag dropped from the template here is removed from the hosts unless gpm restarted in between.",
     "doc": "reference/config/settings/ingress-discovery.md#settings-ingress-discovery-template-tags"
   },
   "settings.ingressDiscovery.template.allowedDomainSuffixes": {
@@ -1211,6 +1295,10 @@
     "text": "Forwards to the host-published port instead of the container IP. Use it when gpm runs on the Docker host rather than in a shared network.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-use-published-ports"
   },
+  "settings.dockerDiscovery.allowLinkLocal": {
+    "text": "Off by default: a link-local address is only reachable on the container's own link. Ignored with Use published ports.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-allow-link-local"
+  },
   "settings.dockerDiscovery.includeStopped": {
     "text": "Lists non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-include-stopped"
@@ -1231,6 +1319,14 @@
     "text": "Sends X-Robots-Tag: noindex, nofollow on every derived host, asking search engines not to index them.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
+  "settings.dockerDiscovery.template.pathBlock": {
+    "text": "off keeps the fleet path block list away from every host this template or profile derives; inherit (the default) applies it. Set it here rather than on a derived host: a hand edit there is rebuilt away at the next reconcile.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
+  },
+  "settings.dockerDiscovery.template.trustedProxies": {
+    "text": "The trusted proxies of every host this template or profile derives, in the three states of a proxy host's own. Trust nobody ([]) or a list: stamped onto every derived host, replacing the fleet list there, and the host is labelled <prefix>/trusted-proxies-by; a hand edit of a stamped value follows the template. Not set: discovery does not own the field. A value set by hand on a host is kept, a value the template stamped is removed along with the label, and a new host uses the fleet list in Settings.",
+    "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
+  },
   "settings.dockerDiscovery.template.timeouts": {
     "text": "Connect and read timeouts, in seconds, for derived hosts. Blank keeps the shared pooled transport.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
@@ -1248,7 +1344,7 @@
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.tags": {
-    "text": "Tags applied to every derived host, for grouping and filtering in the host list. They have no effect on how a host is served.",
+    "text": "Tags stamped onto every derived host, for grouping and filtering in the host list; they have no effect on how a host is served. A reconcile puts these first and keeps the tags added to a host by hand. A template tag removed by hand from a host comes back at the next reconcile, and a tag dropped from the template here is removed from the hosts unless gpm restarted in between.",
     "doc": "reference/config/settings/docker-discovery.md#settings-docker-discovery-template"
   },
   "settings.dockerDiscovery.template.allowedDomainSuffixes": {
@@ -1288,7 +1384,7 @@
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.url": {
-    "text": "The absolute URL each event is POSTed to.",
+    "text": "The absolute URL each event is POSTed to. Or a ${ENV:...} or ${FILE:...} placeholder resolved at send time.",
     "doc": "reference/config/settings/webhooks.md#settings-webhooks"
   },
   "settings.webhooks.secret": {
@@ -1316,7 +1412,7 @@
     "doc": "reference/config/settings/notifications.md#settings-notifications-targets-type"
   },
   "settings.notifications.targets.url": {
-    "text": "The absolute endpoint: an ntfy topic URL, a Discord webhook URL, or any endpoint for generic.",
+    "text": "The absolute endpoint: an ntfy topic URL, a Discord webhook URL, or any endpoint for generic. Or a ${ENV:...} or ${FILE:...} placeholder resolved at send time.",
     "doc": "reference/config/settings/notifications.md#settings-notifications-targets-url"
   },
   "settings.notifications.targets.secret": {

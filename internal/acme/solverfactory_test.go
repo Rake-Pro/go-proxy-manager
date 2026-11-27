@@ -29,6 +29,10 @@ func TestDefaultNewSolverEveryKnownProvider(t *testing.T) {
 			"password":  "pass",
 			"subdomain": "sub",
 		},
+		model.DNSProviderWebhook: {
+			"url":   "https://dns-hook.example.com/acme",
+			"token": "${ENV:GPM_TEST_DNS_TOKEN}",
+		},
 	}
 	for _, name := range model.KnownDNSProviders {
 		t.Run(name, func(t *testing.T) {
@@ -111,6 +115,16 @@ func TestDefaultNewSolverErrors(t *testing.T) {
 			p:       model.DNSProvider{Provider: model.DNSProviderACMEDNS, Config: map[string]model.Secret{"baseURL": "https://acme-dns.example.com", "username": "u", "password": "p"}},
 			wantErr: "subdomain is required",
 		},
+		{
+			name:    "webhook missing token",
+			p:       model.DNSProvider{Provider: model.DNSProviderWebhook, Config: map[string]model.Secret{"url": "https://dns-hook.example.com/acme"}},
+			wantErr: "webhook: token is required",
+		},
+		{
+			name:    "webhook token placeholder unresolved",
+			p:       model.DNSProvider{Provider: model.DNSProviderWebhook, Config: map[string]model.Secret{"url": "https://dns-hook.example.com/acme", "token": "${ENV:GPM_TEST_UNSET_WEBHOOK_TOKEN}"}},
+			wantErr: "webhook token",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,5 +136,52 @@ func TestDefaultNewSolverErrors(t *testing.T) {
 				t.Errorf("defaultNewSolver() = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestAllowInsecureLocalPlaceholder: every DNS provider config value is a
+// Secret and an API write refuses a literal one, so allowInsecureLocal has to
+// work as a placeholder: resolving to "true" turns it on, anything else does
+// not, and a literal in a hand-edited file keeps working.
+func TestAllowInsecureLocalPlaceholder(t *testing.T) {
+	providers := map[string]map[string]model.Secret{
+		model.DNSProviderACMEDNS: {"baseURL": "http://127.0.0.1:8053", "username": "u", "password": "p", "subdomain": "s"},
+		model.DNSProviderWebhook: {"url": "http://127.0.0.1:8053/hook", "token": "t"},
+	}
+	cases := []struct {
+		name, flag, env string
+		want            string // empty: accepted
+	}{
+		{"placeholder resolving to true", "${ENV:GPM_TEST_ALLOW_LOCAL}", "true", ""},
+		{"placeholder resolving to yes", "${ENV:GPM_TEST_ALLOW_LOCAL}", "yes", ""},
+		{"placeholder resolving to false", "${ENV:GPM_TEST_ALLOW_LOCAL}", "false", "points at a loopback address"},
+		{"placeholder resolving to junk", "${ENV:GPM_TEST_ALLOW_LOCAL}", "sure", "points at a loopback address"},
+		{"placeholder not set", "${ENV:GPM_TEST_ALLOW_LOCAL_UNSET}", "", `allowInsecureLocal: secret env var "GPM_TEST_ALLOW_LOCAL_UNSET" is not set`},
+		{"literal true", "true", "", ""},
+		{"absent", "", "", "points at a loopback address"},
+	}
+	for provider, base := range providers {
+		for _, tc := range cases {
+			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+				t.Setenv("GPM_TEST_ALLOW_LOCAL", tc.env)
+				cfg := map[string]model.Secret{}
+				for k, v := range base {
+					cfg[k] = v
+				}
+				if tc.flag != "" {
+					cfg["allowInsecureLocal"] = model.Secret(tc.flag)
+				}
+				_, err := defaultNewSolver(model.DNSProvider{Provider: provider, Config: cfg})
+				if tc.want == "" {
+					if err != nil {
+						t.Errorf("defaultNewSolver() = %v, want accepted", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("defaultNewSolver() = %v, want %q", err, tc.want)
+				}
+			})
+		}
 	}
 }

@@ -15,7 +15,8 @@
 //     this subsystem's managed-by label pair are created, updated or deleted; a
 //     hand-written host with the same name, or one already serving a domain the
 //     derived host wants, is skipped with a warning and never overwritten.
-//   - Operator-owned state (maintenance, a hand-set disabled) is carried
+//   - Operator-owned state (maintenance, a hand-set disabled, trustedProxies
+//     when the template does not set it, tags added by hand) is carried
 //     forward across a reconcile rather than derived.
 //   - A source item that cannot be derived PROTECTS its existing host from
 //     deletion, so one bad manifest or label edit cannot take a service
@@ -44,6 +45,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -90,10 +92,17 @@ type Ownership struct {
 	// called and may be nil.
 	Migrate bool
 	// HasStaleManaged/HasStaleDisabled report a managed-by / disabled-by label
-	// under some other prefix; StripStale deletes such labels in place.
+	// under some other prefix; StripStale deletes such labels, and stale-prefix
+	// trusted-proxies-by markers, in place.
 	HasStaleManaged  func(map[string]string) bool
 	HasStaleDisabled func(map[string]string) bool
 	StripStale       func(map[string]string)
+
+	// TrustedProxiesByKey is the CURRENT-prefix key of the marker that a host's
+	// trustedProxies was stamped from its template (model.TrustedProxiesByLabel),
+	// written with Value. Empty disables the marker: no host is ever treated as
+	// stamped, and none is marked.
+	TrustedProxiesByKey string
 
 	// Unwritable reports a stored host the store will refuse to rewrite (its
 	// file has keys from a newer gpm; see store.AutoWriteRefused). Such a host
@@ -107,6 +116,13 @@ type Ownership struct {
 	// stored host's domains when its source cannot be derived; nil skips that
 	// check.
 	DomainAllowed func(tmpl model.IngressHostTemplate, domain string) bool
+
+	// Stamped is the tag memory of the previous applied pass (the Result.Stamped
+	// of that plan), or nil when there is none, as on the first pass of a
+	// process. Plan only reads it; the memory for the next pass comes back in
+	// Result.Stamped. Like Unwritable it is runtime state the caller supplies
+	// per pass, not a projection of settings.
+	Stamped StampedTags
 }
 
 // Item is one source object, already derived by the caller.
@@ -158,10 +174,44 @@ type HostResult struct {
 	Reason string
 }
 
+// StampedTags is a reconciler's memory of the template tags it stamped onto
+// each managed host at its previous pass, keyed by host name. It is what tells
+// a tag the template dropped (stamped last pass, not in the template now) from
+// one an operator added by hand (never stamped). It lives in memory only: no
+// marker is stored on the host, so a fresh process starts with none and treats
+// nothing as stale.
+type StampedTags map[string][]string
+
+// Unwritten returns the memory to keep after a plan whose writer reported an
+// empty commit with no error: the store may have dropped some or all of the
+// upserts, so for every host in upserts the previous pass's entry is kept (or
+// none, when there was none) instead of s's. Hosts the plan left unchanged
+// keep s's entry. Neither s nor prev is modified.
+func (s StampedTags) Unwritten(prev StampedTags, upserts []model.ProxyHost) StampedTags {
+	out := make(StampedTags, len(s))
+	for name, tags := range s {
+		out[name] = tags
+	}
+	for _, h := range upserts {
+		if old, ok := prev[h.Name]; ok {
+			out[h.Name] = slices.Clone(old)
+		} else {
+			delete(out, h.Name)
+		}
+	}
+	return out
+}
+
 // Result is the whole plan, before anything is written.
 type Result struct {
 	Upserts []model.ProxyHost
 	Deletes []string
+
+	// Stamped is the tag memory to pass to the next Plan once this one has been
+	// applied: the template tags of every host created, updated, restamped or
+	// left unchanged, the previous entry of every managed host this plan kept
+	// as stored (frozen, held, skipped), and nothing for a deleted host.
+	Stamped StampedTags
 
 	Discovered   int
 	Created      int
@@ -202,12 +252,96 @@ func (o Ownership) OperatorDisabled(cur model.ProxyHost) bool {
 	return true
 }
 
+// TrustedProxiesStamped reports whether a managed host's trustedProxies was
+// stamped by discovery from a template rather than set by an operator: it
+// carries a trusted-proxies-by marker (model.IsTrustedProxiesByLabel) under
+// ANY prefix and with EITHER reconciler's value, whatever the migrate switch
+// says. That is wider than how managed-by is recognised on purpose: an
+// operator who relabelled managed-by by hand (a prefix change by
+// search-and-replace, or a host moved to the other reconciler) leaves an old
+// or foreign marker behind, and reading it as "no marker" would keep a value a
+// template granted for good. Recognising it can only clear a value.
+func (o Ownership) TrustedProxiesStamped(h model.ProxyHost) bool {
+	if o.TrustedProxiesByKey == "" {
+		return false
+	}
+	for k, v := range h.Labels {
+		if model.IsTrustedProxiesByLabel(k, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedProxiesFor returns the trustedProxies a reconciled host carries, and
+// whether it carries the stamped marker with it. derived is the derived host's
+// value, non-nil exactly when the resolved template sets the key.
+//
+//   - Template sets it: the template's value, marked. A derived value equal to
+//     the stored one returns the stored pointer, so a pointer to a nil slice
+//     and one to an empty slice (the same YAML) never count as a change.
+//   - Template leaves it unset, stored host marked: the value was discovery's,
+//     so it goes, marker and all. Without this a host moved to a profile that
+//     sets no trustedProxies, or whose template dropped the key, would keep a
+//     trust no profile configures any more.
+//   - Template leaves it unset, stored host unmarked: the value is the
+//     operator's and is carried forward, like maintenance.
+//
+// An operator who edits trustedProxies by hand on a marked host cannot be told
+// apart from the stamp: such a host follows its template, and loses the value
+// when the template stops setting it. The operator-owned case is a host
+// without the marker.
+func (o Ownership) trustedProxiesFor(cur model.ProxyHost, derived *[]string) (*[]string, bool) {
+	if derived != nil {
+		if cur.TrustedProxies != nil && slices.Equal(*cur.TrustedProxies, *derived) {
+			return cur.TrustedProxies, true
+		}
+		return derived, true
+	}
+	if o.TrustedProxiesStamped(cur) {
+		return nil, false
+	}
+	return cur.TrustedProxies, false
+}
+
+// withTrustedProxiesMarker returns labels with every trusted-proxies-by
+// marker removed (any prefix, either reconciler's value, as
+// TrustedProxiesStamped reads them) and, when on, the current-prefix marker
+// with this subsystem's value set, so a write never leaves an old or foreign
+// marker behind. labels is never modified: it may be a stored host's map,
+// which the caller's config still shares.
+func (o Ownership) withTrustedProxiesMarker(labels map[string]string, on bool) map[string]string {
+	if o.TrustedProxiesByKey == "" {
+		return labels
+	}
+	var out map[string]string
+	for k, v := range labels {
+		if model.IsTrustedProxiesByLabel(k, v) && !(on && k == o.TrustedProxiesByKey && v == o.Value) {
+			if out == nil {
+				out = cloneLabels(labels)
+			}
+			delete(out, k)
+		}
+	}
+	if on && labels[o.TrustedProxiesByKey] != o.Value {
+		if out == nil {
+			out = cloneLabels(labels)
+		}
+		out[o.TrustedProxiesByKey] = o.Value
+	}
+	if out == nil {
+		return labels
+	}
+	return out
+}
+
 // Plan computes the whole reconcile without performing any I/O, which is what
 // makes every ownership and freeze rule directly testable. items must be the
 // COMPLETE derived set from a successful listing: an incomplete one read as
 // complete is precisely what would delete managed hosts that should be kept.
 func Plan(cfg model.Config, own Ownership, items []Item) Result {
-	var p Result
+	p := Result{Stamped: StampedTags{}}
+	stamped := own.Stamped
 
 	current := map[string]model.ProxyHost{} // every proxy host, by name
 	managed := map[string]model.ProxyHost{} // only the ones this subsystem owns
@@ -217,6 +351,23 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			managed[h.Name] = h
 		}
 	}
+	// Redirect, parked and stream hosts share the proxy-host name space (the
+	// config validator rejects a duplicate host name across all of them), so a
+	// derived host with one of their names could never be written.
+	otherHost := map[string]string{}
+	for _, h := range cfg.RedirectHosts {
+		otherHost[h.Name] = "redirect host"
+	}
+	for _, h := range cfg.ParkedHosts {
+		otherHost[h.Name] = "parked host"
+	}
+	for _, h := range cfg.StreamHosts {
+		otherHost[h.Name] = "stream host"
+	}
+	// Ingress discovery stamps the profile's upstream onto every derived host;
+	// Docker discovery derives it per container and ignores the profile's, so
+	// comparing it there would report every stored host as differing.
+	templateUpstream := own.Value == model.ManagedByIngressDiscovery
 
 	desired := map[string]model.ProxyHost{}
 	source := map[string]string{}
@@ -238,8 +389,21 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 
 	// staleFor reports whether a stored managed host differs from what tmpl
 	// renders today: in its chain, or in a stored domain tmpl no longer allows.
-	staleFor := func(cur model.ProxyHost, tmpl model.IngressHostTemplate) (chain, domain bool) {
-		chain = ChainDiffers(cur, tmpl)
+	// derived is the freshly derived host when there is one: the dns policy is
+	// the profile's default overridden per source object, so it can only be
+	// compared against a derive, never against the template alone.
+	staleFor := func(cur model.ProxyHost, tmpl model.IngressHostTemplate, derived *model.ProxyHost) (chain, domain bool) {
+		chain = ChainDiffers(cur, tmpl, templateUpstream)
+		// A trustedProxies value discovery stamped is part of the chain even when
+		// tmpl no longer sets the key: what tmpl renders then is no value at all.
+		// ChainDiffers cannot see that (it knows nothing of the marker), so it is
+		// checked here.
+		if tmpl.TrustedProxies == nil && cur.TrustedProxies != nil && own.TrustedProxiesStamped(cur) {
+			chain = true
+		}
+		if derived != nil && dnsOf(cur.DNS) != dnsOf(derived.DNS) {
+			chain = true
+		}
 		for _, d := range cur.Domains {
 			if own.DomainAllowed != nil && !own.DomainAllowed(tmpl, model.NormalizeHostname(d)) {
 				domain = true
@@ -259,6 +423,10 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		// through it, the config the caller still holds - out from under the
 		// read.
 		off.Labels = cloneLabels(cur.Labels)
+		// The disable keeps the stored trustedProxies, so it keeps a marker
+		// saying whose it is, rewritten under the current prefix and this
+		// subsystem's value; read before a stale-prefix marker is stripped.
+		stampedTP := own.TrustedProxiesStamped(cur)
 		// During a prefix migration, cur may only carry a STALE prefix's
 		// labels (that is how it got into managed[] above); strip them so the
 		// host ends up with exactly the current prefix's pair, rather than old
@@ -268,6 +436,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 		}
 		off.Labels[own.ManagedByKey] = own.Value
 		off.Labels[own.DisabledByKey] = own.Value
+		off.Labels = own.withTrustedProxiesMarker(off.Labels, stampedTP)
 		return off
 	}
 
@@ -304,7 +473,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// freezing would keep serving it under that profile.
 			stale := false
 			if cur, ok := managed[it.Name]; ok && !it.UnknownProfile && it.Resolved != nil {
-				chain, domain := staleFor(cur, *it.Resolved)
+				chain, domain := staleFor(cur, *it.Resolved, nil)
 				stale = chain || domain
 			}
 			if cur, ok := managed[it.Name]; ok && (it.UnknownProfile || stale) && !cur.Disabled {
@@ -530,25 +699,50 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			// (which cannot conflict, they are its own); a stored domain the profile
 			// no longer allows disables it.
 			if tmpl := resolved[name]; exists && own.Managed(cur) && tmpl != nil && !cur.Disabled {
-				chain, domain := staleFor(cur, *tmpl)
+				chain, domain := staleFor(cur, *tmpl, &want)
+				// A Docker upstream is the container's current address, which the
+				// chain comparison leaves out: a stored one may belong to another
+				// container by now, and nothing else rewrites it while the conflict
+				// lasts.
+				upstreamStale := !templateUpstream && (cur.Upstream != want.Upstream || cur.UpstreamGroupRef != want.UpstreamGroupRef)
+				chainStale := chain
+				chain = chain || upstreamStale
 				if chain || domain {
 					claim(name, cur.Domains)
 					p.Updated++
-					msg := ": domain conflict on a host whose stored chain differs from its profile; restamping its chain on its current domains"
+					msg := ": domain conflict on a host whose stored chain or upstream differs from what its source renders; restamping it on its current domains"
 					hr := "kept its current domains, chain restamped from its profile: " + reason
+					if upstreamStale && chainStale {
+						hr = "kept its current domains, chain and upstream restamped from its source: " + reason
+					} else if upstreamStale {
+						hr = "kept its current domains, upstream restamped from its source: " + reason
+					}
 					if domain {
 						disable[name] = failClosed(cur)
 						msg = ": domain conflict on a host that serves a domain its profile no longer allows; disabling it rather than leaving it serving that domain"
 						hr = "disabled (fails closed rather than keep serving a chain or domain its profile no longer renders): " + reason
 					} else {
-						upd := cur
-						upd.TLS = want.TLS
-						upd.Middlewares = want.Middlewares
-						upd.AccessLists = want.AccessLists
-						upd.AccessListsMode = want.AccessListsMode
-						upd.Locations = want.Locations
-						upd.StripResponseHeaders = want.StripResponseHeaders
-						upd.SecurityHeaders = want.SecurityHeaders
+						// The upstream is always taken from the derive: for Ingress it
+						// is the profile's, for Docker the container's current address,
+						// which the stored host may hold from an earlier container.
+						upd := withChain(cur, want, true)
+						upd.DNS = want.DNS
+						// trustedProxies and its marker follow the same rule as a
+						// plain update; withChain alone would keep a stamped value
+						// the profile no longer sets. During a prefix migration the
+						// labels move onto the current prefix first, as the
+						// fail-closed write does, so the marker is never written
+						// next to a stale-prefix copy of itself.
+						var tpOn bool
+						upd.TrustedProxies, tpOn = own.trustedProxiesFor(cur, want.TrustedProxies)
+						if own.Migrate && own.StripStale != nil {
+							upd.Labels = cloneLabels(cur.Labels)
+							own.StripStale(upd.Labels)
+							upd.Labels[own.ManagedByKey] = own.Value
+						}
+						upd.Labels = own.withTrustedProxiesMarker(upd.Labels, tpOn)
+						upd.Tags = mergeTags(want.Tags, cur.Tags, stamped[name])
+						p.Stamped[name] = slices.Clone(want.Tags)
 						p.Upserts = append(p.Upserts, upd)
 					}
 					p.Hosts = append(p.Hosts, HostResult{Name: name, Ref: source[name], Domains: cur.Domains,
@@ -573,8 +767,14 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			skip("a proxy host with this name exists and is not managed by " + own.Subsystem)
 			log.Warn().Str("host", name).Str("source", source[name]).
 				Msg(own.Subsystem + ": name is taken by a proxy host this reconciler does not own; leaving it alone")
+		case otherHost[name] != "":
+			skip("a " + otherHost[name] + " with this name exists; host names are shared by proxy, redirect, parked and stream hosts")
+			log.Warn().Str("host", name).Str("source", source[name]).Str("ownerKind", otherHost[name]).
+				Msg(own.Subsystem + ": name is taken by a host of another kind; leaving it alone")
 		case !exists:
 			claim(name, want.Domains)
+			want.Labels = own.withTrustedProxiesMarker(want.Labels, want.TrustedProxies != nil)
+			p.Stamped[name] = slices.Clone(want.Tags)
 			p.Upserts = append(p.Upserts, want)
 			p.Created++
 			p.Hosts = append(p.Hosts, HostResult{Name: name, Ref: source[name], Domains: want.Domains, Action: ActionCreated, Profile: profile[name]})
@@ -601,6 +801,17 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 			} else if cur.Disabled {
 				reenable = true
 			}
+			// trustedProxies is the template's when it sets it (the derive stamped
+			// it, an empty list included, and the host is marked as stamped). When
+			// the template leaves it unset, a stamped value is cleared and an
+			// operator's own is kept; see trustedProxiesFor.
+			var tpOn bool
+			want.TrustedProxies, tpOn = own.trustedProxiesFor(cur, want.TrustedProxies)
+			want.Labels = own.withTrustedProxiesMarker(want.Labels, tpOn)
+			// tags are the template's followed by the stored host's own; see
+			// mergeTags.
+			p.Stamped[name] = slices.Clone(want.Tags)
+			want.Tags = mergeTags(want.Tags, cur.Tags, stamped[name])
 			if SameHost(cur, want) {
 				p.Hosts = append(p.Hosts, HostResult{Name: name, Ref: source[name], Domains: want.Domains, Action: ActionUnchanged, Profile: profile[name]})
 				continue
@@ -630,6 +841,14 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 
 	for _, name := range SortedKeys(managed) {
 		if !doomed[name] {
+			// A managed host this plan keeps as stored (frozen, held for a
+			// conflict, disabled) still carries what was stamped on it before,
+			// so its memory is carried over unchanged.
+			if _, done := p.Stamped[name]; !done {
+				if prev, ok := stamped[name]; ok {
+					p.Stamped[name] = slices.Clone(prev)
+				}
+			}
 			continue
 		}
 		p.Deletes = append(p.Deletes, name)
@@ -644,39 +863,120 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 	return p
 }
 
-// ChainDiffers reports whether the access-relevant fields of a stored host
-// (TLS including client auth, middlewares, access lists and their mode,
-// locations, response-header policy) differ from what tmpl stamps onto a
-// derived host. Both sides are compared in the YAML form the store writes, so
-// an explicit empty list in settings and the nil a stored host round-trips to
-// compare equal, at every nesting level.
-func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate) bool {
-	pick := func(h model.ProxyHost) model.ProxyHost {
-		return model.ProxyHost{
-			TLS:                  h.TLS,
-			Middlewares:          h.Middlewares,
-			AccessLists:          h.AccessLists,
-			AccessListsMode:      h.AccessListsMode,
-			Locations:            h.Locations,
-			StripResponseHeaders: h.StripResponseHeaders,
-			SecurityHeaders:      h.SecurityHeaders,
-		}
-	}
+// ChainDiffers reports whether the fields a derive copies verbatim from tmpl
+// onto a host (TLS including client auth, timeouts, robotsNoIndex,
+// middlewares, access lists and their mode, locations, response-header policy,
+// the path block switch, trustedProxies when tmpl sets it, and the upstream or
+// upstream group when upstream is true) differ between a stored host and tmpl.
+// Both sides are compared in the YAML form the store writes, so an explicit
+// empty list in settings and the nil a stored host round-trips to compare
+// equal, at every nesting level. trustedProxies is the exception that keeps
+// its three states: a set tmpl value (an empty list meaning "trust nobody")
+// differs from a host that inherits the fleet default, and unset on tmpl is
+// not compared here. Unset still differs from a value discovery stamped (a
+// host carrying the trusted-proxies-by marker), but only the planner knows the
+// marker key, so Plan checks that case itself.
+func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate, upstream bool) bool {
 	want := model.ProxyHost{
+		Upstream:             tmpl.Upstream,
+		UpstreamGroupRef:     tmpl.UpstreamGroupRef,
 		TLS:                  tmpl.TLS,
+		RobotsNoIndex:        tmpl.RobotsNoIndex,
+		Timeouts:             tmpl.Timeouts,
 		Middlewares:          tmpl.Middlewares,
 		AccessLists:          tmpl.AccessLists,
 		AccessListsMode:      tmpl.AccessListsMode,
 		Locations:            model.CloneLocations(tmpl.Locations),
 		StripResponseHeaders: tmpl.StripResponseHeaders,
+		PathBlock:            tmpl.PathBlock,
 		SecurityHeaders:      tmpl.SecurityHeaders,
+		TrustedProxies:       tmpl.TrustedProxies,
 	}
-	a, errA := yaml.Marshal(pick(cur))
-	b, errB := yaml.Marshal(want)
+	have := withChain(model.ProxyHost{}, cur, upstream)
+	if tmpl.TrustedProxies == nil {
+		have.TrustedProxies = nil
+	} else {
+		have.TrustedProxies = cur.TrustedProxies
+	}
+	a, errA := yaml.Marshal(have)
+	b, errB := yaml.Marshal(withChain(model.ProxyHost{}, want, upstream))
 	if errA != nil || errB != nil {
 		return true
 	}
 	return !bytes.Equal(a, b)
+}
+
+// withChain returns dst with every field ChainDiffers compares taken from src.
+// trustedProxies is taken only when src has it, because src is a derived host
+// and a derive leaves it nil exactly when the template does not own it; the
+// planner's restamp then settles a stamped value and its marker with
+// trustedProxiesFor.
+func withChain(dst, src model.ProxyHost, upstream bool) model.ProxyHost {
+	if upstream {
+		dst.Upstream = src.Upstream
+		dst.UpstreamGroupRef = src.UpstreamGroupRef
+	}
+	dst.TLS = src.TLS
+	dst.RobotsNoIndex = src.RobotsNoIndex
+	dst.Timeouts = src.Timeouts
+	dst.Middlewares = src.Middlewares
+	dst.AccessLists = src.AccessLists
+	dst.AccessListsMode = src.AccessListsMode
+	dst.Locations = src.Locations
+	dst.StripResponseHeaders = src.StripResponseHeaders
+	dst.PathBlock = src.PathBlock
+	dst.SecurityHeaders = src.SecurityHeaders
+	if src.TrustedProxies != nil {
+		dst.TrustedProxies = src.TrustedProxies
+	}
+	return dst
+}
+
+// mergeTags returns the tags a reconciled host carries: tmplTags as the
+// template has them, then every stored tag not already present, in stored
+// order, except the stored tags that were stamped at the previous pass
+// (prevStamped) and are no longer in the template. A tag added by hand is
+// therefore kept, and a tag the template (or the profile the host now
+// resolves to) dropped while gpm was running is removed.
+//
+// Two consequences follow. A template tag removed by hand from a managed host
+// does not stick: the template stamps it again. And with no memory of the
+// previous pass (a fresh start), nothing is stale, so a template tag removed
+// while gpm was stopped stays on the existing hosts until removed by hand.
+//
+// When the result has the same tags as cur it is cur itself, so a host whose
+// tags already equal the template's comes out identical (nil and empty alike).
+func mergeTags(tmplTags, cur, prevStamped []string) []string {
+	out := append([]string(nil), tmplTags...)
+	have := make(map[string]bool, len(tmplTags)+len(cur))
+	for _, t := range tmplTags {
+		have[t] = true
+	}
+	stale := map[string]bool{}
+	for _, t := range prevStamped {
+		if !have[t] {
+			stale[t] = true
+		}
+	}
+	for _, t := range cur {
+		if have[t] || stale[t] {
+			continue
+		}
+		have[t] = true
+		out = append(out, t)
+	}
+	if slices.Equal(out, cur) {
+		return cur
+	}
+	return out
+}
+
+// dnsOf returns a host's dns policy, nil read as the empty policy.
+func dnsOf(p *model.DNSSyncPolicy) model.DNSSyncPolicy {
+	if p == nil {
+		return model.DNSSyncPolicy{}
+	}
+	return *p
 }
 
 // cloneLabels copies a label map so a write through the copy can never mutate

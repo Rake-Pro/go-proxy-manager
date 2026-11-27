@@ -493,6 +493,13 @@ components:
             Strict-Transport-Security is not settable here (the per-host tls.hsts
             setting owns it); hop-by-hop headers, CR/LF in names/values and an
             unknown scope are rejected.
+        pathBlock:
+          type: string
+          enum: [inherit, 'off']
+          description: >-
+            Switch for the fleet path block list (settings.pathBlock). inherit
+            (default, also when unset) applies it, off does not. A path-block
+            middleware the host or a location references always applies.
         stripResponseHeaders:
           type: array
           items:
@@ -610,6 +617,12 @@ components:
           description: TCP only. Open connections one client address (IPv6 by /56) may hold to this
             host; a connection over the cap is closed before the backend is dialled. 0 or unset means
             no cap.
+        newSessionsPerMinute:
+          type: integer
+          minimum: 0
+          description: UDP only. New sessions one client address (IPv6 by /56) may open per minute,
+            with a burst of the same size; a datagram that would open one over the limit is dropped
+            before the backend is dialled. Open sessions are never limited. 0 or unset means no limit.
       required:
       - name
       - listenPort
@@ -697,16 +710,39 @@ components:
           - ecdsa
         challenge:
           type: string
-          description: dns-01 is the only supported challenge.
+          description: dns-01 (needs dnsProvider; the only way to a wildcard) or http-01 (answered on the plaintext
+            listener). Empty means dns-01 when dnsProvider is set, else http-01.
           enum:
           - ''
           - dns-01
+          - http-01
         dnsProvider:
           type: string
-          description: Name of a DNSProvider object.
+          description: Name of a DNSProvider object. Required for dns-01 (and rejected with http-01).
+        profile:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+          description: >-
+            The CA's issuance profile for every order of this certificate. An
+            empty value means unset and uses the CA's default; a non-empty one must match the pattern. A CA that advertises no profiles, or
+            not this one, fails the order. Changing it on an issued certificate
+            makes the certificate due for renewal at the next pass.
+        caBundle:
+          type: string
+          maxLength: 65536
+          description: >-
+            Trust anchors for a private CA's ACME directory: inline PEM (one or
+            more CERTIFICATE blocks and nothing else) or a ${FILE:/path} /
+            ${ENV:NAME} placeholder, at most 65536 bytes. Not a secret - inline
+            PEM is stored and returned as written. When set, every exchange with
+            this certificate's ACME directory trusts only this bundle, never the
+            system roots, and a bundle that cannot be resolved or parsed fails
+            the renewal attempt. A placeholder is not checked at write time.
+            Setting or changing it needs the admin scope, like directoryURL and
+            eab (403 otherwise); keeping it as stored or clearing it does not.
       required:
       - email
-      - dnsProvider
     CustomCertSpec:
       type: object
       properties:
@@ -773,9 +809,14 @@ components:
           - expired
           - pending
           - error
-          description: 'valid: notAfter is more than 30 days out. expiring: at or inside 30 days.
-            expired: past notAfter. pending: acme certificate, no order has completed yet. error: the
-            last attempt (ACME order, or reading a custom certificate file) failed - see lastError.'
+          description: 'valid: more than min(30 days, lifetime / 3) remains, lifetime being
+            notAfter - notBefore. expiring: at or inside that window for an acme certificate (a 90-day
+            certificate keeps the 30-day window, a 6-day one is expiring inside 2 days); a custom
+            certificate keeps a fixed 30 days, because nothing renews it.
+            expired: past notAfter. pending: acme certificate, no order has completed yet. error: an
+            acme certificate that was never issued and whose attempt failed, or a leaf that cannot be
+            read (see lastError). An issued acme certificate whose renewal fails keeps valid or expiring
+            with lastError set.'
         lastError:
           type: string
           readOnly: true
@@ -800,6 +841,24 @@ components:
           readOnly: true
           description: Leaf certificate's subject alternative names (DNS names and IPs). Absent
             alongside notAfter.
+        renewAt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When the ACME manager next renews this issued acme certificate. A time in the
+            past means the renewal is due and has not succeeded yet. Absent for custom, pending and disabled
+            certificates, on an HA follower, and before the manager's first pass.
+        renewReason:
+          type: string
+          readOnly: true
+          enum:
+          - lifetime
+          - ari
+          - changed
+          description: 'Which rule set renewAt. lifetime: the renewal rule, min(30 days, lifetime / 3)
+            before notAfter. ari: the CA''s renewal information (RFC 9773) named an earlier time. changed:
+            the certificate''s domains or acme.profile changed, so it is due now and renewAt is the time
+            of the pass. Absent alongside renewAt.'
       required:
       - name
       - type
@@ -826,11 +885,13 @@ components:
           - desec
           - rfc2136
           - acme-dns
+          - webhook
           description: >-
             DNS-01 solver to use. cloudflare, digitalocean, hetzner and desec are
             token-authenticated REST providers; rfc2136 sends TSIG-signed dynamic
             updates to any nameserver; acme-dns writes to a joohoi/acme-dns
-            account reached through a CNAME.
+            account reached through a CNAME; webhook POSTs each challenge record
+            to an endpoint the operator runs.
         config:
           type: object
           properties: {}
@@ -840,8 +901,28 @@ components:
             server, zone, tsigKeyName, tsigSecret and optional tsigAlgorithm,
             ttl, transport, timeout. acme-dns takes baseURL, username, password
             and subdomain, plus optional allowInsecureLocal ("true") to permit a
-            loopback baseURL - a link-local baseURL (the cloud metadata range) is
-            always refused, at write time and again at connect time.
+            loopback baseURL. allowInsecureLocal skips the address-literal checks
+            at write time altogether; a link-local destination (the cloud
+            metadata range) is still refused when gpm connects. webhook takes
+            url and token (both required) and optional allowInsecureLocal ("true")
+            to permit a loopback url. For every TXT record it sends POST url with
+            Authorization Bearer token, Content-Type application/json and the body
+            {"action":"present"|"cleanup","fqdn":"_acme-challenge.example.com.","value":"<TXT value>"};
+            any 2xx answer is success, redirects are not followed and link-local
+            destinations are refused. The endpoint must add (not replace) a value
+            on present and remove only the given value on cleanup, because an
+            apex plus wildcard order presents two values at the same fqdn.
+            Secret keys must be ${ENV:}/${FILE:} placeholders: a literal is
+            refused on write, and a stored literal reads back as ***. They are
+            apiToken (cloudflare, digitalocean, hetzner, desec), tsigSecret
+            (rfc2136), username and password (acme-dns) and token (webhook), and
+            any key not named here. Plain keys may be literals or placeholders and
+            are stored and returned as written: rfc2136 server, zone, tsigKeyName,
+            tsigAlgorithm, transport, ttl and timeout; acme-dns baseURL, subdomain
+            and allowInsecureLocal; webhook url and allowInsecureLocal. A literal
+            webhook url is committed to the config repository and visible to
+            anyone who can read DNS providers, so write it as a placeholder when
+            the URL itself carries a credential.
           additionalProperties:
             $ref: '#/components/schemas/Secret'
       required:
@@ -1248,7 +1329,14 @@ components:
         passwordHash:
           type: string
           description: bcrypt hash ($2a$/$2b$/$2y$, 60 characters). Required unless password is sent
-            instead. Anything that is not a bcrypt hash is refused at write time.
+            instead. Anything that is not a bcrypt hash is refused at write time. Every API read
+            (objects, lists, GET /config, GET /settings, write replies, dry-run previews, history
+            diffs) returns "***" in place of a stored hash; only POST /{kind}/_parse echoes the
+            caller's own value. A write that sends "***" back keeps the stored hash of the user of
+            that name in the same user list. A list that replaces the one gone list of its level (a
+            single renamed profile or location) or is new may instead take the one hash that
+            username has in the stored object. Anything else is refused with 400, so a new or renamed user needs a password;
+            see docs/reference/api.md#basic-auth-password-hashes.
         password:
           type: string
           format: password
@@ -1455,6 +1543,13 @@ components:
               type: integer
               minimum: 0
               maximum: 64
+        maxAge:
+          type: string
+          description: Optional Go duration. Once the last successful fetch (or the time maxAge was
+            first applied, if later) is older and a fetch is refused, the stored set is
+            emptied and the source matches nothing until a fetch succeeds again. Must not be shorter than
+            interval (or its 24h default). Absent means a refused fetch keeps the previous set however
+            old it is.
       required:
       - name
       - url
@@ -1499,6 +1594,9 @@ components:
                 format: date-time
               entryCount:
                 type: integer
+              expired:
+                type: boolean
+                description: True once the source's `maxAge` has passed without a successful fetch; the stored set is empty until a fetch succeeds.
               lastError:
                 type: string
               lastAttempt:
@@ -1647,8 +1745,8 @@ components:
           type: array
           items:
             type: string
-          description: CIDRs, IPs or "@<access-list>" references (the networks that list allows, path-scoped
-            rules excluded) that bypass rate limiting entirely.
+          description: CIDRs, IPs or "@<access-list>" references (a client whose first matching rule in that
+            list is an allow rule without paths) that bypass rate limiting entirely.
         blockFor:
           type: string
           description: Go duration; once exceeded, further requests are rejected for this long regardless
@@ -1669,6 +1767,12 @@ components:
           description: Which requests share one budget per client. route (the default) gives the host
             route and every location its own; host makes the host route and all of its locations share
             one. Not allowed on a location's own inline block.
+        ipv6Prefix:
+          type: integer
+          minimum: 48
+          maximum: 64
+          description: Prefix length an IPv6 client is grouped by, so every address in one /N shares a
+            budget. Unset means 64.
       description: Per-client-IP token bucket. Exactly one of requestsPerSecond or requests+window must
         be set.
     RewriteRule:
@@ -1770,6 +1874,82 @@ components:
             every cacheTTL, so the request path is a local IP/CIDR lookup.
       required:
       - url
+    PathBlockMiddleware:
+      type: object
+      description: >-
+        Refuse a request by the shape of its path alone: a file extension, a
+        path segment name or a glob. Matching is case-insensitive, on the
+        cleaned decoded path, and never looks at the query string or method.
+        The same spec is a path-block middleware and settings.pathBlock. At
+        least one of extensions, names, globs is required; each entry is at
+        most 128 bytes and valid UTF-8.
+      properties:
+        extensions:
+          type: array
+          maxItems: 256
+          description: >-
+            File extensions with the leading dot (.php, .env, .tar.gz), each at
+            most 128 bytes (maxLength counts characters). Matches
+            when any path segment ends with one, or is the extension alone.
+            No "/", no control character, not ending with a dot or a space.
+          items:
+            type: string
+            maxLength: 128
+            pattern: '^\.'
+        names:
+          type: array
+          maxItems: 256
+          description: >-
+            Whole path segments (.git, wp-admin, wp-login.php), each at most
+            128 bytes. Matches when any segment equals one, directories
+            included, at any depth. No "/", no control character,
+            not ending with a dot or a space.
+          items:
+            type: string
+            maxLength: 128
+        globs:
+          type: array
+          maxItems: 64
+          description: >-
+            path.Match patterns over the whole path, each at most 128 bytes and
+            all globs of one list together at most 2048 bytes (not expressible
+            in the schema).
+            Each must start with "/". /dir/* covers /dir/ and one level below
+            it only (not /dir, not deeper); use names for a directory at any
+            depth. "*" and "?" never match "/"; there is no "**". Compared
+            lower-cased, on the path as it is and on its folded form (cut at
+            the first NUL byte, segments without trailing dots or spaces, no
+            trailing slash), so /server-status also blocks /server-status/. A glob that ends with "/" (other than "/"),
+            has an empty segment, a segment ending in a dot or a space, or a
+            control character is refused. A [...] class must be lower case.
+            With globs, a request path over 4096 bytes counts as listed.
+          items:
+            type: string
+            maxLength: 128
+            pattern: '^/'
+        allowFrom:
+          type: array
+          description: >-
+            Exempt clients: CIDRs, bare IPs and @<access-list> references. A
+            list reference exempts a client whose first matching rule in that
+            list is an allow rule. A client address that cannot be resolved is
+            never exempt.
+          items:
+            type: string
+        denyStatus:
+          type: integer
+          description: >-
+            Status for a blocked request: 400 to 599 when set. Unset or 0
+            means the default, 404.
+        denyWith:
+          type: string
+          description: >-
+            error-page renders the host's custom error page for the status when
+            one exists; plain always writes the bare status text. Default
+            error-page.
+          enum:
+          - error-page
+          - plain
     Middleware:
       type: object
       properties:
@@ -1782,7 +1962,7 @@ components:
         updatedAt: *id007
         type:
           type: string
-          description: auth | headers | guard | rate-limit | rewrite | bouncer.
+          description: auth | headers | guard | rate-limit | rewrite | bouncer | path-block.
           enum:
           - auth
           - headers
@@ -1790,6 +1970,7 @@ components:
           - rate-limit
           - rewrite
           - bouncer
+          - path-block
         auth:
           $ref: '#/components/schemas/AuthMiddleware'
         headers:
@@ -1802,10 +1983,12 @@ components:
           $ref: '#/components/schemas/RewriteMiddleware'
         bouncer:
           $ref: '#/components/schemas/BouncerMiddleware'
+        pathBlock:
+          $ref: '#/components/schemas/PathBlockMiddleware'
       required:
       - name
       - type
-      description: A reusable, named processing step referenced by hosts/locations. Exactly one of auth/headers/guard/rateLimit/rewrite
+      description: A reusable, named processing step referenced by hosts/locations. Exactly one of auth/headers/guard/rateLimit/rewrite/bouncer/pathBlock
         is set, matching type.
     APIToken:
       type: object
@@ -1880,7 +2063,8 @@ components:
           type: string
         url:
           type: string
-          description: Absolute http(s) endpoint.
+          description: Absolute http(s) endpoint, or a value that is wholly a ${ENV:...} / ${FILE:...}
+            placeholder, resolved and checked at each delivery and echoed as the placeholder.
         secret:
           $ref: '#/components/schemas/Secret'
         disabled:
@@ -1902,7 +2086,9 @@ components:
           - generic
         url:
           type: string
-          description: Absolute http(s) endpoint. A discord url must contain "/api/webhooks/".
+          description: Absolute http(s) endpoint. A discord url must contain "/api/webhooks/". May
+            instead be wholly a ${ENV:...} / ${FILE:...} placeholder, resolved and checked at each
+            send and echoed as the placeholder.
         secret:
           $ref: '#/components/schemas/Secret'
           description: ntfy access token or generic bearer token, sent as "Authorization Bearer".
@@ -2007,6 +2193,39 @@ components:
           type: array
           items:
             type: string
+          description: >-
+            Stamped onto every derived host. A reconcile writes these first and
+            keeps the host's other tags after them, so a tag added by hand
+            survives, while a template tag removed by hand is stamped again. A
+            template tag removed from the template or profile is dropped from the
+            hosts that had it only if gpm kept running between the two
+            reconciles; after a restart it stays until removed by hand.
+        trustedProxies:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: >-
+            The three states of ProxyHost.trustedProxies. Absent (or null):
+            discovery does not own the field - a managed host's own
+            trustedProxies survives every reconcile, and a new host gets none and
+            uses settings.trustedProxies. [] (present and empty): trusting
+            nobody. A list of CIDRs or bare IPs: trusting those. Both [] and a list are
+            stamped onto every derived host and marked with the label
+            <prefix>/trusted-proxies-by (value ingress-discovery or
+            docker-discovery). When the template or profile stops setting the
+            key (or the host moves to a profile that leaves it unset), a host
+            with the label loses the value and the label; a host without the
+            label keeps its own value. A hand edit on a labelled host follows the
+            template, and a labelled host whose source cannot be derived is
+            disabled once its profile stops setting the key.
+        pathBlock:
+          type: string
+          enum: [inherit, 'off']
+          description: >-
+            Stamped onto every derived host as its pathBlock (inherit | off).
+            A hand edit on a managed host is reverted on the next reconcile, so
+            set it here.
         stripResponseHeaders:
           type: array
           items:
@@ -2112,6 +2331,63 @@ components:
           - rules-only
       description: Disabled (default) is inert. Discovers annotated Kubernetes Ingress objects into managed
         proxy hosts.
+    DockerDiscoverySettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        socket:
+          type: string
+          description: Absolute path of the Engine API unix socket. Default /var/run/docker.sock. Ignored
+            when host is set.
+        host:
+          type: string
+          description: tcp:// or https:// Engine endpoint used instead of the socket.
+        tlsCert:
+          type: string
+          description: Absolute path to a client certificate for an https:// host. Set with tlsKey.
+        tlsKey:
+          type: string
+          description: Absolute path to the client key. Set with tlsCert.
+        tlsCA:
+          type: string
+          description: Absolute path to the PEM bundle verifying the endpoint.
+        network:
+          type: string
+          description: Docker network whose per-container IP becomes the upstream. Empty picks the first
+            non-host network. Mutually exclusive with usePublishedPorts.
+        allowLinkLocal:
+          type: boolean
+          default: false
+          description: Accept a link-local container address (169.254.0.0/16, fe80::/10) as the
+            upstream. Off skips such a container. Ignored with usePublishedPorts.
+        usePublishedPorts:
+          type: boolean
+        publishedHost:
+          type: string
+          description: Address a published port is reached on. Default 127.0.0.1. Only valid with
+            usePublishedPorts.
+        includeStopped:
+          type: boolean
+        pollInterval:
+          type: string
+          description: Go duration. Default 1m, minimum 15s.
+        allowedDomainSuffixes:
+          type: array
+          items:
+            type: string
+          description: Required when enabled.
+        template:
+          $ref: '#/components/schemas/IngressHostTemplate'
+        profiles:
+          type: object
+          properties: {}
+          description: Named chains a container may select by name. Empty inherits
+            ingressDiscovery.profiles. "template" is reserved.
+          additionalProperties:
+            $ref: '#/components/schemas/IngressHostTemplate'
+      description: Disabled (default) is inert. Discovers labelled Docker containers into managed proxy
+        hosts.
     TLSFleetSettings:
       type: object
       properties:
@@ -2210,6 +2486,8 @@ components:
             address; 0.0.0.0/0 and ::/0 are accepted but warned about at load.
         ingressDiscovery:
           $ref: '#/components/schemas/IngressDiscoverySettings'
+        dockerDiscovery:
+          $ref: '#/components/schemas/DockerDiscoverySettings'
         securityHeaders:
           type: object
           additionalProperties:
@@ -2229,6 +2507,14 @@ components:
           $ref: '#/components/schemas/MaintenanceSettings'
         adminEdge:
           $ref: '#/components/schemas/AdminEdgeSettings'
+        pathBlock:
+          $ref: '#/components/schemas/PathBlockMiddleware'
+          description: >-
+            Fleet path block list: the same spec as a path-block middleware,
+            applied to every proxy host that has not set pathBlock: off, ahead
+            of access lists and authentication. Unset (default) blocks nothing.
+            The admin edge host is never covered. allowFrom may name access
+            lists (@name) that must exist.
         stripResponseHeaders:
           type: array
           items:
@@ -2827,7 +3113,10 @@ components:
             type: string
           description: Non-fatal config smells (mirrors Config.Warnings()), including one entry per
             config file with an unknown YAML key an older struct silently ignored - see
-            docs/operations/upgrading.md#rollback. Absent when there is nothing to warn about.
+            docs/operations/upgrading.md#rollback - and one entry per access-list deny rule whose
+            source the data plane resolves to the empty set (never fetched successfully, expired
+            under maxAge, over maxCoverage, or every stored entry refused by the entry guard), which
+            therefore denies no one. Absent when there is nothing to warn about.
     HealthListener:
       type: object
       properties:
@@ -3166,7 +3455,13 @@ components:
           type: array
           items:
             type: object
-            properties: {}
+            properties:
+              deny:
+                type: string
+                description: >-
+                  Reason an access-control tier refused the request (the denial
+                  reasons of gpm_denials_total, for example path-block,
+                  access-list, rate-limit, guard). Omitted when nothing refused it.
             additionalProperties: true
           description: Newest first. Shape depends on internal/dataplane's access-log entry.
         capacity:
@@ -3399,7 +3694,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Access lists
@@ -3684,7 +3979,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - API tokens
@@ -3924,7 +4219,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Certificates
@@ -4066,6 +4361,9 @@ paths:
       description: Restores only this object's file to its state at the given commit; every other object
         is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
         an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+        Needs the admin scope, not certificates:write, because a revert restores a stored certificate without the
+        admin check on acme.directoryURL, acme.eab and acme.caBundle, so it could bring back an earlier ACME
+        destination or trust bundle that only an admin may set.
       tags:
       - Certificates
       requestBody:
@@ -4089,14 +4387,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: certificates:write
+      x-scope: admin
   /api/certificates/{name}/renew:
     parameters:
     - $ref: '#/components/parameters/NamePath'
     post:
       summary: Force an immediate certificate renewal
-      description: Starts an ACME order for this certificate now, ignoring the normal 30-day renewal
-        window. Responds as soon as the order has STARTED, not once it completes - DNS-01 propagation
+      description: Starts an ACME order for this certificate now, ignoring every renewal window
+        (the lifetime rule and ARI). Responds as soon as the order has STARTED, not once it completes - DNS-01 propagation
         alone can take minutes. Poll GET /certificates/{name}'s status fields (state, lastAttempt,
         lastError) to see the outcome. Only one order runs at a time across the whole instance; a
         second renew request while one is already in flight gets 409, not queued. A 1-hour cooldown
@@ -4179,7 +4477,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Client CAs
@@ -4636,7 +4934,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Parked hosts
@@ -4827,7 +5125,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - DNS providers
@@ -4997,7 +5295,10 @@ paths:
     get:
       summary: Preview a DNS sync reconcile
       description: 'Read-only dry run: reports what a reconcile would create/adopt/retarget/delete, without
-        changing anything.'
+        changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - DNS sync
       responses:
@@ -5177,7 +5478,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Identity providers
@@ -5346,7 +5647,10 @@ paths:
   /api/docker-discovery/plan:
     get:
       summary: Preview a Docker discovery reconcile
-      description: Read-only dry run, without changing anything.
+      description: 'Read-only dry run, without changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - Docker discovery
       responses:
@@ -5421,7 +5725,10 @@ paths:
   /api/ingress-discovery/plan:
     get:
       summary: Preview an Ingress discovery reconcile
-      description: Read-only dry run, without changing anything.
+      description: 'Read-only dry run, without changing anything. Concurrent calls share one computation, and a successful plan is reused for up to 5 seconds
+        while the config repo HEAD is unchanged and no reconcile has run through the API; a failed plan
+        (including one reporting a backend error) is never reused. A reconcile on its own schedule can
+        still leave a reused plan up to 5 seconds old.'
       tags:
       - Ingress discovery
       responses:
@@ -5610,7 +5917,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Middlewares
@@ -5817,7 +6124,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Proxy hosts
@@ -6008,7 +6315,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Redirect hosts
@@ -6432,7 +6739,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Stream hosts
@@ -6623,7 +6930,7 @@ paths:
       description: 'Decodes one YAML document (a mapping) with the same rules as the PUT body and returns
         the object plus its own validation verdict. A document that decodes but fails validation is still
         a 200 with valid false, so a form can be filled and fixed. Nothing is persisted. The name comes from
-        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion and bodies
+        the top-level `name` key, else the `name` query parameter. Excessive YAML alias expansion (aliases that add more than 100,000 nodes once expanded) and bodies
         over 1 MiB are refused (400).'
       tags:
       - Upstream groups

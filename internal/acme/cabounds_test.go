@@ -34,6 +34,10 @@ func TestIssuedChainIsCheckedBeforeSaving(t *testing.T) {
 	ca := newStubCA(t, []string{"http-01"})
 	dir := t.TempDir()
 	m := NewManager(Options{CertDir: dir})
+	// Each case is a fresh attempt after a failed one: move the clock past the
+	// retry backoff between them.
+	clock := time.Now()
+	m.now = func() time.Time { return clock }
 	ca.onAccept = func(string, string) error { return nil }
 
 	if _, err := m.EnsureAll(context.Background(), acmeCert(ca.url("/directory"), "app.example.com")); err != nil {
@@ -55,6 +59,7 @@ func TestIssuedChainIsCheckedBeforeSaving(t *testing.T) {
 	}
 	for _, tc := range cases {
 		tc.setup()
+		clock = clock.Add(2 * time.Hour)
 		cfg := acmeCert(ca.url("/directory"), tc.domains...)
 		_, err := m.EnsureAll(context.Background(), cfg)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -175,3 +175,124 @@ func TestHetznerRequiresToken(t *testing.T) {
 		t.Error("expected an error for an empty token")
 	}
 }
+
+// TestHetznerPagination serves the zone and record listings in pages and checks
+// that every page is followed, that an unpaginated response is read with the one
+// request it always was, and that a listing that never ends or breaks halfway is
+// an error rather than a partial result.
+func TestHetznerPagination(t *testing.T) {
+	rec := func(id, zoneID, value string) hetznerRecord {
+		return hetznerRecord{ID: id, ZoneID: zoneID, Type: "TXT", Name: "_acme-challenge", Value: value}
+	}
+	tests := []struct {
+		name        string
+		zonePages   [][]hetznerZone
+		recordPages [][]hetznerRecord
+		lastPage    int // record last_page; 0 = len(recordPages), -1 = no meta at all
+		failPage    int // record page answered 404
+		wantErr     string
+		wantCreated int
+		wantQueries []string // record listing queries, in order
+	}{
+		{
+			name:        "unpaginated response",
+			zonePages:   [][]hetznerZone{{{ID: "z1", Name: "example.com"}}},
+			recordPages: [][]hetznerRecord{{rec("r1", "z1", "other")}},
+			lastPage:    -1,
+			wantCreated: 1,
+			wantQueries: []string{"per_page=500&zone_id=z1"},
+		},
+		{
+			name:        "zone and existing record on later pages",
+			zonePages:   [][]hetznerZone{{{ID: "z9", Name: "other.net"}}, {{ID: "z1", Name: "example.com"}}},
+			recordPages: [][]hetznerRecord{{rec("r1", "z1", "a")}, {rec("r2", "z1", "b")}, {rec("r3", "z1", "token-value")}},
+			wantCreated: 0,
+			wantQueries: []string{"per_page=500&zone_id=z1", "page=2&per_page=500&zone_id=z1", "page=3&per_page=500&zone_id=z1"},
+		},
+		{
+			name:        "page bound reached",
+			zonePages:   [][]hetznerZone{{{ID: "z1", Name: "example.com"}}},
+			recordPages: [][]hetznerRecord{{rec("r1", "z1", "a")}},
+			lastPage:    hetznerMaxPages + 50,
+			wantErr:     "refusing to use a partial listing",
+		},
+		{
+			name:        "404 on a later page",
+			zonePages:   [][]hetznerZone{{{ID: "z1", Name: "example.com"}}},
+			recordPages: [][]hetznerRecord{{rec("r1", "z1", "a")}, {rec("r2", "z1", "b")}},
+			failPage:    2,
+			wantErr:     "page 2 of a paginated listing",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var queries []string
+			var created int
+			// meta reports last_page n; the lastPage override applies to the
+			// record listing only, so the bound case walks the records.
+			meta := func(page, n int) map[string]any {
+				return map[string]any{"pagination": map[string]any{"page": page, "per_page": 500, "last_page": n}}
+			}
+			pageOf := func(r *http.Request) int {
+				p, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				return max(p, 1)
+			}
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/zones", func(w http.ResponseWriter, r *http.Request) {
+				p := pageOf(r)
+				body := map[string]any{"zones": tc.zonePages[min(p, len(tc.zonePages))-1]}
+				if tc.lastPage != -1 {
+					body["meta"] = meta(p, len(tc.zonePages))
+				}
+				writeJSON(t, w, body)
+			})
+			mux.HandleFunc("/api/v1/records", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					created++
+					writeJSON(t, w, map[string]any{"record": map[string]any{"id": "new"}})
+					return
+				}
+				queries = append(queries, r.URL.RawQuery)
+				p := pageOf(r)
+				if p == tc.failPage {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				body := map[string]any{"records": tc.recordPages[min(p, len(tc.recordPages))-1]}
+				switch {
+				case tc.lastPage > 0:
+					body["meta"] = meta(p, tc.lastPage)
+				case tc.lastPage == 0:
+					body["meta"] = meta(p, len(tc.recordPages))
+				}
+				writeJSON(t, w, body)
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			s, err := NewHetznerSolver("hz-token", WithHetznerBaseURL(srv.URL), WithHetznerHTTPClient(srv.Client()))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = s.Present(context.Background(), "_acme-challenge.example.com", "token-value")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Present error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if tc.lastPage > hetznerMaxPages && len(queries) != hetznerMaxPages {
+					t.Errorf("followed %d pages, want the bound %d", len(queries), hetznerMaxPages)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Present: %v", err)
+			}
+			if created != tc.wantCreated {
+				t.Errorf("created %d records, want %d", created, tc.wantCreated)
+			}
+			if strings.Join(queries, " ") != strings.Join(tc.wantQueries, " ") {
+				t.Errorf("record queries = %q, want %q", queries, tc.wantQueries)
+			}
+		})
+	}
+}

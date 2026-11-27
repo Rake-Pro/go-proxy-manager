@@ -8,6 +8,7 @@ The settings to check before an instance faces the internet.
   not on every interface, and reach it from elsewhere through an SSH tunnel or
   the HTTPS admin hostname
   ([Reach the admin UI through gpm itself](../how-to/admin-ui-behind-gpm.md)).
+- Answer scanner paths at the edge: [`settings.pathBlock`](../reference/config/settings/path-block.md) refuses dotfiles, VCS directories and script drop paths with a `404` by default before any upstream sees them ([how-to](../how-to/block-scanner-paths.md)). It is off until set.
 - Keep `-debug-headers` off in production (it exposes upstream addressing).
 - Keep `-pprof` off unless actively profiling; it is admin-role **and**
   admin-scope gated but still needless attack surface when idle.
@@ -48,6 +49,13 @@ The settings to check before an instance faces the internet.
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't
   show up in the process environment.
+- Keep `acme.caBundle` to the one private root you mean to trust: a certificate that sets it trusts **only** that bundle for its ACME directory, and setting or changing it through the API needs the `admin` scope (with `directoryURL` and `eab`), because it decides which server gpm accepts as the CA.
+- Give a `webhook` DNS provider a `https` `url` and a `token` held as a `${ENV:}` or `${FILE:}` placeholder (the `url` is a plain setting: a literal is committed and readable by anyone who can read DNS providers, so use a placeholder if it carries a credential). gpm refuses loopback, link-local, unspecified and multicast literals at write time unless `allowInsecureLocal` is set, always refuses a link-local destination when it connects, never follows redirects with the token attached, and warns in the log about a plain-`http` URL to a non-loopback host; writes on `/api/dns-providers` need the `admin` scope.
+- Give a webhook or notification `url` that carries a credential in its path
+  (a chat or incident hook token) as a whole-value `${ENV:NAME}` or
+  `${FILE:path}` placeholder, so only the reference is committed to git and
+  shown by the status endpoints
+  ([Keeping the url out of git](../reference/config/settings/webhooks.md#keeping-the-url-out-of-git)).
 - What the admin listener does on its own, so you know not to re-implement it
   in front: `/version` needs a signed-in session or token (only `/healthz` is
   anonymous); local login locks a client IP after five failures and a username

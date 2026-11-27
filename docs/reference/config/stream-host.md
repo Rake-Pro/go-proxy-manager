@@ -17,8 +17,9 @@ backend is dialled.
 | <span id="stream-host-target"></span>  `target` | StreamTarget | yes | The backend this port forwards to: `{host, port}`. Mirrors `upstream`'s vocabulary minus the scheme: a raw stream carries an arbitrary protocol, so `http`/`https` means nothing here. |
 | <span id="stream-host-tls"></span>  `tls` | StreamTLS | no | SNI routing and/or TLS termination. **TCP only.** |
 | <span id="stream-host-access-lists"></span>  `accessLists` | []string | no | L4 access lists evaluated on the client IP (below). |
-| <span id="stream-host-idle-timeout"></span>  `idleTimeout` | string | no | **TCP only.** Go duration (`"10m"`, `"1h"`). A connection that carries no data in either direction for this long is closed. Unset: no idle limit, a connection lasts until one side closes it. |
+| <span id="stream-host-idle-timeout"></span>  `idleTimeout` | string | no | **TCP only.** Go duration (`"10m"`, `"1h"`). A connection that carries no data in either direction for this long is closed. Unset: no idle limit, a connection lasts until it is closed ([TCP connection close](#tcp-connection-close)). After a half-close this timeout is the only bound: a transfer that keeps moving is never cut. |
 | <span id="stream-host-max-conns-per-source"></span>  `maxConnsPerSource` | int | no | **TCP only.** Open connections one client address (IPv6 by /56, as the UDP per-source cap) may hold to this host. A connection over the cap is closed after the access-list check and before the backend is dialled. Unset or `0`: no cap. |
+| <span id="stream-host-new-sessions-per-minute"></span>  `newSessionsPerMinute` | int | no | **UDP only.** New sessions one client address (IPv6 by /56) may open per minute, with a burst of the same size. The limit counts session attempts that reach the dial: a datagram dropped by another limit (full table, no free dial slot) costs nothing, a dial that fails still counts. A datagram that would open one over the limit is dropped silently (one log line per source) before the backend is dialled; datagrams on an open session are never limited. Unset or `0`: no limit. |
 
 ```yaml
 name: postgres
@@ -48,6 +49,21 @@ the new shape: it is never silently accepted with no backend. See
 | <span id="stream-host-target-host"></span>  `host` | string | yes | Backend host. |
 | <span id="stream-host-target-port"></span>  `port` | int | yes | 1-65535. |
 
+## TCP connection close
+
+A TCP stream forwards a half-close: a side that finishes sending does not end the connection for the other side.
+
+| Event | What gpm does |
+|-------|---------------|
+| One side finishes sending (EOF on read) | Shuts only the write side toward the other peer (TCP FIN; in `terminate` mode a TLS `close_notify` first) and keeps copying the other direction. |
+| The other side finishes too | Closes the connection. |
+| With `idleTimeout` set: no data in the open direction for `idleTimeout` | Closes the connection. An active transfer after a half-close is never cut. |
+| Without `idleTimeout`: 60 s pass after the first side finished and the other has not | Resets both peers (TCP RST), so a cut reply surfaces as a connection error and is never read as a complete one. The 60 s linger bound is fixed. |
+| A read or write error in either direction (a reset, an `idleTimeout` expiry) | Closes both sides at once. |
+
+- **Slot:** the connection holds its `maxConnsPerSource` slot until it is closed or reset.
+- **Long replies after a half-close:** a client that half-closes and then waits for a reply (`nc -N`, a request sent before `shutdown(SHUT_WR)`) gets the whole reply on a host with `idleTimeout`; without it, the reply must finish within 60 s of the half-close or the client sees a reset.
+
 ## L4 access lists (`accessLists`)
 
 A stream host may reference AccessList objects, exactly like a proxy host. Only
@@ -75,7 +91,8 @@ address.
 
 TCP limits are off unless set (`idleTimeout`, `maxConnsPerSource`, above);
 both are rejected on a `protocol: udp` host and apply to the TCP side of
-`both`.
+`both`. The UDP limit `newSessionsPerMinute` is off unless set, is rejected on a
+`protocol: tcp` host and applies to the UDP side of `both`.
 
 UDP session limits apply independently of any access list:
 
@@ -83,6 +100,27 @@ UDP session limits apply independently of any access list:
 |-------|-------|--------------|
 | Sessions per listener | 4096 | A new source takes the slot of the session whose client was silent the longest, if that session has had no client traffic for at least 30 s; otherwise the new source is dropped. |
 | Sessions per source address (IPv6 by /56) | 64 | Datagrams that would open another session from that source are dropped until one of its sessions ends. |
+| Concurrent backend dials per listener | 64 | Datagrams that would open another session are dropped until a dial completes (a slow or unresolvable `target.host`). |
+| Concurrent backend dials per source address (IPv6 by /56) | 8 | Datagrams from that source that would open another session are dropped until one of its dials completes, so one client cannot hold every dial slot of the listener. |
+| Datagrams queued for a session being dialled | 32, and 64 KiB in total counting 64 bytes per datagram | Further datagrams from that client are dropped until the dial completes. The queue is written to the new backend within 1 s; whatever is left after that is dropped, and the session still opens. |
+| Sources tracked by `newSessionsPerMinute` | 4096 | A source whose budget has fully refilled is forgotten first (checked at most once a second, and on the 60 s reap); when none has, a new session from an untracked source is dropped, as with a full session table, and logged once per port. |
+
+A new session's backend is dialled without holding up the listener: datagrams on
+other sessions keep flowing during a slow dial (a DNS lookup for a hostname
+`target.host`), and further datagrams from the new client are queued (within the
+limits above) and delivered in order when the dial completes. A session that is
+still being dialled counts against both session limits.
+
+```yaml
+# WireGuard: at most 10 new sessions per source address per minute.
+name: wireguard
+listenPort: 51820
+protocol: udp
+target:
+  host: 192.0.2.20
+  port: 51820
+newSessionsPerMinute: 10
+```
 
 ## StreamTLS (`tls`)
 

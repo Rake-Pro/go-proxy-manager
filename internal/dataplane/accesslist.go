@@ -5,7 +5,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,18 +106,9 @@ func compileAccessList(al model.AccessList) accessList {
 			// turning into a list with nothing to match on.
 			nr.nets = sourceNets(sources, al, r.Source)
 		} else {
-			var ipnet *net.IPNet
-			_, ipnet, err := net.ParseCIDR(r.CIDR)
-			if err != nil {
-				// A bare IP becomes a /32 or /128.
-				if ip := net.ParseIP(r.CIDR); ip != nil {
-					bits := 32
-					if ip.To4() == nil {
-						bits = 128
-					}
-					_, ipnet, _ = net.ParseCIDR(r.CIDR + "/" + strconv.Itoa(bits))
-				}
-			}
+			// A bare IP becomes a /32 or /128; an IPv4-mapped one
+			// (::ffff:a.b.c.d) is the IPv4 address a.b.c.d/32.
+			ipnet := parseNet(r.CIDR)
 			if ipnet == nil {
 				continue
 			}
@@ -670,28 +660,140 @@ func authGateKey(ipOf func(*http.Request) net.IP, r *http.Request) string {
 func ipInNets(ip net.IP, nets []*net.IPNet) bool { return clientip.InNets(ip, nets) }
 
 // parseNet parses a CIDR or bare IP into an *net.IPNet (a bare IP becomes a
-// /32 or /128). Returns nil on a malformed value.
+// /32 or /128, an IPv4-mapped one the IPv4 /32). Returns nil on a malformed
+// value.
 func parseNet(s string) *net.IPNet { return clientip.ParseNet(s) }
 
-// accessListAllowNets returns the networks an access list allows without a
-// path condition: its allow cidr rules plus the fetched sets of its allow
-// source rules. Path-scoped rules are skipped because they admit an address
-// only for some paths and must not exempt it everywhere. A rate limit's
-// "@<list>" allowFrom entry resolves through this.
-func accessListAllowNets(al model.AccessList) []*net.IPNet {
-	sources := currentAccessListSources()
-	var nets []*net.IPNet
-	for _, r := range al.Rules {
-		if r.Action != model.ActionAllow || r.PathScoped() {
+// rateLimitExemptList is an access list compiled for "@<list>" rate-limit
+// exemptions (see registry.rateLimitExemption): its rules without a path
+// condition (a path-scoped rule never matches without a request path, see
+// netRule.matches), in order, once per address family. v4 holds each rule's
+// IPv4 networks (those net.IPNet.Contains compares in 4-byte form, IPv4-mapped
+// ones included) and v6 the rest, so a client walks only its own family and a
+// large feed of the other family costs it nothing. A rule with no networks of
+// a family is left out of that family's view, which cannot change a verdict.
+type rateLimitExemptList struct {
+	v4, v6 []exemptRule
+}
+
+type exemptRule struct {
+	nets  []*net.IPNet
+	allow bool
+}
+
+func newRateLimitExemptList(al model.AccessList) *rateLimitExemptList {
+	e := &rateLimitExemptList{}
+	for _, r := range compileAccessList(al).rules {
+		if r.paths != nil {
 			continue
 		}
-		if r.Source != "" {
-			nets = append(nets, sourceNets(sources, al, r.Source)...)
-			continue
+		v4, v6 := splitFamilies(r.nets)
+		if len(v4) > 0 {
+			e.v4 = append(e.v4, exemptRule{nets: v4, allow: r.allow})
 		}
-		if n := parseNet(r.CIDR); n != nil {
-			nets = append(nets, n)
+		if len(v6) > 0 {
+			e.v6 = append(e.v6, exemptRule{nets: v6, allow: r.allow})
 		}
 	}
-	return nets
+	return e
+}
+
+// splitFamilies splits nets into its IPv4 and IPv6 networks, sharing nets
+// itself when it holds one family only.
+func splitFamilies(nets []*net.IPNet) (v4, v6 []*net.IPNet) {
+	n4 := 0
+	for _, n := range nets {
+		if n.IP.To4() != nil {
+			n4++
+		}
+	}
+	switch n4 {
+	case len(nets):
+		return nets, nil
+	case 0:
+		return nil, nets
+	}
+	v4 = make([]*net.IPNet, 0, n4)
+	v6 = make([]*net.IPNet, 0, len(nets)-n4)
+	for _, n := range nets {
+		if n.IP.To4() != nil {
+			v4 = append(v4, n)
+		} else {
+			v6 = append(v6, n)
+		}
+	}
+	return v4, v6
+}
+
+// rules returns the view of ip's family, decided as net.IPNet.Contains
+// normalises a client address.
+func (e *rateLimitExemptList) rules(ip net.IP) []exemptRule {
+	if ip.To4() != nil {
+		return e.v4
+	}
+	return e.v6
+}
+
+// exempt reports whether the "@<list>" exemption admits ip.
+func (e *rateLimitExemptList) exempt(ip net.IP) bool {
+	ok, _ := e.check(ip)
+	return ok
+}
+
+// check is exempt plus the number of network comparisons it made. Only a
+// client inside an allow rule's network can be exempt, so it tests those first
+// and spares everyone else the walk over the deny rules; a client inside one
+// then gets the full first-match walk.
+func (e *rateLimitExemptList) check(ip net.IP) (exempt bool, compared int) {
+	for _, r := range e.rules(ip) {
+		if !r.allow {
+			continue
+		}
+		for _, n := range r.nets {
+			compared++
+			if n.Contains(ip) {
+				ok, m := e.walk(ip)
+				return ok, compared + m
+			}
+		}
+	}
+	return false, compared
+}
+
+// walk is the first-match verdict over ip's family view, the walk the gate
+// does for a raw stream: the first rule containing ip decides, allow exempting
+// and deny not. No match exempts nobody: the default action and the geo rules
+// never exempt.
+func (e *rateLimitExemptList) walk(ip net.IP) (exempt bool, compared int) {
+	for _, r := range e.rules(ip) {
+		for _, n := range r.nets {
+			compared++
+			if n.Contains(ip) {
+				return r.allow, compared
+			}
+		}
+	}
+	return false, compared
+}
+
+// rateLimitExemption returns the "@<name>" exemption of this build, or nil
+// when the registry has no such list (it then exempts nobody). It runs while
+// the build's handlers are constructed, never per request: the first call for
+// a name compiles the list, later calls of the same build share it.
+func (reg *registry) rateLimitExemption(name string) func(net.IP) bool {
+	al, ok := reg.accessLists[name]
+	if !ok {
+		return nil
+	}
+	reg.rateLimitExemptMu.Lock()
+	defer reg.rateLimitExemptMu.Unlock()
+	e := reg.rateLimitExempt[name]
+	if e == nil {
+		if reg.rateLimitExempt == nil {
+			reg.rateLimitExempt = map[string]*rateLimitExemptList{}
+		}
+		e = newRateLimitExemptList(al)
+		reg.rateLimitExempt[name] = e
+	}
+	return e.exempt
 }

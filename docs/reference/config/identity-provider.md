@@ -48,6 +48,18 @@
 | <span id="identity-provider-auth-request-auth-path"></span>  `authPath` | string | `<pathPrefix>/auth/nginx` | no | The subrequest endpoint that answers allow or deny. |
 | <span id="identity-provider-auth-request-copy-headers"></span>  `copyHeaders` | []string | the Authentik `X-authentik-*` set | no | Response headers copied from the auth subrequest onto the upstream request. |
 
+What the outpost receives:
+
+| Request | Client address | Time bound |
+|---------|----------------|------------|
+| Auth subrequest (`authPath`) | `X-Forwarded-For` = the derived client IP | 10 s for the whole exchange |
+| Passthrough under `pathPrefix` | `X-Forwarded-For` and `X-Real-Ip` = the derived client IP | 10 s for the response headers; the body is not time-limited |
+
+The derived client IP is the address every gpm gate compares (see
+[Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)); a client-supplied
+`X-Forwarded-For` or `X-Real-Ip` is never passed on as is. A passthrough whose
+outpost sends no response headers within 10 s is answered `502`.
+
 ## RoleMapping (`roleMapping`)
 
 | Key | Type | Default | Required | Description |

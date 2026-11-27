@@ -51,9 +51,19 @@ type IPRule struct {
 	CIDR string `json:"cidr,omitempty" yaml:"cidr,omitempty"`
 	// Source names an entry in the list's Sources: the rule then matches every
 	// network in that source's most recently fetched set (see
-	// AccessListSourceLedger). A source with no ledger entry yet resolves to the
-	// EMPTY set, so the rule matches nothing and the list falls through to its
-	// defaultAction - a feed that has never been fetched can never widen access.
+	// AccessListSourceLedger). A source with no ledger entry yet (never fetched
+	// successfully, or the ledger could not be loaded), and one whose set
+	// expired under maxAge, resolves to the EMPTY set: the rule matches nothing
+	// and evaluation moves on to the next rule and then the defaultAction. For
+	// an allow rule that is the safe direction. For a deny rule it is not: the
+	// rule blocks nobody, and an address it was meant to deny is decided by the
+	// rules after it, which may allow it. That is kept on purpose (an outage of
+	// a deny feed must not lock everyone out) and surfaced instead: such a deny
+	// rule is listed in the configWarnings of GET /health (see
+	// dataplane.UnresolvedDenySourceWarnings), and the data plane logs every
+	// source rule with an empty set once per reload. A set over its maxCoverage
+	// budget, or one whose every entry the entry guard refuses, resolves to
+	// the empty set in the same way.
 	Source string `json:"source,omitempty" yaml:"source,omitempty"`
 	// Paths scopes the rule to a set of exact request paths. When empty the rule
 	// applies to every request (the historical behaviour). When set, the rule
@@ -76,6 +86,34 @@ type IPRule struct {
 	// valid together with Paths; empty means GET and HEAD, the read-only pair a
 	// health probe needs.
 	Methods []string `json:"methods,omitempty" yaml:"methods,omitempty"`
+}
+
+// AccessListSourceRef is one deny rule's source reference: the list and the
+// source name.
+type AccessListSourceRef struct {
+	List   AccessList
+	Source string
+}
+
+// DenySourceRefs returns every source a deny rule names in an enabled list,
+// once per list and source. Such a rule denies no one while its source
+// resolves to the empty set (see IPRule.Source).
+func DenySourceRefs(lists []AccessList) []AccessListSourceRef {
+	var out []AccessListSourceRef
+	for _, al := range lists {
+		if al.Disabled {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, r := range al.Rules {
+			if r.Action != ActionDeny || r.Source == "" || seen[r.Source] {
+				continue
+			}
+			seen[r.Source] = true
+			out = append(out, AccessListSourceRef{List: al, Source: r.Source})
+		}
+	}
+	return out
 }
 
 // httpMethods is the standard method set an IPRule may name.
@@ -144,6 +182,14 @@ type AccessListSource struct {
 	// feed made of many individually acceptable prefixes cannot allow most of
 	// the internet. Absent means no budget (the per-entry rules still apply).
 	MaxCoverage *AccessListSourceCoverage `json:"maxCoverage,omitempty" yaml:"maxCoverage,omitempty"`
+	// MaxAge, when set, is a Go duration after which the stored set stops
+	// being served: once the last successful fetch recorded in the ledger, or
+	// the moment maxAge was first applied to the source if that is later, is
+	// older than MaxAge and a fetch is refused, the fetcher empties the set and
+	// the source matches nothing until a fetch succeeds again. It may not be
+	// shorter than the fetch interval. Empty means a refused fetch keeps the
+	// previous set however old it is.
+	MaxAge string `json:"maxAge,omitempty" yaml:"maxAge,omitempty"`
 }
 
 // AccessListSourceCoverage is a per-family coverage budget, each written as the
@@ -165,6 +211,19 @@ func (s AccessListSource) FetchInterval() time.Duration {
 		return DefaultAccessListSourceInterval
 	}
 	return d
+}
+
+// MaxAgeLimit is the configured maxAge; ok is false when none is set (or it
+// does not parse, which validation refuses), meaning a set never expires.
+func (s AccessListSource) MaxAgeLimit() (d time.Duration, ok bool) {
+	if s.MaxAge == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s.MaxAge)
+	if err != nil {
+		return 0, false
+	}
+	return d, true
 }
 
 // EntryLimit is the configured cap, or the 10000 default.
@@ -304,6 +363,17 @@ func (a AccessList) Validate() error {
 			}
 			if d < MinAccessListSourceInterval {
 				return fmt.Errorf("access list %q: sources: source %q interval must be at least %s, got %q", a.Name, src.Name, MinAccessListSourceInterval, src.Interval)
+			}
+		}
+		if src.MaxAge != "" {
+			d, err := time.ParseDuration(src.MaxAge)
+			if err != nil {
+				return fmt.Errorf("access list %q: sources: source %q maxAge must be a Go duration (e.g. \"72h\"), got %q: %w", a.Name, src.Name, src.MaxAge, err)
+			}
+			// Shorter than the interval would expire every set between two
+			// scheduled fetches of a healthy feed.
+			if iv := src.FetchInterval(); d < iv {
+				return fmt.Errorf("access list %q: sources: source %q maxAge must not be shorter than its fetch interval (%s), got %q", a.Name, src.Name, iv, src.MaxAge)
 			}
 		}
 		if src.MaxEntries < 0 {

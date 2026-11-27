@@ -13,6 +13,23 @@ object carries exactly one `type` and its matching spec.
 | `rate-limit` | RateLimitMiddleware | Per-client rate limiting, per route or per host (`scope`). |
 | `rewrite` | RewriteMiddleware | Request-path replacement (upstream-facing): exact, prefix or regex rules. |
 | `bouncer` | BouncerMiddleware | Deny hook: ask an external bouncer (CrowdSec LAPI or any HTTP endpoint) whether the client IP is banned. |
+| `path-block` | PathBlockMiddleware | Deny a request by the shape of its path: file extension, segment name or glob. |
+
+## Middleware object
+
+Every object also carries the shared keys `displayName`, `labels`, `tags` and `disabled`, documented under [Common fields](../../concepts/config-model.md#common-fields-every-object).
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="middleware-name"></span>  `name` | string | none | yes | Unique name that hosts and locations reference. |
+| <span id="middleware-type"></span>  `type` | string | none | yes | One of the types above. Selects which spec key below is read. |
+| <span id="middleware-auth"></span>  `auth` | AuthMiddleware | none | with `type: auth` | Spec for `auth`. |
+| <span id="middleware-headers"></span>  `headers` | HeadersMiddleware | none | with `type: headers` | Spec for `headers`. |
+| <span id="middleware-guard"></span>  `guard` | GuardMiddleware | none | with `type: guard` | Spec for `guard`. |
+| <span id="middleware-rate-limit"></span>  `rateLimit` | RateLimitMiddleware | none | with `type: rate-limit` | Spec for `rate-limit`. |
+| <span id="middleware-rewrite"></span>  `rewrite` | RewriteMiddleware | none | with `type: rewrite` | Spec for `rewrite`. |
+| <span id="middleware-bouncer"></span>  `bouncer` | BouncerMiddleware | none | with `type: bouncer` | Spec for `bouncer`. |
+| <span id="middleware-path-block"></span>  `pathBlock` | PathBlockMiddleware | none | with `type: path-block` | Spec for `path-block`. |
 
 ## AuthMiddleware (`auth`)
 
@@ -20,9 +37,9 @@ object carries exactly one `type` and its matching spec.
 |-----|------|---------|----------|-------------|
 | <span id="middleware-auth-identity-provider"></span>  `identityProvider` | string | none | yes, except in `client-cert` and `basic` mode | Name of an [IdentityProvider](identity-provider.md). Naming one in `client-cert` or `basic` mode is an error. A dangling name is a load-time error, and the proxy listeners fail closed with `503` if one ever reaches it. |
 | <span id="middleware-auth-mode"></span>  `mode` | string | the provider's `type` | no | `oidc` \| `forward-auth` \| `auth-request` \| `client-cert` \| `basic`. See the mode table below. |
-| <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass. **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
+| <span id="middleware-auth-required-roles"></span>  `requiredRoles` | []string | none | no | Roles from the provider's `roleMapping` that may pass: `admin` and `user` in `oidc` and `forward-auth` mode, never group names (an entry that is not a role admits no one and is reported as a config warning). **Refused in `auth-request` mode** (the IdP application binding does authorization) and in `basic` mode (a username carries no roles). |
 | <span id="middleware-auth-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs exempt from this gate, compared against the derived client IP. Valid in `auth-request`, `client-cert` and `basic` mode only; **refused in `oidc` and `forward-auth` mode**, where the gate has no bypass to honour. With `mode` unset the effective mode is the provider's `type`, so an exemption against an `oidc` or `forward-auth` provider is refused too: set `mode` explicitly rather than relying on the default. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
-| <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
+| <span id="middleware-auth-client-cert-roles"></span>  `clientCertRoles` | map[string]string | none | no | `client-cert` mode only. Maps a certificate subject (RFC 2253, or its bare common name when that contains no `=`) to a role that `requiredRoles` is checked against. `requiredRoles` without a mapping is refused at validation. |
 | <span id="middleware-auth-basic"></span>  `basic` | BasicAuthSpec | none | yes in `basic` mode | Local credentials for `basic` mode. Table below. Setting it in any other mode is an error. |
 
 ### Auth modes
@@ -34,6 +51,14 @@ object carries exactly one `type` and its matching spec.
 | `auth-request` | An external `auth_request` endpoint | The auth server does authorization; `requiredRoles` is refused. |
 | `client-cert` | The TLS handshake | Names no `identityProvider`. The host (or the host a location belongs to) must set its own `tls.clientAuth` (`optional` for a gate that exempts some networks): without it the gate admits only its `allowFrom` exemptions and `GET /health` warns, because a certificate is accepted only when the handshake verified it under this host's SNI configuration, which such a host never requests. The gate also refuses a certificate presented under another host's SNI and re-checks revocation on every request. |
 | `basic` | The middleware's own `basic.users` | Names no `identityProvider`; HTTP basic auth against local bcrypt hashes. |
+
+### Several auth gates on one route
+
+- **All must pass.** Every referenced auth middleware and inline `auth` block that applies to the route gates it.
+- **Run order.** The location's inline block, then the host's inline block, then the referenced auth middlewares last-referenced first; a location's referenced gates run before its host's. The first gate that refuses or redirects answers the request.
+- **Pass-through paths.** An `auth-request` gate's outpost `pathPrefix` and an `oidc` gate's callback `/__gpm/oidc/callback` are served by that gate, never gated by it. Every `basic`, `client-cert` and `forward-auth` gate on the route still applies its full rule there (`allowFrom` included); another `oidc` or `auth-request` gate applies only if it runs before the owning gate.
+
+See [Several auth gates on one route](../../concepts/request-pipeline.md#several-auth-gates-on-one-route).
 
 ### BasicAuthSpec (`auth.basic`, `basic` mode only)
 
@@ -97,8 +122,10 @@ the host runs `tls.clientAuth` and the trust anchor (and its CRL, if configured)
 accepted the certificate; otherwise it replies `401`. `clientCertRoles` maps a
 certificate subject to a role: the key is the RFC 2253 subject (`CN=ops,O=Corp`)
 or its bare common name, the value is the role `requiredRoles` is checked
-against. With no mapping, any verified certificate passes; with a mapping, an
-unmapped subject or an insufficient role gets `403`. `requiredRoles` without a
+against. A common name that contains `=` is matched only through the full
+subject, so a CN cannot spell another certificate's subject and take its role.
+With no mapping, any verified certificate passes; with a mapping, an unmapped
+subject or an insufficient role gets `403`. `requiredRoles` without a
 mapping is refused at validation (it could never match).
 
 Pair it with `tls.clientAuth.mode: optional` so certless clients still reach the
@@ -122,16 +149,23 @@ auth:
   allowFrom: [10.0.0.0/8]   # LAN skips the certificate requirement
 ```
 
-In `oidc` mode gpm is itself the OIDC relying party for the host: an
-unauthenticated request is redirected to the IdP, the reserved callback path
-`/__gpm/oidc/callback` exchanges the code (PKCE + nonce) and sets a signed,
-stateless SSO session cookie, and `requiredRoles` (via the IdP's `roleMapping`)
-is enforced; with no role mapping or required roles the gate just requires a
-valid login. Register `https://<host>/__gpm/oidc/callback` as a redirect URI on
-the IdP. The signing key is auto-generated and persisted at
-`<cert-dir>/sso_signing.key` (0600) on first use, so sessions survive restarts
-without any operator action. Set `GPM_SSO_SIGNING_KEY` explicitly to supply your
-own key (useful when rotating or sharing a key across instances).
+In `oidc` mode gpm is itself the OIDC relying party for the host.
+
+- **Flow.** An unauthenticated request is redirected to the IdP; the reserved
+  callback path `/__gpm/oidc/callback` exchanges the code (PKCE + nonce) and
+  sets a signed, stateless SSO session cookie.
+- **Roles.** `requiredRoles` is enforced through the IdP's `roleMapping`; with
+  no role mapping and no required roles the gate just requires a valid login.
+- **Redirect URI.** Register `https://<domain>/__gpm/oidc/callback` on the IdP
+  for every domain of the host. The URI never carries a port.
+- **On a location.** The callback path lies outside the location. gpm lets the
+  location's gate answer it when the host carries no interactive gate, no
+  other location covers the path, and the host's locations share one `oidc`
+  gate ([Gate a host with SSO](../../how-to/per-host-sso.md)).
+- **Signing key.** Auto-generated and persisted at `<cert-dir>/sso_signing.key`
+  (0600) on first use, so sessions survive restarts. Set `GPM_SSO_SIGNING_KEY`
+  to supply your own key (useful when rotating or sharing a key across
+  instances).
 
 After a login the upstream receives `X-Forwarded-User` (the `email` claim, or the
 subject when the token has no email), `X-Forwarded-Email` and
@@ -159,6 +193,9 @@ provider.
 
 At least one of the four must be set.
 
+- **Order**: when several headers middlewares are attached, their response rules run in list order, so the later-listed middleware wins on a name both touch.
+- **Interim and upgrade responses**: the response rules apply to every interim `1xx` and to a `101 Switching Protocols`, in the same order. On a `101`, rules naming `Connection`, `Upgrade`, `Sec-WebSocket-Accept`, `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` are skipped so the handshake stays intact; on other responses they apply as written.
+
 ## GuardMiddleware (`guard`)
 
 | Key | Type | Default | Required | Description |
@@ -173,7 +210,7 @@ At least one of the four must be set.
 |-----|------|---------|----------|-------------|
 | <span id="middleware-guard-triggers-name"></span>  `name` | string | none | no | Optional label (object-name characters, at most 64). A denial by this trigger is reported to Analytics as the signature `guard:<name>`; unnamed triggers count under the `guard` denial reason only. |
 | <span id="middleware-guard-triggers-paths"></span>  `paths` | []string | none | no | Exact request paths this trigger covers. Matching is exact, see [the four path mechanisms](../../concepts/which-mechanism.md#four-path-aware-mechanisms). |
-| <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | HTTP methods this trigger covers, matched without regard to letter case. |
+| <span id="middleware-guard-triggers-methods"></span>  `methods` | []string | none | no | HTTP methods this trigger covers, matched without regard to letter case. Listing `GET` also covers `HEAD`. The method compared is the one on the request line: a method-override parameter (a `_method` form or query field, or an `X-HTTP-Method-Override` header) is not read. If your backend honours such an override, list `POST` in the trigger as well. |
 | <span id="middleware-guard-triggers-query-equals"></span>  `queryEquals` | map[string]string | none | no | Query parameters that must equal these values for the trigger to fire. See the `;` note below. |
 
 A trigger with no field set matches every request, which is a deny-all guard;
@@ -279,11 +316,12 @@ rewrite:
 | <span id="middleware-rate-limit-window"></span>  `window` | string | none | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
 | <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | none | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
 | <span id="middleware-rate-limit-burst"></span>  `burst` | int | `ceil(requests)` | no | Token-bucket capacity: how far above the steady rate a short spike may go. |
-| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` stands for every network access list `name` allows: its allow `cidr` rules plus the fetched sets of its allow `source` rules, path-scoped rules excluded. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays limited, and a path-scoped allow rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 | <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
 | <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
 | <span id="middleware-rate-limit-scope"></span>  `scope` | string | `route` | no | `route` or `host`. Which requests share one budget per client: `route` gives the host route and every location its own; `host` makes the host route and all of its locations draw on one. Not allowed on a location's own inline block. |
+| <span id="middleware-rate-limit-ipv6-prefix"></span>  `ipv6Prefix` | int | `64` | no | `48` to `64`; unset or `0` means `64`. Prefix length an IPv6 client is grouped by: every address in one such prefix shares one bucket. A shorter prefix stops one large delegation from spreading a flood over many buckets, but also groups unrelated customers of a provider that hands out small prefixes, so they share one budget. IPv4 clients are always keyed per address. |
 
 Exactly one of `requests`+`window` or `requestsPerSecond` must be set.
 
@@ -296,7 +334,7 @@ locations. A location's own extra limit always applies to that location only. Ov
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
 request is not proxied. The bucket is keyed on the derived client IP, with an
-IPv6 client keyed by its /64 (one subscriber holds a whole /64, so a per-address
+IPv6 client keyed by its /64, or the `ipv6Prefix` set (one subscriber holds a whole /64, so a per-address
 key would be a fresh bucket per address); the basic-auth lockout keys IPv4 the
 same way and IPv6 by the wider /56 (see
 [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers));
@@ -304,8 +342,8 @@ a request whose client IP cannot be resolved falls back to a
 single shared bucket (fail-safe, never unlimited, and never matches
 `allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
 so a flood is shed before it can drive an auth subrequest or any other
-per-request work: rate-limit -> access-list -> bouncer -> auth -> guard -> headers ->
-rewrite -> upstream.
+per-request work: rate-limit -> path-block -> access-list -> bouncer -> auth -> guard ->
+headers -> rewrite -> upstream.
 
 `blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
 harsher penalty on top of the token bucket: the first request that exceeds
@@ -435,6 +473,13 @@ For the `http` provider a `fail-open` verdict derived from an error is not
 cached at all (the hook's answer depends on the request, so its error can be
 specific to one request); a `fail-closed` one is cached for the 5s.
 
+Live lookups are per client address (an IPv6 client is never judged by its
+neighbours' prefix), and concurrent requests that miss the cache with the same
+lookup share one call to the bouncer: for `crowdsec` the same client IP, for
+`http` the same IP, `host`, `path` and `X-Original-URL`. Every request sharing
+a call gets its verdict or its error (then `onError` as above); the shared call
+runs to its `timeout` even if the request that started it goes away.
+
 `denyWith: error-page` (the default) renders the host's configured custom error
 page for `denyStatus`, falling back to the plain status body when none is
 configured; `plain` opts out of the custom page deliberately:
@@ -549,4 +594,74 @@ type: rewrite
 rewrite:
   replacePath:
     /application/o/token: /application/o/token/
+```
+
+## PathBlockMiddleware (`pathBlock`)
+
+Refuses a request by the shape of its path alone. The same spec is also
+[`settings.pathBlock`](settings/path-block.md), the fleet list that covers every
+proxy host. For a task walkthrough see [Block scanner paths](../../how-to/block-scanner-paths.md).
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="middleware-path-block-extensions"></span>  `extensions` | []string | none | one of `extensions`, `names`, `globs` | File extensions **with the leading dot** (`.php`, `.env`, `.tar.gz`). Matches when any path segment ends with one, so `/a.php/extra` is blocked too, and when a segment is the extension alone (`/.env`). At most 256 entries. |
+| <span id="middleware-path-block-names"></span>  `names` | []string | none | one of `extensions`, `names`, `globs` | Whole path segments (`.git`, `wp-admin`, `wp-login.php`). Matches any segment, directories included, at any depth. At most 256 entries. |
+| <span id="middleware-path-block-globs"></span>  `globs` | []string | none | one of `extensions`, `names`, `globs` | `path.Match` patterns over the whole path, tried on the path as it is and on the folded form described below. Each must start with `/`. `*` and `?` never match `/`, `[a-z]` is a class (written in lower case), a backslash quotes the next character. There is no `**`. At most 64 entries, 128 bytes each and 2048 bytes for all globs of one list together. |
+| <span id="middleware-path-block-allow-from"></span>  `allowFrom` | []string | none | no | Clients the block does not apply to: CIDRs, bare IPs and `@<access-list>` references. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays blocked, and a path-scoped rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-path-block-deny-status"></span>  `denyStatus` | int | `404` | no | Status of a blocked request: `400` to `599` when set, and unset or `0` means `404`. The default answers like a path that does not exist. |
+| <span id="middleware-path-block-deny-with"></span>  `denyWith` | string | `error-page` | no | `error-page` renders the host's custom error page for the status when one exists; `plain` always writes the bare status text. |
+
+Matching rules:
+
+- Matching is case-insensitive throughout.
+- It runs on the cleaned, decoded client path, after dot-segment and percent-decoding normalisation, and before `stripPrefix`, `rewrite` and the upstream `path` are applied. gpm does not decode that path a second time.
+- A segment is compared without its trailing dots and spaces, and only up to its first NUL byte, so `/x.php.` and `/x.php%00.txt` are treated as `x.php`.
+- A glob is tried on the lower-cased request path as it is, and on a folded form of it: cut at the path's first NUL byte as a whole (so `/backup/site.zip%00/x` is matched by `/backup/*.zip`), each segment without trailing dots and spaces, a segment that is only dots and spaces dropped, and **without a trailing slash**. So `/server-status` also blocks `/server-status/` and `/Server-Status.`. The folded form only ever adds matches.
+- A glob must be writable in the folded form, so validation refuses one that ends with `/` (other than `/` itself), one with an empty segment (`//`), one with a segment ending in a dot or a space, and one with a control character. A trailing slash on a pattern is refused, not ignored: write `/old`, not `/old/`.
+- Extensions and names still look at every segment, each cut at its own first NUL byte.
+- `*` and `?` never match `/`. A `[...]` class can: a negated class (`[^x]`) or a range that spans `/` matches a slash like any other character. A class must be written in lower case: validation refuses an upper-case letter inside a class, because the pattern is lower-cased before use.
+- `/dir/*` covers `/dir/` and one level below it. It does not cover `/dir` itself, and does not cover deeper levels, because `*` never matches `/`. To block a directory at any depth use a `names` entry; with globs it takes both `/dir` and `/dir/*`, and still covers one level only.
+- The query string is never looked at. Every method is blocked alike.
+- A client whose address cannot be resolved is never exempt. An `@list` that does not resolve exempts nobody.
+
+<span id="path-block-limits"></span>
+
+Limits:
+
+- At least one of `extensions`, `names`, `globs` is required.
+- Every entry is at most 128 bytes.
+- Extensions and names contain no `/` and no control character, and do not end with a dot or a space. An extension starts with `.`.
+- At most 256 `extensions`, 256 `names` and 64 `globs`, and 2048 bytes for all globs of one list together.
+- Entries must be valid UTF-8.
+- **Long paths.** On a route covered by a list that has `globs`, a request path longer than 4096 bytes counts as listed: it is refused with the list's `denyStatus` unless the client is exempt. The length is measured after lower-casing, which can lengthen a path that is not valid UTF-8. A list with only `extensions` and `names` has no such bound.
+
+Where the step runs:
+
+- It sits just inside the rate limit and ahead of the access list, bouncer and authentication. See [Request pipeline](../../concepts/request-pipeline.md#how-the-chain-is-compiled).
+- Maintenance mode and the `forceSSL` redirect run before it: a listed path on a host in maintenance gets the maintenance response, and on plain HTTP a `forceSSL` host answers its redirect first.
+- Blocked requests are counted with the denial reason `path-block`, and the access log line and `GET /api/logs` entry of a blocked request carry `deny: path-block`.
+- It is a filter on path shape, not content inspection and not a substitute for hardening the upstream.
+
+<span id="path-block-not-caught"></span>
+
+What it does not catch:
+
+- Names that only a double-decoding upstream produces (`/x.ph%2570`).
+- Platform-specific spellings other than trailing dots and spaces, for example an NTFS stream suffix (`x.php::$DATA`).
+- Characters that only compare equal under Unicode case folding.
+- Content negotiation that maps another name onto a listed file (`/wp-login` served as `wp-login.php`).
+
+gpm matches the cleaned client path and does not decode it a second time.
+
+```yaml
+# Answer 404 for scanner paths on one host, except from the office network
+name: scanner-paths
+type: path-block
+pathBlock:
+  extensions: [".php", ".env", ".sql", ".bak"]
+  names: [".git", ".htaccess", "wp-admin", "wp-login.php"]
+  globs: ["/server-status"]
+  allowFrom: [192.0.2.0/24, "@office"]
+  denyStatus: 404
+  denyWith: plain
 ```

@@ -139,6 +139,12 @@ Two operational rules worth knowing before you alert on any of this:
 Scopes: `docker-discovery:read` for status and plan, `docker-discovery:write`
 for reconcile.
 
+Concurrent `/plan` calls share one Engine API read, and a successful plan is
+reused for up to 5 seconds unless a config commit lands or
+`POST /api/docker-discovery/reconcile` runs in between. A failed plan is never
+reused; a reconcile on an event or poll can still leave a reused plan up to 5
+seconds old.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -152,5 +158,6 @@ for reconcile.
 | Container skipped: `a proxy host with this name exists and is not managed by docker discovery` | A hand-written or Ingress-derived host already has that name | Rename the container, or remove the other host |
 | Container skipped: `domain "<d>" is already claimed by <kind> "<h>", which docker discovery does not manage` | A hand-written or Ingress-derived proxy host, a redirect or a parked host already serves that domain | Remove the domain from the container's labels, or from the other host |
 | Host disabled with `profile ... is not defined` | The profile was renamed or retired; an unresolvable profile fails closed | Re-add the profile, or fix the container's `profile` label |
+| Container skipped: `link-local IP address` | The container's address on its network is in `169.254.0.0/16` or `fe80::/10`, which only its own link can reach | Attach it to a routed Docker network, or set `dockerDiscovery.allowLinkLocal: true` if gpm shares that link |
 | Host serves `502` after a container is recreated | The container IP changed between reconciles | Wait for the next event-driven reconcile, or use `usePublishedPorts` |
 | The first reconcile writes nothing and reports an error | The template names a certificate, middleware or access list that does not exist | Create those objects, then enable discovery |

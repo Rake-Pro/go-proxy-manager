@@ -86,7 +86,9 @@ minutes, plus certificate issuance time.
    `tls` is optional: omit it and the host is reachable over plain HTTP on
    `:80` with no certificate configured yet.
 
-6. **Add a certificate.** Pick one path.
+6. **Add a certificate.** In the UI: **Certificates -> Add certificate** opens
+   the certificate wizard (Domains, Authority, Validation, Review), and its
+   Review step shows the YAML before it is committed. Pick one path.
 
    **HTTP-01** (no credentials, needs public `:80`):
 

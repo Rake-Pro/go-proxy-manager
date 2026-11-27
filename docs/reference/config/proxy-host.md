@@ -25,6 +25,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-error-pages-intercept-upstream"></span>  `errorPages.interceptUpstream` | []int | no | Status codes for which this host also replaces the **upstream's own** error body. |
 | <span id="proxy-host-security-headers"></span>  `securityHeaders` | map[string]string \| map[string]{value,scope} | no | Merges over [`settings.securityHeaders`](settings/security-headers.md) per key for this host (replacing the settings value **and its scope** for a header it names). Unset uses the settings-level default unchanged. |
 | <span id="proxy-host-strip-response-headers"></span>  `stripResponseHeaders` | []string | no | Response headers removed from what this host's upstream sends, **in addition to** [`settings.stripResponseHeaders`](settings/security-headers.md#strip-response-headers-section) (union, not replacement: a host cannot opt out of a fleet-level strip). |
+| <span id="proxy-host-path-block"></span>  `pathBlock` | string | no | `inherit` (default, also when unset) or `off`. `off` takes this host out of the fleet list [`settings.pathBlock`](settings/path-block.md), for an application that serves listed paths on purpose. A `type: path-block` [middleware](middleware.md#pathblockmiddleware-pathblock) the host or a location references always applies. On a discovery-managed host set it on the discovery template or profile: a hand edit is rebuilt away at the next reconcile. |
 | <span id="proxy-host-trusted-proxies"></span>  `trustedProxies` | []string (nullable) | no | The L7 proxies whose `X-Forwarded-For` is believed when deriving this host's client IP. **Three states:** omitted or `null` inherits [`settings.trustedProxies`](settings/trusted-proxies.md); `[]` trusts nobody for this host whatever the fleet default is; a non-empty list **replaces** the fleet list (never extends it). See [Per-host override](settings/trusted-proxies.md#per-host-override-absent-is-not-the-same-as-empty) and [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers). |
 
 **Upstream**: a single backend target. Used by `proxyHost.upstream`,
@@ -134,7 +135,15 @@ means no override. A host with any override uses its **own** cloned transport
 (its own connection pool), so a custom timeout never affects another host's
 keep-alive reuse; hosts without an override share the default pooled transport.
 `readSeconds` bounds only time-to-first-byte, so it does not cut off a slow
-streaming / SSE / websocket body once headers have arrived.
+streaming / SSE / websocket body once headers have arrived. A reload closes the
+idle connections of the cloned pool it replaces; requests in flight and open
+WebSocket connections are not interrupted.
+
+**Interim responses**: an upstream's `1xx` responses (`100`, `102`, `103`) are
+relayed to the client with [`stripResponseHeaders`](#proxy-host-strip-response-headers)
+applied, at most 16 per request (later ones are dropped). An upstream that sends
+more than 256 for one request has the exchange aborted, and the client receives
+a `502`.
 
 **Location** (`locations[]`) is a path-scoped override. Matching is
 longest-prefix; the request path is forwarded unchanged unless `stripPrefix` is

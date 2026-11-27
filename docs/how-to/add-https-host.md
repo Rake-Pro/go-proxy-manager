@@ -44,8 +44,11 @@ certificate strategy. For the very first host, start at
    auth:
      identityProvider: authentik
      mode: forward-auth
-     requiredRoles: [staff]
+     requiredRoles: [admin, user]
    ```
+
+   `requiredRoles` lists roles (`admin`, `user`), not groups; the provider's
+   `roleMapping` maps groups to them.
 
    See [Per-host SSO](per-host-sso.md) and [Basic auth](basic-auth.md).
 

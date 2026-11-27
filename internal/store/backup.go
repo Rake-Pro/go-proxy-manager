@@ -44,13 +44,15 @@ func (s *Store) Export(ctx context.Context) ([]byte, error) {
 		return err
 	}
 
+	// A link resolving inside the config dir is archived as the regular file it
+	// names; one resolving outside it (or nowhere) fails the export.
 	for _, files := range s.configFiles() {
-		b, err := os.ReadFile(filepath.Join(s.dir, files)) //nolint:gosec // G304: names come from the store's own configFiles() listing under s.dir
+		b, err := readInDir(s.dir, filepath.Join(s.dir, files))
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("export: %s: %w", files, err)
 		}
 		if err := add(files, b); err != nil {
 			return nil, err
@@ -69,7 +71,7 @@ func (s *Store) Export(ctx context.Context) ([]byte, error) {
 // disk (kind subdirectories + settings.yaml), sorted for deterministic archives.
 func (s *Store) configFiles() []string {
 	var rels []string
-	if _, err := os.Stat(filepath.Join(s.dir, settingsFile)); err == nil {
+	if _, err := os.Lstat(filepath.Join(s.dir, settingsFile)); err == nil {
 		rels = append(rels, settingsFile)
 	}
 	for _, sub := range kindDir {
@@ -267,7 +269,13 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 			return nil, fmt.Errorf("restore: archive too large (> %d bytes uncompressed)", maxRestoreBytes)
 		}
 		if hdr.Typeflag != tar.TypeReg {
-			continue // skip directories and anything non-regular
+			// Skip directories and anything non-regular: a restore never creates
+			// a link. A skipped link is logged, since its file is then missing.
+			if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+				log.Warn().Str("entry", hdr.Name).Str("target", hdr.Linkname).
+					Msg("restore: archive entry is a link, not a regular file; skipped")
+			}
+			continue
 		}
 		entry := hdr.Name
 		if mapped, ok := remapLegacyRestorePath(entry); ok {
@@ -291,8 +299,15 @@ func (s *Store) readArchive(archive []byte) (map[string][]byte, error) {
 // contents in their place. Operates on the working tree; the caller commits or
 // rolls back.
 func (s *Store) replaceConfigFiles(files map[string][]byte) error {
+	// Every config file is removed (a link is removed, not its target) before
+	// the archive is written, so no write below lands on a link. Neither step
+	// goes through a kind dir that links outside the config dir.
 	for _, rel := range s.configFiles() {
-		if err := os.Remove(filepath.Join(s.dir, rel)); err != nil && !os.IsNotExist(err) {
+		p := filepath.Join(s.dir, filepath.FromSlash(rel))
+		if _, err := resolveInDir(s.dir, filepath.Dir(p)); err != nil {
+			return fmt.Errorf("restore: %s: %w", path.Dir(rel), err)
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -301,7 +316,11 @@ func (s *Store) replaceConfigFiles(files map[string][]byte) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 			return err
 		}
-		if err := os.WriteFile(dst, content, 0o640); err != nil {
+		dir, err := resolveInDir(s.dir, filepath.Dir(dst))
+		if err != nil {
+			return fmt.Errorf("restore: %s: %w", path.Dir(rel), err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.Base(dst)), content, 0o640); err != nil {
 			return err
 		}
 	}

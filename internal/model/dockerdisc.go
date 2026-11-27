@@ -103,6 +103,11 @@ type DockerDiscoverySettings struct {
 	// upstream host. Empty picks the container's first network by name, skipping
 	// "host" and "none". Ignored when UsePublishedPorts is set.
 	Network string `json:"network,omitempty" yaml:"network,omitempty"`
+	// AllowLinkLocal lets a link-local container address (169.254.0.0/16,
+	// fe80::/10) become the upstream. Off by default: such an address is only
+	// reachable on the container's own link, so a container reporting one is
+	// skipped. Ignored when UsePublishedPorts is set.
+	AllowLinkLocal bool `json:"allowLinkLocal,omitempty" yaml:"allowLinkLocal,omitempty"`
 	// UsePublishedPorts forwards to the HOST-published port on PublishedHost
 	// instead of the container IP on Network. Use it when gpm runs on the Docker
 	// host rather than inside a shared Docker network; see
@@ -191,6 +196,13 @@ func (d DockerDiscoverySettings) LabelPublicCname() string { return d.Prefix() +
 func (d DockerDiscoverySettings) ManagedByLabel() string  { return d.Prefix() + "/managed-by" }
 func (d DockerDiscoverySettings) DisabledByLabel() string { return d.Prefix() + "/disabled-by" }
 
+// TrustedProxiesByLabel is the CURRENT-prefix key of the marker that a managed
+// host's trustedProxies was stamped from its template (value
+// ManagedByDockerDiscovery); see the package-level TrustedProxiesByLabel.
+func (d DockerDiscoverySettings) TrustedProxiesByLabel() string {
+	return d.Prefix() + "/trusted-proxies-by"
+}
+
 // HasStaleManagedByLabel reports whether labels carries a docker-discovery
 // managed-by label under a prefix OTHER than the current one - the same
 // orphan-detection Ingress discovery does, keyed on this reconciler's own label
@@ -216,18 +228,18 @@ func (d DockerDiscoverySettings) HasStaleDisabledByLabel(labels map[string]strin
 }
 
 // StripStaleDiscoveryLabels deletes, in place, any docker-discovery
-// managed-by/disabled-by label belonging to a PREVIOUS prefix. Only meaningful
-// during a prefix migration; a no-op otherwise.
+// managed-by/disabled-by/trusted-proxies-by label belonging to a PREVIOUS
+// prefix. Only meaningful during a prefix migration; a no-op otherwise.
 func (d DockerDiscoverySettings) StripStaleDiscoveryLabels(labels map[string]string) {
-	managedKey, disabledKey := d.ManagedByLabel(), d.DisabledByLabel()
+	managedKey, disabledKey, tpKey := d.ManagedByLabel(), d.DisabledByLabel(), d.TrustedProxiesByLabel()
 	for k, v := range labels {
 		if v != ManagedByDockerDiscovery {
 			continue
 		}
-		if k == managedKey || k == disabledKey {
+		if k == managedKey || k == disabledKey || k == tpKey {
 			continue
 		}
-		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") {
+		if strings.HasSuffix(k, "/managed-by") || strings.HasSuffix(k, "/disabled-by") || strings.HasSuffix(k, "/trusted-proxies-by") {
 			delete(labels, k)
 		}
 	}
@@ -405,10 +417,11 @@ func dockerSettingsErr(err error) error {
 	return errors.New(strings.Replace(err.Error(), "ingressDiscovery.", "dockerDiscovery.", 1))
 }
 
-// ValidateRefs cross-checks every object the docker discovery block NAMES - the
-// certificate, the upstream group, each middleware, each access list and the
-// mTLS trust anchor - against the objects that actually exist in cfg, for the
-// same reason ingressDiscovery does: a dangling ref there is stamped onto every
+// ValidateRefs cross-checks every object the docker discovery block NAMES,
+// with the same check as IngressDiscoverySettings.ValidateRefs (refErrors),
+// except the template's upstream and upstreamGroupRef, which Docker derive
+// ignores (the upstream is the container's own address), and for the same
+// reason ingressDiscovery does: a dangling ref there is stamped onto every
 // derived host and rejects the whole reconcile batch on every poll, dropping
 // unrelated changes with it. A disabled block is not checked at all.
 func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
@@ -418,48 +431,12 @@ func (d DockerDiscoverySettings) ValidateRefs(cfg Config) error {
 	if err := d.checkPrefixMigration(cfg); err != nil {
 		return err
 	}
-	certs := map[string]bool{}
-	for _, o := range cfg.Certificates {
-		certs[o.Name] = true
-	}
-	mws := map[string]bool{}
-	for _, o := range cfg.Middlewares {
-		mws[o.Name] = true
-	}
-	als := map[string]bool{}
-	for _, o := range cfg.AccessLists {
-		als[o.Name] = true
-	}
-	anyRefused := anyModeRefusals(cfg.AccessLists)
-	ugs := map[string]bool{}
-	for _, o := range cfg.UpstreamGroups {
-		ugs[o.Name] = true
-	}
-	clientCAs := map[string]bool{}
-	disabledClientCAs := map[string]bool{}
-	for _, o := range cfg.ClientCAs {
-		clientCAs[o.Name] = true
-		if o.Disabled {
-			disabledClientCAs[o.Name] = true
-		}
-	}
-
 	var errs []error
 	check := func(path string, t IngressHostTemplate) {
-		owner := "dockerDiscovery." + path
-		checkRef(&errs, "", owner, "tls.certificateRef", "certificate", t.TLS.CertificateRef, certs)
-		checkRef(&errs, "", owner, "upstreamGroupRef", "upstreamGroup", t.UpstreamGroupRef, ugs)
-		checkClientAuthRef(&errs, "", owner, t.TLS, clientCAs, disabledClientCAs)
-		for _, m := range t.Middlewares {
-			checkRef(&errs, "", owner, "middlewares", "middleware", m, mws)
-		}
-		for _, a := range t.AccessLists {
-			checkRef(&errs, "", owner, "accessLists", "accessList", a, als)
-		}
-		checkAnyModeMembers(&errs, "", owner, "", t.AccessListsMode, t.AccessLists, anyRefused)
-		for _, l := range t.Locations {
-			checkAnyModeMembers(&errs, "", owner, fmt.Sprintf("locations: location %q: ", l.Path), l.AccessListsMode, l.AccessLists, anyRefused)
-		}
+		// Docker derive takes the upstream from the container and never stamps
+		// the template's upstream or upstream group, so neither is checked here.
+		t.Upstream, t.UpstreamGroupRef = Upstream{}, ""
+		errs = append(errs, t.refErrors(cfg, "dockerDiscovery."+path)...)
 	}
 	check(DefaultProfileName, d.Template)
 	for _, name := range d.ProfileNames() {

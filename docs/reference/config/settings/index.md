@@ -13,6 +13,7 @@ has its own reference page; the complete example at the end shows them together.
 | Client limits | `clientLimits.*` | [Client limits](client-limits.md) |
 | TLS | `tls.minVersion` | [TLS](tls.md) |
 | Security headers | `securityHeaders`, `stripResponseHeaders` | [Security headers](security-headers.md) |
+| Path block list | `pathBlock` | [Path block list](path-block.md) |
 | Error pages | `errorPages` | [Error pages](error-pages.md) |
 | Maintenance | `maintenance` | [Maintenance mode](maintenance.md) |
 | Analytics | `analytics` | [Analytics](analytics.md) |
@@ -38,6 +39,10 @@ adminAuth:
   ssoOnly: false
 tls:
   minVersion: "1.2"                 # fleet floor; a host may pin "1.3" (or back to "1.2")
+pathBlock:                          # off until set; covers every proxy host except the admin edge
+  extensions: [".php", ".env"]
+  names: [".git", "wp-login.php"]
+  globs: ["/server-status"]
 clientLimits:
   maxInFlight: 256                  # requests in progress per client address; absent = no limit
 webhooks:

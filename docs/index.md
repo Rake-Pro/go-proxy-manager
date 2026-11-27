@@ -12,7 +12,7 @@ proxy listeners and the admin panel.
 ## What it does
 
 - **TLS and ACME.** Issues and renews Let's Encrypt certificates over DNS-01 or
-  HTTP-01, against any ACME CA including EAB-gated ones.
+  HTTP-01, against any ACME CA including EAB-gated ones and private CAs.
 - **Authentication as typed config.** OIDC, forward-auth, `auth_request`, mTLS
   and basic auth are validated objects, not text snippets.
 - **Access control.** Ordered IP/CIDR allow-deny lists, optional GeoIP country

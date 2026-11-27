@@ -418,6 +418,20 @@ input.field:focus-visible, select.field:focus-visible, textarea.field:focus-visi
 .feed-tick.info { background:var(--info); }
 .ov-summary { margin:4px 0 0; font-size:13.5px; }
 .feed-tick.warn { background:var(--warn); }
+/* Overview panels: three across while each keeps a readable width; below
+   that a panel that wraps takes the full row, so no half row is left empty. */
+.ov-panels { display:flex; flex-wrap:wrap; gap:16px; margin-bottom:16px; }
+.ov-panel { flex:1 1 280px; min-width:0; }
+.ov-panel h3 { margin-bottom:12px; }
+.ov-panel .kv { grid-template-columns:max-content minmax(0,1fr); }
+.ov-panel .kv .v { font-family:var(--sans); font-size:14px; }
+.ov-panel .kv .k .dot { display:inline-block; margin-right:4px; }
+.ov-panel .kv .v a { font-weight:700; }
+.ov-note { margin:14px 0 0; font-size:13.5px; }
+.ov-panel h3 + .ov-note { margin-top:0; }
+.ov-panel .btn { margin-top:12px; }
+.meter.ov-bar { display:flex; height:10px; margin:0 0 14px; }
+.meter i.muted { background:var(--border-2); }
 /* Revert controls are <button>: they commit a config change, so they must be
    tabbable and Enter/Space operable. */
 .revert { font-size:12.5px; color:var(--muted); background:none; border:0; padding:0; font-family:inherit; cursor:pointer; }
