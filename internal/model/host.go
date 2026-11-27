@@ -457,6 +457,13 @@ type ProxyHost struct {
 	// from what the upstream sent, never from headers gpm adds.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 
+	// PathBlock is this host's switch for the fleet path block list
+	// (settings.pathBlock): "inherit" (the default, also when unset) applies it,
+	// "off" does not, for an application that serves the blocked paths on
+	// purpose. It has no effect on a `type: path-block` middleware the host or a
+	// location references, which always applies.
+	PathBlock string `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
+
 	// TrustedProxies REPLACES settings.trustedProxies for this host (it does not
 	// merge): the L7 proxies whose X-Forwarded-For gpm believes when it derives
 	// this host's client IP.
@@ -512,6 +519,9 @@ func (h ProxyHost) Validate() error {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	if err := validateStripResponseHeaders(h.StripResponseHeaders); err != nil {
+		return fmt.Errorf("proxy host %q: %w", h.Name, err)
+	}
+	if err := validatePathBlockSwitch(h.PathBlock); err != nil {
 		return fmt.Errorf("proxy host %q: %w", h.Name, err)
 	}
 	if h.TrustedProxies != nil {

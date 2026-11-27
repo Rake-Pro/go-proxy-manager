@@ -272,7 +272,7 @@ function $$(sel, root) { return Array.from((root || document).querySelectorAll(s
 
 // The UI's word for a middleware type where it differs from the YAML value:
 // the rail, the check-lists and the summaries all read from here.
-const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit' };
+const MW_TYPE_LABEL = { auth: 'sign-in', 'rate-limit': 'rate limit', 'path-block': 'path block' };
 
 // ---------- list filter ----------
 // Every list filter box takes plain words and field-scoped terms. parseFilter
@@ -831,6 +831,7 @@ const ENUM_LABELS = {
     'rate-limit': 'Rate limit',
     'rewrite': 'Path rewrite',
     'bouncer': 'Bouncer (external deny hook)',
+    'path-block': 'Path block (deny by path shape)',
   },
   authMode: {
     '': 'Take the mode from the identity provider',
@@ -949,6 +950,10 @@ const ENUM_LABELS = {
   bouncerDenyWith: {
     'error-page': 'The configured error page',
     'plain': 'A plain-text body',
+  },
+  pathBlockSwitch: {
+    'inherit': 'Apply the fleet path block list (default)',
+    'off': 'Do not apply the fleet path block list',
   },
 };
 
@@ -2906,6 +2911,173 @@ function wireRateLimitBlock(p, rl) {
   };
 }
 
+// ---------- path block list block (middleware, settings.pathBlock) ----------
+// model.PathBlockMiddleware is one spec in two places: a `type: path-block`
+// middleware and the fleet list settings.pathBlock. Both editors render this
+// block; the help ids differ per place, so they are looked up by scope.
+const PATH_BLOCK_HINTS = {
+  middleware: {
+    extensions: 'middleware.pathBlock.extensions', names: 'middleware.pathBlock.names', globs: 'middleware.pathBlock.globs',
+    allowFrom: 'middleware.pathBlock.allowFrom', denyStatus: 'middleware.pathBlock.denyStatus', denyWith: 'middleware.pathBlock.denyWith',
+  },
+  settings: {
+    extensions: 'settings.pathBlock.extensions', names: 'settings.pathBlock.names', globs: 'settings.pathBlock.globs',
+    allowFrom: 'settings.pathBlock.allowFrom', denyStatus: 'settings.pathBlock.denyStatus', denyWith: 'settings.pathBlock.denyWith',
+  },
+};
+// The model's bounds (model.MaxPathBlockEntries, MaxPathBlockGlobs,
+// MaxPathBlockEntryLen). The server is authoritative; these only block a save
+// the API would refuse anyway.
+const PATH_BLOCK_MAX_ENTRIES = 256;
+const PATH_BLOCK_MAX_GLOBS = 64;
+const PATH_BLOCK_MAX_LEN = 128;
+const PATH_BLOCK_MAX_GLOB_BYTES = 2048;
+function pathBlockBlockHtml(p, pb, scope) {
+  pb = pb || {};
+  const hn = PATH_BLOCK_HINTS[scope];
+  return `
+    <div class="field-group"><label>Extensions</label><div class="chip-input" id="${p}-ext" data-hint="${hn.extensions}" data-path="pathBlock.extensions"></div>
+      <div class="hint">With the leading dot: <span class="mono">.php</span>, <span class="mono">.env</span>, <span class="mono">.tar.gz</span>.</div>
+    </div>
+    <div class="field-group"><label>Names</label><div class="chip-input" id="${p}-names" data-hint="${hn.names}" data-path="pathBlock.names"></div>
+      <div class="hint">Whole path segments: <span class="mono">.git</span>, <span class="mono">wp-admin</span>, <span class="mono">wp-login.php</span>.</div>
+    </div>
+    <div class="field-group"><label>Globs</label><div class="chip-input" id="${p}-globs" data-hint="${hn.globs}" data-path="pathBlock.globs"></div>
+      <div class="hint">Patterns over the whole path, starting with <span class="mono">/</span>: <span class="mono">/server-status</span>. Write classes in lower case (<span class="mono">[a-z]</span>) and no trailing <span class="mono">/</span>: a path is compared without its own.</div>
+    </div>
+    <div class="field-group"><label>Exempt networks</label><div class="chip-input" id="${p}-allow" data-hint="${hn.allowFrom}" data-path="pathBlock.allowFrom"></div>
+      <div class="hint">CIDRs, bare IPs, or <span class="mono">@access-list</span> (a client whose first matching rule in that list is an allow rule) that the block does not apply to.</div>
+    </div>
+    <div class="inline-fields">
+      <div class="field-group"><label>Deny status</label><input class="field mono" id="${p}-denystatus" data-hint="${hn.denyStatus}" data-path="pathBlock.denyStatus" type="number" value="${esc(pb.denyStatus != null ? pb.denyStatus : '')}" placeholder="404" /></div>
+      <div class="field-group"><label>Deny with</label><select class="field mono" id="${p}-denywith" data-hint="${hn.denyWith}" data-path="pathBlock.denyWith">
+        ${enumOptions('bouncerDenyWith', ['error-page', 'plain'], pb.denyWith || 'error-page')}
+      </select></div>
+    </div>`;
+}
+// pathBlockEntryError mirrors model.pathBlockEntryError for one extension or
+// name: '' when it is fine, else the complaint.
+function pathBlockEntryError(e) {
+  if (new TextEncoder().encode(e).length > PATH_BLOCK_MAX_LEN) return `is longer than ${PATH_BLOCK_MAX_LEN} bytes`;
+  if (e.indexOf('/') !== -1) return 'must not contain "/" (it is compared with one path segment)';
+  if (/[. ]$/.test(e)) return 'must not end with a dot or a space';
+  if (/[\x00-\x1f\x7f]/.test(e)) return 'must not contain a control character';
+  return '';
+}
+// globClassHasUpper mirrors model.globClassHasUpper: whether a glob holds an
+// upper-case letter inside a [...] class, counting a backslash-quoted
+// character as part of the class it stands in. Patterns are lower-cased before
+// use, so such a class would match something other than what it says.
+function globClassHasUpper(g) {
+  const cs = Array.from(g);
+  let inClass = false;
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    if (c === '\\' && i + 1 < cs.length) {
+      const q = cs[++i];
+      if (inClass && q.toLowerCase() !== q) return true;
+    } else if (!inClass && c === '[') inClass = true;
+    else if (inClass && c === ']') inClass = false;
+    else if (inClass && c.toLowerCase() !== c) return true;
+  }
+  return false;
+}
+// globShapeError mirrors model.globShapeError: '' when the glob can match the
+// form a path is compared in (no trailing slash, no empty segment, no segment
+// ending in a dot or a space, no control character), else the complaint.
+function globShapeError(g) {
+  if (g === '/') return '';
+  if (/[\x00-\x1f\x7f]/.test(g)) return 'must not contain a control character';
+  const t = g.replace(/\/+$/, '');
+  if (t !== g && t !== '') return `must not end with "/" (a path is compared without its trailing slash; write "${t}")`;
+  for (const seg of g.slice(1).split('/')) {
+    if (seg === '') return 'must not contain an empty segment ("//")';
+    if (seg.endsWith('.') || seg.endsWith(' ')) return 'has a segment ending with a dot or a space, which a path is compared without';
+  }
+  return '';
+}
+function wirePathBlockBlock(p, pb) {
+  pb = pb || {};
+  const extCtl = makeChipInput($('#' + p + '-ext'), arr(pb.extensions), 'add extension...');
+  const namesCtl = makeChipInput($('#' + p + '-names'), arr(pb.names), 'add name...');
+  const globsCtl = makeChipInput($('#' + p + '-globs'), arr(pb.globs), 'add glob...');
+  const allowCtl = makeChipInput($('#' + p + '-allow'), arr(pb.allowFrom), 'add CIDR or @list...');
+  return {
+    // The spec; undefined when no extension, name or glob is set (the caller
+    // decides whether that means "no list" or is an error); null once
+    // showInvalid has flagged a field.
+    get() {
+      const extensions = extCtl.get(), names = namesCtl.get(), globs = globsCtl.get();
+      if (!extensions.length && !names.length && !globs.length) return undefined;
+      const lists = [
+        ['Extensions', extensions, PATH_BLOCK_MAX_ENTRIES, '-ext', (e) => pathBlockEntryError(e) || (e[0] !== '.' ? 'must be a dot followed by the extension, such as .php' : '')],
+        ['Names', names, PATH_BLOCK_MAX_ENTRIES, '-names', pathBlockEntryError],
+        ['Globs', globs, PATH_BLOCK_MAX_GLOBS, '-globs', (e) => (e[0] !== '/' ? 'must start with "/" (a glob is matched against the whole path)'
+          : (new TextEncoder().encode(e).length > PATH_BLOCK_MAX_LEN ? `is longer than ${PATH_BLOCK_MAX_LEN} bytes`
+            : (globClassHasUpper(e) ? 'has an upper-case letter inside [...]: matching is case-insensitive, write the class in lower case' : globShapeError(e))))],
+      ];
+      if (globs.reduce((n, g) => n + new TextEncoder().encode(g).length, 0) > PATH_BLOCK_MAX_GLOB_BYTES) {
+        showInvalid('Globs too large', `Globs: at most ${PATH_BLOCK_MAX_GLOB_BYTES} bytes in total are allowed.`, $('#' + p + '-globs'));
+        return null;
+      }
+      for (const [label, list, max, suffix, check] of lists) {
+        const el = $('#' + p + suffix);
+        if (list.length > max) { showInvalid('Too many entries', `${label}: at most ${max} entries are allowed.`, el); return null; }
+        for (const e of list) {
+          const err = check(e);
+          if (err) { showInvalid('Invalid path block entry', `${label}: "${e}" ${err}.`, el); return null; }
+        }
+      }
+      const spec = {};
+      if (extensions.length) spec.extensions = extensions;
+      if (names.length) spec.names = names;
+      if (globs.length) spec.globs = globs;
+      const allow = allowCtl.get();
+      if (allow.length) {
+        const bad = allow.find(v => !(v.startsWith('@') ? ACCESS_LIST_REF_RE.test(v) : isCidrOrIP(v)));
+        if (bad) { showInvalid('Invalid network', `"${bad}" is not a CIDR, an IP address or an @access-list name.`, $('#' + p + '-allow')); return null; }
+        spec.allowFrom = allow;
+      }
+      const ds = parseInt($('#' + p + '-denystatus').value, 10);
+      if (!isNaN(ds)) {
+        if (ds < 400 || ds > 599) { showInvalid('Invalid deny status', 'Deny status must be a 4xx or 5xx code. Leave it blank for 404.', $('#' + p + '-denystatus')); return null; }
+        spec.denyStatus = ds;
+      }
+      // error-page is the default, so it is only written when the stored
+      // object already spelled it out.
+      const dw = $('#' + p + '-denywith').value;
+      if (dw !== 'error-page' || pb.denyWith) spec.denyWith = dw;
+      return spec;
+    },
+  };
+}
+// The pathBlock switch of a proxy host, a discovery template and a discovery
+// profile: inherit (the default, also when unset) or off.
+// cls is an extra class for the select (a profile row finds its own select by
+// it); it is merged into the one class attribute, since a second class
+// attribute in attrs would be dropped by the browser.
+function pathBlockSwitchHtml(attrs, stored, hint, cls) {
+  return `<select class="field mono${cls ? ' ' + cls : ''}" ${attrs} data-hint="${esc(hint)}">${enumOptions('pathBlockSwitch', ['inherit', 'off'], stored === 'off' ? 'off' : 'inherit')}</select>`;
+}
+// pathBlockSwitchValue is the pathBlock to send for one select: "off", else
+// the stored value ("inherit" stays "inherit", unset stays unset), so a save
+// that does not touch the select writes nothing new. No select rendered means
+// the stored value is carried forward as it is.
+function pathBlockSwitchValue(el, stored) {
+  if (!el) return stored || undefined;
+  if (el.value === 'off') return 'off';
+  return stored === 'inherit' ? 'inherit' : undefined;
+}
+// pathBlockSummary is a path block spec as one line: "3 extensions, 2 names".
+function pathBlockSummary(pb) {
+  pb = pb || {};
+  return [
+    arr(pb.extensions).length ? plural(arr(pb.extensions).length, 'extension', 'extensions') : '',
+    arr(pb.names).length ? plural(arr(pb.names).length, 'name', 'names') : '',
+    arr(pb.globs).length ? plural(arr(pb.globs).length, 'glob', 'globs') : '',
+  ].filter(Boolean).join(', ') || 'no entries';
+}
+
 // ---------- inline auth / rate-limit folds ----------
 // The fold wrapper both inline blocks share: an on/off switch that owns the
 // whole key (off omits it from the body entirely), a one-line summary of what
@@ -3614,6 +3786,7 @@ async function viewIntegrations(c, tab) {
             <div class="field-group"><label>Certificate</label><input class="field mono" id="set-id-cert" data-hint="settings.ingressDiscovery.template.tls.certificateRef" data-path="ingressDiscovery.template.tls.certificateRef" value="${esc(idt.tls.certificateRef || '')}" placeholder="wildcard" /><div class="hint">Required: point this at your wildcard certificate.</div></div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
+            <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-id-pathblock" data-path="ingressDiscovery.template.pathBlock"', idt.pathBlock, 'settings.ingressDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
           </div>
           <div>
             <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw" data-hint="settings.ingressDiscovery.template.middlewares"></div><div class="hint">Applied to every derived host, in order.</div></div>
@@ -3704,6 +3877,7 @@ async function viewIntegrations(c, tab) {
               <div class="field-group"><label>Certificate</label><input class="field mono" id="set-dkr-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" data-path="dockerDiscovery.template.tls.certificateRef" value="${esc(ddt.tls.certificateRef || '')}" placeholder="wildcard" /></div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-dkr-forcessl', !!ddt.tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-dkr-robots', !!ddt.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
+              <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-dkr-pathblock" data-path="dockerDiscovery.template.pathBlock"', ddt.pathBlock, 'settings.dockerDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
               <div class="field-group" style="margin-top:10px">
                 <label>Upstream timeouts (seconds)</label>
                 <div class="loc-row bare">
@@ -3926,6 +4100,7 @@ async function viewIntegrations(c, tab) {
           <div class="field-group"><label>Tags</label><div class="chip-input pf-tags" data-hint="settings.ingressDiscovery.template.tags"></div><div class="hint">Applied to every host that selects this profile.</div></div>
           <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input pf-suffixes" data-hint="settings.ingressDiscovery.template.allowedDomainSuffixes"></div><div class="hint">Narrows the global list for hosts using this profile. Must be a subset.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('pf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
+          <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.ingressDiscovery.template.pathBlock', 'pf-pathblock')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct', 'settings.ingressDiscovery.template.defaultDNS.lanDirect')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div></div>${switchHtml('pf-dns-pub-' + i, !!dns.publicCname, 'Default public CNAME', 'settings.ingressDiscovery.template.defaultDNS.publicCname')}</div>
         </div>
@@ -4069,6 +4244,7 @@ async function viewIntegrations(c, tab) {
           <div class="field-group"><label>Certificate</label><input class="field mono dpf-cert" data-hint="settings.dockerDiscovery.template.tls.certificateRef" value="${esc(tls.certificateRef || '')}" placeholder="wildcard" aria-label="Certificate" /></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('dpf-forcessl-' + i, !!tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('dpf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
+          <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.dockerDiscovery.template.pathBlock', 'dpf-pathblock')}</div>
           <div class="field-group" style="margin-top:10px">
             <label>Upstream timeouts (seconds)</label>
             <div class="loc-row bare">
@@ -4478,6 +4654,7 @@ async function viewIntegrations(c, tab) {
         // strips the template's strip list / security headers and the next
         // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue($('#set-id-pathblock'), idt.pathBlock),
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
@@ -4522,6 +4699,7 @@ async function viewIntegrations(c, tab) {
         tags: row._tags.get(),
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue(row.querySelector('.pf-pathblock'), (row._orig || {}).pathBlock),
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -4604,6 +4782,7 @@ async function viewIntegrations(c, tab) {
         accessListsMode: alModeValue($('#set-dkr-alm'), ddt.accessListsMode),
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue($('#set-dkr-pathblock'), ddt.pathBlock),
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
@@ -4637,6 +4816,7 @@ async function viewIntegrations(c, tab) {
         accessListsMode: alModeValue($('#dpf-alm-' + uid), (row._orig || {}).accessListsMode),
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
+        pathBlock: pathBlockSwitchValue(row.querySelector('.dpf-pathblock'), (row._orig || {}).pathBlock),
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -5353,10 +5533,11 @@ function revealTabPanel(el) {
 }
 
 // The rail's request chain, in the order the data plane evaluates it: rate
-// limit, access lists, bouncer, sign-in, guard, headers, rewrite, then the
-// upstream. An inline block sits at its kind's position, just before the
-// referenced middlewares of that kind.
-const CHAIN_TYPE_ORDER = ['rate-limit', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
+// limit, path block, access lists, bouncer, sign-in, guard, headers, rewrite,
+// then the upstream. An inline block sits at its kind's position, just before
+// the referenced middlewares of that kind; the fleet path block list sits
+// ahead of the referenced path-block middlewares.
+const CHAIN_TYPE_ORDER = ['rate-limit', 'path-block', 'bouncer', 'auth', 'guard', 'headers', 'rewrite'];
 function renderRailChain(el, ctx) {
   if (!el) return;
   const KIND_LABEL = MW_TYPE_LABEL;
@@ -5364,6 +5545,8 @@ function renderRailChain(el, ctx) {
   const items = [];
   if (ctx.inlineRateLimit) items.push({ name: 'rate limit', kind: 'on this host' });
   items.push(...byType('rate-limit'));
+  if (ctx.fleetPathBlock) items.push({ name: 'path block list', kind: 'fleet, from Settings' });
+  items.push(...byType('path-block'));
   if (ctx.alMode === 'any' && ctx.alSelected.length) items.push({ name: ctx.alSelected.join(' or '), kind: 'access lists, any' });
   else ctx.alSelected.forEach((a) => items.push({ name: a, kind: 'access list' }));
   items.push(...byType('bouncer'));
@@ -5417,6 +5600,8 @@ async function hostEditor(c, name) {
   ]);
   const idps = arr(idpList);
   const fleetProxies = arr((setR.data || {}).trustedProxies);
+  // Whether settings.pathBlock holds a list at all, for the rail and the fold.
+  const fleetPathBlock = !!(setR.data || {}).pathBlock;
   const certs = arr(certList);
   const mwListOK = mwList !== null;
   const alListOK = alList !== null;
@@ -5525,6 +5710,11 @@ async function hostEditor(c, name) {
 
   const stripCount = arr(h.stripResponseHeaders).length;
   const stripSummary = stripCount ? `${plural(stripCount, 'header', 'headers')}` : 'none';
+
+  // pathBlock: this host's switch for the fleet path block list. Only "off"
+  // says anything a reader of the summary needs; inherit is the default.
+  const pbSwitchSummary = (v) => (v === 'off' ? 'off - the fleet list does not apply here'
+    : (fleetPathBlock ? 'fleet list applies' : 'inherit (no fleet list set in Settings)'));
 
   const dnsParts = [];
   if (h.dns && h.dns.lanDirect) dnsParts.push('LAN direct');
@@ -5733,6 +5923,11 @@ ${panel('access', `        <div class="card form-section">
 
         ${inlineFoldHtml('f-rl', 'Rate limit', 'Throttle this host per client IP. For a limit shared by several hosts, use a middleware instead.',
     !!h.rateLimit, rateFoldSummary(h.rateLimit), rateLimitBlockHtml('f-rl', h.rateLimit), 'proxyHost.rateLimit')}
+
+        ${foldHtml('f-pathblock-card', 'Fleet path block list', pbSwitchSummary(h.pathBlock), h.pathBlock === 'off', `
+          <div class="field-group"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="f-pathblock" data-path="pathBlock"', h.pathBlock, 'proxyHost.pathBlock')}</div>
+          <div class="hint">The list is set under <a href="#/settings/general">Settings &gt; General</a>. A path-block middleware attached above applies either way.</div>
+        `)}
 `)}
 ${panel('headers', `        ${foldHtml('f-sech-card', 'Response security headers', secHdrSummary, secHdrCount > 0, `
           <div id="f-secheaders" data-hint="proxyHost.securityHeaders" data-path="securityHeaders"></div>
@@ -5864,6 +6059,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   $('#f-auth-on').addEventListener('switchchange', () => { syncInlineOrderHint(); refreshFlow(); });
   $('#f-rl-on').addEventListener('switchchange', () => { syncInlineOrderHint(); refreshFlow(); });
   $('#f-auth-idp').addEventListener('change', refreshFlow);
+  $('#f-pathblock').addEventListener('change', refreshFlow);
 
   // These two DNS toggles stay USABLE when their backend is not configured, and
   // say so inline instead. Deliberately unlike every other capability-gated
@@ -5916,6 +6112,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     },
     'f-sech-card': () => { const n = $$('#f-secheaders > .loc-row').length; return n ? `${n} set` : 'fleet defaults'; },
     'f-strip-card': () => { const n = stripCtl.get().length; return n ? `${plural(n, 'header', 'headers')}` : 'none'; },
+    'f-pathblock-card': () => pbSwitchSummary($('#f-pathblock').value),
     'f-adv-card': () => {
       const mode = tpChoice();
       if (mode === 'custom') { const l = trustedCtl.get(); return l.length ? `trusted proxies: ${l.join(', ')}` : 'trusted proxies: custom list (empty)'; }
@@ -6114,6 +6311,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       mwSelected: curMw(), mwType, alSelected: curAl(), alMode: curAlMode(),
       inlineAuth: isOn('f-auth-on') ? (($('#f-auth-idp') && $('#f-auth-idp').value) || 'credentials') : '',
       inlineRateLimit: isOn('f-rl-on'),
+      fleetPathBlock: fleetPathBlock && $('#f-pathblock').value !== 'off',
     });
   }
   // rail: the certificate the handshake will present for the first domain,
@@ -6255,6 +6453,12 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
     const stripErr = stripHeaderListError(stripHdrs);
     if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#f-striphdrs')); return; }
     if (stripHdrs.length) obj.stripResponseHeaders = stripHdrs;
+
+    // pathBlock (this host's switch for the fleet path block list): "off" is
+    // sent, the inherit default is left off the body unless the stored host
+    // spelled it out.
+    const pathBlock = pathBlockSwitchValue($('#f-pathblock'), h.pathBlock);
+    if (pathBlock) obj.pathBlock = pathBlock;
 
     // certificateRef and http2 have no control on this form any more - the L7
     // listener picks the certificate by SNI and negotiates h2 over ALPN, so
@@ -6856,7 +7060,7 @@ const SECTION_META = {
       (arr(o.basicAuth).length ? `<span class="k">Legacy</span><span class="v v-list"><span class="chip warn">Deprecated</span> ${plural(arr(o.basicAuth).length, 'basic-auth user', 'basic-auth users')}</span>` : ''),
   },
   middleware: {
-    title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, guards, path rewrites and deny hooks.',
+    title: 'Middleware', sub: 'Reusable steps any host can pick up: sign-in, headers, rate limits, path blocks, guards, path rewrites and deny hooks.',
     empty: 'Most installs start with one sign-in middleware pointing at an identity provider, then attach it to the hosts that need signing in.',
     singular: 'middleware', many: 'middleware', addLabel: 'Add middleware',
     summary: (o) => `<span class="k">Type</span><span class="v">${enumChip('middlewareType', o.type || '')}${(o.type === 'auth' && o.auth && o.auth.mode) ? ' - ' + esc(enumLabel('authMode', o.auth.mode).split(' - ')[0]) : ''}</span>` +
@@ -6865,7 +7069,8 @@ const SECTION_META = {
       (o.rateLimit ? `<span class="k">Rate</span><span class="v">${o.rateLimit.window ? esc(o.rateLimit.requests) + ' / ' + esc(o.rateLimit.window) : esc(o.rateLimit.requestsPerSecond) + ' r/s'}</span>` : '') +
       (o.rateLimit && o.rateLimit.blockFor ? `<span class="k">Block</span><span class="v">${esc(o.rateLimit.blockFor)}${o.rateLimit.blockBackoff > 1 ? ' x' + esc(o.rateLimit.blockBackoff) + ' up to ' + esc(o.rateLimit.blockMax || '24h') : ''}</span>` : '') +
       (o.rewrite && o.rewrite.replacePath && Object.keys(o.rewrite.replacePath).length ? `<span class="k">Rewrite</span><span class="v">${plural(Object.keys(o.rewrite.replacePath).length, 'path', 'paths')}</span>` : '') +
-      (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : ''),
+      (o.bouncer ? `<span class="k">Bouncer</span><span class="v">${esc(o.bouncer.provider || 'crowdsec')}${o.bouncer.stream ? ' (stream)' : ''}</span><span class="k">On error</span><span class="v">${esc(o.bouncer.onError || 'fail-open')}</span>` : '') +
+      (o.pathBlock ? `<span class="k">Blocks</span><span class="v">${esc(pathBlockSummary(o.pathBlock))}</span>` : ''),
   },
   dns: {
     title: 'DNS Providers', sub: 'API credentials for the DNS zones gpm writes into: ACME dns-01 challenges and DNS sync records.',
@@ -8363,12 +8568,12 @@ async function middlewareEditor(c, name) {
   const idps = arr(idpR);
   const o = seed ? seed.data : (objR.data || {}); const type = o.type || 'headers';
   const auth = o.auth || {}; const headers = o.headers || {}; const guard = o.guard || {}; const rl = o.rateLimit || {}; const rewrite = o.rewrite || {};
-  const bo = o.bouncer || {};
+  const bo = o.bouncer || {}; const pb = o.pathBlock || {};
   c.innerHTML = editorHead('middleware', meta, isNew, name) + `<div class="stack">
     ${identityCard('ed', o, { section: 'middleware', isNew, placeholder: seed && seed.origName + '-copy' })}
     <div class="card form-section"><p class="section-label">Type</p>
       <div class="field-group"><label>Middleware type</label><select class="field mono" id="ed-type" data-hint="middleware.type">
-        ${enumOptions('middlewareType', ['auth', 'headers', 'guard', 'rate-limit', 'rewrite', 'bouncer'], type)}
+        ${enumOptions('middlewareType', ['auth', 'headers', 'guard', 'rate-limit', 'rewrite', 'bouncer', 'path-block'], type)}
       </select></div>
     </div>
 
@@ -8419,6 +8624,10 @@ async function middlewareEditor(c, name) {
       </select></div>
       <div class="toggle-line" id="bo-stream-line"><div class="tl-text"><div class="nm">Stream mode (crowdsec only)</div><div class="ds">Pull the whole decision set once, then deltas every cache TTL, so the request path is a local lookup with no per-request LAPI call</div></div>${switchHtml('bo-stream', !!bo.stream, 'Stream mode', 'middleware.bouncer.stream')}</div>
     </div>
+    <div class="card form-section ed-sub" data-type="path-block" style="${type === 'path-block' ? '' : 'display:none'}"><p class="section-label">Path block</p>
+      <div class="hint">Refuses a request by the shape of its path alone. Runs right after the rate limit, ahead of access lists and sign-in, so a blocked path never reaches the upstream or the identity provider. Matching is case-insensitive; the query string is not looked at.</div>
+      <div style="margin-top:12px">${pathBlockBlockHtml('mwpb', pb, 'middleware')}</div>
+    </div>
     <div class="card form-section ed-sub" data-type="rewrite" style="${type === 'rewrite' ? '' : 'display:none'}"><p class="section-label">Rewrite</p>
       <div class="field-group"><label>Exact</label>
         <div class="hint" style="margin:0 0 6px">The request path must equal "From" exactly.</div>
@@ -8447,6 +8656,7 @@ async function middlewareEditor(c, name) {
   // The same rate-limit block (and the same per-window / per-second forms) the
   // host and location editors use for the same model.
   const rlCtl = wireRateLimitBlock('mwrl', rl);
+  const pbCtl = wirePathBlockBlock('mwpb', pb);
   const rwCtl = makeKVRows($('#rw-replacepath'), rewrite.replacePath || {}, '/application/o/token', '/application/o/token/', false);
   $$('.hdr-add').forEach((b) => b.addEventListener('click', () => { (b.dataset.wrap === 'hdr-setreq' ? setReqCtl : setRespCtl).addRow('', ''); }));
   $('#rw-add').addEventListener('click', () => rwCtl.addRow('', ''));
@@ -8565,6 +8775,13 @@ async function middlewareEditor(c, name) {
       const denyWith = $('#bo-denywith').value; if (denyWith) spec.denyWith = denyWith;
       if (provider === 'crowdsec' && isOn('bo-stream')) spec.stream = true;
       body.bouncer = spec;
+    } else if (t === 'path-block') {
+      const spec = pbCtl.get();
+      if (spec === null) return null;
+      // Same rule as guard and rewrite: a list with no entry blocks nothing,
+      // and the API refuses it.
+      if (!spec) { showInvalid('Entry required', 'Add at least one extension, name or glob.', $('#mwpb-ext')); return null; }
+      body.pathBlock = spec;
     } else if (t === 'rewrite') {
       const rp = rwCtl.get();
       const entries = Object.entries(rp);
@@ -9801,6 +10018,7 @@ const LOG_FIELDS = {
   client: 'an IP, a network such as 10.0.0.0/8, or @list for the networks an access list allows', slow: 'yes: requests slower than 1s',
   country: 'an ISO country code such as US (needs a GeoIP database)',
   source: 'internal (private, loopback, link-local or a configured internal network) or external',
+  deny: 'the tier that refused the request, such as path-block, access-list or rate-limit; -deny:path-block hides those',
 };
 // clientHit matches one client alternative: a CIDR or bare IP by address,
 // @name by the literal allow networks of that access list (nets is
@@ -9817,11 +10035,11 @@ function clientHit(client, alt, nets) {
 function logRec(e, nets) {
   const cls = e.status >= 100 ? Math.floor(e.status / 100) + 'xx' : '';
   return {
-    blob: [e.method, e.host, e.path, e.status, cls, e.client, e.country].join(' ').toLowerCase(),
+    blob: [e.method, e.host, e.path, e.status, cls, e.client, e.country, e.deny].join(' ').toLowerCase(),
     f: {
       method: fvals(e.method), host: fvals(e.host), path: fvals(e.path), status: fvals(e.status, cls),
       client: fvals(e.client), slow: fvals(e.durMs >= 1000 ? 'yes' : 'no'), country: fvals(e.country || ''),
-      source: fvals(e.source || ''),
+      source: fvals(e.source || ''), deny: fvals(e.deny || ''),
     },
     m: { client: (alt) => clientHit(e.client, alt, nets) },
   };
@@ -9851,7 +10069,7 @@ function logRowHtml(e, i) {
       <td class="mono col-method">${esc(e.method || '')}</td>
       <td class="mono col-host"><span class="cp"><span class="trunc cp-text" title="${esc(e.host || '')}">${esc(e.host || '')}</span>${cpBtn(e.host, 'host')}</span></td>
       <td class="mono col-path"><span class="cp"><span class="trunc cp-text" title="${esc(e.path || '')}">${esc(e.path || '')}</span>${cpBtn(e.path, 'path')}</span></td>
-      <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span></td>
+      <td class="col-status" data-v="${esc(e.status)}"><span class="chip ${statusClass}">${esc(e.status)}</span>${e.deny ? ` <span class="chip kind cyan" title="${esc('Refused by ' + e.deny)}">${esc(e.deny)}</span>` : ''}</td>
       <td class="mono col-num" data-v="${esc(e.durMs)}">${esc(e.durMs)}ms</td>
       <td class="mono col-num" data-v="${esc(e.bytes || 0)}">${esc(fmtBytes(e.bytes || 0))}</td>
       <td class="mono faint col-client"><span class="cp"><span class="trunc cp-text" title="${esc(e.client || '')}">${esc(e.client || '')}</span>${cpBtn(e.client, 'client address')}</span></td>
@@ -10007,7 +10225,7 @@ async function viewLogs(c) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     let text, type;
     if (fmt === 'csv') {
-      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source']);
+      const cols = ['time', 'method', 'host', 'path', 'status', 'durMs', 'bytes', 'client'].concat(logsGeo ? ['country'] : []).concat(['source', 'deny']);
       text = [cols.join(',')].concat(rows.map((e) => cols.map((k) => csvCell(e[k])).join(','))).join('\r\n') + '\r\n';
       type = 'text/csv';
     } else {
@@ -10572,6 +10790,12 @@ async function viewSettings(c, tab) {
         </div>
       </div>
       <div class="card form-section" style="margin-top:16px">
+        <p class="section-label">Path block list</p>
+        <p class="muted" style="font-size:13.5px;margin:0 0 10px">Refuses a request by the shape of its path on every proxy host that has not set its own switch to <span class="mono">off</span>, right after the rate limit and ahead of access lists and sign-in. The admin front door, redirect, parked and stream hosts are never covered, and gpm's own ACME HTTP-01 challenges are answered before it. Check what each host serves first: an application written in PHP needs <span class="mono">off</span> or a list without <span class="mono">.php</span>, and <span class="mono">.well-known</span> must stay off the list.</p>
+        ${pathBlockBlockHtml('set-pb', s.pathBlock, 'settings')}
+        <div class="hint" style="margin-top:6px">With no extension, name or glob the list is off and nothing in this section is saved.</div>
+      </div>
+      <div class="card form-section" style="margin-top:16px">
         <p class="section-label">Analytics</p>
         <p class="muted" style="font-size:13.5px;margin:0 0 10px">The traffic collector behind <a href="#/analytics">Analytics</a>: every finished request is handed to a background worker (one queue send on the request path), which resolves the client's country, labels scanner patterns and keeps bounded hourly aggregates. Closed hours are rolled up into <span class="mono">analytics.db</span> next to the session database.</p>
         <div class="toggle-line"><div class="tl-text"><div class="nm">Collect traffic analytics</div><div class="ds">Off costs nothing per request; the Analytics page says it is off</div></div>${switchHtml('set-an-on', !!an.enabled, 'Collect traffic analytics', 'settings.analytics.enabled')}</div>
@@ -10787,6 +11011,7 @@ async function viewSettings(c, tab) {
       added ? `${plural(added, 'header', 'headers')} added. Review them, then save.` : 'Every recommended header is already listed.', added ? 'ok' : '');
   });
   const stripCtl = makeChipInput($('#set-striphdrs'), arr(s.stripResponseHeaders), 'add header...');
+  const pathBlockCtl = wirePathBlockBlock('set-pb', s.pathBlock);
 
   // The migrate switch only matters once the prefix field actually differs
   // from what is currently saved, so it stays greyed out (and off) otherwise -
@@ -10946,6 +11171,13 @@ async function viewSettings(c, tab) {
     const stripErr = stripHeaderListError(stripHdrs);
     if (stripErr) { showInvalid('Invalid strip header', stripErr, $('#set-striphdrs')); return; }
     if (stripHdrs.length) body.stripResponseHeaders = stripHdrs;
+
+    // pathBlock (the fleet path block list) is owned by the block above. With
+    // no extension, name or glob the key is left off the body entirely: the API
+    // refuses a list with no entry, and no key is what "nothing blocked" is.
+    const pathBlock = pathBlockCtl.get();
+    if (pathBlock === null) return;
+    if (pathBlock) body.pathBlock = pathBlock;
 
     // ingressDiscovery: this page owns only the shared annotation prefix and its
     // migration flag (Advanced tab); the connection, template and profiles live

@@ -493,6 +493,13 @@ components:
             Strict-Transport-Security is not settable here (the per-host tls.hsts
             setting owns it); hop-by-hop headers, CR/LF in names/values and an
             unknown scope are rejected.
+        pathBlock:
+          type: string
+          enum: [inherit, 'off']
+          description: >-
+            Switch for the fleet path block list (settings.pathBlock). inherit
+            (default, also when unset) applies it, off does not. A path-block
+            middleware the host or a location references always applies.
         stripResponseHeaders:
           type: array
           items:
@@ -1799,6 +1806,82 @@ components:
             every cacheTTL, so the request path is a local IP/CIDR lookup.
       required:
       - url
+    PathBlockMiddleware:
+      type: object
+      description: >-
+        Refuse a request by the shape of its path alone: a file extension, a
+        path segment name or a glob. Matching is case-insensitive, on the
+        cleaned decoded path, and never looks at the query string or method.
+        The same spec is a path-block middleware and settings.pathBlock. At
+        least one of extensions, names, globs is required; each entry is at
+        most 128 bytes and valid UTF-8.
+      properties:
+        extensions:
+          type: array
+          maxItems: 256
+          description: >-
+            File extensions with the leading dot (.php, .env, .tar.gz), each at
+            most 128 bytes (maxLength counts characters). Matches
+            when any path segment ends with one, or is the extension alone.
+            No "/", no control character, not ending with a dot or a space.
+          items:
+            type: string
+            maxLength: 128
+            pattern: '^\.'
+        names:
+          type: array
+          maxItems: 256
+          description: >-
+            Whole path segments (.git, wp-admin, wp-login.php), each at most
+            128 bytes. Matches when any segment equals one, directories
+            included, at any depth. No "/", no control character,
+            not ending with a dot or a space.
+          items:
+            type: string
+            maxLength: 128
+        globs:
+          type: array
+          maxItems: 64
+          description: >-
+            path.Match patterns over the whole path, each at most 128 bytes and
+            all globs of one list together at most 2048 bytes (not expressible
+            in the schema).
+            Each must start with "/". /dir/* covers /dir/ and one level below
+            it only (not /dir, not deeper); use names for a directory at any
+            depth. "*" and "?" never match "/"; there is no "**". Compared
+            lower-cased, on the path as it is and on its folded form (cut at
+            the first NUL byte, segments without trailing dots or spaces, no
+            trailing slash), so /server-status also blocks /server-status/. A glob that ends with "/" (other than "/"),
+            has an empty segment, a segment ending in a dot or a space, or a
+            control character is refused. A [...] class must be lower case.
+            With globs, a request path over 4096 bytes counts as listed.
+          items:
+            type: string
+            maxLength: 128
+            pattern: '^/'
+        allowFrom:
+          type: array
+          description: >-
+            Exempt clients: CIDRs, bare IPs and @<access-list> references. A
+            list reference exempts a client whose first matching rule in that
+            list is an allow rule. A client address that cannot be resolved is
+            never exempt.
+          items:
+            type: string
+        denyStatus:
+          type: integer
+          description: >-
+            Status for a blocked request: 400 to 599 when set. Unset or 0
+            means the default, 404.
+        denyWith:
+          type: string
+          description: >-
+            error-page renders the host's custom error page for the status when
+            one exists; plain always writes the bare status text. Default
+            error-page.
+          enum:
+          - error-page
+          - plain
     Middleware:
       type: object
       properties:
@@ -1811,7 +1894,7 @@ components:
         updatedAt: *id007
         type:
           type: string
-          description: auth | headers | guard | rate-limit | rewrite | bouncer.
+          description: auth | headers | guard | rate-limit | rewrite | bouncer | path-block.
           enum:
           - auth
           - headers
@@ -1819,6 +1902,7 @@ components:
           - rate-limit
           - rewrite
           - bouncer
+          - path-block
         auth:
           $ref: '#/components/schemas/AuthMiddleware'
         headers:
@@ -1831,10 +1915,12 @@ components:
           $ref: '#/components/schemas/RewriteMiddleware'
         bouncer:
           $ref: '#/components/schemas/BouncerMiddleware'
+        pathBlock:
+          $ref: '#/components/schemas/PathBlockMiddleware'
       required:
       - name
       - type
-      description: A reusable, named processing step referenced by hosts/locations. Exactly one of auth/headers/guard/rateLimit/rewrite
+      description: A reusable, named processing step referenced by hosts/locations. Exactly one of auth/headers/guard/rateLimit/rewrite/bouncer/pathBlock
         is set, matching type.
     APIToken:
       type: object
@@ -2039,6 +2125,13 @@ components:
           type: array
           items:
             type: string
+        pathBlock:
+          type: string
+          enum: [inherit, 'off']
+          description: >-
+            Stamped onto every derived host as its pathBlock (inherit | off).
+            A hand edit on a managed host is reverted on the next reconcile, so
+            set it here.
         stripResponseHeaders:
           type: array
           items:
@@ -2320,6 +2413,14 @@ components:
           $ref: '#/components/schemas/MaintenanceSettings'
         adminEdge:
           $ref: '#/components/schemas/AdminEdgeSettings'
+        pathBlock:
+          $ref: '#/components/schemas/PathBlockMiddleware'
+          description: >-
+            Fleet path block list: the same spec as a path-block middleware,
+            applied to every proxy host that has not set pathBlock: off, ahead
+            of access lists and authentication. Unset (default) blocks nothing.
+            The admin edge host is never covered. allowFrom may name access
+            lists (@name) that must exist.
         stripResponseHeaders:
           type: array
           items:
@@ -3260,7 +3361,13 @@ components:
           type: array
           items:
             type: object
-            properties: {}
+            properties:
+              deny:
+                type: string
+                description: >-
+                  Reason an access-control tier refused the request (the denial
+                  reasons of gpm_denials_total, for example path-block,
+                  access-list, rate-limit, guard). Omitted when nothing refused it.
             additionalProperties: true
           description: Newest first. Shape depends on internal/dataplane's access-log entry.
         capacity:

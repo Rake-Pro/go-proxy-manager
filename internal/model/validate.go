@@ -100,6 +100,11 @@ func (c Config) Validate() error {
 	}
 
 	for _, o := range c.Middlewares {
+		if o.Type == MWTypePathBlock && o.PathBlock != nil {
+			for _, a := range o.PathBlock.AccessListRefs() {
+				checkRef(&errs, "middleware", o.Name, "pathBlock.allowFrom", "accessList", a, als)
+			}
+		}
 		if o.Type != MWTypeRateLimit || o.RateLimit == nil {
 			continue
 		}

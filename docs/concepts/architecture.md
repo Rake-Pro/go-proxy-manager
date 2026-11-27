@@ -846,6 +846,14 @@ explicit operator allow-list (`allowFrom`, or the access list itself) still wins
 outright over an external feed, and a banned IP never reaches the IdP. Denials
 go through the shared per-host denial counter.
 
+**Path block lists** (`internal/dataplane/pathblock.go`, wired in `chain.go`):
+
+- **What it is.** A path-shape filter, not content inspection: a compiled set of extensions, segment names and globs matched against the cleaned, decoded request path, case-insensitively.
+- **Two sources.** A `type: path-block` middleware a host or location references, and `settings.pathBlock`, the fleet list. The fleet list is installed with `SetPathBlock` and compiled into each proxy host's chain at the next router build, unless the host sets `pathBlock: off`. The synthesized admin edge host (`settings.adminEdge`) is not covered by the fleet list, but a `path-block` middleware named in `adminEdge.middlewares` applies to it, and a hand-written proxy host that fronts the admin panel is covered like any other.
+- **Position.** The fleet list is outermost among the path-block steps, then the referenced middlewares, all just inside the rate limit and ahead of the access list, bouncer and auth. A blocked request never reaches an auth subrequest, a sign-in redirect or the upstream, and spends rate-limit budget like any other request.
+- **Exemption and denial.** `allowFrom` resolves `@list` entries through the same first-match exemption a rate limit uses. A hit is counted with the denial reason `path-block` and rendered through the host's error pages.
+- **References.** A settings write whose `pathBlock.allowFrom` names a missing access list is always refused. An object write that would leave such a reference dangling (deleting the list) is refused too, unless the stored state already fails the check, in which case it is accepted with a warning so the state can be repaired.
+
 **A reference that resolves to nothing fails the host closed.** If a host (or one
 of its locations) names a middleware or access list that does not exist in the
 compiled registry, the chain is replaced by a handler answering `503` and the
@@ -878,7 +886,7 @@ effect of this defence in depth.
   direct client cannot forge an identity. Forward-auth and auth-request handlers
   re-strip their own header sets as a second layer.
 - **Network exemptions are explicit and IP-rooted, and only as good as
-  `trustedProxies`.** A middleware's `allowFrom` (rate limit, guard, bouncer,
+  `trustedProxies`.** A middleware's `allowFrom` (rate limit, guard, path block, bouncer,
   `auth-request` and `client-cert` auth) is evaluated against the derived client
   IP above (the same value the access list compared), with no per-middleware
   notion of its own. With `trustedProxies` empty that is the raw TCP peer, which

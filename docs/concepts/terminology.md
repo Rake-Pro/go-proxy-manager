@@ -24,7 +24,8 @@ brackets where it differs.
 | **Upstream group** (`upstream-groups/`, UI: **Upstream Groups**) | An ordered set of interchangeable upstreams with health checks and a failover policy. |
 | **Location** | A path prefix inside a proxy host with its own upstream and extra policy. Always at least as restrictive as its host. |
 | **Chain** | The ordered sequence of middlewares applied to one host or location. Fixed order, not the order you listed them: see [Request pipeline](request-pipeline.md). |
-| **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite` or `bouncer`. |
+| **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite`, `bouncer` or `path-block`. |
+| **Path block list** (`settings.pathBlock`, the **fleet list**; or a `type: path-block` middleware) | Extensions, segment names and globs answered with a `404` by default before the access list, auth or the upstream. The fleet list covers every proxy host; a host opts out with `pathBlock: off`. |
 | **Inline block** | An `auth` or `rateLimit` block written directly on a host or location instead of referencing a middleware. Same handler, same chain position. |
 
 ## Access and identity
@@ -33,7 +34,7 @@ brackets where it differs.
 |---|---|
 | **Access list** (`access-lists/`, UI: **Access Lists**) | The gate: ordered IP/CIDR allow-deny rules plus optional GeoIP country rules over the derived client IP. Never abbreviated to "ACL" in gpm. |
 | **Saved filter** (`settings.savedFilters[]`, UI: **Saved** beside a list's filter box) | A named filter query for one admin UI list, stored in settings so every browser offers it. |
-| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a bouncer verdict or one auth mode). Never the access list. |
+| **Exemption** (`allowFrom`) | A CIDR list that lets a network skip **one** control (a guard, a rate limit, a path block list, a bouncer verdict or one auth mode). Never the access list. |
 | **Trusted proxy** | A peer whose `X-Forwarded-For` gpm believes when deriving the client IP. Distinct from `proxyProtocol.trustedCIDRs` (who may rewrite the connection address) and `forwardAuth.trustedProxies` (who may assert identity headers). |
 | **Identity provider** (`identity-providers/`, UI: **Identity Providers**), **IdP** | An OIDC issuer, a trusted forward-auth proxy, or an `auth_request` outpost, plus its group-to-role mapping. An IdP on its own has no effect at the proxy listeners until an auth gate references it. |
 | **Forward-auth** | Trusting identity headers (`Remote-User` and friends) asserted by a proxy in front of gpm. |

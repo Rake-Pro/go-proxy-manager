@@ -2765,6 +2765,47 @@ func TestDerivedHostInheritsStripResponseHeaders(t *testing.T) {
 	}
 }
 
+// The fleet path block switch reaches the derived host from the profile the
+// Ingress selects (and is absent when the profile leaves it unset), so an
+// application that serves the blocked paths can be opted out per profile.
+func TestDerivedHostInheritsPathBlockSwitch(t *testing.T) {
+	f := newFakeAPI(t, "tok")
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeList(w, []string{
+			ingressJSON("web", "cloud", map[string]string{
+				model.AnnotationManaged: "true", model.AnnotationProfile: "sso-internal",
+			}, "cloud.example.com"),
+			ingressJSON("web", "paste", map[string]string{model.AnnotationManaged: "true"}, "paste.example.com"),
+		}, "")
+	}
+	s := profileSettings(f)
+	prof := s.Profiles["sso-internal"]
+	prof.PathBlock = model.PathBlockOff
+	s.Profiles["sso-internal"] = prof
+	settings := &model.Settings{IngressDiscovery: s}
+	rec := &recorder{}
+	d := newDiscoverer(f, &model.Config{}, settings, rec)
+
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.upserts) != 2 {
+		t.Fatalf("upserts = %d, want 2", len(rec.upserts))
+	}
+	for _, h := range rec.upserts {
+		want := ""
+		if strings.Join(h.Domains, ",") == "cloud.example.com" {
+			want = model.PathBlockOff
+		}
+		if h.PathBlock != want {
+			t.Errorf("host %v: pathBlock = %q, want %q", h.Domains, h.PathBlock, want)
+		}
+		if err := h.Validate(); err != nil {
+			t.Errorf("derived host must be valid: %v", err)
+		}
+	}
+}
+
 func TestDerivedHostInheritsStripResponseHeadersFromAProfile(t *testing.T) {
 	f := newFakeAPI(t, "tok")
 	f.handler = func(w http.ResponseWriter, r *http.Request) {

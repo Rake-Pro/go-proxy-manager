@@ -61,6 +61,28 @@ type registry struct {
 	// requests use the compiled lists, never the map.
 	rateLimitExempt   map[string]*rateLimitExemptList
 	rateLimitExemptMu sync.Mutex
+	// pathBlocks holds each path block list of this build, compiled once and
+	// shared by every route that takes it (see registry.pathBlockFor).
+	pathBlocks   map[string]*pathBlock
+	pathBlocksMu sync.Mutex
+}
+
+// pathBlockFor returns the compiled path block list for key ("fleet" for
+// settings.pathBlock, "mw:<name>" for a middleware). A compiled list is
+// immutable, so the fleet list is compiled once per build instead of once per
+// route of every host.
+func (reg *registry) pathBlockFor(key string, spec model.PathBlockMiddleware) *pathBlock {
+	reg.pathBlocksMu.Lock()
+	defer reg.pathBlocksMu.Unlock()
+	if p := reg.pathBlocks[key]; p != nil {
+		return p
+	}
+	if reg.pathBlocks == nil {
+		reg.pathBlocks = map[string]*pathBlock{}
+	}
+	p := compilePathBlock(spec, reg.rateLimitExemption)
+	reg.pathBlocks[key] = p
+	return p
 }
 
 // rateLimiterFor returns the limiter for one rate-limit step. owner names the
@@ -427,11 +449,11 @@ func unresolvedRefs(host model.ProxyHost, inline inlineChain, reg *registry) str
 // The tiers run in a fixed canonical order regardless of reference order
 // (within a tier, reference order does matter; see the auth tier below):
 //
-//	rate-limit -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> proxy
+//	rate-limit -> path-block -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> proxy
 //
 // Rewrite is innermost (closest to upstream), so the path replacement it applies
-// is upstream-facing only: rate-limit/access-list/bouncer/auth/guard all evaluate
-// the ORIGINAL client path, never the rewritten one.
+// is upstream-facing only: rate-limit/path-block/access-list/bouncer/auth/guard
+// all evaluate the ORIGINAL client path, never the rewritten one.
 //
 // A host's (or location's) INLINE auth / rateLimit block occupies the same
 // position as a middleware of that kind and compiles through the same function,
@@ -670,12 +692,35 @@ func buildChainInline(proxy http.Handler, host model.ProxyHost, inline inlineCha
 	wrapAccessLists(host.AccessLists, host.AccessListsMode)
 	wrapAccessLists(inline.accessLists, inline.accessListsMode)
 
-	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
-	// flood is rejected (429) before it can drive an auth subrequest or any other
-	// per-request work. An "@<list>" exemption walks that list's rules
-	// first-match per request, compiled once per build (see
+	// An "@<list>" exemption (path block and rate limit allowFrom) walks that
+	// list's rules first-match per request, compiled once per build (see
 	// registry.rateLimitExemption).
 	listExempt := reg.rateLimitExemption
+
+	// Path block lists, outside the access lists and authentication: a request
+	// for a listed path (a dotfile, a ".php" drop path) is answered here, so it
+	// never drives an access-list lookup, a bouncer call or an auth subrequest,
+	// and is never proxied. Still inside the rate limit, so a scanner working
+	// through a word list spends its budget like any other client. The
+	// referenced middlewares are wrapped first (so the last-referenced one runs
+	// first among them, a location's before its host's), then the fleet list
+	// (settings.pathBlock) outermost, unless the host turned it off; the admin
+	// edge host never takes the fleet list, so a list that blocks too much
+	// cannot lock the edge panel out.
+	for _, name := range host.Middlewares {
+		mw, ok := reg.middlewares[name]
+		if !ok || mw.Type != model.MWTypePathBlock || mw.PathBlock == nil {
+			continue
+		}
+		h = pathBlockHandler(reg.pathBlockFor("mw:"+name, *mw.PathBlock), clientIP, host.Name, ep, h)
+	}
+	if fleet := currentPathBlock(); fleet != nil && host.PathBlock != model.PathBlockOff && !host.AdminEdge {
+		h = pathBlockHandler(reg.pathBlockFor("fleet", *fleet), clientIP, host.Name, ep, h)
+	}
+
+	// Outermost: per-client-IP rate limiting, ahead of auth/access-control so a
+	// flood is rejected (429) before it can drive an auth subrequest or any other
+	// per-request work.
 	// Limiter state is per route (host route or one location) and per step; a
 	// name referenced twice on one route gets one limiter per reference. A step
 	// with scope: host drops the route from its key, so the host route and every

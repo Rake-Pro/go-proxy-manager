@@ -6,14 +6,14 @@ derived once per request, and how the upstream path is composed.
 ## Middleware ordering
 
 Middlewares are applied in a fixed order per request regardless of the order you
-list them: **rate-limit -> access-list -> bouncer -> auth -> guard -> headers ->
-location `stripPrefix` -> rewrite -> upstream `path` -> upstream**. Rate limiting is
-outermost (evaluated first, so floods are shed before any work); the access-list
-is evaluated ahead of the bouncer, so an explicit operator allow-list is never
-overridden by an external feed's verdict, and both are ahead of auth, so a denied
-or banned IP never reaches the IdP; the three path-composition steps are
-innermost (closest to the backend), so every security tier above still sees the
-original client path. Host-wide middlewares run before any location-scoped ones.
+list them: **rate-limit -> path-block -> access-list -> bouncer -> auth -> guard ->
+headers -> location `stripPrefix` -> rewrite -> upstream `path` -> upstream**.
+
+- **Rate limiting is outermost** (evaluated first), so floods are shed before any work.
+- **The path block list comes next** and answers scanner paths before the access list, bouncer, authentication and the upstream.
+- **The access-list is ahead of the bouncer**, so an explicit operator allow-list is never overridden by an external feed's verdict. Both are ahead of auth, so a denied or banned IP never reaches the IdP.
+- **The three path-composition steps are innermost** (closest to the backend), so every security tier above still sees the original client path.
+- **Within one tier, the last-referenced middleware runs first**, and a location's references run before its host's, because each name wraps outside the previous one and a location's names are appended after its host's. Inline `auth` and `rateLimit` blocks wrap outside the referenced ones, the location's outside the host's. A location's own `accessLists` group wraps outside the host's group.
 
 Path composition therefore runs: the location match (on the original client
 path), then that location's `stripPrefix`, then the rewrite rules, then the
@@ -59,10 +59,24 @@ steps. On a location route the inherited host gates count the same way.
 to a handler that wraps the reverse proxy in a fixed order:
 
 ```
-request -> rate-limit -> access-list -> bouncer -> auth -> guard -> headers -> stripPrefix -> rewrite -> reverse proxy -> upstream
+request -> rate-limit -> path-block -> access-list -> bouncer -> auth -> guard -> headers -> stripPrefix -> rewrite -> reverse proxy -> upstream
 ```
 
 Rate limiting is outermost; path composition is innermost (closest to the backend).
+
+**Path block step.** A refusal by path shape alone:
+
+- **What it sees.** Only the cleaned, decoded client path. The query string, method, headers and body are never looked at, and the path is not decoded a second time.
+- **Before path composition.** It runs before `stripPrefix`, `rewrite` and the upstream `path` are applied.
+- **Where it sits and why.** Just inside the rate limit and ahead of the access-list, bouncer and auth, so a scanner request never costs a bouncer lookup, an auth subrequest or a sign-in redirect, and never reaches the upstream. Other gates run before it: the in-flight limit, the mTLS check, maintenance mode, the `400` for a bad path, the `forceSSL` redirect and the rate limit.
+- **Maintenance and force-SSL.** A listed path on a host in maintenance gets the maintenance response, and on plain HTTP a `forceSSL` host answers its redirect first.
+- **Rate-limit budget.** It runs inside the rate limit, so a blocked request spends budget like any other request. There is deliberately no "one hit is a ban" rule: any page can make a visitor's browser request a listed path on another site, so that rule would let a third party lock visitors out.
+- **Outside authentication.** A list entry that matches an auth gate's own path (the `auth-request` outpost prefix, `/__gpm/oidc/callback`) blocks sign-in on that host.
+- **Order within the step.** The fleet list (`settings.pathBlock`) runs first. The referenced `path-block` middlewares follow, last-referenced first, and a location's references run before its host's, as for every tier above. This decides which list's `denyStatus` and `denyWith` answer.
+- **ACME.** gpm's own in-flight HTTP-01 tokens are answered before any host chain. Any other challenge path falls through to normal routing, so an upstream that runs its own ACME client is blocked if a list matches `/.well-known/acme-challenge/...`.
+
+See [Path block list](../reference/config/settings/path-block.md).
+
 The access-list sits ahead of auth, so an IP the list would deny is dropped
 before any auth work runs (no forward-auth subrequest to the IdP, no OIDC
 redirect).
@@ -191,8 +205,8 @@ upstream sets `hostHeader` to `upstream` or an explicit hostname), and
 carries WebSocket upgrades transparently. An open upgraded connection is
 closed when the decision that admitted it no longer holds: a reload removes or
 disables its host or changes the host's access configuration (its access
-lists, its access middlewares (`auth`, `guard`, `rate-limit`, `bouncer`),
-inline auth or rate limit, client-certificate settings, the identity providers
+lists, its access middlewares (`auth`, `guard`, `rate-limit`, `bouncer`, `path-block`),
+inline auth or rate limit, `settings.pathBlock` on a host it covers, the host's `pathBlock` switch, client-certificate settings, the identity providers
 and client CAs those name, or its trusted proxies), the SSO session that
 admitted it expires or is revoked, or a CRL update revokes the client
 certificate it was opened with. A reload that leaves all of that unchanged
@@ -255,8 +269,8 @@ a header gpm cannot fully read never becomes a client identity:
 Everything, with no per-feature configuration:
 
 - **Access control**: `AccessList` rules and sources, geo rules.
-- **Exemptions**: `allowFrom` on guard, rate-limit, bouncer, `auth-request`
-  auth and `client-cert` auth middlewares.
+- **Exemptions**: `allowFrom` on guard, rate-limit, path-block, bouncer,
+  `auth-request` auth and `client-cert` auth middlewares.
 - **Throttling**: the rate-limit bucket key and the basic-auth lockout key.
 - **Outbound**: the `X-Real-IP` and `X-Forwarded-For` gpm sends to the
   upstream and to an auth-request outpost on the passthrough under its

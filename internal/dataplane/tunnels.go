@@ -213,7 +213,7 @@ func (w *tunnelWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // response and stay out of the chain key.
 func accessMiddlewareType(t string) bool {
 	switch t {
-	case model.MWTypeAuth, model.MWTypeGuard, model.MWTypeRateLimit, model.MWTypeBouncer:
+	case model.MWTypeAuth, model.MWTypeGuard, model.MWTypeRateLimit, model.MWTypeBouncer, model.MWTypePathBlock:
 		return true
 	}
 	return false
@@ -265,6 +265,7 @@ func hostChainKey(h model.ProxyHost, cfg model.Config, trusted []*net.IPNet) str
 		RateLimit       *model.RateLimitMiddleware
 		Locations       []locSpec
 		Trusted         []string
+		PathBlock       *model.PathBlockMiddleware
 		RefMiddlewares  []model.Middleware
 		RefAccessLists  []model.AccessList
 		RefIdPs         []model.IdentityProvider
@@ -287,6 +288,10 @@ func hostChainKey(h model.ProxyHost, cfg model.Config, trusted []*net.IPNet) str
 	}
 	for _, n := range trusted {
 		spec.Trusted = append(spec.Trusted, n.String())
+	}
+	// The fleet path block list, for a host it covers (see buildChainInline).
+	if h.PathBlock != model.PathBlockOff && !h.AdminEdge {
+		spec.PathBlock = currentPathBlock()
 	}
 	for _, m := range cfg.Middlewares {
 		if used[m.Name] && accessMiddlewareType(m.Type) {

@@ -707,6 +707,7 @@ func TestChainDiffersCoversEveryTemplateField(t *testing.T) {
 		"TLS": true, "RobotsNoIndex": true, "Timeouts": true,
 		"Middlewares": true, "AccessLists": true, "AccessListsMode": true,
 		"StripResponseHeaders": true, "SecurityHeaders": true, "Locations": true,
+		"PathBlock": true,
 	}
 	excluded := map[string]string{
 		"WebsocketsUpgrade":     "deprecated, no effect",

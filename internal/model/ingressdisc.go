@@ -196,6 +196,13 @@ type IngressHostTemplate struct {
 	// template.
 	StripResponseHeaders []string `json:"stripResponseHeaders,omitempty" yaml:"stripResponseHeaders,omitempty"`
 
+	// PathBlock is stamped onto every derived host, exactly as
+	// ProxyHost.PathBlock: "off" keeps the fleet path block list
+	// (settings.pathBlock) away from the hosts this template or profile
+	// produces. It is on the template because a hand edit on a managed host is
+	// rebuilt away on the next reconcile.
+	PathBlock string `json:"pathBlock,omitempty" yaml:"pathBlock,omitempty"`
+
 	// SecurityHeaders is applied verbatim to every derived host, exactly as on a
 	// hand-written ProxyHost, and for the same reason StripResponseHeaders is:
 	// without it a per-host securityHeaders override on a discovery-managed host
@@ -823,6 +830,7 @@ func (t IngressHostTemplate) refErrors(cfg Config, owner string) []error {
 		AccessLists:          t.AccessLists,
 		AccessListsMode:      t.AccessListsMode,
 		StripResponseHeaders: t.StripResponseHeaders,
+		PathBlock:            t.PathBlock,
 		SecurityHeaders:      t.SecurityHeaders,
 		Locations:            t.Locations,
 	}
@@ -955,6 +963,9 @@ func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) err
 	// Timeouts above: a template that would derive a host the config validator
 	// rejects must fail the settings write.
 	if err := validateStripResponseHeaders(t.StripResponseHeaders); err != nil {
+		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
+	}
+	if err := validatePathBlockSwitch(t.PathBlock); err != nil {
 		return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 	}
 	if err := validateSecurityHeaders(t.SecurityHeaders); err != nil {

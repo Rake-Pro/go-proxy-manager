@@ -11,7 +11,7 @@ overlap disappears.
 | Concept | Where it lives | What it decides |
 |---|---|---|
 | **Gate** | [`AccessList`](../reference/config/access-list.md) (`rules`, `sources`, `geo`, `defaultAction`) | Who is admitted at all. Ordered, first match wins, then geo, then `defaultAction`. |
-| **Exemption** | `allowFrom` on the guard, rate-limit, bouncer, `auth-request` auth, `client-cert` auth and `basic` auth middlewares | Which networks skip **one specific control**. Never the access list. |
+| **Exemption** | `allowFrom` on the guard, rate-limit, path-block, bouncer, `auth-request` auth, `client-cert` auth and `basic` auth middlewares | Which networks skip **one specific control**. Never the access list. |
 | **Trust** | [`settings.proxyProtocol.trustedCIDRs`](../reference/config/settings/proxy-protocol.md), [`settings.trustedProxies`](../reference/config/settings/trusted-proxies.md), `identityProvider.forwardAuth.trustedProxies` | Which address the gate and the exemptions compare, and who may assert an identity. |
 
 An access list decides who is admitted. An exemption lets a network skip one
@@ -31,7 +31,12 @@ access list attached, everything else still reaches the host.
 | Let one network reach only `/health` | Access-list rule `paths` | Exact, allow-only |
 | Let a second, separately kept list widen a host (a prober list beside the LAN list) | `accessListsMode: any` on the host, see [Composing access lists](../reference/config/access-list.md#access-list-composing) | Each list keeps its own rules, `paths` included |
 | Block `POST /login` except from the LAN | [`guard` middleware](../reference/config/middleware.md) | Exact |
+| Answer scanner paths (`/.env`, `*.php`, `.git`) with a `404` by default, before the access list, bouncer, authentication and the upstream | [Path block list](../reference/config/settings/path-block.md): `settings.pathBlock` fleet-wide, a `path-block` middleware per host | Extension, whole segment or glob, case-insensitive |
 | Fix a path the client got wrong | [`rewrite` middleware](../reference/config/middleware.md) | Exact, prefix or regex, upstream-facing |
+
+A path block list is the scanner-noise case of path-deny: it matches the shape
+of the path (extension, segment name, glob) rather than one exact path, and it
+runs ahead of the access list and authentication, after the rate limit.
 
 Path-deny belongs to the guard and path-allow to the access list, deliberately:
 an exact match that misses fails **closed** for an allow rule and would fail
@@ -84,6 +89,7 @@ status code.
 | Whole object (`errorPages`) | Resolved **per status**: the host's template for that status wins, else its own `default`, else the settings-level one |
 | List (`stripResponseHeaders`) | The host list is **added to** the settings list; a host cannot opt out |
 | List (`trustedProxies`) | The host list **replaces** the settings list |
+| Fleet object with a host switch (`pathBlock`) | The host value is `inherit` or `off`; `off` drops the fleet list for that host only, and a referenced `path-block` middleware still applies |
 | Bool safety switch (`maintenance`) | Settings `true` wins over a host `false` |
 | Discovery `template` vs `profiles[x]` | **Replaces**, never merges |
 | Discovery `allowedDomainSuffixes` | A profile may only **narrow** the global list |

@@ -7,6 +7,24 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Access log: every access-control refusal is recorded with its reason. The
+  JSON log line of a refused request carries `"deny":"<reason>"` and each
+  `GET /api/logs` entry carries `deny` (omitted when nothing refused the
+  request). Reasons are the `gpm_denials_total` labels: `path-block`,
+  `access-list`, `guard`, `rate-limit`, the auth reasons and the rest.
+- Path block list (#75): a `type: path-block` middleware (spec key `pathBlock`:
+  `extensions`, `names`, `globs`, `allowFrom`, `denyStatus` default `404`,
+  `denyWith`) and `settings.pathBlock`, the same spec applied to every proxy
+  host. A request whose cleaned path has a listed extension, segment name or
+  glob match is refused before any access list, bouncer, auth gate or the
+  upstream, and counts as `reason="path-block"` in `gpm_denials_total` and
+  analytics. It sits just inside the rate limit, so a blocked request spends
+  rate-limit budget. `pathBlock: inherit | off` on a proxy host, an Ingress or
+  Docker discovery template and each profile opts a host out of the fleet list.
+  Off by default: unset blocks nothing, and existing configs are unchanged. The
+  synthesized admin edge host (`settings.adminEdge`) is not covered by the fleet
+  list; a hand-written host that fronts the admin panel is, so check the list
+  against the panel's paths first.
 - Access-list composition: `accessListsMode: any` on a proxy host or location
   passes a request when at least one of its `accessLists` allows it. It
   composes allow-lists only: it needs at least one list, refuses a list with

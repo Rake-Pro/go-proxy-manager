@@ -348,17 +348,24 @@ func checkAdminEdge(cfg model.Config, settings model.Settings) error {
 // usable in cfg. The prefix-migration half is left to the settings write (the
 // migrate flags are set on a copy to skip it): it guards a settings change,
 // and a host carrying an old prefix's label wedges nothing.
+//
+// It also covers the one other settings block that names config objects and
+// takes the same treatment: the access lists settings.pathBlock exempts.
 func discoveryRefs(cfg model.Config, settings model.Settings) error {
 	settings.IngressDiscovery.AnnotationPrefixMigrate = true
 	if err := settings.IngressDiscovery.ValidateRefs(cfg); err != nil {
 		return err
 	}
-	return settings.DockerDiscoveryResolved().ValidateRefs(cfg)
+	if err := settings.DockerDiscoveryResolved().ValidateRefs(cfg); err != nil {
+		return err
+	}
+	return settings.ValidatePathBlockRefs(cfg)
 }
 
 // checkDiscoveryRefs refuses a write whose result fails discoveryRefs: a
 // template reference that no longer resolves fails the next derived host's
-// batch, and with it that source's whole reconcile on every poll. When the
+// batch, and with it that source's whole reconcile on every poll (and an access
+// list settings.pathBlock exempts would stop exempting anyone). When the
 // stored config already fails the check (storedOK false) the write is let
 // through with a warning, as checkCompilesLocked does, so the stored state
 // can be repaired one write at a time.
@@ -367,7 +374,7 @@ func checkDiscoveryRefs(storedOK bool, result model.Config, settings model.Setti
 	if err == nil || storedOK {
 		return err
 	}
-	log.Warn().Err(err).Msg("config store: the stored config already fails the discovery reference check; accepting the write so it can be repaired")
+	log.Warn().Err(err).Msg("config store: the stored config already fails the settings reference check (discovery templates, pathBlock); accepting the write so it can be repaired")
 	return nil
 }
 
@@ -1592,6 +1599,11 @@ func (s *Store) saveSettingsLocked(ctx context.Context, settings model.Settings,
 	// Same for the container reconciler's block, resolved so the profiles it
 	// inherits from ingressDiscovery are cross-checked too.
 	if err := settings.DockerDiscoveryResolved().ValidateRefs(cfg); err != nil {
+		return "", err
+	}
+	// And for the access lists the fleet path block list exempts: a name that
+	// does not resolve would exempt nobody.
+	if err := settings.ValidatePathBlockRefs(cfg); err != nil {
 		return "", err
 	}
 	// Same reasoning for adminAuth: Settings.Validate can only see that the

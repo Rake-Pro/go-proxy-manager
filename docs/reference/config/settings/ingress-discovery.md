@@ -33,6 +33,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. |
 | <span id="settings-ingress-discovery-template-locations"></span> `template.locations` | []Location | Path-scoped overrides stamped verbatim onto every derived host, the same shape as [ProxyHost: `locations`](../proxy-host.md) (own upstream or group, own middleware/access-list chain, `stripPrefix`, inline `auth`/`rateLimit`), validated by the same rules at settings-write time. **Operator-side only**: they live on the template or a named profile, never on the `Ingress`, so the annotation model is unchanged (a tenant can pick a profile that carries them, never name a path or chain). Meant for a profile written for one service whose upstream is not the cluster ingress controller (a hostPort pod with a sidecar under a path, say); on the default template they would apply to every derived host. |
 | <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
+| <span id="settings-ingress-discovery-template-path-block"></span> `template.pathBlock` | string | `inherit` (default) or `off`, stamped onto every derived host exactly as [ProxyHost: `pathBlock`](../proxy-host.md#proxy-host-path-block): `off` keeps the fleet [path block list](path-block.md) away from the derived hosts. Set it here or on a profile, never on the derived host, which is rebuilt at the next reconcile. |
 | <span id="settings-ingress-discovery-template-security-headers"></span> `template.securityHeaders` | map | Applied to every derived host: that host's `securityHeaders` override (name -> value/scope), merged over `settings.securityHeaders` per key at request time. Validated by the same rules as a hand-written host. Without it a hand-set override on a managed host is reverted on the next reconcile. See [Security headers](security-headers.md#settings-security-headers). |
 | <span id="settings-ingress-discovery-template-default-dns"></span> `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
 | <span id="settings-ingress-discovery-template-allowed-domain-suffixes"></span> `template.allowedDomainSuffixes` | []string | Optional. **Narrows** the top-level `allowedDomainSuffixes` for hosts derived from the template. Must be a **subset** of the global list (checked at settings-write time); empty means no narrowing. |
@@ -111,7 +112,7 @@ host keeps serving, with a chain nobody chose.
 shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
 required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
 `robotsNoIndex`, range-checked `timeouts`, `tags`,
-validated `stripResponseHeaders`, `securityHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
+validated `stripResponseHeaders`, `pathBlock`, `securityHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
 
 **The annotation carries a name and nothing else: that is the security model.**
 An Ingress author is untrusted: in a shared cluster a tenant may be able to
@@ -169,7 +170,7 @@ tenant take their own service offline with a one-character manifest edit. If the
 stored chain differs from the profile (`upstream`, `upstreamGroupRef`, `tls`
 including `clientAuth`, `timeouts`, `robotsNoIndex`, `middlewares`,
 `accessLists`, `accessListsMode`, `locations`, `stripResponseHeaders`,
-`securityHeaders`), or one of its domains is no longer
+`pathBlock`, `securityHeaders`), or one of its domains is no longer
 allowed by `allowedDomainSuffixes` or the profile's `allowedHostnames`, the
 policy was changed after the host was written, and the host is **disabled** the
 same way, so a malformed Ingress cannot keep the old chain or name in service.

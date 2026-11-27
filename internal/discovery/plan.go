@@ -683,7 +683,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 // ChainDiffers reports whether the fields a derive copies verbatim from tmpl
 // onto a host (TLS including client auth, timeouts, robotsNoIndex,
 // middlewares, access lists and their mode, locations, response-header policy,
-// and the upstream or upstream group when upstream is true) differ between a
+// the path block switch, and the upstream or upstream group when upstream is true) differ between a
 // stored host and tmpl. Both sides are compared in the YAML form the store
 // writes, so an explicit empty list in settings and the nil a stored host
 // round-trips to compare equal, at every nesting level.
@@ -699,6 +699,7 @@ func ChainDiffers(cur model.ProxyHost, tmpl model.IngressHostTemplate, upstream 
 		AccessListsMode:      tmpl.AccessListsMode,
 		Locations:            model.CloneLocations(tmpl.Locations),
 		StripResponseHeaders: tmpl.StripResponseHeaders,
+		PathBlock:            tmpl.PathBlock,
 		SecurityHeaders:      tmpl.SecurityHeaders,
 	}
 	a, errA := yaml.Marshal(withChain(model.ProxyHost{}, cur, upstream))
@@ -723,6 +724,7 @@ func withChain(dst, src model.ProxyHost, upstream bool) model.ProxyHost {
 	dst.AccessListsMode = src.AccessListsMode
 	dst.Locations = src.Locations
 	dst.StripResponseHeaders = src.StripResponseHeaders
+	dst.PathBlock = src.PathBlock
 	dst.SecurityHeaders = src.SecurityHeaders
 	return dst
 }
