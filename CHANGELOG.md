@@ -7,6 +7,12 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Config warnings for `auth.requiredRoles` that does not do what it says
+  (#65): an entry that is not a role (`admin`, `user`), typically a group
+  name; `requiredRoles` on an `oidc` or `forward-auth` gate whose provider
+  maps no role; and `requiredRoles` on a gate that takes `auth-request` mode
+  from its provider, where it is not applied. All three load and behave as
+  before.
 - Admin UI certificate wizard (#54): **Add certificate** opens a four-step
   wizard (Domains, Authority, Validation, Review) for ACME certificates, with a
   Review dry run, Import from YAML and a create-only save, like the proxy host
@@ -525,6 +531,10 @@ vulnerability:
 
 ### Changed
 
+- Docs (#65): the per-host SSO how-to is corrected after the walk. Its
+  example put a group name in `requiredRoles`, which denies everyone; it now
+  also covers the per-domain redirect URI, the port 443 requirement, the
+  default scopes, how a session ends and the missing per-user sign-out.
 - Admin UI certificate editor (#54): same layout as the proxy host editor, with
   tabs in the title band (Certificate, Authority, Validation for ACME;
   Certificate, Files for custom) and a rail with status, renewal, issuer,
@@ -637,6 +647,21 @@ vulnerability:
 
 ### Fixed
 
+- Per-host SSO on a location (#65): a sign-in started by an `oidc` or
+  `auth-request` gate that only a `locations` entry carries now completes. The
+  gate's own path (`/__gpm/oidc/callback`, the outpost `pathPrefix`) lies
+  outside the location and used to reach the upstream instead of the gate.
+  Found in the first walk of `oidc` mode against a real identity provider.
+- The path of such a gate (#65) now meets the host's rate limit, path block,
+  access lists, bouncer and auth gates, then that gate (not the guard, headers
+  or rewrite, as on any gate path). It routes as before when another location
+  covers the path, the host carries an `oidc` or `auth-request` gate of its
+  own, two different gates of the host's locations own the path, the outpost
+  `pathPrefix` is `/`, or the gate's provider is of another type.
+- An auth gate that cannot be built (`oidc` or `auth-request` mode on a
+  provider of another type) now answers `503` on another gate's sign-in paths
+  too. It used to step aside there, so on a host with such a gate and a
+  second, working gate the callback or outpost path was still served.
 - Non-secret DNS provider settings can be written as literals through the API
   and the UI (#61): rfc2136 `server`, `zone`, `tsigKeyName`, `tsigAlgorithm`,
   `transport`, `ttl`, `timeout`; acme-dns `baseURL`, `subdomain`,

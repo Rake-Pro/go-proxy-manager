@@ -107,6 +107,69 @@ type interactiveGate struct {
 	owns func(path string) bool
 }
 
+// ownedPaths is the pass-through path set of one interactive gate: the exact
+// OIDC callback path, or an auth-request outpost prefix.
+type ownedPaths struct {
+	exact  string
+	prefix string
+}
+
+func (o ownedPaths) owns(path string) bool {
+	if o.exact != "" {
+		return path == o.exact
+	}
+	return ownsOutpostPath(o.prefix, path)
+}
+
+// overlaps reports whether some path is owned by both sets.
+func (o ownedPaths) overlaps(p ownedPaths) bool {
+	switch {
+	case o.exact != "" && p.exact != "":
+		return o.exact == p.exact
+	case o.exact != "":
+		return p.owns(o.exact)
+	case p.exact != "":
+		return o.owns(p.exact)
+	}
+	return o.owns(p.prefix) || p.owns(o.prefix)
+}
+
+// interactiveMode reports whether an auth spec asks for an interactive mode
+// (oidc, auth-request), whether or not the gate can compile: a spec whose
+// provider is of the wrong type still becomes a (fail-closed) gate of that
+// mode.
+func interactiveMode(a model.AuthMiddleware, reg *registry) bool {
+	mode := a.Mode
+	if mode == "" {
+		mode = reg.idps[a.IdentityProvider].Type
+	}
+	return mode == model.AuthModeOIDC || mode == model.AuthModeAuthRequest
+}
+
+// interactiveOwned returns the pass-through paths of the interactive gate an
+// auth spec compiles to; ok is false when the spec is not an interactive gate.
+// It follows authHandler's mode resolution and compiles nothing.
+func interactiveOwned(a model.AuthMiddleware, reg *registry) (o ownedPaths, ok bool) {
+	if a.Mode == model.AuthModeClientCert || a.Mode == model.AuthModeBasic {
+		return o, false
+	}
+	idp, found := reg.idps[a.IdentityProvider]
+	if !found {
+		return o, false
+	}
+	mode := a.Mode
+	if mode == "" {
+		mode = idp.Type
+	}
+	switch {
+	case mode == model.AuthModeAuthRequest && idp.AuthRequest != nil:
+		return ownedPaths{prefix: outpostPrefix(*idp.AuthRequest)}, true
+	case mode == model.AuthModeOIDC && idp.OIDC != nil:
+		return ownedPaths{exact: oidcCallbackPath}, true
+	}
+	return o, false
+}
+
 // forwardAuthGate enforces a trusted forward-auth identity and role policy. host
 // and ep resolve the custom error page for either refusal (see refuse).
 func forwardAuthGate(fa auth.ForwardAuth, rm *model.RoleMapping, required []string, host string, ep *compiledErrorPages, next http.Handler) http.Handler {

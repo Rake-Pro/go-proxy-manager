@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -571,6 +572,47 @@ func (c Config) Warnings() []string {
 		}
 		return ""
 	}
+	// requiredRoles names ROLES ("admin", "user"), which the provider's
+	// roleMapping derives from groups. Three shapes load and then do not do
+	// what was written: an entry that is not a role (a group name, typically)
+	// admits no one; requiredRoles on a gate whose provider maps no role
+	// refuses every user; and requiredRoles on a gate that takes auth-request
+	// mode from its provider is not applied at all (written with an explicit
+	// mode it is a load error). They are warnings so that a config that loads
+	// today keeps loading.
+	idpMapsRoles := map[string]bool{}
+	for _, p := range c.IdentityProviders {
+		rm := p.RoleMapping
+		idpMapsRoles[p.Name] = rm != nil && (len(rm.AdminGroups) > 0 || len(rm.UserGroups) > 0 || rm.DefaultRole != "")
+	}
+	checkRequiredRoles := func(owner string, a *AuthMiddleware) {
+		if a == nil || len(a.RequiredRoles) == 0 {
+			return
+		}
+		mode := a.Mode
+		if mode == "" {
+			mode = idpTypes[a.IdentityProvider]
+		}
+		if mode == AuthModeAuthRequest {
+			out = append(out, fmt.Sprintf("%s: auth.requiredRoles is not applied: the gate takes auth-request mode from identity provider %q, where the auth server decides who may pass; remove requiredRoles", owner, a.IdentityProvider))
+			return
+		}
+		if mode != AuthModeOIDC && mode != AuthModeForwardAuth {
+			return
+		}
+		var unknown []string
+		for _, r := range a.RequiredRoles {
+			if r != "admin" && r != "user" {
+				unknown = append(unknown, strconv.Quote(r))
+			}
+		}
+		if len(unknown) > 0 {
+			out = append(out, fmt.Sprintf("%s: auth.requiredRoles: %s is not a role, so it admits no one; the roles are \"admin\" and \"user\" (a roleMapping maps groups to them)", owner, strings.Join(unknown, ", ")))
+		}
+		if !idpMapsRoles[a.IdentityProvider] {
+			out = append(out, fmt.Sprintf("%s: auth.requiredRoles is set but the roleMapping of identity provider %q gives no user a role, so every request is refused; map groups to roles on the provider or remove requiredRoles", owner, a.IdentityProvider))
+		}
+	}
 	for _, m := range c.Middlewares {
 		if m.Auth != nil && m.Auth.Mode == AuthModeClientCert {
 			clientCertMWs[m.Name] = true
@@ -578,9 +620,14 @@ func (c Config) Warnings() []string {
 		if p := oidcProvider(m.Auth); p != "" {
 			oidcMWs[m.Name] = p
 		}
+		checkRequiredRoles(fmt.Sprintf("middleware %q", m.Name), m.Auth)
 	}
 	for _, h := range c.ProxyHosts {
 		checkClientCertMode(&out, h, clientCertMWs)
+		checkRequiredRoles(fmt.Sprintf("proxy host %q", h.Name), h.Auth)
+		for _, l := range h.Locations {
+			checkRequiredRoles(fmt.Sprintf("proxy host %q: location %q", h.Name, l.Path), l.Auth)
+		}
 		if h.TLS.MinTLSVersion == "1.3" && !h.TLS.ForceSSL {
 			out = append(out, fmt.Sprintf("proxy host %q: tls.minTLSVersion is \"1.3\" but tls.forceSSL is off, so the host is also served on the plain HTTP listener; set tls.forceSSL: true", h.Name))
 		}

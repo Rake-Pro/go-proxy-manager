@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -210,6 +211,22 @@ func buildRouter(cfg model.Config, certDir string, health groupResolver) (*route
 		hh.maintenanceExempt = h.AdminEdge
 		if hh.locations, err = buildLocations(h, reg, hostEP); err != nil {
 			return nil, fmt.Errorf("proxy host %q: %w", h.Name, err)
+		}
+		specs, owned := locationOnlyGates(h, reg)
+		for i := range specs {
+			// The host route with ONE of those gates added, for that gate's
+			// paths only: the host's own tiers apply as they do on the host
+			// route, and the gate answers, so the upstream is never reached.
+			// One route per gate, so that a sign-in at one location never has
+			// to pass another location's gate first.
+			ph := h
+			ph.Locations = nil
+			inline := hostInline(h)
+			inline.auth = append(inline.auth, specs[i])
+			hh.passThrough = append(hh.passThrough, passThroughRoute{
+				owned:   owned[i],
+				handler: buildChainInline(proxy, ph, inline, reg, hostEP),
+			})
 		}
 		hh.identityHeaders, hh.trustedNets = hostIdentityTrust(h, reg)
 		// A DIFFERENT trust tier from trustedNets above: this one decides whose
@@ -439,6 +456,89 @@ func buildLocations(h model.ProxyHost, reg *registry, ep *compiledErrorPages) ([
 		})
 	}
 	return routes, nil
+}
+
+// locationOnlyGates returns the interactive gate specs (oidc, auth-request)
+// that locations of h carry while the host itself carries no interactive gate,
+// with the pass-through paths of each. Such a gate starts a sign-in under its
+// location, and the flow returns on the gate's own path (the OIDC callback, the
+// outpost prefix), which lies outside the location: route sends that path to a
+// chain that holds these gates, or the sign-in could never complete.
+//
+// The result is deliberately narrow, and empty whenever serving the path could
+// give a request fewer checks than the host route did, or leaves a doubt about
+// which gate answers:
+//   - a host that carries an interactive gate of its own, working or not, keeps
+//     every path on its routes as before (that gate serves, gates or refuses
+//     them);
+//   - the same spec on several locations counts once (one middleware, or
+//     inline blocks that agree once the mode is resolved and the roles are
+//     sorted: either instance can finish the other's sign-in);
+//   - two DIFFERENT specs that own a common path are both left out, since the
+//     wrong one would redeem the other's sign-in (other roles, other provider);
+//   - an outpost prefix of "/" is left out: it would claim the whole host.
+func locationOnlyGates(h model.ProxyHost, reg *registry) ([]model.AuthMiddleware, []ownedPaths) {
+	resolve := func(names []string, inline *model.AuthMiddleware) []model.AuthMiddleware {
+		var out []model.AuthMiddleware
+		for _, name := range names {
+			if mw, ok := reg.middlewares[name]; ok && mw.Type == model.MWTypeAuth && mw.Auth != nil {
+				out = append(out, *mw.Auth)
+			}
+		}
+		if inline != nil {
+			out = append(out, *inline)
+		}
+		return out
+	}
+	for _, a := range resolve(h.Middlewares, h.Auth) {
+		if interactiveMode(a, reg) {
+			return nil, nil
+		}
+	}
+	var specs []model.AuthMiddleware
+	var owned []ownedPaths
+	seen := map[string]struct{}{}
+	for _, loc := range h.Locations {
+		for _, a := range resolve(loc.Middlewares, loc.Auth) {
+			o, ok := interactiveOwned(a, reg)
+			if !ok || o.prefix == "/" {
+				continue
+			}
+			// Two blocks that differ only in how they are written are one gate.
+			norm := a
+			if norm.Mode == "" {
+				norm.Mode = reg.idps[a.IdentityProvider].Type
+			}
+			norm.RequiredRoles = append([]string(nil), a.RequiredRoles...)
+			sort.Strings(norm.RequiredRoles)
+			key, err := json.Marshal(norm)
+			if err != nil {
+				continue
+			}
+			if _, dup := seen[string(key)]; dup {
+				continue
+			}
+			seen[string(key)] = struct{}{}
+			specs = append(specs, a)
+			owned = append(owned, o)
+		}
+	}
+	var keptSpecs []model.AuthMiddleware
+	var keptOwned []ownedPaths
+	for i := range specs {
+		clash := false
+		for j := range specs {
+			if i != j && owned[i].overlaps(owned[j]) {
+				clash = true
+				break
+			}
+		}
+		if !clash {
+			keptSpecs = append(keptSpecs, specs[i])
+			keptOwned = append(keptOwned, owned[i])
+		}
+	}
+	return keptSpecs, keptOwned
 }
 
 // baseHostTLSConfig returns a per-host TLS config with the shared cert resolver,

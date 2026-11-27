@@ -675,6 +675,11 @@ type hostHandler struct {
 	upstream  string // scheme://host:port, for debug headers/logging only
 	locations []locationRoute
 
+	// passThrough holds one route per interactive gate that only locations of
+	// this host carry, serving that gate's pass-through paths; empty when there
+	// are none. See locationOnlyGates and route.
+	passThrough []passThroughRoute
+
 	// hsts is the precomputed Strict-Transport-Security header value, or "" when
 	// HSTS is disabled for this host. Emitted only on the HTTPS listener.
 	hsts string
@@ -739,11 +744,29 @@ type hostHandler struct {
 // path is matched on a segment boundary (exact, or prefix followed by "/") so
 // "/reports" does not capture "/reports-evil"; callers pass an already-cleaned
 // path (see normalizeRequestPath) so dot-segments cannot dodge the match.
+//
+// A path no location covers, which would go to the host route, goes to the
+// passThrough route instead when it is a pass-through path of a gate that only
+// a location carries: the sign-in that gate started comes back on that path,
+// and on the host route it would reach the upstream instead of the gate. A
+// path a location covers always stays with that location.
 func (hh *hostHandler) route(path string) (http.Handler, string) {
 	for _, l := range hh.locations {
 		if l.prefix == "/" || path == l.prefix || strings.HasPrefix(path, l.prefix+"/") {
 			return l.handler, l.upstream
 		}
 	}
+	for _, pt := range hh.passThrough {
+		if pt.owned.owns(path) {
+			return pt.handler, hh.upstream
+		}
+	}
 	return hh.handler, hh.upstream
+}
+
+// passThroughRoute is the host's chain with one location-only interactive gate
+// added, used only for the paths that gate owns.
+type passThroughRoute struct {
+	owned   ownedPaths
+	handler http.Handler
 }

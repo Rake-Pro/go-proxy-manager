@@ -53,6 +53,25 @@ itself: the `auth-request` outpost `pathPrefix` and the OIDC callback
 The pass-through request still skips the guard, headers, rewrite and upstream
 steps. On a location route the inherited host gates count the same way.
 
+A pass-through path usually lies outside a location (`/__gpm/oidc/callback` is
+not under `/admin`), so a gate that only a location carries gets one extra
+route for its paths: the host's chain with that gate added. As on any
+pass-through request, the gate answers and the guard, headers, rewrite and
+upstream steps are skipped.
+
+| Case | Where the pass-through path goes |
+|------|----------------------------------|
+| A location covers the path | That location's route, as any other path |
+| The host carries an `oidc` or `auth-request` gate, working or not | The host route; that gate serves, gates or refuses it |
+| Only locations carry the gate | The gate's extra route: the host's rate limit, path block, access lists, bouncer and auth gates, then the gate |
+| Locations carry gates that own different paths | One extra route per gate |
+| Locations carry different gates that own a common path | The host route; neither sign-in can complete |
+| The gate is `auth-request` with `pathPrefix: /` | The host route |
+
+A gate that cannot be built (an interactive mode on a provider of another
+type) refuses every request on the routes that carry it with `503`, another
+gate's pass-through path included.
+
 ## How the chain is compiled
 
 **Middleware chain** (`internal/dataplane/chain.go`). Each host/location compiles

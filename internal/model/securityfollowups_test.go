@@ -66,6 +66,13 @@ func TestConfigWarningsGates(t *testing.T) {
 		ObjectMeta: ObjectMeta{Name: "sso2"}, Type: IdPTypeOIDC,
 		OIDC: &OIDCSpec{IssuerURL: "https://idp2.example.com", ClientID: "gpm"},
 	})
+	// The "fine" host below restricts a location by role, which needs the
+	// provider to map roles.
+	for i := range idps {
+		if idps[i].Name == "sso" {
+			idps[i].RoleMapping = &RoleMapping{AdminGroups: []string{"admins"}}
+		}
+	}
 	cfg := Config{
 		IdentityProviders: idps,
 		Middlewares: []Middleware{
@@ -114,5 +121,80 @@ func TestIngressDiscoveryDefaultsAreExempt(t *testing.T) {
 	d.TokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/other"
 	if err := d.Validate(); err == nil {
 		t.Fatal("a sibling path outside the roots must be refused")
+	}
+}
+
+// requiredRoles names roles, not groups. An entry that is not a role, a
+// provider that maps no role, and requiredRoles under an inherited
+// auth-request mode all load and then do not do what was written: each is
+// reported through Warnings, wherever the gate is written (a middleware, a
+// host, a location), and never fails the load.
+func TestConfigWarningsRequiredRoles(t *testing.T) {
+	oidcSpec := func(issuer string) *OIDCSpec { return &OIDCSpec{IssuerURL: issuer, ClientID: "gpm"} }
+	idps := []IdentityProvider{
+		{ObjectMeta: ObjectMeta{Name: "mapped"}, Type: IdPTypeOIDC, OIDC: oidcSpec("https://idp.example.com"),
+			RoleMapping: &RoleMapping{AdminGroups: []string{"proxy-admins"}, UserGroups: []string{"staff"}}},
+		{ObjectMeta: ObjectMeta{Name: "unmapped"}, Type: IdPTypeOIDC, OIDC: oidcSpec("https://idp2.example.com")},
+		{ObjectMeta: ObjectMeta{Name: "empty-map"}, Type: IdPTypeOIDC, OIDC: oidcSpec("https://idp3.example.com"), RoleMapping: &RoleMapping{}},
+		{ObjectMeta: ObjectMeta{Name: "edge"}, Type: IdPTypeForwardAuth, ForwardAuth: &ForwardAuthSpec{TrustedProxies: []string{"192.0.2.0/24"}, UserHeader: "X-User"},
+			RoleMapping: &RoleMapping{DefaultRole: "user"}},
+		{ObjectMeta: ObjectMeta{Name: "edge-unmapped"}, Type: IdPTypeForwardAuth, ForwardAuth: &ForwardAuthSpec{TrustedProxies: []string{"192.0.2.0/24"}, UserHeader: "X-User"}},
+		{ObjectMeta: ObjectMeta{Name: "outpost"}, Type: IdPTypeAuthRequest, AuthRequest: &AuthRequestSpec{OutpostURL: "http://auth-outpost:9000"}},
+	}
+	loc := func(a *AuthMiddleware) []Location {
+		return []Location{{Path: "/admin", Upstream: &Upstream{Scheme: "http", Host: "192.0.2.10", Port: 80}, Auth: a}}
+	}
+	mw := func(name string, a AuthMiddleware) Middleware {
+		return Middleware{ObjectMeta: ObjectMeta{Name: name}, Type: MWTypeAuth, Auth: &a}
+	}
+	cfg := Config{
+		IdentityProviders: idps,
+		Middlewares: []Middleware{
+			mw("group-name", AuthMiddleware{IdentityProvider: "mapped", Mode: AuthModeOIDC, RequiredRoles: []string{"staff", "admin"}}),
+			mw("roles-ok", AuthMiddleware{IdentityProvider: "mapped", Mode: AuthModeOIDC, RequiredRoles: []string{"admin", "user"}}),
+			mw("no-roles", AuthMiddleware{IdentityProvider: "unmapped", Mode: AuthModeOIDC}),
+			mw("fa-group", AuthMiddleware{IdentityProvider: "edge", Mode: AuthModeForwardAuth, RequiredRoles: []string{"ops"}}),
+			mw("fa-ok", AuthMiddleware{IdentityProvider: "edge", Mode: AuthModeForwardAuth, RequiredRoles: []string{"user"}}),
+			mw("fa-unmapped", AuthMiddleware{IdentityProvider: "edge-unmapped", Mode: AuthModeForwardAuth, RequiredRoles: []string{"user"}}),
+			mw("empty-map", AuthMiddleware{IdentityProvider: "empty-map", Mode: AuthModeOIDC, RequiredRoles: []string{"user"}}),
+			// Mode left unset: auth-request comes from the provider type, and
+			// requiredRoles is then silently not applied.
+			mw("ar-inherited", AuthMiddleware{IdentityProvider: "outpost", RequiredRoles: []string{"admin"}}),
+			mw("ar-plain", AuthMiddleware{IdentityProvider: "outpost"}),
+		},
+		ProxyHosts: []ProxyHost{
+			// Mode left unset: oidc comes from the provider type.
+			proxyHost("inline", func(h *ProxyHost) {
+				h.Auth = &AuthMiddleware{IdentityProvider: "unmapped", RequiredRoles: []string{"user"}}
+			}),
+			proxyHost("scoped", func(h *ProxyHost) {
+				h.Locations = loc(&AuthMiddleware{IdentityProvider: "mapped", Mode: AuthModeOIDC, RequiredRoles: []string{"Admin"}})
+			}),
+			proxyHost("clean", func(h *ProxyHost) {
+				h.Auth = &AuthMiddleware{IdentityProvider: "mapped", Mode: AuthModeOIDC, RequiredRoles: []string{"user"}}
+			}),
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the config must still load: %v", err)
+	}
+	got := cfg.Warnings()
+	want := []string{
+		`middleware "group-name": auth.requiredRoles: "staff" is not a role, so it admits no one; the roles are "admin" and "user" (a roleMapping maps groups to them)`,
+		`middleware "fa-group": auth.requiredRoles: "ops" is not a role, so it admits no one; the roles are "admin" and "user" (a roleMapping maps groups to them)`,
+		`middleware "fa-unmapped": auth.requiredRoles is set but the roleMapping of identity provider "edge-unmapped" gives no user a role, so every request is refused; map groups to roles on the provider or remove requiredRoles`,
+		`middleware "empty-map": auth.requiredRoles is set but the roleMapping of identity provider "empty-map" gives no user a role, so every request is refused; map groups to roles on the provider or remove requiredRoles`,
+		`middleware "ar-inherited": auth.requiredRoles is not applied: the gate takes auth-request mode from identity provider "outpost", where the auth server decides who may pass; remove requiredRoles`,
+		`proxy host "inline": auth.requiredRoles is set but the roleMapping of identity provider "unmapped" gives no user a role, so every request is refused; map groups to roles on the provider or remove requiredRoles`,
+		`proxy host "scoped": location "/admin": auth.requiredRoles: "Admin" is not a role, so it admits no one; the roles are "admin" and "user" (a roleMapping maps groups to them)`,
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d warnings, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
+	}
+	all := strings.Join(got, "\n")
+	for _, w := range want {
+		if !strings.Contains(all, w) {
+			t.Errorf("missing warning:\n%s\nin:\n%s", w, all)
+		}
 	}
 }
