@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -110,10 +111,8 @@ func decodeEABKey(raw string) ([]byte, error) {
 // registered (idempotent: an already-registered key is accepted). When the CA
 // requires External Account Binding (ZeroSSL, Google Public CA), eab carries the
 // kid/HMAC pair that ties the new account to the external one.
-func newClient(ctx context.Context, certDir, directoryURL, email string, eab *acme.ExternalAccountBinding) (*acme.Client, error) {
-	if directoryURL == "" {
-		directoryURL = acme.LetsEncryptURL
-	}
+func newClient(ctx context.Context, certDir, directoryURL, email string, eab *acme.ExternalAccountBinding, httpClient *http.Client) (*acme.Client, error) {
+	directoryURL = effectiveDirectoryURL(directoryURL)
 	kid := ""
 	if eab != nil {
 		kid = eab.KID
@@ -122,7 +121,7 @@ func newClient(ctx context.Context, certDir, directoryURL, email string, eab *ac
 	if err != nil {
 		return nil, fmt.Errorf("account key: %w", err)
 	}
-	client := &acme.Client{Key: key, DirectoryURL: directoryURL, HTTPClient: acmeHTTPClient}
+	client := &acme.Client{Key: key, DirectoryURL: directoryURL, HTTPClient: httpClient}
 
 	acct := &acme.Account{ExternalAccountBinding: eab}
 	if email != "" {
@@ -152,6 +151,47 @@ var acmeHTTPClient = &http.Client{
 	Timeout:       acmeHTTPTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error { return errACMERedirect },
 	Transport:     cappedTransport{base: http.DefaultTransport},
+}
+
+// effectiveDirectoryURL is the directory a certificate talks to: its own, or
+// Let's Encrypt production when none is set.
+func effectiveDirectoryURL(directoryURL string) string {
+	if directoryURL == "" {
+		return acme.LetsEncryptURL
+	}
+	return directoryURL
+}
+
+// acmeHTTPClientFor returns the HTTP client for every exchange with one
+// certificate's ACME directory (account, order, renewal information). Without
+// acme.caBundle that is the shared acmeHTTPClient. With it, the client is the
+// same in every respect (no redirects, capped bodies, the timeout, proxy
+// settings from the environment) except that TLS trusts only the bundle's
+// certificates, not the system roots. A bundle that does not resolve or parse
+// is an error, never a fallback to the system roots.
+func acmeHTTPClientFor(spec *model.ACMESpec) (*http.Client, error) {
+	if spec == nil || spec.CABundle == "" {
+		return acmeHTTPClient, nil
+	}
+	raw, err := model.Secret(spec.CABundle).Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("acme.caBundle: %w", err)
+	}
+	certs, err := model.ParseCABundle(raw)
+	if err != nil {
+		return nil, fmt.Errorf("acme.caBundle: %w", err)
+	}
+	pool := x509.NewCertPool()
+	for _, c := range certs {
+		pool.AddCert(c)
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	return &http.Client{
+		Timeout:       acmeHTTPClient.Timeout,
+		CheckRedirect: acmeHTTPClient.CheckRedirect,
+		Transport:     cappedTransport{base: tr},
+	}, nil
 }
 
 // cappedTransport wraps every response body in a reader that fails once the

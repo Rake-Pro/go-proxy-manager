@@ -69,7 +69,9 @@ func NewACMEDNSSolver(cfg ACMEDNSConfig, opts ...ACMEDNSOption) (*ACMEDNSSolver,
 	if base == "" {
 		return nil, errors.New("acme-dns: baseURL is required")
 	}
-	if err := model.ValidateOutboundBaseURL("acme-dns: baseURL", base, cfg.AllowInsecureLocal); err != nil {
+	// The value may come from a placeholder and hold a credential, so no error
+	// or log line here contains it; the warning names the host only.
+	if err := model.ValidateResolvedOutboundURL("acme-dns: baseURL", base, cfg.AllowInsecureLocal); err != nil {
 		return nil, err
 	}
 	if u, err := url.Parse(base); err == nil && u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {

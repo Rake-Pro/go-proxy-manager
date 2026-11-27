@@ -25,7 +25,7 @@ A scope is `<subject>:read`, `<subject>:write`, `*:read`, `*:write`, or `admin`.
 | `*:read` | Every read, including whole-config reads (`/api/config`, `/api/history`, `/api/logs`, `/api/upstream-health`, `/api/analytics`) |
 | `*:write` | Every read and write, except the `admin`-only routes below |
 | `metrics:read` | `GET /metrics` only, and nothing else |
-| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, every write on `/api/dns-providers` and `/api/identity-providers`, a bouncer middleware write that creates, or changes the `url` or `apiKey` of, a bouncer whose `apiKey` is a placeholder, `POST /api/middlewares/{name}/revert` (a revert restores a stored bouncer without that check), `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `POST /api/sessions/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
+| `admin` | Everything, and the **only** scope that reaches `/api/api-tokens`, `PUT /api/settings`, every write on `/api/dns-providers` and `/api/identity-providers`, a bouncer middleware write that creates, or changes the `url` or `apiKey` of, a bouncer whose `apiKey` is a placeholder, a certificate write that sets or changes `acme.directoryURL`, `acme.eab` or `acme.caBundle`, `POST /api/middlewares/{name}/revert` (a revert restores a stored bouncer without that check), `POST /api/certificates/{name}/revert` (a revert restores a stored certificate without the admin check on `acme.directoryURL`, `acme.eab` and `acme.caBundle`), `GET /api/backup`, `POST /api/restore`, `POST /api/revert`, `POST /api/sso/revoke`, `POST /api/sessions/revoke`, `PUT` / `DELETE /api/logs` and `/debug/pprof/*` |
 
 Why the two provider kinds are admin-only: a DNS provider pairs a
 `${ENV:...}` / `${FILE:...}` credential with an API endpoint, so whoever can
@@ -58,6 +58,18 @@ scope. A viewer-role session and a resource-scoped token both hit this.
 `certificate "app": dns-01 challenge or DNS provider failure`, never the
 provider's raw message, whoever is asking. The full message stays on that
 certificate's own status, behind `certificates:read`.
+
+## Certificate status fields
+
+`GET /api/certificates` and `GET /api/certificates/{name}` add read-only status fields to each object; the full list is in [Certificate: status fields](config/certificate.md#status-fields-get-only).
+
+| Field | Meaning |
+|---|---|
+| `renewAt` | When the ACME manager next renews an issued `acme` certificate (RFC 3339). A time in the past means the renewal is due and has not succeeded yet. Omitted for `custom`, pending and disabled certificates, on an HA follower, and before the manager's first pass. |
+| `renewReason` | `lifetime`, `ari` or `changed` (domains or `acme.profile` changed, so the certificate is due now and `renewAt` is the time of the pass): which rule set `renewAt`. Omitted with it. |
+| `state: expiring` | At or inside `min(30 days, lifetime / 3)` of `notAfter`, lifetime being `notAfter - notBefore`. This holds for `acme` certificates only; a `custom` certificate keeps the fixed 30 days, because nothing renews it. It was a fixed 30 days for every certificate before, so a short-lived `acme` certificate is no longer `expiring` from the day it is issued. The `certificates.expiring` count of `GET /api/health` follows the same split. |
+
+`acme.caBundle` is returned as written: it holds public trust anchors, not a secret.
 
 ## Basic-auth password hashes
 

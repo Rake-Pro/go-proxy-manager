@@ -2548,6 +2548,69 @@ function hasWildcardProxy(list) {
 // it is surfaced permanently in the card and the save stays enabled.
 const TRUSTED_WILDCARD_WARNING = '0.0.0.0/0 trusts every peer, so any client can set its own address and every IP rule below becomes spoofable. List your proxies\' real addresses instead.';
 
+// Discovery templates and profiles carry the proxy host's three-state
+// trustedProxies and the same three-way control, but "unset" means something
+// else there: the template does not own the field, so a managed host keeps its
+// own value across a reconcile and a new host inherits settings.trustedProxies.
+// [] (trust nobody) and a list are stamped onto every derived host, which then
+// carries the <prefix>/trusted-proxies-by label; a stamped value is removed
+// again when the template stops setting the key. The API
+// omits an unset value, so only `undefined` is unset: a present null is a set,
+// empty value and reads as "trust nobody", as it does in the model.
+const TP_TEMPLATE_NOTES = {
+  unset: 'Not owned by discovery: a value set by hand on a derived host is kept, a value this template or profile stamped is removed from its hosts, and a new host uses the fleet list in Settings.',
+  none: 'Stamped onto every derived host: the client address is the connection address, X-Forwarded-For is ignored.',
+  custom: 'Stamped onto every derived host, replacing the fleet list there.',
+};
+function tpTemplateMode(v) {
+  if (v === undefined) return 'unset';
+  return arr(v).length ? 'custom' : 'none';
+}
+function tpTemplateHtml(v, hint) {
+  const mode = tpTemplateMode(v);
+  const btn = (m, label) => `<button type="button" class="seg-btn${mode === m ? ' on' : ''}" data-tp="${m}" aria-pressed="${mode === m}">${label}</button>`;
+  return `<div class="tp-tmpl">
+    <div class="seg tp-seg" data-hint="${esc(hint)}">${btn('unset', 'Not set')}${btn('none', 'Trust nobody')}${btn('custom', 'Custom list')}</div>
+    <div class="tp-custom"${mode === 'custom' ? '' : ' hidden'}><div class="chip-input tp-list" data-hint="${esc(hint)}"></div></div>
+    <div class="hint tp-note">${esc(TP_TEMPLATE_NOTES[mode])}</div>
+    <div class="hint warn tp-warn" hidden>${esc(TRUSTED_WILDCARD_WARNING)}</div>
+  </div>`;
+}
+// Wires one tpTemplateHtml block. get() returns undefined for unset (the save
+// omits the key), [] for trust nobody and the list otherwise, or null after
+// reporting an invalid list, so the caller stops.
+function wireTpTemplate(wrap, v, where) {
+  const warn = wrap.querySelector('.tp-warn');
+  const mode = () => { const on = wrap.querySelector('.tp-seg .seg-btn.on'); return on ? on.dataset.tp : 'unset'; };
+  const ctl = makeChipInput(wrap.querySelector('.tp-list'), arr(v), '10.0.0.0/8 or 192.0.2.10', (list) => {
+    warn.hidden = mode() !== 'custom' || !hasWildcardProxy(list);
+  });
+  function sync() {
+    const m = mode();
+    wrap.querySelector('.tp-custom').hidden = m !== 'custom';
+    wrap.querySelector('.tp-note').textContent = TP_TEMPLATE_NOTES[m];
+    warn.hidden = m !== 'custom' || !hasWildcardProxy(ctl.get());
+  }
+  wrap.querySelectorAll('.tp-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
+    wrap.querySelectorAll('.tp-seg .seg-btn').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+    sync();
+    b.dispatchEvent(new CustomEvent('switchchange', { bubbles: true }));
+  }));
+  sync();
+  return {
+    get() {
+      const m = mode();
+      if (m === 'unset') return undefined;
+      if (m === 'none') return [];
+      const list = ctl.get();
+      if (!list.length) { showInvalid('Trusted proxies empty', `${where}: add at least one CIDR or IP, or choose "Not set" or "Trust nobody".`, wrap.querySelector('.tp-list')); return null; }
+      const bad = firstBadCidr(list);
+      if (bad) { showInvalid('Invalid trusted proxy', `${where}: "${bad}" is not a CIDR or IP address. Use 10.0.0.0/8 or 192.0.2.10.`, wrap.querySelector('.tp-list')); return null; }
+      return list;
+    },
+  };
+}
+
 // A hostname, optionally with a port - what upstream.hostHeader accepts.
 const HOSTHEADER_RE = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:\d{1,5})?$/;
 
@@ -3220,6 +3283,8 @@ function certStateChip(ct) {
     titleBits.push(days >= 0 ? `${plural(days, 'day', 'days')} remaining` : `Expired ${plural(-days, 'day', 'days')} ago`);
   }
   if (ct.notAfter) titleBits.push(fmtTime(ct.notAfter));
+  const renew = certRenewInfo(ct);
+  if (renew) titleBits.push(renew.text);
   const title = titleBits.join('; ');
   const chipCls = flat ? `chip flat${cls ? ' ' + cls : ''}` : `chip ${cls}`;
   return `<span class="${chipCls}" title="${esc(title)}"><span class="dot ${cls}"></span>${esc(label)}</span>`;
@@ -3251,7 +3316,36 @@ function certCoverHtml(ct, domain) {
 function certExpiryCellHtml(ct) {
   ct = ct || {};
   const date = ct.notAfter ? fmtDate(ct.notAfter) : '';
-  return `<span class="cert-expiry">${certStateChip(ct)}${date ? `<span class="expiry-date" title="${esc(fmtTime(ct.notAfter))}">${esc(date)}</span>` : ''}</span>`;
+  const cell = `<span class="cert-expiry">${certStateChip(ct)}${date ? `<span class="expiry-date" title="${esc(fmtTime(ct.notAfter))}">${esc(date)}</span>` : ''}</span>`;
+  const renew = certRenewInfo(ct);
+  if (!renew) return cell;
+  return `${cell}<div class="cell-sub"><span class="${renew.due ? 'warn-text' : 'mono'}" title="${esc(renew.text)}">${esc(renew.short)}</span></div>`;
+}
+// renewAt / renewReason (GET /api/certificates): when the ACME manager next
+// renews an issued certificate, and which rule set that time - "ari" is a time
+// the CA asked for through its renewal information, "lifetime" the
+// min(30 days, lifetime / 3) rule. A renewAt in the past means the renewal is
+// due and has not succeeded yet, so it is said in words, never shown as a
+// plain past date. Both are absent for custom and pending certificates, on an
+// HA follower and before the manager's first pass: null then.
+// "changed" (domains or profile changed) is due now whatever the time, which
+// is then the pass that noticed it. A reason this build does not know is shown
+// raw rather than dropped or mislabelled.
+const CERT_RENEW_REASONS = { ari: 'time requested by the CA (ARI)', lifetime: 'lifetime rule' };
+const CERT_RENEW_RULE = 'An ACME certificate renews when min(30 days, lifetime / 3) remains (the lifetime rule). A CA that publishes renewal information (ARI) can only bring that time forward, never past the lifetime rule. A failed attempt is retried after a wait that starts at a quarter of the renewal window (5 minutes to 1 hour) and doubles with each further failure, up to 12 hours.';
+function certRenewInfo(ct) {
+  if (!ct || !ct.renewAt) return null;
+  const t = new Date(ct.renewAt).getTime();
+  if (isNaN(t)) return null;
+  if (ct.renewReason === 'changed') {
+    return { due: true, label: 'Due now: domains or profile changed', short: 'due now: domains or profile changed', text: `Due now: domains or profile changed (noticed ${fmtTime(ct.renewAt)})` };
+  }
+  const why = CERT_RENEW_REASONS[ct.renewReason] || ct.renewReason || '';
+  const tail = why ? ` (${why})` : '';
+  if (t <= Date.now()) {
+    return { due: true, label: 'Due now, not yet succeeded', why, short: 'renewal due, not yet succeeded', text: `Renewal due since ${fmtTime(ct.renewAt)} and not yet succeeded${tail}` };
+  }
+  return { due: false, why, short: 'renews ' + fmtDate(ct.renewAt), text: `Renews ${fmtTime(ct.renewAt)}${tail}` };
 }
 // POST /api/certificates/{name}/renew starts an order and returns immediately -
 // DNS-01 propagation alone can take minutes, so there is no spinner and no poll:
@@ -3259,7 +3353,7 @@ function certExpiryCellHtml(ct) {
 async function renewCertificate(name) {
   const ok = await confirmModal({
     title: 'Renew this certificate now?',
-    body: `<p>Forces an immediate renewal of <b>${esc(name)}</b>. This starts a new ACME order now, ignoring the 30-day schedule.</p>`
+    body: `<p>Forces an immediate renewal of <b>${esc(name)}</b>. This starts a new ACME order now, ignoring the renewal window and any time the CA asked for.</p>`
       + '<p>The order runs in the background; DNS-01 validation can take several minutes.</p>',
     confirmLabel: 'Renew now',
     danger: false,
@@ -3787,6 +3881,7 @@ async function viewIntegrations(c, tab) {
             <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-id-forcessl', !!idt.tls.forceSSL, 'Force SSL', 'settings.ingressDiscovery.template.tls.forceSSL')}</div>
             <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-id-robots', !!idt.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
             <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-id-pathblock" data-path="ingressDiscovery.template.pathBlock"', idt.pathBlock, 'settings.ingressDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
+            <div class="field-group" id="set-id-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(idt.trustedProxies, 'settings.ingressDiscovery.template.trustedProxies')}</div>
           </div>
           <div>
             <div class="field-group"><label>Middlewares</label><div class="chip-input" id="set-id-mw" data-hint="settings.ingressDiscovery.template.middlewares"></div><div class="hint">Applied to every derived host, in order.</div></div>
@@ -3878,6 +3973,7 @@ async function viewIntegrations(c, tab) {
               <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div><div class="ds">Redirect HTTP to HTTPS on derived hosts</div></div>${switchHtml('set-dkr-forcessl', !!ddt.tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
               <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div><div class="ds">Send X-Robots-Tag on derived hosts</div></div>${switchHtml('set-dkr-robots', !!ddt.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
               <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('id="set-dkr-pathblock" data-path="dockerDiscovery.template.pathBlock"', ddt.pathBlock, 'settings.dockerDiscovery.template.pathBlock')}<div class="hint">Stamped onto every derived host.</div></div>
+              <div class="field-group" id="set-dkr-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(ddt.trustedProxies, 'settings.dockerDiscovery.template.trustedProxies')}</div>
               <div class="field-group" style="margin-top:10px">
                 <label>Upstream timeouts (seconds)</label>
                 <div class="loc-row bare">
@@ -4026,6 +4122,7 @@ async function viewIntegrations(c, tab) {
   const idAlCtl = makeChipInput($('#set-id-al'), arr(idt.accessLists), 'add access list...');
   wireAlMode($('#set-id-alm').parentNode);
   const idTagCtl = makeChipInput($('#set-id-tags'), arr(idt.tags), 'add tag...');
+  const idTpCtl = wireTpTemplate($('#set-id-tp'), idt.trustedProxies, 'Ingress discovery template');
   const idTemplateSuffixCtl = makeChipInput($('#set-id-suffixes-override'), arr(idt.allowedDomainSuffixes), 'add suffix...');
 
   // Same MERGE invariant as the tls object in the save handler: `timeouts` is
@@ -4101,6 +4198,7 @@ async function viewIntegrations(c, tab) {
           <div class="field-group"><label>Allowed domain suffixes override (optional)</label><div class="chip-input pf-suffixes" data-hint="settings.ingressDiscovery.template.allowedDomainSuffixes"></div><div class="hint">Narrows the global list for hosts using this profile. Must be a subset.</div></div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('pf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.ingressDiscovery.template.robotsNoIndex')}</div>
           <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.ingressDiscovery.template.pathBlock', 'pf-pathblock')}</div>
+          <div class="field-group pf-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(p.trustedProxies, 'settings.ingressDiscovery.template.trustedProxies')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default LAN direct</div></div>${switchHtml('pf-dns-lan-' + i, !!dns.lanDirect, 'Default LAN direct', 'settings.ingressDiscovery.template.defaultDNS.lanDirect')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Default public CNAME</div></div>${switchHtml('pf-dns-pub-' + i, !!dns.publicCname, 'Default public CNAME', 'settings.ingressDiscovery.template.defaultDNS.publicCname')}</div>
         </div>
@@ -4115,6 +4213,9 @@ async function viewIntegrations(c, tab) {
     div._al = makeChipInput(div.querySelector('.pf-al'), arr(p.accessLists), 'add access list...');
     wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.pf-tags'), arr(p.tags), 'add tag...');
+    // Read from the loaded profile, so a row nobody opens sends back exactly
+    // what it was loaded with; a new row starts unset.
+    div._tp = wireTpTemplate(div.querySelector('.pf-tp'), p.trustedProxies, 'Ingress discovery profile');
     div._suffixes = makeChipInput(div.querySelector('.pf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
   Object.keys(idProfiles).sort().forEach((n) => profileRow(n, idProfiles[n]));
@@ -4219,6 +4320,7 @@ async function viewIntegrations(c, tab) {
   const dkrAlCtl = makeChipInput($('#set-dkr-al'), arr(ddt.accessLists), 'add access list...');
   wireAlMode($('#set-dkr-alm').parentNode);
   const dkrTagCtl = makeChipInput($('#set-dkr-tags'), arr(ddt.tags), 'add tag...');
+  const dkrTpCtl = wireTpTemplate($('#set-dkr-tp'), ddt.trustedProxies, 'Docker discovery template');
   const dkrTemplateSuffixCtl = makeChipInput($('#set-dkr-suffixes-override'), arr(ddt.allowedDomainSuffixes), 'add suffix...');
 
   const dpfWrap = $('#set-dkr-profiles');
@@ -4245,6 +4347,7 @@ async function viewIntegrations(c, tab) {
           <div class="toggle-line"><div class="tl-text"><div class="nm">Force SSL</div></div>${switchHtml('dpf-forcessl-' + i, !!tls.forceSSL, 'Force SSL', 'settings.dockerDiscovery.template.tls.forceSSL')}</div>
           <div class="toggle-line"><div class="tl-text"><div class="nm">Discourage indexing</div></div>${switchHtml('dpf-robots-' + i, !!p.robotsNoIndex, 'Discourage indexing', 'settings.dockerDiscovery.template.robotsNoIndex')}</div>
           <div class="field-group" style="margin-top:10px"><label>Fleet path block list</label>${pathBlockSwitchHtml('aria-label="Fleet path block list"', p.pathBlock, 'settings.dockerDiscovery.template.pathBlock', 'dpf-pathblock')}</div>
+          <div class="field-group dpf-tp" style="margin-top:10px"><label>Trusted proxies</label>${tpTemplateHtml(p.trustedProxies, 'settings.dockerDiscovery.template.trustedProxies')}</div>
           <div class="field-group" style="margin-top:10px">
             <label>Upstream timeouts (seconds)</label>
             <div class="loc-row bare">
@@ -4270,6 +4373,7 @@ async function viewIntegrations(c, tab) {
     div._al = makeChipInput(div.querySelector('.dpf-al'), arr(p.accessLists), 'add access list...');
     wireAlMode(div);
     div._tags = makeChipInput(div.querySelector('.dpf-tags'), arr(p.tags), 'add tag...');
+    div._tp = wireTpTemplate(div.querySelector('.dpf-tp'), p.trustedProxies, 'Docker discovery profile');
     div._suffixes = makeChipInput(div.querySelector('.dpf-suffixes'), arr(p.allowedDomainSuffixes), 'add suffix...');
   }
   Object.keys(ddProfiles).sort().forEach((n) => dockerProfileRow(n, ddProfiles[n]));
@@ -4606,6 +4710,12 @@ async function viewIntegrations(c, tab) {
     if (isOn('set-cf-proxied')) dnsSync.cloudflare.proxied = true;
     body.dnsSync = dnsSync;
 
+    // trustedProxies keeps its three states on all four discovery blocks:
+    // undefined (unset) is dropped by JSON.stringify, so the key is omitted,
+    // and an explicit [] (trust nobody) is sent as [].
+    const idTp = idTpCtl.get();
+    if (idTp === null) return;
+
     // annotationPrefix and annotationPrefixMigrate belong to Settings ->
     // Advanced, so they are carried forward from the loaded block rather than
     // rebuilt here; everything else on the ingressDiscovery block is this card's.
@@ -4655,6 +4765,7 @@ async function viewIntegrations(c, tab) {
         // reconcile pushes that onto every derived host.
         stripResponseHeaders: arr(idt.stripResponseHeaders).length ? idt.stripResponseHeaders : undefined,
         pathBlock: pathBlockSwitchValue($('#set-id-pathblock'), idt.pathBlock),
+        trustedProxies: idTp,
         securityHeaders: Object.keys(idt.securityHeaders || {}).length ? idt.securityHeaders : undefined,
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
@@ -4672,11 +4783,17 @@ async function viewIntegrations(c, tab) {
     // the profile. Here it becomes a normal key the server rejects by name.
     const profiles = Object.create(null);
     let pfDup = '';
+    let pfTpBad = false;
     $$('#set-id-profiles .id-profile').forEach((row) => {
+      if (pfTpBad) return;
       const pname = row.querySelector('.pf-name').value.trim();
       if (!pname) return; // an untouched blank row is not a profile
       if (pname in profiles) pfDup = pname;
       const uid = row.dataset.uid;
+      // Read off the row's own control, which was loaded from row._orig, so a
+      // renamed row keeps its value and a new row (loaded from {}) is unset.
+      const tp = row._tp.get();
+      if (tp === null) { pfTpBad = true; return; }
       const group = row.querySelector('.pf-up-group').value.trim();
       const prof = {
         upstream: group ? undefined
@@ -4700,6 +4817,7 @@ async function viewIntegrations(c, tab) {
         // Carried forward from the loaded profile, like the template's above.
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         pathBlock: pathBlockSwitchValue(row.querySelector('.pf-pathblock'), (row._orig || {}).pathBlock),
+        trustedProxies: tp,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -4710,6 +4828,7 @@ async function viewIntegrations(c, tab) {
       }
       profiles[pname] = prof;
     });
+    if (pfTpBad) return;
     if (pfDup) {
       showInvalid('Duplicate profile', `Two discovery profiles are both called "${pfDup}". Profile names must be unique - an Ingress selects one by name.`);
       return;
@@ -4759,6 +4878,8 @@ async function viewIntegrations(c, tab) {
     if ($('#set-dkr-pubhost').value.trim() && !isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Published host applies only with Use published ports on. Turn it on, or clear Published host.', $('#set-dkr-pubhost')); return; }
     if ($('#set-dkr-network').value.trim() && isOn('set-dkr-pubports')) { showInvalid('Docker discovery', 'Network and Use published ports cannot both be set. Clear Network, or turn Use published ports off.', $('#set-dkr-network')); return; }
     if (dkrOn && !$('#set-dkr-cert').value.trim()) { showInvalid('Docker discovery', 'Set the template Certificate. It is required while Docker discovery is on.', $('#set-dkr-cert')); return; }
+    const dkrTp = dkrTpCtl.get();
+    if (dkrTp === null) return;
     const dockerDiscovery = {
       socket: dkrSocket || undefined,
       host: dkrHost || undefined,
@@ -4783,6 +4904,7 @@ async function viewIntegrations(c, tab) {
         tags: dkrTagCtl.get(),
         stripResponseHeaders: arr(ddt.stripResponseHeaders).length ? ddt.stripResponseHeaders : undefined,
         pathBlock: pathBlockSwitchValue($('#set-dkr-pathblock'), ddt.pathBlock),
+        trustedProxies: dkrTp,
         securityHeaders: Object.keys(ddt.securityHeaders || {}).length ? ddt.securityHeaders : undefined,
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
@@ -4798,11 +4920,15 @@ async function viewIntegrations(c, tab) {
     }
     const dkrProfiles = Object.create(null);
     let dpfDup = '';
+    let dpfTpBad = false;
     $$('#set-dkr-profiles .dkr-profile').forEach((row) => {
+      if (dpfTpBad) return;
       const pname = row.querySelector('.dpf-name').value.trim();
       if (!pname) return;
       if (pname in dkrProfiles) dpfDup = pname;
       const uid = row.dataset.uid;
+      const tp = row._tp.get();
+      if (tp === null) { dpfTpBad = true; return; }
       const prof = {
         tls: Object.assign({}, (row._orig || {}).tls, {
           certificateRef: row.querySelector('.dpf-cert').value.trim(),
@@ -4817,6 +4943,7 @@ async function viewIntegrations(c, tab) {
         tags: row._tags.get(),
         stripResponseHeaders: arr((row._orig || {}).stripResponseHeaders).length ? (row._orig || {}).stripResponseHeaders : undefined,
         pathBlock: pathBlockSwitchValue(row.querySelector('.dpf-pathblock'), (row._orig || {}).pathBlock),
+        trustedProxies: tp,
         securityHeaders: Object.keys((row._orig || {}).securityHeaders || {}).length ? (row._orig || {}).securityHeaders : undefined,
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
@@ -4827,6 +4954,7 @@ async function viewIntegrations(c, tab) {
       }
       dkrProfiles[pname] = prof;
     });
+    if (dpfTpBad) return;
     if (dpfDup) {
       showInvalid('Duplicate profile', `Two Docker discovery profiles are both called "${dpfDup}". Profile names must be unique.`);
       return;
@@ -4916,8 +5044,9 @@ async function viewOverview(c) {
           href, 'Open'));
       } else if (ct.state === 'expiring') {
         const days = ct.daysRemaining;
+        const renew = certRenewInfo(ct);
         warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${plural(days, 'day', 'days')}`,
-          [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : ''].filter(Boolean).join(' &middot; '),
+          [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : '', renew ? esc(renew.short) : ''].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       }
     });
@@ -5072,8 +5201,8 @@ function managedBy(h) {
 // the certificates table, API tokens) uses this, so it means one thing.
 const DISABLED_CHIP = '<span class="chip flat muted"><span class="dot muted"></span>Disabled</span>';
 const MANAGED_CHIPS = {
-  'ingress-discovery': { text: 'k8s-managed', title: 'Derived from an annotated Kubernetes Ingress. Edits other than disable and maintenance are reverted on the next reconcile.' },
-  'docker-discovery': { text: 'docker-managed', title: 'Derived from a labelled Docker container. Edits other than disable and maintenance are reverted on the next reconcile.' },
+  'ingress-discovery': { text: 'k8s-managed', title: 'Derived from an annotated Kubernetes Ingress. The next reconcile reverts edits other than disable, maintenance, tags added by hand, and trusted proxies set by hand while the discovery template leaves them unset; a trusted-proxy value the template stamped follows the template.' },
+  'docker-discovery': { text: 'docker-managed', title: 'Derived from a labelled Docker container. The next reconcile reverts edits other than disable, maintenance, tags added by hand, and trusted proxies set by hand while the discovery template leaves them unset; a trusted-proxy value the template stamped follows the template.' },
 };
 
 async function listHosts(c) {
@@ -5366,27 +5495,19 @@ async function listHosts(c) {
   async function runBulk(action) {
     if (action === 'clear') { selected.clear(); render(); return; }
     const names = Array.from(selected);
-    let targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
+    const targets = names.map((n) => hosts.find((h) => h.name === n)).filter(Boolean);
     if (!targets.length) return;
-    // Discovery rewrites a managed host's tags from its template on the next
-    // reconcile, so a tag change there would be reverted: those are skipped,
-    // and the dialog and the result say so.
-    let skipped = [];
-    if (action === 'tag-add' || action === 'tag-remove') {
-      skipped = targets.filter((h) => managedBy(h));
-      targets = targets.filter((h) => !managedBy(h));
-      if (!targets.length) {
-        toast('No hosts to change', `The selected host${skipped.length === 1 ? ' is' : 's are'} discovery-managed: tags come from the discovery template.`, 'err');
-        return;
-      }
-    }
+    // Tags apply to discovery-managed hosts too: a reconcile keeps a host's
+    // hand-added tags after the template's. Only removing a tag the template
+    // stamps does not stick, which the remove dialog says.
+    const managedTargets = targets.filter((h) => managedBy(h));
     const one = targets.length === 1;
     const many = `<b>${targets.length}</b> proxy host${one ? '' : 's'}`;
     // Every confirm names its targets, so a selection is never acted on blind.
     const shownNames = targets.slice(0, 12).map((h) => `<li class="mono">${esc(arr(h.domains)[0] || h.name)}</li>`).join('');
     const listHtml = `<ul class="bulk-targets">${shownNames}${targets.length > 12 ? `<li class="muted">and ${targets.length - 12} more</li>` : ''}</ul>`;
-    const skipHtml = skipped.length
-      ? `<p class="muted">${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped (${skipped.map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}): tags come from the discovery template.</p>`
+    const managedHtml = (action === 'tag-remove' && managedTargets.length)
+      ? `<p class="muted">${managedTargets.length === targets.length ? (one ? 'This host is' : 'These hosts are') : plural(managedTargets.length, 'of these hosts is', 'of these hosts are')} discovery-managed (${managedTargets.slice(0, 12).map((h) => esc(arr(h.domains)[0] || h.name)).join(', ')}${managedTargets.length > 12 ? ', ...' : ''}). A tag that comes from the discovery template or profile is stamped again at the next reconcile; a tag added by hand stays removed.</p>`
       : '';
     let mutate, title, confirmLabel, body, tag = '';
 
@@ -5410,7 +5531,7 @@ async function listHosts(c) {
       const add = action === 'tag-add';
       const answered = await confirmModal({
         title: add ? 'Add a tag to the selected hosts?' : 'Remove a tag from the selected hosts?',
-        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>${listHtml}${skipHtml}`,
+        body: `<p>Applied to ${many}. Tags are free-form labels used for grouping and filtering; they change nothing about how a host is served.</p>${listHtml}${managedHtml}`,
         confirmLabel: add ? 'Add tag' : 'Remove tag',
         danger: false,
         prompt: { label: add ? 'Tag to add' : 'Tag to remove', placeholder: 'e.g. internal' },
@@ -5453,8 +5574,7 @@ async function listHosts(c) {
         return;
       }
     }
-    prog.done('Done', `${plural(done, 'host', 'hosts')} updated and committed.`
-      + (skipped.length ? ` ${plural(skipped.length, 'discovery-managed host', 'discovery-managed hosts')} skipped.` : ''), 'ok');
+    prog.done('Done', `${plural(done, 'host', 'hosts')} updated and committed.`, 'ok');
     refreshHeadSha();
     if (c.isConnected) await route();
   }
@@ -6686,6 +6806,17 @@ function certChallenge(ct) {
   return a.dnsProvider ? 'dns-01' : 'http-01';
 }
 
+// acme.profile and acme.caBundle bounds, as model.ACMESpec checks them.
+const ACME_PROFILE_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ACME_CA_BUNDLE_MAX_BYTES = 65536;
+// The bundle to send: the stored text when the textarea still shows it (a
+// textarea turns CRLF into LF, which would otherwise rewrite an untouched
+// bundle on every save), the typed text otherwise; blank means none.
+function caBundleValue(typed, stored) {
+  if (stored && typed === stored.replace(/\r\n?/g, '\n')) return stored;
+  return typed.trim() ? typed.trim() : '';
+}
+
 // ---------- CERTIFICATES LIST ----------
 // A table rather than a card grid, because the questions asked of this page are
 // comparative ("which of these expires first", "which one covers this domain")
@@ -6841,12 +6972,19 @@ function certStatusCardHtml(ct) {
   const days = ct.daysRemaining;
   const sans = arr(ct.sans).length ? arr(ct.sans) : arr(ct.domains);
   const row = (k, v, cls) => `<span class="k">${esc(k)}</span><span class="v ${cls || ''}">${v}</span>`;
+  const renew = acme ? certRenewInfo(ct) : null;
+  const renewHtml = !renew ? ''
+    : (renew.due
+      ? `<span class="warn-text">${esc(renew.label)}</span> <span class="mono faint">since ${esc(fmtTime(ct.renewAt))}</span>`
+      : `<span class="mono">${esc(fmtTime(ct.renewAt))}</span>`)
+      + (renew.why ? ` <span class="faint" title="${esc(CERT_RENEW_RULE)}">- ${esc(renew.why)}</span>` : '');
   return `<div class="card form-section" id="ct-status">
     <p class="section-label">Status</p>
     <div class="kv">
       ${row('State', certStateChip(ct))}
       ${row('Expiry', `<span class="mono">${esc(ct.notAfter ? fmtTime(ct.notAfter) : '-')}</span>`)}
       ${row('Days remaining', `<span class="mono${days != null && days < 0 ? ' err-text' : ''}">${days != null ? esc(days) : '-'}</span>`)}
+      ${renewHtml ? row('Renews', renewHtml) : ''}
       ${row('Issuer', `<span class="mono">${esc(ct.issuer || '-')}</span>`)}
       ${row('SANs', sans.length ? `<span class="mono">${domainListHtml(sans, sans.length)}</span>` : '<span class="mono">-</span>')}
       ${acme ? row('Last renewal attempt', `<span class="mono">${esc(ct.lastAttempt ? fmtTime(ct.lastAttempt) : 'Never')}</span>`) : ''}
@@ -6901,6 +7039,12 @@ async function certEditor(c, name) {
           <p class="section-label">ACME</p>
           <div class="field-group"><label>Account email</label><input class="field mono" id="ct-email" data-hint="certificate.acme.email" data-path="acme.email" value="${esc(acme.email || '')}" placeholder="you@example.com" /></div>
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" data-hint="certificate.acme.directoryURL" data-path="acme.directoryURL" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
+          <div class="field-group"><label>Issuance profile</label><input class="field mono" id="ct-profile" data-hint="certificate.acme.profile" data-path="acme.profile" value="${esc(acme.profile || '')}" placeholder="CA default" />
+            <div class="hint">A profile name the CA lists in its directory. Blank uses the CA's default.</div>
+          </div>
+          <div class="field-group"><label>CA bundle (private CA)</label><textarea class="field mono" id="ct-cabundle" data-hint="certificate.acme.caBundle" data-path="acme.caBundle" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE----- or \${FILE:/run/secrets/acme-ca.pem}"></textarea>
+            <div class="hint">Only for a CA whose directory is not trusted by the system roots. Paste PEM, or use a <span class="mono">\${FILE:...}</span> or <span class="mono">\${ENV:...}</span> placeholder. Blank trusts the system roots.</div>
+          </div>
           <div class="inline-fields">
             <div class="field-group"><label>Key type</label><input class="field mono" id="ct-keytype" data-hint="certificate.acme.keyType" data-path="acme.keyType" value="${esc(acme.keyType || '')}" placeholder="ecdsa" /></div>
             <div class="field-group"><label>Challenge</label>
@@ -6946,6 +7090,9 @@ async function certEditor(c, name) {
       </div>
     </div>`;
 
+  // Set as a property, not as markup between the tags: the HTML parser drops a
+  // leading newline there, and the save compares against the loaded text.
+  $('#ct-cabundle').value = acme.caBundle || '';
   const domainsCtl = makeChipInput($('#ct-domains'), arr(ct.domains), 'add domain...');
   const tagsCtl = wireIdentityCard('ct', ct);
   pathsFromHints($('#content'));
@@ -6980,6 +7127,19 @@ async function certEditor(c, name) {
       const a = { email: $('#ct-email').value.trim(), challenge: ch };
       const dir = $('#ct-dir').value.trim(); if (dir) a.directoryURL = dir;
       const kt = $('#ct-keytype').value.trim(); if (kt) a.keyType = kt;
+      // Both omitted when blank. The profile rule and the bundle's size cap
+      // mirror model.ACMESpec; the PEM itself is parsed by the API.
+      const prof = $('#ct-profile').value.trim();
+      if (prof) {
+        if (!ACME_PROFILE_RE.test(prof)) { showInvalid('Invalid profile', `acme.profile: must be 1 to 64 characters of letters, digits, "_" or "-", got "${prof}".`, $('#ct-profile')); return; }
+        a.profile = prof;
+      }
+      const cab = caBundleValue($('#ct-cabundle').value, acme.caBundle);
+      if (cab) {
+        const n = new TextEncoder().encode(cab).length;
+        if (n > ACME_CA_BUNDLE_MAX_BYTES) { showInvalid('CA bundle too large', `acme.caBundle: must be at most ${ACME_CA_BUNDLE_MAX_BYTES} bytes, got ${n}.`, $('#ct-cabundle')); return; }
+        a.caBundle = cab;
+      }
       if (ch === 'dns-01') {
         a.dnsProvider = $('#ct-dns').value;
         if (!a.dnsProvider) { showInvalid('DNS provider required', 'Select a DNS provider for dns-01.', $('#ct-dns')); return; }
@@ -7975,8 +8135,11 @@ async function parkedEditor(c, name) {
 
 // DNS-01 providers with a built-in solver (mirrors model.KnownDNSProviders).
 // The four token providers authenticate with a single config key, apiToken;
-// rfc2136 and acme-dns do not, so `fields` (when present) drives a typed form
+// rfc2136, acme-dns and webhook do not, so `fields` (when present) drives a typed form
 // instead of the free-form key/value rows and `required` is per provider.
+// `secret: true` marks exactly the keys model.DNSProviderPlainKey calls
+// secrets: those need a placeholder, and a literal one reads back as ***.
+// Every other key is a plain setting, stored and shown as written.
 const DNS_PROVIDERS = [
   { id: 'cloudflare', label: 'Cloudflare', hint: 'config.apiToken: an API token with Zone:DNS:Edit + Zone:Read on the zone.', required: ['apiToken'] },
   { id: 'digitalocean', label: 'DigitalOcean', hint: 'config.apiToken: a personal access token with write scope on domains.', required: ['apiToken'] },
@@ -7993,7 +8156,7 @@ const DNS_PROVIDERS = [
       { key: 'server', hint: 'dnsProvider.config.server', label: 'Nameserver', placeholder: '192.0.2.53', help: 'Host, <span class="mono">host:port</span>, or <span class="mono">[2001:db8::53]:53</span>. Port defaults to 53.' },
       { key: 'zone', hint: 'dnsProvider.config.zone', label: 'Zone', placeholder: 'example.com', help: 'The zone the UPDATE is addressed to, not the challenge name.' },
       { key: 'tsigKeyName', hint: 'dnsProvider.config.tsigKeyName', label: 'TSIG key name', placeholder: 'gpm-acme', help: 'Exactly the key name configured on the nameserver.' },
-      { key: 'tsigSecret', hint: 'dnsProvider.config.tsigSecret', label: 'TSIG secret', placeholder: '${FILE:/run/secrets/tsig_key}', help: 'Base64 secret from <span class="mono">tsig-keygen</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder so it is not committed.' },
+      { key: 'tsigSecret', hint: 'dnsProvider.config.tsigSecret', label: 'TSIG secret', secret: true, placeholder: '${FILE:/run/secrets/tsig_key}', help: 'Base64 secret from <span class="mono">tsig-keygen</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder so it is not committed.' },
       { key: 'tsigAlgorithm', hint: 'dnsProvider.config.tsigAlgorithm', label: 'TSIG algorithm', select: { group: 'tsigAlgorithm', options: ['hmac-sha1', 'hmac-sha224', 'hmac-sha256', 'hmac-sha384', 'hmac-sha512'], dflt: 'hmac-sha256' }, help: 'Must match the key on the nameserver. <span class="mono">hmac-md5</span> is not offered and is rejected by the API.' },
       { key: 'ttl', hint: 'dnsProvider.config.ttl', label: 'Record TTL (seconds)', placeholder: '60', help: 'TTL of the challenge TXT record, 1 to 86400.' },
       { key: 'transport', hint: 'dnsProvider.config.transport', label: 'Transport', select: { group: 'dnsTransport', options: ['tcp', 'udp'], dflt: 'tcp' }, help: 'UDP is retried over TCP when the reply is truncated.' },
@@ -8008,13 +8171,36 @@ const DNS_PROVIDERS = [
     missing: 'acme-dns needs baseURL, username, password and subdomain.',
     note: 'Add one permanent CNAME per certificate domain in your real zone: <span class="mono">_acme-challenge.example.com. CNAME &lt;subdomain&gt;.acme-dns.example.com.</span> A wildcard validates at the same name, so it needs no second record. gpm warns in the log if the delegation is missing but still attempts issuance.',
     fields: [
-      { key: 'baseURL', hint: 'dnsProvider.config.baseURL', label: 'acme-dns base URL', placeholder: 'https://acme-dns.example.com', help: 'API root of your acme-dns server. Must be http or https.' },
-      { key: 'username', hint: 'dnsProvider.config.username', label: 'Username', placeholder: 'c0f8ba55-0000-4000-8000-000000000001', help: 'The <span class="mono">username</span> from the acme-dns <span class="mono">/register</span> response.' },
-      { key: 'password', hint: 'dnsProvider.config.password', label: 'Password', placeholder: '${FILE:/run/secrets/acme_dns_password}', help: 'The <span class="mono">password</span> from <span class="mono">/register</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'baseURL', hint: 'dnsProvider.config.baseURL', label: 'acme-dns base URL', placeholder: 'https://acme-dns.example.com', help: 'API root of your acme-dns server: an http or https URL, or a <span class="mono">${ENV:...}</span> / <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'username', hint: 'dnsProvider.config.username', label: 'Username', secret: true, placeholder: '${ENV:ACME_DNS_USERNAME}', help: 'The <span class="mono">username</span> from the acme-dns <span class="mono">/register</span> response. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'password', hint: 'dnsProvider.config.password', label: 'Password', secret: true, placeholder: '${FILE:/run/secrets/acme_dns_password}', help: 'The <span class="mono">password</span> from <span class="mono">/register</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
       { key: 'subdomain', hint: 'dnsProvider.config.subdomain', label: 'Subdomain', placeholder: 'd420c923-0000-4000-8000-000000000002', help: 'The <span class="mono">subdomain</span> from <span class="mono">/register</span>; this is what the CNAME points at.' },
+      { key: 'allowInsecureLocal', hint: 'dnsProvider.config.allowInsecureLocal', label: 'Allow a loopback base URL', toggle: true, help: 'For an acme-dns running beside gpm. Link-local addresses stay refused.' },
+    ],
+  },
+  {
+    id: 'webhook',
+    label: 'Webhook (your own endpoint)',
+    hint: 'POSTs each challenge record to an HTTP endpoint you run, which writes it into whatever DNS you have.',
+    required: ['url', 'token'],
+    missing: 'webhook needs url and token.',
+    note: 'For each TXT record gpm sends <span class="mono">POST &lt;url&gt;</span> with <span class="mono">Authorization: Bearer &lt;token&gt;</span>, <span class="mono">Content-Type: application/json</span> and the body <span class="mono">{"action":"present","fqdn":"_acme-challenge.example.com.","value":"&lt;TXT value&gt;"}</span>. <span class="mono">action</span> is <span class="mono">present</span> to create the record and <span class="mono">cleanup</span> to remove it; <span class="mono">fqdn</span> always ends in a dot. Any 2xx answer is success and redirects are not followed. An order for an apex and its wildcard sends two values for the same <span class="mono">fqdn</span>: add each value rather than replacing the record, and on cleanup remove only the value given.',
+    fields: [
+      { key: 'url', hint: 'dnsProvider.config.url', label: 'Endpoint URL', placeholder: 'https://dns-hook.example.com/acme', help: 'http or https. Stored and shown as written, so a URL that itself carries a credential (in its path or query string) should be a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder. Plain http to anything but loopback sends the token unencrypted and is logged as a warning.' },
+      { key: 'token', hint: 'dnsProvider.config.token', label: 'Bearer token', secret: true, placeholder: '${FILE:/run/secrets/dns_hook_token}', help: 'Sent as <span class="mono">Authorization: Bearer &lt;token&gt;</span>. Use a <span class="mono">${ENV:...}</span> or <span class="mono">${FILE:...}</span> placeholder.' },
+      { key: 'allowInsecureLocal', hint: 'dnsProvider.config.webhook.allowInsecureLocal', label: 'Allow a loopback URL', toggle: true, help: 'For an endpoint running beside gpm. Link-local addresses stay refused.' },
     ],
   },
 ];
+// A typed-form switch (allowInsecureLocal) over a string-valued plain key: on
+// for the values model.IsTruthyConfig reads as on, and for a placeholder. The
+// save sends the stored value back unchanged while the switch shows the state
+// that value means.
+const SECRET_REF_RE = /^(\$\{(ENV|FILE):[^}]+\}\s*)+$/;
+function dnsToggleOn(v) {
+  const s = String(v == null ? '' : v).trim();
+  return SECRET_REF_RE.test(s) || /^(true|yes|1|on)$/i.test(s);
+}
 function dnsProvider(id) { return DNS_PROVIDERS.find((p) => p.id === id) || DNS_PROVIDERS[0]; }
 
 // ---------- DNS PROVIDER EDITOR ----------
@@ -8040,34 +8226,47 @@ async function dnsEditor(c, name) {
         <button class="btn ghost sm" id="ed-addcfg" type="button" style="margin-top:6px">${ICON.plus}Add credential</button>
       </div>
       <div class="hint" id="ed-provider-note" style="margin-top:8px"></div>
-      <div class="hint" style="margin-top:8px">Use a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so no secret is committed. A masked secret reads <span class="mono">***</span>.</div>
+      <div class="hint" style="margin-top:8px">Secrets (API tokens, passwords, the TSIG secret, the webhook token) take a placeholder like <span class="mono">\${ENV:CF_API_TOKEN}</span> or <span class="mono">\${FILE:/run/secrets/token}</span> so none is committed; a masked secret reads <span class="mono">***</span>. Settings such as a nameserver, zone or URL may be written as is and are shown as written.</div>
     </div>
   </div>` + saveBar('dns', isNew, meta.addLabel);
 
-  const cfgCtl = makeKVRows($('#ed-config'), o.config || {}, 'key (e.g. apiToken)', '${ENV:DNS_API_TOKEN}', true);
+  // The stored config, and the type it belongs to. A save for that same type
+  // sends back what the form does not render; a save after the type was changed
+  // sends only the new type's keys.
+  const storedCfg = o.config || {};
+  const kvKey = 'key (e.g. apiToken)';
+  const kvVal = '${ENV:DNS_API_TOKEN}';
+  let cfgCtl = makeKVRows($('#ed-config'), storedCfg, kvKey, kvVal, true);
   $('#ed-addcfg').addEventListener('click', () => cfgCtl.addRow('', ''));
 
-  // Typed form for the providers whose credentials are not one token. Rendered
-  // from the loaded config so a switch away and back does not lose what was
-  // typed; the KV rows stay the control for the four token providers.
-  let typedValues = Object.assign({}, o.config || {});
+  // Typed form for the providers whose credentials are not one token, rendered
+  // from typedValues; the KV rows stay the control for the four token providers.
+  let typedValues = Object.assign({}, storedCfg);
   function renderTyped(p) {
     const wrap = $('#ed-typed');
     if (!p.fields) { wrap.innerHTML = ''; return; }
     wrap.innerHTML = p.fields.map((f) => {
       const v = typedValues[f.key] == null ? '' : String(typedValues[f.key]);
+      if (f.toggle) {
+        const ref = SECRET_REF_RE.test(v.trim());
+        return `<div class="field-group"><div class="toggle-line"><div class="tl-text"><div class="nm">${esc(f.label)}</div><div class="ds">${f.help}</div></div>${switchHtml('dnsf-' + f.key, dnsToggleOn(v), f.label, f.hint)}</div>
+          ${ref ? `<div class="hint">Set from <span class="mono">${esc(v.trim())}</span>, kept as written while the switch stays on.</div>` : ''}</div>`;
+      }
       if (f.select) {
         return `<div class="field-group"><label>${esc(f.label)}</label>
-          <select class="field mono dnsf" data-key="${esc(f.key)}" data-hint="${esc(f.hint)}">${enumOptions(f.select.group, f.select.options, v || f.select.dflt)}</select>
+          <select class="field mono dnsf" data-key="${esc(f.key)}" data-dflt="${esc(f.select.dflt)}" data-hint="${esc(f.hint)}">${enumOptions(f.select.group, v && f.select.options.indexOf(v) === -1 ? f.select.options.concat(v) : f.select.options, v || f.select.dflt)}</select>
           <div class="hint">${f.help}</div></div>`;
       }
       return `<div class="field-group"><label>${esc(f.label)}</label>
-        <input class="field mono dnsf" data-key="${esc(f.key)}" data-hint="${esc(f.hint)}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" />
+        <input class="field mono dnsf" data-key="${esc(f.key)}"${f.secret ? ' data-secret="1" autocomplete="off"' : ''} data-hint="${esc(f.hint)}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" />
         <div class="hint">${f.help}</div></div>`;
     }).join('');
     wrap.querySelectorAll('.dnsf').forEach((el) => {
       el.addEventListener('input', () => { typedValues[el.dataset.key] = el.value; });
       el.addEventListener('change', () => { typedValues[el.dataset.key] = el.value; });
+    });
+    p.fields.filter((f) => f.toggle).forEach((f) => {
+      $('#dnsf-' + f.key).addEventListener('switchchange', () => { typedValues[f.key] = isOn('dnsf-' + f.key) ? 'true' : ''; });
     });
   }
   function syncProvider(reseed) {
@@ -8076,12 +8275,15 @@ async function dnsEditor(c, name) {
     $('#ed-provider-note').innerHTML = p.note || '';
     $('#ed-provider-note').hidden = !p.note;
     $('#ed-kv').hidden = !!p.fields;
-    // Reseeding on a provider CHANGE stops the operator staring at an apiToken
-    // row that no longer applies; the initial render keeps whatever was loaded.
-    if (reseed && p.fields) {
-      const keep = {};
-      p.fields.forEach((f) => { if (typedValues[f.key] != null) keep[f.key] = typedValues[f.key]; });
-      typedValues = keep;
+    // A provider CHANGE starts the new type from its own keys only: none of
+    // the previous type's values (a webhook token is not a Cloudflare one),
+    // or the stored config again when the change goes back to the stored type.
+    // The initial render keeps whatever was loaded.
+    if (reseed) {
+      const back = p.id === current;
+      typedValues = back ? Object.assign({}, storedCfg) : {};
+      $('#ed-config').innerHTML = '';
+      cfgCtl = makeKVRows($('#ed-config'), back ? storedCfg : (p.fields ? {} : { apiToken: '' }), kvKey, kvVal, true);
     }
     renderTyped(p);
   }
@@ -8099,10 +8301,36 @@ async function dnsEditor(c, name) {
         const v = el.value.trim();
         // Optional keys are OMITTED rather than sent empty: an empty value is
         // noise in the committed YAML and the API only validates non-empty ones.
+        // A select showing its default for a key the stored object did not
+        // have stays omitted too, so an untouched save adds nothing.
+        if (el.dataset.dflt && v === el.dataset.dflt && !String((o.config || {})[el.dataset.key] || '').trim()) return;
         if (v) cfg[el.dataset.key] = v;
       });
-      if (Object.values(cfg).some((v) => v === '***')) {
-        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $$('#ed-typed .dnsf').find((el) => el.value.trim() === '***')); return null;
+      // A switch left in the state its stored value means sends that value
+      // back as written ("yes", "false", a placeholder); a switch the operator
+      // changed sends "true" when on and nothing when off.
+      p.fields.filter((f) => f.toggle).forEach((f) => {
+        const on = isOn('dnsf-' + f.key);
+        const was = provId === current ? storedCfg[f.key] : undefined;
+        if (was != null && String(was).trim() !== '' && on === dnsToggleOn(was)) cfg[f.key] = was;
+        else if (on) cfg[f.key] = 'true';
+      });
+      // Keys the stored config holds and this form does not render (written
+      // in the file by hand, or by a newer build) go back unchanged, for the
+      // stored type only. One the API masked cannot be sent back.
+      if (provId === current) {
+        const rendered = p.fields.map((f) => f.key);
+        const extra = Object.keys(storedCfg).filter((k) => rendered.indexOf(k) === -1);
+        const maskedExtra = extra.find((k) => storedCfg[k] === '***');
+        if (maskedExtra) {
+          showInvalid('Secret masked', `config.${maskedExtra} is a literal secret this form does not show (it reads ***). Replace it in the file with a \${ENV:...} or \${FILE:...} placeholder, then save here.`, $('#ed-typed')); return null;
+        }
+        extra.forEach((k) => { cfg[k] = storedCfg[k]; });
+      }
+      // Only a secret key can come back masked; a plain one is shown as written.
+      const masked = $$('#ed-typed .dnsf[data-secret]').find((el) => el.value.trim() === '***');
+      if (masked) {
+        showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a ${ENV:...} or ${FILE:...} placeholder before saving.', masked); return null;
       }
       if (cfg.ttl != null) {
         const n = Number(cfg.ttl);
@@ -8111,8 +8339,11 @@ async function dnsEditor(c, name) {
       if (cfg.timeout && !GO_DURATION_RE.test(cfg.timeout)) {
         showInvalid('Invalid timeout', 'config.timeout must be a positive Go duration such as 30s.', $('#ed-typed .dnsf[data-key="timeout"]')); return null;
       }
-      if (cfg.baseURL && !/^https?:\/\//.test(cfg.baseURL)) {
-        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL.', $('#ed-typed .dnsf[data-key="baseURL"]')); return null;
+      if (cfg.baseURL && !SECRET_REF_RE.test(cfg.baseURL) && !/^https?:\/\//.test(cfg.baseURL)) {
+        showInvalid('Invalid base URL', 'config.baseURL must be an http or https URL, or a ${ENV:...} or ${FILE:...} placeholder.', $('#ed-typed .dnsf[data-key="baseURL"]')); return null;
+      }
+      if (cfg.url && !SECRET_REF_RE.test(cfg.url) && !/^https?:\/\//.test(cfg.url)) {
+        showInvalid('Invalid URL', 'config.url must be an http or https URL, or a ${ENV:...} or ${FILE:...} placeholder.', $('#ed-typed .dnsf[data-key="url"]')); return null;
       }
     } else {
       if (cfgCtl.masked()) { showInvalid('Secret masked', 'A credential is masked as ***. Replace it with a real value or a ${ENV:...} placeholder before saving.', $('#ed-config')); return null; }

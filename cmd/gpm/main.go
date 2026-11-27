@@ -1035,6 +1035,28 @@ func sessionGC(ctx context.Context, st *session.Store) {
 	}
 }
 
+// certDigestLists sorts the ACME certificates into the two digest lists at
+// time now: expired, and expiring (expiry before cutoff). A certificate whose
+// renewal is not due yet is healthy however close its expiry is, since a
+// short-lived one always expires inside the threshold, so it is listed as
+// expiring only once its renewal time has passed (or is unknown).
+func certDigestLists(obs []acme.CertObservation, now, cutoff time.Time) (expiring, expired []string) {
+	for _, o := range obs {
+		if o.NotAfter.IsZero() {
+			continue
+		}
+		switch {
+		case o.NotAfter.Before(now):
+			expired = append(expired, fmt.Sprintf("%s (expired %s)", o.Name, o.NotAfter.Format("2006-01-02")))
+		case o.NotAfter.Before(cutoff) && (o.RenewAt.IsZero() || !o.RenewAt.After(now)):
+			expiring = append(expiring, fmt.Sprintf("%s (expires %s)", o.Name, o.NotAfter.Format("2006-01-02")))
+		}
+	}
+	sort.Strings(expiring)
+	sort.Strings(expired)
+	return expiring, expired
+}
+
 // certExpiryDigest runs an initial pass then once a day until ctx is done,
 // mirroring acme.Manager.Run's "initial pass, then interval" shape. Each pass
 // emits at most two notifications - a cert.expiring digest and a cert.expired
@@ -1052,20 +1074,7 @@ func certExpiryDigest(ctx context.Context, st *store.Store, acmeMgr *acme.Manage
 		cutoff := time.Now().Add(time.Duration(thresholdDays) * 24 * time.Hour)
 		now := time.Now()
 
-		var expiring, expired []string
-		for _, o := range acmeMgr.CertObservations() {
-			if o.NotAfter.IsZero() {
-				continue
-			}
-			switch {
-			case o.NotAfter.Before(now):
-				expired = append(expired, fmt.Sprintf("%s (expired %s)", o.Name, o.NotAfter.Format("2006-01-02")))
-			case o.NotAfter.Before(cutoff):
-				expiring = append(expiring, fmt.Sprintf("%s (expires %s)", o.Name, o.NotAfter.Format("2006-01-02")))
-			}
-		}
-		sort.Strings(expiring)
-		sort.Strings(expired)
+		expiring, expired := certDigestLists(acmeMgr.CertObservations(), now, cutoff)
 
 		if len(expiring) > 0 {
 			notifier.Emit(ctx, notify.Event{

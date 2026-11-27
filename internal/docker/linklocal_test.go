@@ -76,7 +76,7 @@ func TestPlanReconcileLinkLocalContainer(t *testing.T) {
 	ct := container("app", enabled(nil), withNetworks(map[string]string{"bridge": "169.254.10.20"}))
 
 	t.Run("new container is skipped", func(t *testing.T) {
-		p := planReconcile(model.Config{}, conf, []Container{ct}, nil)
+		p := planReconcile(model.Config{}, conf, []Container{ct}, nil, nil)
 		if len(p.Upserts) != 0 || p.Skipped != 1 {
 			t.Fatalf("plan %+v, want one skip and no write", p)
 		}
@@ -88,7 +88,7 @@ func TestPlanReconcileLinkLocalContainer(t *testing.T) {
 
 	t.Run("stored host is frozen, not deleted", func(t *testing.T) {
 		stored := managedHostFixture("dkr-app", func(h *model.ProxyHost) { h.Upstream.Host = "169.254.10.20" })
-		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stored}}, conf, []Container{ct}, nil)
+		p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stored}}, conf, []Container{ct}, nil, nil)
 		if len(p.Upserts) != 0 || len(p.Deletes) != 0 || p.Skipped != 1 {
 			t.Fatalf("plan %+v, want the stored host left as it is", p)
 		}

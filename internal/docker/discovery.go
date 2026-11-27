@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -154,6 +155,13 @@ type Discoverer struct {
 	clientMu  sync.Mutex
 	client    *Client
 	clientKey string
+
+	// stamped is the template tags the last applied reconcile stamped onto each
+	// managed host (discovery.StampedTags), so the next one can tell a tag the
+	// template dropped from one added by hand. In memory only: a restart, a
+	// new leader, or a pass that finds the block disabled starts without it,
+	// and then no stored tag is treated as stale. Guarded by single.
+	stamped discovery.StampedTags
 }
 
 // New returns a Discoverer. load is called on every reconcile so a settings
@@ -405,7 +413,8 @@ func (d *Discoverer) Plan(ctx context.Context) (Plan, error) {
 	d.mu.Lock()
 	unwritable := d.unwritable
 	d.mu.Unlock()
-	res := planReconcile(cfg, conf, containers, unwritable)
+	// A preview reads the tag memory but never advances it.
+	res := planReconcile(cfg, conf, containers, unwritable, d.stamped)
 	p.Discovered = res.Discovered
 	p.Managed = res.ManagedAfter
 	p.Created = res.Created
@@ -452,6 +461,9 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 	endpoint := endpointOf(conf)
 	d.setEnabled(conf.Enabled)
 	if !conf.Enabled {
+		// Disabling forgets the tag memory, so re-enabling behaves exactly like
+		// a restart: no stored tag is treated as stale on the first pass.
+		d.stamped = nil
 		d.mu.Lock()
 		d.status = Status{Enabled: false, LastRun: now, Hosts: []HostResult{}}
 		d.mu.Unlock()
@@ -479,7 +491,7 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 	d.mu.Lock()
 	unwritable := d.unwritable
 	d.mu.Unlock()
-	res := planReconcile(cfg, conf, containers, unwritable)
+	res := planReconcile(cfg, conf, containers, unwritable, d.stamped)
 
 	commit := ""
 	if len(res.Upserts) > 0 || len(res.Deletes) > 0 {
@@ -501,6 +513,18 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 				d.onChange(commit)
 			}
 		}
+	}
+
+	// The plan is on disk (or there was nothing to write), so what it stamped
+	// is what the next pass compares against. A failed apply returned above and
+	// keeps the previous memory, which still describes the hosts as stored.
+	// An empty commit with no error means the store wrote nothing, possibly
+	// having dropped upserts this plan made, so those hosts keep their previous
+	// memory; see discovery.StampedTags.Unwritten.
+	if commit == "" && len(res.Upserts) > 0 {
+		d.stamped = res.Stamped.Unwritten(d.stamped, res.Upserts)
+	} else {
+		d.stamped = res.Stamped
 	}
 
 	d.mu.Lock()
@@ -570,6 +594,8 @@ func ownership(conf model.DockerDiscoverySettings) discovery.Ownership {
 		HasStaleManaged:  conf.HasStaleManagedByLabel,
 		HasStaleDisabled: conf.HasStaleDisabledByLabel,
 		StripStale:       conf.StripStaleDiscoveryLabels,
+
+		TrustedProxiesByKey: conf.TrustedProxiesByLabel(),
 		DomainAllowed: func(tmpl model.IngressHostTemplate, d string) bool {
 			return conf.AllowedDomainFor(tmpl, d) && tmpl.AllowsHostname(d)
 		},
@@ -580,8 +606,10 @@ func ownership(conf model.DockerDiscoverySettings) discovery.Ownership {
 // the shared full-state planner (internal/discovery), which owns every
 // ownership, freeze and carry-forward rule. Everything above the handover is
 // Docker-specific; everything below it is shared with Ingress discovery, so the
-// rules with security consequences exist exactly once.
-func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, containers []Container, unwritable func(model.ProxyHost) bool) discovery.Result {
+// rules with security consequences exist exactly once. stamped is the tag
+// memory of the previous applied pass (nil for none); the result carries the
+// next one and stamped is never modified.
+func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, containers []Container, unwritable func(model.ProxyHost) bool, stamped discovery.StampedTags) discovery.Result {
 	items := make([]discovery.Item, 0, len(containers))
 	for _, ct := range containers {
 		if strings.TrimSpace(ct.Labels[conf.LabelEnabled()]) != "true" {
@@ -610,6 +638,7 @@ func planReconcile(cfg model.Config, conf model.DockerDiscoverySettings, contain
 	}
 	own := ownership(conf)
 	own.Unwritable = unwritable
+	own.Stamped = stamped
 	return discovery.Plan(cfg, own, items)
 }
 
@@ -752,6 +781,17 @@ func derive(ct Container, conf model.DockerDiscoverySettings) (string, model.Pro
 		}
 	}
 	host.Locations = model.CloneLocations(tmpl.Locations)
+	// Only a template that sets trustedProxies owns the field, and then an
+	// empty list is stamped too (trust nobody). nil leaves it to the stored
+	// host, which the planner carries forward. Cloned so no two hosts, nor the
+	// settings object, share one backing array.
+	if tmpl.TrustedProxies != nil {
+		tp := slices.Clone(*tmpl.TrustedProxies)
+		if tp == nil {
+			tp = []string{}
+		}
+		host.TrustedProxies = &tp
+	}
 	if pol := dnsPolicy(ct, tmpl, conf); pol != nil {
 		host.DNS = pol
 	}

@@ -7,6 +7,34 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- ACME profiles (#62): `acme.profile` names the CA's issuance profile for a
+  certificate's orders (1 to 64 characters of letters, digits, `_` or `-`). A CA
+  that does not offer it fails the order; changing it on an issued certificate
+  makes it due for renewal at the next pass.
+- Private CA trust (#62): `acme.caBundle` (inline PEM or a `${FILE:}` /
+  `${ENV:}` placeholder, at most 65536 bytes) makes every exchange with that
+  certificate's ACME directory trust only the bundle. Setting or changing it
+  through the API needs the `admin` scope. New how-to: issuing from a private
+  step-ca (#60).
+- ACME Renewal Information (#62): when the CA's directory advertises
+  `renewalInfo` (RFC 9773), gpm polls it on every pass (early wakes included) and renews at
+  the earlier of the CA's time and the lifetime rule. Polling only: orders do
+  not send `replaces`.
+- Webhook DNS-01 solver (#61): `provider: webhook` (`url`, `token`,
+  `allowInsecureLocal`) POSTs each challenge record to an operator endpoint.
+  New how-tos: DNS-01 through your own endpoint, and certificates for a domain
+  whose DNS host has no API (#60).
+- Certificate status `renewAt` and `renewReason` (`lifetime`, `ari`, or
+  `changed` when the domains or profile changed and the certificate is due now)
+  on `GET /api/certificates` and `GET /api/certificates/{name}` (#62).
+- Discovery templates and profiles accept `trustedProxies` (#53), with the proxy
+  host's three states. Unset leaves a managed host's own value alone. A value a
+  template stamped is marked with the label `<prefix>/trusted-proxies-by`
+  (`gpm.rake.pro/trusted-proxies-by` by default, value `ingress-discovery` or
+  `docker-discovery`): when the template or profile stops setting the key, a
+  labelled host loses the value and the label, and a host without the label
+  keeps its own.
+
 - Access log: every access-control refusal is recorded with its reason. The
   JSON log line of a refused request carries `"deny":"<reason>"` and each
   `GET /api/logs` entry carries `deny` (omitted when nothing refused the
@@ -467,7 +495,43 @@ vulnerability:
   `auth-request` gates that run after it still step aside there, so a sign-in
   flow never waits on a gate that runs after it (#172).
 
+- `POST /api/certificates/{name}/revert` needs the `admin` scope (it was
+  `certificates:write`), like the middleware revert: a revert restores a stored
+  certificate without the admin check on `acme.directoryURL`, `acme.eab` and
+  `acme.caBundle`. (#62)
+
 ### Changed
+
+- Renewal is lifetime-relative (#62): an ACME certificate renews when
+  `min(30 days, lifetime / 3)` remains, so a certificate living less than 90
+  days no longer renews on every pass. The `expiring` state of an ACME certificate, the
+  `expiring` count of `GET /api/health` and the `cert.expiring` digest follow
+  the same rule (a custom certificate keeps the fixed 30 days), and the digest lists an ACME certificate only when its renewal
+  is already due.
+- The renewal loop wakes early when the next certificate enters its window
+  (never sooner than one minute), besides the regular 12-hour pass (#62).
+- A failed renewal is retried after a backoff that grows with consecutive
+  failures (it used to wait for the next 12-hour pass): the base is a quarter of
+  the certificate's renewal window (5 minutes to 1 hour), and the n-th failure
+  waits `min(base * 2^(n-1), 12 hours)` from when the attempt started, so 1 h,
+  2 h, 4 h, 8 h, then every 12 h for a 90-day certificate. A success resets it,
+  and a restart starts again at the base. A pass that cannot load the config is
+  retried every 5 minutes (#62).
+- Every renewal attempt has a deadline of the DNS propagation timeout plus 10
+  minutes (13 minutes by default): an order that hangs fails with `the attempt
+  did not finish within 13m0s: ...`, the backoff applies and its TXT records
+  are still cleaned up (#62).
+- ACME renewal information is bounded: the `renewalInfo` URL must match the
+  directory's scheme, host and port, the suggested window is cut to the
+  certificate's validity, an ARI time cannot renew a certificate younger than
+  `min(72 hours, lifetime / 3)`, and each request times out after 10 seconds
+  (#62).
+- Discovery keeps tags added by hand to a managed host (#53): the template's
+  tags come first, then the host's other tags. A template tag removed from the
+  template is dropped while gpm keeps running; after a restart it stays until
+  removed by hand.
+- An unset template `trustedProxies` no longer wipes a managed host's own value
+  on reconcile (#53).
 
 - `gpm_denials_total{reason}` and the analytics denial reasons now count an
   access-list denial decided by a **country rule** under `geo` (before: under
@@ -539,6 +603,14 @@ vulnerability:
 - Restore logs each symbolic-link or hard-link archive entry it skips.
 
 ### Fixed
+
+- Non-secret DNS provider settings can be written as literals through the API
+  and the UI (#61): rfc2136 `server`, `zone`, `tsigKeyName`, `tsigAlgorithm`,
+  `transport`, `ttl`, `timeout`; acme-dns `baseURL`, `subdomain`,
+  `allowInsecureLocal`. They are stored and returned as written. rfc2136 and
+  acme-dns providers could not be saved from the UI before, and the webhook
+  provider's `url` and `allowInsecureLocal` follow the same rule. Credentials (`apiToken`, `tsigSecret`, `username`,
+  `password`, `token`) still need a placeholder.
 
 - A batch save (import) whose objects are all unchanged no longer makes a
   commit, and unchanged members of a mixed batch keep their file and

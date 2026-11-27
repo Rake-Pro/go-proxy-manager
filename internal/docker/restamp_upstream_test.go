@@ -20,7 +20,7 @@ func TestDomainConflictRestampTakesTheCurrentUpstream(t *testing.T) {
 	ct := container("app", enabled(map[string]string{"gpm.rake.pro/domains": "app.example.com,www.example.com"}),
 		withNetworks(map[string]string{"bridge": "192.0.2.20"}))
 
-	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale, operator}}, conf, []Container{ct}, nil)
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale, operator}}, conf, []Container{ct}, nil, nil)
 	if len(p.Upserts) != 1 {
 		t.Fatalf("plan %+v, want one restamp", p)
 	}
@@ -34,7 +34,7 @@ func TestDomainConflictRestampTakesTheCurrentUpstream(t *testing.T) {
 
 	// The next reconcile, with the conflict still in place, leaves the restamped
 	// host alone: nothing else would ever correct its upstream while it lasts.
-	p = planReconcile(model.Config{ProxyHosts: []model.ProxyHost{u, operator}}, conf, []Container{ct}, nil)
+	p = planReconcile(model.Config{ProxyHosts: []model.ProxyHost{u, operator}}, conf, []Container{ct}, nil, nil)
 	if len(p.Upserts) != 0 || p.Skipped != 1 {
 		t.Fatalf("second plan %+v, want a plain skip and no write", p)
 	}
@@ -43,7 +43,7 @@ func TestDomainConflictRestampTakesTheCurrentUpstream(t *testing.T) {
 	// chain still matches, and the stored upstream alone triggers the restamp.
 	moved := container("app", enabled(map[string]string{"gpm.rake.pro/domains": "app.example.com,www.example.com"}),
 		withNetworks(map[string]string{"bridge": "192.0.2.30"}))
-	p = planReconcile(model.Config{ProxyHosts: []model.ProxyHost{u, operator}}, conf, []Container{moved}, nil)
+	p = planReconcile(model.Config{ProxyHosts: []model.ProxyHost{u, operator}}, conf, []Container{moved}, nil, nil)
 	if len(p.Upserts) != 1 || p.Upserts[0].Upstream.Host != "192.0.2.30" || p.Upserts[0].Disabled {
 		t.Fatalf("third plan %+v, want one restamp onto 192.0.2.30", p)
 	}

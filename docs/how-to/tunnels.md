@@ -13,8 +13,8 @@ today.
   whichever tunnel/relay component you pick, not necessarily from the
   public internet.
 - A DNS-01-capable [DNSProvider](../reference/config/dns-provider.md)
-  (`cloudflare`, `digitalocean`, `hetzner`, `desec`, `rfc2136` or
-  `acme-dns`), since CGNAT means none of these patterns can expose a public
+  (`cloudflare`, `digitalocean`, `hetzner`, `desec`, `rfc2136`,
+  `acme-dns` or `webhook`), since CGNAT means none of these patterns can expose a public
   `:80` for ACME HTTP-01.
 - Read [Client IP and the three trust tiers](../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)
   before writing access lists behind any of these. Every pattern below puts a

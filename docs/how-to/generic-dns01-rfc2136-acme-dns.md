@@ -28,7 +28,7 @@ TSIG-signed dynamic update, or a delegated acme-dns zone.
    `_acme-challenge.example.com. CNAME <subdomain>.acme-dns.example.com.`
    A wildcard `*.example.com` validates at the same `_acme-challenge.example.com`, so it needs no second record.
 4. Verify the delegation resolves: `dig +short CNAME _acme-challenge.example.com`
-5. Store the password as a secret placeholder; the account is worthless without the CNAME, but it is still a credential.
+5. Store the `username` and `password` as secret placeholders (a literal is refused on API and UI writes); the account is worthless without the CNAME, but it is still a credential.
 
 For a local acme-dns, `baseURL` may name a loopback address only when
 `allowInsecureLocal` is set:
@@ -39,13 +39,13 @@ provider: acme-dns
 config:
   baseURL: http://127.0.0.1:8053
   allowInsecureLocal: "true"     # required for a loopback baseURL
-  username: c0f8ba55-0000-4000-8000-000000000001
+  username: ${FILE:/run/secrets/acme_dns_username}
   password: ${FILE:/run/secrets/acme_dns_password}
   subdomain: d420c923-0000-4000-8000-000000000002
 ```
 
-Link-local, unspecified and multicast literals are refused whatever this is set
-to, and a `3xx` from the acme-dns server is reported as a failed update rather
+`allowInsecureLocal` skips the address-literal checks at write time altogether, but a
+link-local destination is still refused when gpm connects, and a `3xx` from the acme-dns server is reported as a failed update rather
 than followed: the request carries `X-Api-User` and `X-Api-Key`.
 
 ## Verify

@@ -343,10 +343,76 @@ func TestCertificateLastErrorRedactedForViewer(t *testing.T) {
 	}
 }
 
+// TestCertificateRenewAt: an issued ACME certificate reports the manager's
+// next renewal time and the rule behind it; a certificate the manager has no
+// renewal time for (custom, pending, or no observation) carries neither field.
+func TestCertificateRenewAt(t *testing.T) {
+	certDir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	renewAt := now.Add(48 * time.Hour)
+
+	leafPEM := genLeafCert(t, "Test CA", now.Add(-time.Hour), now.Add(6*24*time.Hour), []string{"short.example.com"})
+	writeIssuedCert(t, certDir, "short", leafPEM, now.Add(6*24*time.Hour))
+	writeIssuedCert(t, certDir, "unobserved", leafPEM, now.Add(6*24*time.Hour))
+	writeCustomCertFiles(t, certDir, "custom.pem", "custom-key.pem", leafPEM)
+
+	h := newCertHealthHandler(t, certDir, api.Deps{
+		ACMEObservations: func() []acme.CertObservation {
+			return []acme.CertObservation{
+				{Name: "short", NotAfter: now.Add(6 * 24 * time.Hour), RenewAt: renewAt, RenewReason: acme.RenewReasonARI},
+				{Name: "pending"},
+			}
+		},
+	})
+	for name, body := range map[string]string{
+		"short":      `{"name":"short","type":"acme","domains":["short.example.com"],"acme":{"email":"a@example.com"}}`,
+		"unobserved": `{"name":"unobserved","type":"acme","domains":["unobserved.example.com"],"acme":{"email":"a@example.com"}}`,
+		"pending":    `{"name":"pending","type":"acme","domains":["pending.example.com"],"acme":{"email":"a@example.com"}}`,
+		"custom":     `{"name":"custom","type":"custom","domains":["custom.example.com"],"custom":{"certFile":"custom.pem","keyFile":"custom-key.pem"}}`,
+	} {
+		if w := do(t, h, "PUT", "/certificates/"+name, body); w.Code != http.StatusOK {
+			t.Fatalf("PUT %s: %d: %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(do(t, h, "GET", "/certificates/short", "").Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["renewAt"] != renewAt.Format(time.RFC3339) || got["renewReason"] != "ari" {
+		t.Errorf("short: renewAt = %v, renewReason = %v; want %s, ari", got["renewAt"], got["renewReason"], renewAt.Format(time.RFC3339))
+	}
+
+	for _, name := range []string{"unobserved", "pending", "custom"} {
+		var other map[string]any
+		if err := json.Unmarshal(do(t, h, "GET", "/certificates/"+name, "").Body.Bytes(), &other); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := other["renewAt"]; ok {
+			t.Errorf("%s: renewAt = %v, want absent", name, other["renewAt"])
+		}
+		if _, ok := other["renewReason"]; ok {
+			t.Errorf("%s: renewReason = %v, want absent", name, other["renewReason"])
+		}
+	}
+
+	// The list route decorates the same way.
+	var list []map[string]any
+	if err := json.Unmarshal(do(t, h, "GET", "/certificates", "").Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range list {
+		if c["name"] == "short" && c["renewReason"] != "ari" {
+			t.Errorf("GET /certificates: short renewReason = %v, want ari", c["renewReason"])
+		}
+	}
+}
+
 func TestHealth(t *testing.T) {
 	certDir := t.TempDir()
 	now := time.Now()
-	expiringPEM := genLeafCert(t, "Test CA", now.Add(-time.Hour), now.Add(5*24*time.Hour), []string{"e.example.com"})
+	// A 90-day certificate with 5 days left: inside its 30-day renewal window.
+	expiringPEM := genLeafCert(t, "Test CA", now.Add(-85*24*time.Hour), now.Add(5*24*time.Hour), []string{"e.example.com"})
 	writeIssuedCert(t, certDir, "expiring", expiringPEM, now.Add(5*24*time.Hour))
 
 	deps := api.Deps{

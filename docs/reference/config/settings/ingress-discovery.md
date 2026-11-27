@@ -30,9 +30,10 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host, in order. |
 | <span id="settings-ingress-discovery-template-access-lists"></span> `template.accessLists` | []string | Applied to every derived host. |
 | <span id="settings-ingress-discovery-template-access-lists-mode"></span> `template.accessListsMode` | string | Stamped onto every derived host as its [`accessListsMode`](../proxy-host.md#proxy-host-access-lists-mode): `all` (default when unset, every list must allow) or `any` (one allowing list is enough). Validated by the same rules as a hand-written host: `any` needs at least one entry in `template.accessLists` and refuses a list with `defaultAction: allow`, with `geo.countryDeny` or with `basicAuth` users. A named profile takes the same key. |
-| <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. |
+| <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. A managed host's tags are the template's tags first, then the host's other tags: a tag added by hand is kept. See [Tags on managed hosts](#tags-on-managed-hosts). |
+| <span id="settings-ingress-discovery-template-trusted-proxies"></span> `template.trustedProxies` | []string (nullable) | The same three states as [ProxyHost: `trustedProxies`](../proxy-host.md#proxy-host-trusted-proxies). **Absent (unset)**: discovery does not own the field; a managed host's own `trustedProxies` survives every reconcile, and a new host gets none and uses `settings.trustedProxies`. **`[]`**: stamped onto every derived host, trusting nobody. **A list of CIDRs or addresses**: stamped onto every derived host, replacing the fleet list. A host whose value was stamped carries an ownership label, and loses the value when the template or profile stops setting the key: see [trustedProxies on managed hosts](#trustedproxies-on-managed-hosts). Errors are checked as on a proxy host, for example `ingressDiscovery.template.trustedProxies: invalid cidr/ip "nope" (expected a CIDR like 10.0.0.0/8 or a bare address)` and `ingressDiscovery.template.trustedProxies[1]: empty entry` (`ingressDiscovery.profiles.<name>.` for a profile). |
 | <span id="settings-ingress-discovery-template-locations"></span> `template.locations` | []Location | Path-scoped overrides stamped verbatim onto every derived host, the same shape as [ProxyHost: `locations`](../proxy-host.md) (own upstream or group, own middleware/access-list chain, `stripPrefix`, inline `auth`/`rateLimit`), validated by the same rules at settings-write time. **Operator-side only**: they live on the template or a named profile, never on the `Ingress`, so the annotation model is unchanged (a tenant can pick a profile that carries them, never name a path or chain). Meant for a profile written for one service whose upstream is not the cluster ingress controller (a hostPort pod with a sidecar under a path, say); on the default template they would apply to every derived host. |
-| <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile. See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
+| <span id="settings-ingress-discovery-template-strip-response-headers"></span> `template.stripResponseHeaders` | []string | Applied to every derived host: response headers removed from what its upstream sends, exactly as on a hand-written host, and validated by the same rules. Without it a hand-set list on a managed host is reverted on the next reconcile (unlike `tags` and an unset `trustedProxies`, which are kept). See [StripResponseHeaders](security-headers.md#strip-response-headers-section). |
 | <span id="settings-ingress-discovery-template-path-block"></span> `template.pathBlock` | string | `inherit` (default) or `off`, stamped onto every derived host exactly as [ProxyHost: `pathBlock`](../proxy-host.md#proxy-host-path-block): `off` keeps the fleet [path block list](path-block.md) away from the derived hosts. Set it here or on a profile, never on the derived host, which is rebuilt at the next reconcile. |
 | <span id="settings-ingress-discovery-template-security-headers"></span> `template.securityHeaders` | map | Applied to every derived host: that host's `securityHeaders` override (name -> value/scope), merged over `settings.securityHeaders` per key at request time. Validated by the same rules as a hand-written host. Without it a hand-set override on a managed host is reverted on the next reconcile. See [Security headers](security-headers.md#settings-security-headers). |
 | <span id="settings-ingress-discovery-template-default-dns"></span> `template.defaultDNS` | DNSSyncPolicy | The `dns` policy a derived host gets when the corresponding annotation is absent. Each flag is overridden individually by its annotation. |
@@ -41,7 +42,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-profiles"></span> `profiles` | map[string]-> same shape as `template` (including its own `allowedDomainSuffixes`) | Additional named chains an Ingress may **select by name** (below). Each key is a profile name (`ValidateName` shape); `template` is reserved for the default block. |
 | <span id="settings-ingress-discovery-profile-rules"></span> `profileRules` | []IngressProfileRule | Optional, ordered. Operator-side profile selection, see [below](#operator-side-profile-selection-profilerules). |
 | <span id="settings-ingress-discovery-profile-selection"></span> `profileSelection` | `"annotation-or-rules"` \| `"rules-only"` | Empty means `"annotation-or-rules"` (today's behaviour: try `profileRules` first, then the annotation). `"rules-only"` never reads `gpm.rake.pro/profile` at all. |
-| <span id="settings-ingress-discovery-annotation-prefix"></span> `annotationPrefix` | string | Replaces `gpm.rake.pro` as the prefix for every annotation below and for the `managed-by`/`disabled-by` labels gpm writes on derived hosts. Empty (the default) keeps every existing deployment's keys unchanged. Must be a DNS-subdomain-shaped prefix: lowercase alphanumerics, `-` and `.`, no leading/trailing dot, no slash, at most 253 characters. See [Changing the annotation prefix](#changing-the-annotation-prefix) below. **Changing this does not relabel existing hosts by itself.** |
+| <span id="settings-ingress-discovery-annotation-prefix"></span> `annotationPrefix` | string | Replaces `gpm.rake.pro` as the prefix for every annotation below and for the `managed-by`/`disabled-by`/`trusted-proxies-by` labels gpm writes on derived hosts. Empty (the default) keeps every existing deployment's keys unchanged. Must be a DNS-subdomain-shaped prefix: lowercase alphanumerics, `-` and `.`, no leading/trailing dot, no slash, at most 253 characters. See [Changing the annotation prefix](#changing-the-annotation-prefix) below. **Changing this does not relabel existing hosts by itself.** |
 | <span id="settings-ingress-discovery-annotation-prefix-migrate"></span> `annotationPrefixMigrate` | bool | Opt-in escape hatch for the refusal `annotationPrefix` triggers when existing hosts are still labelled under the old prefix, see below. Does not relabel anything itself; only lifts the refusal so the *next reconcile* can. |
 
 A derived host's `displayName` is always `<namespace>/<name>` (where the Ingress
@@ -71,6 +72,29 @@ The same table applies to every entry in `profiles`, which is the identical type
 | `gpm.rake.pro/profile` | a `profiles` key | Select one of the operator-defined profiles. Absent (or empty) uses the default `template`. An **undefined** name skips the Ingress. |
 | `gpm.rake.pro/lan-direct` | `"true"` \| `"false"` | Sets `dns.lanDirect` on the derived host, overriding the resolved profile's `defaultDNS`. |
 | `gpm.rake.pro/public-cname` | `"true"` \| `"false"` | Sets `dns.publicCname` on the derived host. |
+
+## Tags on managed hosts
+
+- **Order.** A managed host's tags are the template's (or resolved profile's) tags, followed by the host's other tags in stored order. Hand-added tags are appended without repeating a tag already present; duplicates inside the template's own list are not removed.
+- **Hand-added tags are kept.** A tag added to a managed host by hand stays across reconciles.
+- **A template tag removed by hand does not stick.** The next reconcile stamps it again.
+- **A stale template tag is dropped** when it was removed from the template or profile, or the host moved to another profile, **and** gpm kept running between the two reconciles: the memory of what was stamped is in memory only.
+- **After a restart, or on a new HA leader,** that memory is empty, so a tag that is no longer in the template stays on existing hosts until you remove it by hand.
+- **A skipped write.** A pass whose write the store skipped keeps the previous pass's memory for the hosts that were not written, so a template tag dropped from the template is still removed at the next pass that writes.
+- **Disabling then enabling the discovery block** clears the memory like a restart: nothing is treated as stale until the next pass has stamped again.
+- **No change for existing setups.** A host whose tags are exactly the template's is not touched.
+
+## trustedProxies on managed hosts
+
+- **Set (a list, or `[]`).** The template or profile owns the field and stamps it onto every derived host, replacing a hand edit on the next reconcile.
+- **Unset.** Discovery does not own the field. A managed host's own `trustedProxies`, set by hand, survives every reconcile; a new host gets none and uses `settings.trustedProxies`.
+- **Ownership marker.** A host whose value was stamped by a template carries the label `<prefix>/trusted-proxies-by` (default `gpm.rake.pro/trusted-proxies-by`; the prefix is `annotationPrefix`). Its value is `ingress-discovery` or `docker-discovery`, after the reconciler that stamped it.
+- **Recognition.** gpm treats any label whose key ends in `/trusted-proxies-by` and whose value is `ingress-discovery` or `docker-discovery` as the marker, whatever the prefix and whichever reconciler wrote it, and rewrites it under the current prefix the next time it writes the host.
+- **Set to unset.** When the host's template or profile stops setting the key (the key is removed, or the host moves to a profile that leaves it unset), a host **with** the label loses the value and the label, so it falls back to `settings.trustedProxies`. A host **without** the label keeps its own value.
+- **Hand edits.** A hand edit of the value on a labelled host follows the template: the next reconcile stamps the template's value again.
+- **Fail closed.** A labelled host whose source cannot currently be derived is disabled once its profile stops setting the key, rather than being left on a value the template no longer vouches for.
+- **Removing the label by hand** makes a stamped value the operator's own: the host without the label keeps its `trustedProxies` when the template stops setting the key.
+- **Changing the prefix.** The label moves with `annotationPrefix` like `managed-by` does; see [Changing the annotation prefix](#changing-the-annotation-prefix).
 
 ## Changing the annotation prefix
 
@@ -111,7 +135,7 @@ host keeps serving, with a chain nobody chose.
 `profiles` is a map of operator-defined chains, each with **exactly the same
 shape and the same validation as `template`** (`upstream` XOR `upstreamGroupRef`,
 required `tls.certificateRef`, name-checked `middlewares`/`accessLists`,
-`robotsNoIndex`, range-checked `timeouts`, `tags`,
+`robotsNoIndex`, range-checked `timeouts`, `tags`, `trustedProxies`,
 validated `stripResponseHeaders`, `pathBlock`, `securityHeaders`, `defaultDNS`). An `Ingress` picks one with `gpm.rake.pro/profile`.
 
 **The annotation carries a name and nothing else: that is the security model.**
@@ -467,7 +491,7 @@ discovery (annotate the `Ingress`, let the derived host appear, delete the
 hand-written one) silently drops everything the template has no field for. A
 derived host carries what its template or profile carries: `upstream`/
 `upstreamGroupRef`, `tls`, `middlewares`, `accessLists`, `timeouts`,
-`robotsNoIndex`, `tags`, `locations` and the `dns` policy. Per host it cannot
+`robotsNoIndex`, `tags`, `trustedProxies`, `locations` and the `dns` policy. Per host it cannot
 carry:
 
 - anything the profile does not: a host-specific `timeouts` or `locations` list
@@ -476,9 +500,12 @@ carry:
 
 So **diff each hand-written host against what the template derives before you
 delete it**, field by field, and keep it hand-written if it uses any of the
-above. Adding them back afterwards is not an option: manual edits to a managed
+above. Adding them back afterwards is mostly not an option: manual edits to a managed
 host are reverted on the next poll (see the reserved-label note near the top of
-this document).
+this document). The exceptions are `disabled`, `maintenance`, tags added by hand
+(see [Tags on managed hosts](#tags-on-managed-hosts)) and a per-host
+`trustedProxies` while the template leaves it unset and the host carries no
+`trusted-proxies-by` label.
 
 Ownership is re-checked **under the store lock at write time**, not only when the
 reconcile was planned: the plan is made before a multi-second cluster list, so an

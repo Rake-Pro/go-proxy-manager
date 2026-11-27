@@ -154,6 +154,10 @@ func TestDNSProviderValidate(t *testing.T) {
 			"password":  "${ENV:ACME_DNS_PASSWORD}",
 			"subdomain": "d420c923-0000-4000-8000-000000000002",
 		},
+		DNSProviderWebhook: {
+			"url":   "https://dns-hook.example.com/acme",
+			"token": "${ENV:GPM_DNS_WEBHOOK_TOKEN}",
+		},
 	}
 	for _, provider := range KnownDNSProviders {
 		cfg, ok := validConfigs[provider]
@@ -194,6 +198,34 @@ func TestDNSProviderValidate(t *testing.T) {
 			cfg[k] = v
 		}
 		return DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: DNSProviderACMEDNS, Config: cfg}
+	}
+	webhook := func(overrides map[string]Secret) DNSProvider {
+		cfg := map[string]Secret{}
+		for k, v := range validConfigs[DNSProviderWebhook] {
+			cfg[k] = v
+		}
+		for k, v := range overrides {
+			if v == "" {
+				delete(cfg, k)
+				continue
+			}
+			cfg[k] = v
+		}
+		return DNSProvider{ObjectMeta: ObjectMeta{Name: "dns"}, Provider: DNSProviderWebhook, Config: cfg}
+	}
+
+	// Accepted webhook variants: a placeholder url is not checked at write
+	// time, and a loopback url needs the explicit opt-in.
+	for name, p := range map[string]DNSProvider{
+		"placeholder url":         webhook(map[string]Secret{"url": "${ENV:GPM_DNS_WEBHOOK_URL}"}),
+		"loopback with opt-in":    webhook(map[string]Secret{"url": "http://127.0.0.1:8053/present", "allowInsecureLocal": "true"}),
+		"plain http to a name":    webhook(map[string]Secret{"url": "http://dns-hook.example.com/acme"}),
+		"literal token (warned)":  webhook(map[string]Secret{"token": "literal-token"}),
+		"documentation range url": webhook(map[string]Secret{"url": "https://192.0.2.10/hook"}),
+	} {
+		if err := p.Validate(); err != nil {
+			t.Errorf("webhook %s: Validate() = %v, want nil", name, err)
+		}
 	}
 
 	cases := []struct {
@@ -275,6 +307,36 @@ func TestDNSProviderValidate(t *testing.T) {
 			name:    "acme-dns bad base url",
 			p:       acmeDNS(map[string]Secret{"baseURL": "acme-dns.example.com"}),
 			wantErr: "config.baseURL: must be an http or https URL",
+		},
+		{
+			name:    "webhook missing url",
+			p:       webhook(map[string]Secret{"url": ""}),
+			wantErr: `dns provider "dns": config.url: is required for provider webhook`,
+		},
+		{
+			name:    "webhook missing token",
+			p:       webhook(map[string]Secret{"token": ""}),
+			wantErr: `dns provider "dns": config.token: is required for provider webhook`,
+		},
+		{
+			name:    "webhook url not http",
+			p:       webhook(map[string]Secret{"url": "ftp://dns-hook.example.com/acme"}),
+			wantErr: `dns provider "dns": config.url: must be an http or https URL`,
+		},
+		{
+			name:    "webhook url without scheme",
+			p:       webhook(map[string]Secret{"url": "dns-hook.example.com/acme"}),
+			wantErr: `dns provider "dns": config.url: must be an http or https URL`,
+		},
+		{
+			name:    "webhook loopback without opt-in",
+			p:       webhook(map[string]Secret{"url": "http://127.0.0.1:8053/present"}),
+			wantErr: "points at the loopback address 127.0.0.1",
+		},
+		{
+			name:    "webhook link-local",
+			p:       webhook(map[string]Secret{"url": "http://169.254.169.254/latest"}),
+			wantErr: "config.url: points at the link-local address",
 		},
 	}
 	for _, tc := range cases {

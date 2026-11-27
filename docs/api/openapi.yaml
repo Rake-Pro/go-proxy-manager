@@ -710,16 +710,39 @@ components:
           - ecdsa
         challenge:
           type: string
-          description: dns-01 is the only supported challenge.
+          description: dns-01 (needs dnsProvider; the only way to a wildcard) or http-01 (answered on the plaintext
+            listener). Empty means dns-01 when dnsProvider is set, else http-01.
           enum:
           - ''
           - dns-01
+          - http-01
         dnsProvider:
           type: string
-          description: Name of a DNSProvider object.
+          description: Name of a DNSProvider object. Required for dns-01 (and rejected with http-01).
+        profile:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+          description: >-
+            The CA's issuance profile for every order of this certificate. An
+            empty value means unset and uses the CA's default; a non-empty one must match the pattern. A CA that advertises no profiles, or
+            not this one, fails the order. Changing it on an issued certificate
+            makes the certificate due for renewal at the next pass.
+        caBundle:
+          type: string
+          maxLength: 65536
+          description: >-
+            Trust anchors for a private CA's ACME directory: inline PEM (one or
+            more CERTIFICATE blocks and nothing else) or a ${FILE:/path} /
+            ${ENV:NAME} placeholder, at most 65536 bytes. Not a secret - inline
+            PEM is stored and returned as written. When set, every exchange with
+            this certificate's ACME directory trusts only this bundle, never the
+            system roots, and a bundle that cannot be resolved or parsed fails
+            the renewal attempt. A placeholder is not checked at write time.
+            Setting or changing it needs the admin scope, like directoryURL and
+            eab (403 otherwise); keeping it as stored or clearing it does not.
       required:
       - email
-      - dnsProvider
     CustomCertSpec:
       type: object
       properties:
@@ -786,9 +809,14 @@ components:
           - expired
           - pending
           - error
-          description: 'valid: notAfter is more than 30 days out. expiring: at or inside 30 days.
-            expired: past notAfter. pending: acme certificate, no order has completed yet. error: the
-            last attempt (ACME order, or reading a custom certificate file) failed - see lastError.'
+          description: 'valid: more than min(30 days, lifetime / 3) remains, lifetime being
+            notAfter - notBefore. expiring: at or inside that window for an acme certificate (a 90-day
+            certificate keeps the 30-day window, a 6-day one is expiring inside 2 days); a custom
+            certificate keeps a fixed 30 days, because nothing renews it.
+            expired: past notAfter. pending: acme certificate, no order has completed yet. error: an
+            acme certificate that was never issued and whose attempt failed, or a leaf that cannot be
+            read (see lastError). An issued acme certificate whose renewal fails keeps valid or expiring
+            with lastError set.'
         lastError:
           type: string
           readOnly: true
@@ -813,6 +841,24 @@ components:
           readOnly: true
           description: Leaf certificate's subject alternative names (DNS names and IPs). Absent
             alongside notAfter.
+        renewAt:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When the ACME manager next renews this issued acme certificate. A time in the
+            past means the renewal is due and has not succeeded yet. Absent for custom, pending and disabled
+            certificates, on an HA follower, and before the manager's first pass.
+        renewReason:
+          type: string
+          readOnly: true
+          enum:
+          - lifetime
+          - ari
+          - changed
+          description: 'Which rule set renewAt. lifetime: the renewal rule, min(30 days, lifetime / 3)
+            before notAfter. ari: the CA''s renewal information (RFC 9773) named an earlier time. changed:
+            the certificate''s domains or acme.profile changed, so it is due now and renewAt is the time
+            of the pass. Absent alongside renewAt.'
       required:
       - name
       - type
@@ -839,11 +885,13 @@ components:
           - desec
           - rfc2136
           - acme-dns
+          - webhook
           description: >-
             DNS-01 solver to use. cloudflare, digitalocean, hetzner and desec are
             token-authenticated REST providers; rfc2136 sends TSIG-signed dynamic
             updates to any nameserver; acme-dns writes to a joohoi/acme-dns
-            account reached through a CNAME.
+            account reached through a CNAME; webhook POSTs each challenge record
+            to an endpoint the operator runs.
         config:
           type: object
           properties: {}
@@ -853,8 +901,28 @@ components:
             server, zone, tsigKeyName, tsigSecret and optional tsigAlgorithm,
             ttl, transport, timeout. acme-dns takes baseURL, username, password
             and subdomain, plus optional allowInsecureLocal ("true") to permit a
-            loopback baseURL - a link-local baseURL (the cloud metadata range) is
-            always refused, at write time and again at connect time.
+            loopback baseURL. allowInsecureLocal skips the address-literal checks
+            at write time altogether; a link-local destination (the cloud
+            metadata range) is still refused when gpm connects. webhook takes
+            url and token (both required) and optional allowInsecureLocal ("true")
+            to permit a loopback url. For every TXT record it sends POST url with
+            Authorization Bearer token, Content-Type application/json and the body
+            {"action":"present"|"cleanup","fqdn":"_acme-challenge.example.com.","value":"<TXT value>"};
+            any 2xx answer is success, redirects are not followed and link-local
+            destinations are refused. The endpoint must add (not replace) a value
+            on present and remove only the given value on cleanup, because an
+            apex plus wildcard order presents two values at the same fqdn.
+            Secret keys must be ${ENV:}/${FILE:} placeholders: a literal is
+            refused on write, and a stored literal reads back as ***. They are
+            apiToken (cloudflare, digitalocean, hetzner, desec), tsigSecret
+            (rfc2136), username and password (acme-dns) and token (webhook), and
+            any key not named here. Plain keys may be literals or placeholders and
+            are stored and returned as written: rfc2136 server, zone, tsigKeyName,
+            tsigAlgorithm, transport, ttl and timeout; acme-dns baseURL, subdomain
+            and allowInsecureLocal; webhook url and allowInsecureLocal. A literal
+            webhook url is committed to the config repository and visible to
+            anyone who can read DNS providers, so write it as a placeholder when
+            the URL itself carries a credential.
           additionalProperties:
             $ref: '#/components/schemas/Secret'
       required:
@@ -2125,6 +2193,32 @@ components:
           type: array
           items:
             type: string
+          description: >-
+            Stamped onto every derived host. A reconcile writes these first and
+            keeps the host's other tags after them, so a tag added by hand
+            survives, while a template tag removed by hand is stamped again. A
+            template tag removed from the template or profile is dropped from the
+            hosts that had it only if gpm kept running between the two
+            reconciles; after a restart it stays until removed by hand.
+        trustedProxies:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: >-
+            The three states of ProxyHost.trustedProxies. Absent (or null):
+            discovery does not own the field - a managed host's own
+            trustedProxies survives every reconcile, and a new host gets none and
+            uses settings.trustedProxies. [] (present and empty): trusting
+            nobody. A list of CIDRs or bare IPs: trusting those. Both [] and a list are
+            stamped onto every derived host and marked with the label
+            <prefix>/trusted-proxies-by (value ingress-discovery or
+            docker-discovery). When the template or profile stops setting the
+            key (or the host moves to a profile that leaves it unset), a host
+            with the label loses the value and the label; a host without the
+            label keeps its own value. A hand edit on a labelled host follows the
+            template, and a labelled host whose source cannot be derived is
+            disabled once its profile stops setting the key.
         pathBlock:
           type: string
           enum: [inherit, 'off']
@@ -4267,6 +4361,9 @@ paths:
       description: Restores only this object's file to its state at the given commit; every other object
         is left as-is. api-tokens is exempt from write scope by construction elsewhere, but reverting
         an APIToken specifically is refused (see docs/configuration.md) so a rotation always means revocation.
+        Needs the admin scope, not certificates:write, because a revert restores a stored certificate without the
+        admin check on acme.directoryURL, acme.eab and acme.caBundle, so it could bring back an earlier ACME
+        destination or trust bundle that only an admin may set.
       tags:
       - Certificates
       requestBody:
@@ -4290,14 +4387,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-      x-scope: certificates:write
+      x-scope: admin
   /api/certificates/{name}/renew:
     parameters:
     - $ref: '#/components/parameters/NamePath'
     post:
       summary: Force an immediate certificate renewal
-      description: Starts an ACME order for this certificate now, ignoring the normal 30-day renewal
-        window. Responds as soon as the order has STARTED, not once it completes - DNS-01 propagation
+      description: Starts an ACME order for this certificate now, ignoring every renewal window
+        (the lifetime rule and ARI). Responds as soon as the order has STARTED, not once it completes - DNS-01 propagation
         alone can take minutes. Poll GET /certificates/{name}'s status fields (state, lastAttempt,
         lastError) to see the outcome. Only one order runs at a time across the whole instance; a
         second renew request while one is already in flight gets 409, not queued. A 1-hour cooldown

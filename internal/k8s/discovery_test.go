@@ -551,7 +551,7 @@ func TestDerivedNaming(t *testing.T) {
 	full := conf
 	full.Enabled = true
 	full.Template.TLS.CertificateRef = "wildcard"
-	p := planReconcile(model.Config{}, full, dup, nil)
+	p := planReconcile(model.Config{}, full, dup, nil, nil)
 	if len(p.upserts) != 1 || p.skipped != 1 {
 		t.Fatalf("duplicate names: upserts=%d skipped=%d", len(p.upserts), p.skipped)
 	}
@@ -1558,7 +1558,7 @@ func TestUnresolvableProfileNeverDisablesAnUnownedHost(t *testing.T) {
 		Domains:    []string{"paste.example.com"},
 		Upstream:   model.Upstream{Scheme: "http", Host: "10.0.0.9", Port: 80},
 	}
-	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Ingress{ing}, nil)
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{operator}}, conf, []Ingress{ing}, nil, nil)
 	if len(p.upserts) != 0 || len(p.deletes) != 0 {
 		t.Fatalf("plan = +%d -%d, want neither: the host is not one discovery owns", len(p.upserts), len(p.deletes))
 	}
@@ -1624,7 +1624,7 @@ func TestUndefinedProfileNamesAreAllRejected(t *testing.T) {
 				Host string `json:"host"`
 			}{{Host: "app.example.com"}}
 
-			p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil)
+			p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil, nil)
 			if tc.wantMW == "skip" {
 				if len(p.upserts) != 0 || p.skipped != 1 {
 					t.Fatalf("upserts=%d skipped=%d, want the Ingress skipped", len(p.upserts), p.skipped)
@@ -1970,7 +1970,7 @@ func TestUndefinedProfileReasonIsBounded(t *testing.T) {
 		Host string `json:"host"`
 	}{{Host: "app.example.com"}}
 
-	p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil)
+	p := planReconcile(model.Config{}, conf, []Ingress{ing}, nil, nil)
 	if p.skipped != 1 || len(p.results) != 1 {
 		t.Fatalf("plan = %+v, want one skip", p.results)
 	}
@@ -2007,7 +2007,7 @@ func TestDerivedHostsDoNotShareTheClientAuthPointer(t *testing.T) {
 	}
 	p := planReconcile(model.Config{}, conf, []Ingress{
 		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
-	}, nil)
+	}, nil, nil)
 	if len(p.upserts) != 2 {
 		t.Fatalf("upserts = %d, want 2", len(p.upserts))
 	}
@@ -2306,7 +2306,7 @@ func TestDerivedHostsDoNotShareTheTimeoutsOrTagsBacking(t *testing.T) {
 	}
 	p := planReconcile(model.Config{}, conf, []Ingress{
 		mk("web", "a", "a.example.com"), mk("web", "b", "b.example.com"),
-	}, nil)
+	}, nil, nil)
 	if len(p.upserts) != 2 {
 		t.Fatalf("upserts = %d, want 2", len(p.upserts))
 	}
@@ -2679,7 +2679,7 @@ func TestAnnotationPrefixMigrateRelabelsOnFailClosedDisable(t *testing.T) {
 		Host string `json:"host"`
 	}{{Host: "app.example.com"}}
 
-	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale}}, conf, []Ingress{ing}, nil)
+	p := planReconcile(model.Config{ProxyHosts: []model.ProxyHost{stale}}, conf, []Ingress{ing}, nil, nil)
 	if len(p.upserts) != 1 {
 		t.Fatalf("upserts=%d, want exactly the disabled+relabelled host", len(p.upserts))
 	}
@@ -3035,7 +3035,7 @@ func TestOverlongDerivedNameIsAPerIngressSkip(t *testing.T) {
 	if err == nil || name != "" {
 		t.Fatalf("derive = (%q, %v), want an error and no name", name, err)
 	}
-	p := planReconcile(model.Config{}, conf, []Ingress{long, ing("ok", "ok.example.com")}, nil)
+	p := planReconcile(model.Config{}, conf, []Ingress{long, ing("ok", "ok.example.com")}, nil, nil)
 	if len(p.upserts) != 1 || p.upserts[0].Name != "ing-ok.default" {
 		t.Fatalf("upserts = %+v, want only the well-formed Ingress", p.upserts)
 	}
@@ -3119,7 +3119,7 @@ func TestDomainConflictSkipDoesNotFreezeAStaleChain(t *testing.T) {
 
 	t.Run("held by an operator host: stale chain restamped on current domains", func(t *testing.T) {
 		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", false), operator}}
-		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil, nil)
 		u, ok := find(p, "ing-x.apps")
 		if !ok {
 			t.Fatalf("upserts = %+v, want ing-x.apps restamped", p.upserts)
@@ -3132,14 +3132,14 @@ func TestDomainConflictSkipDoesNotFreezeAStaleChain(t *testing.T) {
 		}
 		// The restamped host is stable: the next poll writes nothing.
 		cfg.ProxyHosts[0] = u
-		if again := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil); len(again.upserts) != 0 || again.skipped != 1 {
+		if again := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil, nil); len(again.upserts) != 0 || again.skipped != 1 {
 			t.Fatalf("second poll = %+v, want one skip and no write", again)
 		}
 	})
 
 	t.Run("held by another discovered host: stale chain restamped", func(t *testing.T) {
 		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", false), stored("ing-y.apps", "y.example.com", false)}}
-		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "y.example.com"), ing("y", "y.example.com")}, nil)
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "y.example.com"), ing("y", "y.example.com")}, nil, nil)
 		for _, name := range []string{"ing-x.apps", "ing-y.apps"} {
 			u, ok := find(p, name)
 			if !ok || u.Disabled || len(u.AccessLists) != 1 {
@@ -3152,7 +3152,7 @@ func TestDomainConflictSkipDoesNotFreezeAStaleChain(t *testing.T) {
 		c := conf
 		c.Template.AllowedHostnames = []string{"www.example.com", "y.example.com"}
 		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", true), operator}}
-		p := planReconcile(cfg, c, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		p := planReconcile(cfg, c, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil, nil)
 		u, ok := find(p, "ing-x.apps")
 		if !ok || !u.Disabled || u.Labels[model.DisabledByLabel] != model.DisabledByIngressDiscovery {
 			t.Fatalf("ing-x.apps = %+v (found %v), want it disabled by discovery", u, ok)
@@ -3161,7 +3161,7 @@ func TestDomainConflictSkipDoesNotFreezeAStaleChain(t *testing.T) {
 
 	t.Run("current chain: still a plain skip", func(t *testing.T) {
 		cfg := model.Config{ProxyHosts: []model.ProxyHost{stored("ing-x.apps", "x.example.com", true), operator}}
-		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil)
+		p := planReconcile(cfg, conf, []Ingress{ing("x", "x.example.com", "www.example.com")}, nil, nil)
 		if len(p.upserts) != 0 || p.skipped != 1 {
 			t.Fatalf("plan = %+v, want one skip and no write", p)
 		}

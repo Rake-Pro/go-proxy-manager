@@ -35,9 +35,11 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
 
 **Certificates**
 
-- **ACME issuance and renewal.** HTTP-01 or DNS-01 against any ACME CA, including
-  EAB-gated ones, with four named DNS providers plus the generic RFC2136 and
-  acme-dns solvers, and renewal 30 days before expiry.
+- **ACME issuance.** HTTP-01 or DNS-01 against any ACME CA, including
+  EAB-gated ones and private CAs, with four named DNS providers plus the generic
+  RFC2136, acme-dns and webhook solvers.
+- **Renewal.** Certificates renew when `min(30 days, lifetime / 3)` remains, a CA's
+  renewal information (ARI) can bring that forward, and ACME profiles are supported.
 - **Built-in client CA.** Generate a CA, mint mTLS client certificates as
   password-protected PKCS#12 bundles, and enforce them per host with CRL
   revocation.

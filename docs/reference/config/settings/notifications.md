@@ -16,7 +16,7 @@ own payload shapes, own event filtering). Empty (default) sends nothing.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | <span id="settings-notifications-targets"></span> `targets` | []NotificationTarget | no | The configured receivers (below). |
-| <span id="settings-notifications-expiring-threshold-days"></span> `expiringThresholdDays` | int | no | Days before ACME expiry a certificate joins the daily `cert.expiring` digest. Default `14`. |
+| <span id="settings-notifications-expiring-threshold-days"></span> `expiringThresholdDays` | int | no | Days before ACME expiry a certificate joins the daily `cert.expiring` digest. Default `14`. An `acme` certificate is listed only when it is inside this threshold **and** its renewal is already due (see [Renewal](../certificate.md#renewal)), so a healthy short-lived certificate is not listed every day. |
 
 **NotificationTarget**
 
