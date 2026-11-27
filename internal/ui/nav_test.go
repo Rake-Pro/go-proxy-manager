@@ -154,3 +154,17 @@ func TestRouteDecodesHashSegmentSafely(t *testing.T) {
 		t.Error("route() still has an unguarded decodeURIComponent of the hash segment")
 	}
 }
+
+// A ?query on the hash is not part of a Settings or Integrations tab, also
+// when the hash changes in place.
+func TestTabOfStripsQuery(t *testing.T) {
+	js := navBundle(t)
+	for _, want := range []string{
+		"const m = /^#\\/settings(?:\\/([^/]+))?$/.exec((hash || '').split('?')[0]);",
+		"const m = /^#\\/integrations(?:\\/([^/]+))?$/.exec((hash || '').split('?')[0]);",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+}

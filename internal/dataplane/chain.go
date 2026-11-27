@@ -808,6 +808,12 @@ func passThroughGate(gate, next http.Handler) http.Handler {
 			return
 		}
 		if ig.owns(r.URL.Path) {
+			// The gate answers its own path and the route's upstream is never
+			// contacted, so the debug header naming that upstream (set before
+			// routing, see Server.observe) is dropped. Responses the tiers
+			// write themselves (401, 403, 429, 503) keep it: it names the
+			// route's upstream, not proof that it was reached.
+			w.Header().Del("X-GPM-Upstream")
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), passThroughKey{}, ig.Handler)))
 			return
 		}

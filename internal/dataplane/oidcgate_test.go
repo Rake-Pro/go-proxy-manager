@@ -2,13 +2,17 @@ package dataplane
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -824,5 +828,52 @@ func TestSSOGateCookiesAreNotForwardedUpstream(t *testing.T) {
 		if c := got(); len(c) != 1 || c[0] != cookie {
 			t.Errorf("ungated upstream Cookie = %q, want [%q]", c, cookie)
 		}
+	}
+}
+
+// The key handed over at startup (GPM_SSO_SIGNING_KEY_FILE or
+// GPM_SSO_SIGNING_KEY, read by cmd/gpm) is the SSO signing key, ahead of the
+// variable; a blank one leaves the variable, then the key file, in charge.
+func TestSetSSOSigningKeyTakesPrecedence(t *testing.T) {
+	t.Cleanup(func() { ssoKeyOverride.Store(nil) })
+	t.Setenv("GPM_SSO_SIGNING_KEY", "from-env")
+
+	SetSSOSigningKey(" from-file\n")
+	if got := string(resolveSSOSigningKey()); got != "from-file" {
+		t.Fatalf("key = %q, want the key handed over at startup", got)
+	}
+	SetSSOSigningKey("  ")
+	if got := string(resolveSSOSigningKey()); got != "from-env" {
+		t.Fatalf("blank handed-over key: key = %q, want GPM_SSO_SIGNING_KEY", got)
+	}
+}
+
+// The key handed over at startup is the key the gates sign with: in a fresh
+// process (ssoSigningKey resolves once per process), a session token minted
+// by signToken carries the HMAC of that key, not of GPM_SSO_SIGNING_KEY.
+func TestSetSSOSigningKeySignsGateTokens(t *testing.T) {
+	if os.Getenv("GPM_TEST_SSO_KEY_CHILD") == "1" {
+		SetSSOSigningKey("k3y-from-file")
+		tok := signToken(macLabelSSOSession, []byte("payload"))
+		mac := hmac.New(sha256.New, []byte("k3y-from-file"))
+		mac.Write([]byte(macLabelSSOSession + "payload"))
+		want := base64.RawURLEncoding.EncodeToString([]byte("payload")) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		if tok != want {
+			t.Fatalf("token %q is not signed with the handed-over key", tok)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetSSOSigningKeySignsGateTokens$", "-test.v")
+	// Only the GPM_ variables this test sets reach the child.
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GPM_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GPM_TEST_SSO_KEY_CHILD=1", "GPM_SSO_SIGNING_KEY=from-env")
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "--- PASS") {
+		t.Fatalf("child: %v\n%s", err, out)
 	}
 }

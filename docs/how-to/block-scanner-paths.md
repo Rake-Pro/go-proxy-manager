@@ -74,7 +74,7 @@ Answer the probes every public host receives (`/.env`, `/wp-login.php`, `/.git/c
      allowFrom: [192.0.2.0/24, "@office"]
    ```
 
-   `@office` exempts a client only when the first rule of the `office` list that matches it is an allow rule without `paths`.
+   `@office` exempts a client only when the first rule of the `office` list that matches it is an allow rule without `paths`, and a `disabled` list exempts nobody.
 
 ## Verify
 
@@ -99,7 +99,7 @@ Blocked requests are counted in `gpm_denials_total{reason="path-block"}` and car
 | Sign-in loops or fails | An entry matches the auth gate's own path (the `auth-request` outpost prefix or `/__gpm/oidc/callback`); the path block runs outside authentication | Remove the matching entry, or set `pathBlock: off` on the host |
 | `pathBlock: off` on a discovery-managed host disappears | The host is rebuilt from the template or profile at every reconcile | Set `pathBlock: off` on the discovery template or profile |
 | A request with a very long path returns `404` on a host with globs | On a route covered by a list that has `globs`, a path over 4096 bytes counts as listed | Expected; shorten the path, exempt the client with `allowFrom`, or move the globs to a middleware on the hosts that need them |
-| An `@list` exemption does not apply | The first rule of that list matching the client is a `deny` rule, or the client matches only a path-scoped rule (an `@list` exemption ignores path-scoped rules), the `defaultAction` or a `geo` rule, none of which exempt anyone; or the list does not exist | Put an allow rule for the client's network first in the list, without `paths`, or use a CIDR in `allowFrom` |
+| An `@list` exemption does not apply | The first rule of that list matching the client is a `deny` rule, or the client matches only a path-scoped rule (an `@list` exemption ignores path-scoped rules), the `defaultAction` or a `geo` rule, none of which exempt anyone; or the list does not exist or is `disabled` | Put an allow rule for the client's network first in the list, without `paths`, or use a CIDR in `allowFrom` |
 | Settings write refused: `pathBlock.allowFrom: references unknown accessList` | The `@name` list does not exist | Create the list first, or remove the reference |
 | A scanner still reaches the upstream | The host opted out, the path shape is not listed, the spelling is one the filter does not catch ([what it does not catch](../reference/config/middleware.md#path-block-not-caught)), or the request went through a redirect, parked or stream host, which the list does not cover | Add the entry, or remove `pathBlock: off`; the list covers proxy hosts only |
 | `.well-known` requests are blocked | An entry in `extensions`, `names` or `globs` matches it (for example `.txt` blocks `/.well-known/security.txt`) | Remove the entry or narrow it; keep `.well-known` off all three lists. An upstream that runs its own ACME client is blocked the same way |

@@ -525,6 +525,26 @@ func checkOutboundBaseURL(field, raw string, allowLocal, echo bool) error {
 	return nil
 }
 
+// dialRefusedHost returns the host of raw when it is an address literal the
+// shared outbound client refuses at connect time whatever the validation said:
+// a link-local unicast or multicast address (refuseLinkLocal on
+// webhook.NewSecureClient in internal/webhook/webhook.go, the client of the
+// acme-dns and webhook DNS solvers). An IPv4-mapped IPv6 literal is checked as
+// the IPv4 address it is dialed as. The guard refuses nothing else, so neither
+// does this.
+func dialRefusedHost(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	addr, err := netip.ParseAddr(u.Hostname())
+	if err != nil {
+		return "", false
+	}
+	addr = addr.Unmap()
+	return u.Hostname(), addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()
+}
+
 // HasURLUserInfo reports whether raw parses as a URL with user info
 // (user:password@host). The webhook solver never sends it (it sets its own
 // Authorization header), so a webhook url carrying it is refused rather than

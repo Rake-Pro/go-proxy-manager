@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -198,6 +200,87 @@ func TestConfigHistorySettings(t *testing.T) {
 	if w.Header().Get("X-Config-Commit") == "" {
 		t.Fatal("settings missing X-Config-Commit")
 	}
+}
+
+// GET /settings then PUT /settings with the same body writes and commits
+// nothing, also when settings.yaml leaves appName out (it reads back as the
+// default name). A PUT that really changes appName, or empties it, still
+// writes.
+func TestSettingsUnchangedRoundTripWritesNothing(t *testing.T) {
+	h, st := newHandlerStore(t)
+	ctx := context.Background()
+	file := filepath.Join(st.Dir(), "settings.yaml")
+	// put sends the settings GET returns, with appName set when name is not nil.
+	put := func(t *testing.T, name *string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := do(t, h, "GET", "/settings", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /settings: %d %s", w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if name != nil {
+			var m map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+				t.Fatal(err)
+			}
+			m["appName"] = *name
+			b, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = string(b)
+		}
+		w = do(t, h, "PUT", "/settings", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT /settings: %d %s", w.Code, w.Body.String())
+		}
+		return w
+	}
+	unchanged := func(t *testing.T, when string) {
+		t.Helper()
+		before, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, _ := st.Head(ctx)
+		w := put(t, nil)
+		if c := w.Header().Get("X-Config-Commit"); c != "" {
+			t.Fatalf("%s: an unchanged round trip committed %s", when, c)
+		}
+		if now, _ := st.Head(ctx); now != head {
+			t.Fatalf("%s: HEAD moved from %s to %s", when, head, now)
+		}
+		if after, _ := os.ReadFile(file); !bytes.Equal(after, before) {
+			t.Fatalf("%s: settings.yaml rewritten:\nbefore:\n%s\nafter:\n%s", when, before, after)
+		}
+	}
+	appName := func(t *testing.T) string {
+		t.Helper()
+		_, s, err := st.Load(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.AppName
+	}
+
+	unchanged(t, "fresh tree")
+
+	edge, empty := "Edge", ""
+	if w := put(t, &edge); w.Header().Get("X-Config-Commit") == "" || appName(t) != "Edge" {
+		t.Fatalf("changing appName: commit %q, appName %q", w.Header().Get("X-Config-Commit"), appName(t))
+	}
+	unchanged(t, "custom appName")
+
+	if w := put(t, &empty); w.Header().Get("X-Config-Commit") == "" {
+		t.Fatal("emptying appName made no commit")
+	}
+	if b, _ := os.ReadFile(file); strings.Contains(string(b), "appName") {
+		t.Fatalf("an emptied appName is still in settings.yaml:\n%s", b)
+	}
+	if got := appName(t); got != model.DefaultSettings().AppName {
+		t.Fatalf("an empty appName reads back as %q, want the default", got)
+	}
+	unchanged(t, "appName left out of settings.yaml")
 }
 
 func TestDeleteRejectsTraversal(t *testing.T) {

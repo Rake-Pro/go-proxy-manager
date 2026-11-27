@@ -181,3 +181,70 @@ func TestOverviewLinksUseRealFilterFields(t *testing.T) {
 		}
 	}
 }
+
+// A failed summary read leaves the counts unknown, and unknown is not zero:
+// the first-time setup card is not offered on it.
+func TestSetupOfferedNeedsKnownCounts(t *testing.T) {
+	js := loadAppJS(t)
+	fn := jsRegion(t, js, "function setupOffered() {", "\n}\n")
+	requireAll(t, "setupOffered", fn,
+		"if (c.proxyHosts == null || c.certificates == null) return false;",
+		"return !c.proxyHosts && !c.certificates;",
+	)
+	if strings.Contains(fn, "|| 0") {
+		t.Error("setupOffered reads a missing count as 0")
+	}
+	// loadCounts still leaves the counts empty on a failed read, which is what
+	// the check above reads as unknown.
+	requireAll(t, "loadCounts", jsRegion(t, js, "async function loadCounts() {", "\n}\n"),
+		"} catch (e) { state.counts = {}; }")
+}
+
+// Every read the "Needs attention" list depends on adds a row when it fails,
+// so the list never says "Nothing needs attention" over a failed read.
+func TestOverviewAttentionFailedReads(t *testing.T) {
+	js := loadAppJS(t)
+	ov := jsRegion(t, js, "async function viewOverview(c) {", "\n}\n")
+	requireAll(t, "viewOverview", ov,
+		"warnRows.push(attnRow('warn', 'Could not read certificates',",
+		"warnRows.push(attnRow('warn', 'Could not read health status',",
+		"warnRows.push(attnRow('warn', `Could not read ${label.toLowerCase()} discovery status`,",
+		"if (!hostsR.ok) {\n    warnRows.push(attnRow('warn', 'Could not read proxy hosts',",
+	)
+	// The row is pushed before the counts decide between the list and the
+	// empty state.
+	if a, b := strings.Index(ov, "'Could not read proxy hosts'"), strings.Index(ov, "const warnCount = warnRows.length;"); a < 0 || b < a {
+		t.Error("the proxy hosts failure row is added after the warning count is taken")
+	}
+}
+
+// A custom certificate is not renewed by gpm, so its error state says it could
+// not be loaded; under a day left reads today or tomorrow, never "in 0 days".
+func TestOverviewCertAttentionWording(t *testing.T) {
+	js := loadAppJS(t)
+	ov := jsRegion(t, js, "async function viewOverview(c) {", "\n}\n")
+	requireAll(t, "viewOverview", ov,
+		// The API sends no notAfter with the error state, so the wording cannot
+		// rest on it: custom could not be loaded, ACME has no usable certificate.
+		"const what = ct.type === 'custom' ? 'could not be loaded' : 'has no usable certificate';",
+		// Under a day since expiry reads today or yesterday, never "0 days ago".
+		"(ago >= 1 ? `expired ${plural(ago, 'day', 'days')} ago`",
+		": (ct.notAfter && fmtDate(ct.notAfter) !== fmtDate(new Date()) ? 'expired yesterday' : 'expired today'));",
+		"[agoText, domains].filter(Boolean).join(' &middot; '),",
+		"errRows.push(attnRow('err', `Certificate <b>${name}</b> ${what}`,",
+		"const when = days >= 1 ? 'in ' + plural(days, 'day', 'days')",
+		": (ct.notAfter && fmtDate(ct.notAfter) !== fmtDate(new Date()) ? 'tomorrow' : 'today');",
+		"warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires ${when}`,",
+	)
+	if strings.Contains(ov, "[ago != null ? `expired ${plural(ago, 'day', 'days')} ago`") {
+		t.Error("an expiry under a day ago reads expired 0 days ago")
+	}
+	for _, bad := range []string{"failed to renew", "could not be issued"} {
+		if strings.Contains(ov, bad) {
+			t.Errorf("the error row can read %q, which the API's error state does not support", bad)
+		}
+	}
+	if !strings.Contains(js, "function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }") {
+		t.Error("plural() no longer reads 1 day for one day")
+	}
+}

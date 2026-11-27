@@ -226,6 +226,11 @@ type Deps struct {
 	// internal/auth). The SPA turns the last one into a banner. Empty when the
 	// daemon did not wire it.
 	CookieSecureState func(*http.Request) string
+
+	// dryRunRoutes holds the patterns of the write routes that implement
+	// ?dryRun (the object PUT routes), filled in by register. See
+	// refuseUnsupportedDryRun.
+	dryRunRoutes map[string]bool
 }
 
 // capabilities is the read-only runtime feature-availability payload returned by
@@ -492,6 +497,7 @@ func (d Deps) applyChange(w http.ResponseWriter, action, kind, name, sha string)
 // prefix.
 func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
+	d.dryRunRoutes = map[string]bool{}
 
 	// One shared ledger for the client-certificate issuance records: its mutex is
 	// what serializes the read-modify-write that appending and superseding do.
@@ -1333,10 +1339,34 @@ func New(d Deps) http.Handler {
 
 	registerRuntime(mux, d)
 
+	h := refuseUnsupportedDryRun(mux, d.dryRunRoutes)
 	if d.Role.IsFollower() {
-		return followerReadOnly(mux)
+		return followerReadOnly(mux, h, d.dryRunRoutes)
 	}
-	return mux
+	return h
+}
+
+// refuseUnsupportedDryRun answers 400 to a write that asks for a dry run
+// (dryRun=1 or true, or a value dryRunParam does not know) on a route that
+// does not implement one, so a request meant as a preview never changes
+// anything. dryRun=0 or false is a normal write. The routes in dryRunRoutes
+// implement it; the YAML parse routes write nothing and take any dryRun. A
+// request no route matches is left to the mux (404 or 405).
+func refuseUnsupportedDryRun(mux *http.ServeMux, dryRunRoutes map[string]bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if dry, err := dryRunParam(r); dry || err != nil {
+				_, pattern := mux.Handler(r)
+				if pattern != "" && !dryRunRoutes[pattern] && !strings.HasSuffix(pattern, "/_parse") {
+					writeErr(w, http.StatusBadRequest, fmt.Errorf("dryRun is not supported for %s: nothing was written; send the request without dryRun to make the change", pattern))
+					return
+				}
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // errFollowerReadOnly names the role that CAN take the write, so the operator
@@ -1347,14 +1377,15 @@ var errFollowerReadOnly = fmt.Errorf(
 
 // followerReadOnly refuses every mutating request on a follower. Method-based
 // rather than route-based so a route added later is refused by default: on this
-// mux every write is a POST/PUT/DELETE and every GET/HEAD is a read.
-func followerReadOnly(next http.Handler) http.Handler {
+// mux every write is a POST/PUT/DELETE and every GET/HEAD is a read. next
+// serves what passes; mux only looks up the route a request matches.
+func followerReadOnly(mux *http.ServeMux, next http.Handler, dryRunRoutes map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
 		default:
-			if followerSafe(r) {
+			if followerSafe(mux, r, dryRunRoutes) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -1363,15 +1394,20 @@ func followerReadOnly(next http.Handler) http.Handler {
 	})
 }
 
-// followerSafe reports a non-GET request that only reads: a PUT dry run and
-// the YAML parse route. Both are what the admin UI's creation wizard uses, and
-// a warm standby previews exactly as the leader would. Ending admin sessions is
-// also allowed: it changes this instance's session store, not the config.
-func followerSafe(r *http.Request) bool {
+// followerSafe reports a non-GET request that only reads: a PUT dry run on a
+// route that implements one (dryRunRoutes) and the YAML parse route. Both are
+// what the admin UI's creation wizard uses, and a warm standby previews
+// exactly as the leader would. Ending admin sessions is also allowed: it
+// changes this instance's session store, not the config.
+func followerSafe(mux *http.ServeMux, r *http.Request, dryRunRoutes map[string]bool) bool {
 	switch r.Method {
 	case http.MethodPut:
 		dry, err := dryRunParam(r)
-		return err == nil && dry
+		if err != nil || !dry {
+			return false
+		}
+		_, pattern := mux.Handler(r)
+		return dryRunRoutes[pattern]
 	case http.MethodPost:
 		return strings.HasSuffix(r.URL.Path, "/_parse") || strings.HasSuffix(r.URL.Path, "/sessions/revoke")
 	}
@@ -1468,6 +1504,7 @@ func register[T model.Object](mux *http.ServeMux, d Deps, plural string, res res
 		writeErr(w, http.StatusNotFound, errNotFound(res.kind, name))
 	}))
 
+	d.dryRunRoutes["PUT "+base+"/{name}"] = true
 	mux.HandleFunc("PUT "+base+"/{name}", d.scoped(writeScope, func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if name == "" {

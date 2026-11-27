@@ -42,6 +42,22 @@ func TestPathBlockAllowFromRefsStayResolvable(t *testing.T) {
 	if _, err := st.Delete(ctx, "AccessList", "office", author); !errors.Is(err, ErrDanglingRef) || !strings.Contains(err.Error(), "pathBlock.allowFrom") {
 		t.Fatalf("deleting the exempted list: err = %v, want ErrDanglingRef naming pathBlock.allowFrom", err)
 	}
+	// A batch refuses the same removal with the same text, and a batch that
+	// leaves the list in place goes through.
+	head, _ := st.Head(ctx)
+	if _, err := st.ApplyBatch(ctx, []model.Object{list("spare")}, []ObjectRef{{Kind: "AccessList", Name: "office"}}, "batch", author, nil); err == nil ||
+		!strings.Contains(err.Error(), `pathBlock.allowFrom: references unknown accessList "office"`) {
+		t.Fatalf("a batch deleting the exempted list: err = %v, want the settings write's refusal", err)
+	}
+	if now, _ := st.Head(ctx); now != head {
+		t.Fatal("a refused batch moved HEAD")
+	}
+	if _, err := st.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "AccessList", Name: "spare"}}, "batch", author, nil); err != nil {
+		t.Fatalf("a batch deleting an unrelated list: %v", err)
+	}
+	if _, err := st.Save(ctx, list("spare"), author); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Delete(ctx, "AccessList", "spare", author); err != nil {
 		t.Fatalf("deleting an unrelated list: %v", err)
 	}

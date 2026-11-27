@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -190,7 +191,8 @@ func (l *rateLimiter) evictLRULocked() {
 // which may carry bucket state from an earlier build (see chainStates). On
 // exhaustion it replies 429 with a Retry-After header and does not call next.
 // The client IP is resolved via ipOf (the registry's shared, XFF-aware
-// resolver); an unresolvable IP falls back to the shared nil bucket. A client
+// resolver); an unresolvable IP falls back to the shared nil bucket, except for
+// a peer address with a zone, which gets one per zone (see zonedPeerKey). A client
 // matching rl.AllowFrom bypasses the limiter entirely (no token consumed, no
 // 429); a nil/unresolvable IP never matches, so it falls through to the shared
 // bucket as before. An "@<name>" entry is the predicate listExempt returns for
@@ -242,6 +244,8 @@ func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf fun
 			if ip.To4() == nil && v6Bits != model.DefaultRateLimitIPv6Prefix {
 				key = ip.Mask(v6Mask).String() + v6Suffix
 			}
+		} else if zk, ok := zonedPeerKey(r); ok {
+			key = zk
 		}
 		ok, retry := l.allow(key)
 		if !ok {
@@ -257,6 +261,27 @@ func rateLimitHandlerWith(l *rateLimiter, rl model.RateLimitMiddleware, ipOf fun
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// zonedPeerKey is the bucket key for a connection peer whose address carries a
+// zone ("[fe80::1%eth0]:port"). Such an address parses to no client IP, so
+// without this every scoped peer would share nilIPRateLimitKey. The key is the
+// zone alone, one bucket per interface: a scoped address is self-assigned
+// anywhere in its range, so any part of it would let one peer rotate into
+// fresh buckets (and evict other clients' buckets at the cap). It serves the
+// rate limiter alone: the client IP stays nil for every other control, which
+// denies such a peer. The NUL prefix keeps the key apart from every address
+// key and from nilIPRateLimitKey.
+func zonedPeerKey(r *http.Request) (string, bool) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return "", false
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil || a.Zone() == "" {
+		return "", false
+	}
+	return "\x00zone%" + a.Zone(), true
 }
 
 // chainStates holds the rate-limiter and basic-auth failure-gate instances of

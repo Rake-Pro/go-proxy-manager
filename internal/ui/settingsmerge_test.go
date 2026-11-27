@@ -777,3 +777,95 @@ func jsString(s string) string {
 	}
 	return "'" + s + "'"
 }
+
+// Both discovery templates are the loaded template with the form's fields laid
+// over it, so a key the form has no control for (the Docker template's
+// upstream, anything the model grows) survives a save. defaultDNS is listed so
+// the overlay still removes it when both switches are off.
+func TestDiscoveryTemplateSaveOverlaysLoaded(t *testing.T) {
+	js := readHostEditorJS(t)
+	for _, tc := range []struct {
+		start, end, set string
+		nested          []string
+	}{
+		{"const ingressDiscovery = {", "if (idc.annotationPrefixMigrate)", "template: Object.assign({}, idc.template, {",
+			[]string{"tls: Object.assign({}, idt.tls, {", "timeouts: timeoutsPayload(idt.timeouts,"}},
+		{"const dockerDiscovery = {", "if (dkrOn) dockerDiscovery.enabled = true;", "template: Object.assign({}, dd.template, {",
+			[]string{"tls: Object.assign({}, ddt.tls, {", "timeouts: timeoutsPayload(ddt.timeouts,"}},
+	} {
+		blk := jsRegion(t, js, tc.start, tc.end)
+		if !strings.Contains(blk, tc.set) {
+			t.Errorf("%s: the template is not laid over the loaded one (missing %q)", tc.start, tc.set)
+		}
+		if !strings.Contains(blk, "defaultDNS: undefined, // set below when either switch is on\n      }),") {
+			t.Errorf("%s: defaultDNS is not owned by the overlay; switching both off would keep the loaded value", tc.start)
+		}
+		for _, want := range tc.nested {
+			if !strings.Contains(blk, want) {
+				t.Errorf("%s: a rebuilt nested object is not laid over the loaded one (missing %q)", tc.start, want)
+			}
+		}
+	}
+	// The ingress upstream: the three fields over the loaded upstream (path and
+	// hostHeader have no control), dropped when cleared or for a group.
+	requireAll(t, "ingress template save", js,
+		"const idUp = upstreamPayload($('#set-id-up-scheme'), $('#set-id-up-host'), $('#set-id-up-port'));",
+		"upstream: $('#set-id-up-group').value.trim() ? undefined\n          : (idUp && Object.assign({}, idt.upstream, idUp)),",
+		"if (!host && !port) return undefined;",
+	)
+}
+
+// After a successful save the loaded copies every overlay reads from (the
+// settings object, both discovery blocks and templates, each profile row's
+// loaded profile) are replaced by what is stored, so a later save in the same
+// visit does not bring back keys the previous save removed. Profile rows are
+// laid over their own loaded profile, and an ingress profile's upstream over
+// its loaded upstream, like the template.
+func TestIntegrationsSaveAdoptsStored(t *testing.T) {
+	js := readHostEditorJS(t)
+	view := jsRegion(t, js, "async function viewIntegrations(c, tab) {", "\n}\n")
+	requireAll(t, "viewIntegrations", view,
+		"const s = {}, idc = {}, idt = {}, dd = {}, ddt = {};",
+		"put(s, stored);",
+		"put(idc, Object.assign({ template: {} }, s.ingressDiscovery || {}));",
+		"put(idt, Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {}));",
+		"put(dd, Object.assign({ template: {} }, s.dockerDiscovery || {}));",
+		"put(ddt, Object.assign({ tls: {}, defaultDNS: {} }, dd.template || {}));",
+		"row._orig = (n && profiles && profiles[n]) || {};",
+		"byName('#set-id-profiles .id-profile', '.pf-name', idc.profiles);",
+		"byName('#set-dkr-profiles .dkr-profile', '.dpf-name', dd.profiles);",
+		"adoptStored(setR.data || {});",
+	)
+	// The loaded copies are filled in one place only.
+	for _, bad := range []string{"const idc = ", "const idt = ", "const dd = ", "const ddt = ", "const s = setR"} {
+		if strings.Contains(view, bad) {
+			t.Errorf("viewIntegrations derives a loaded copy outside adoptStored (%q)", bad)
+		}
+	}
+	save := jsRegion(t, js, "async function saveIntegrations(btn) {", "\n  }\n")
+	put := strings.Index(save, "const r = await api('/api/settings', { method: 'PUT', body });")
+	adopt := strings.Index(save, "adoptStored(r.data && typeof r.data === 'object' ? r.data : body);")
+	catch := strings.Index(save, "} catch (e) { showSaveError(e, 'Could not save these integrations'); }")
+	if put < 0 || adopt < put || catch < adopt {
+		t.Error("saveIntegrations must adopt the stored settings after a successful PUT, inside the try")
+	}
+	for _, tc := range []struct{ start, end string }{
+		{"$$('#set-id-profiles .id-profile').forEach((row) => {", "profiles[pname] = prof;"},
+		{"$$('#set-dkr-profiles .dkr-profile').forEach((row) => {", "dkrProfiles[pname] = prof;"},
+	} {
+		blk := jsRegion(t, save, tc.start, tc.end)
+		requireAll(t, tc.start, blk,
+			"const prof = Object.assign({}, row._orig, {",
+			"defaultDNS: undefined, // set below when either switch is on\n      });",
+		)
+	}
+	requireAll(t, "ingress profile row", jsRegion(t, save, "$$('#set-id-profiles .id-profile').forEach((row) => {", "profiles[pname] = prof;"),
+		"const pfUp = upstreamPayload(row.querySelector('.pf-up-scheme'), row.querySelector('.pf-up-host'), row.querySelector('.pf-up-port'));",
+		": (pfUp && Object.assign({}, (row._orig || {}).upstream, pfUp)),",
+	)
+	// A new row starts from an empty loaded profile.
+	requireAll(t, "profile rows", view,
+		"$('#addIdProfile').addEventListener('click', () => profileRow('', {}));",
+		"$('#addDkrProfile').addEventListener('click', () => dockerProfileRow('', {}));",
+	)
+}

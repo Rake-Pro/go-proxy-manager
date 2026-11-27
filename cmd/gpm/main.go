@@ -100,6 +100,10 @@ func main() {
 	// an operator believes is protecting them. Generate one with: gpm totp-secret
 	localHash, localTOTP := localAdminSecrets()
 
+	if err := applySSOSigningKey(dataplane.SetSSOSigningKey); err != nil {
+		log.Fatal().Err(err).Msg("SSO signing key file is unreadable or empty; refusing to start rather than sign every SSO user out with a generated key")
+	}
+
 	if localTOTP != "" {
 		if _, err := auth.NormalizeTOTPSecret(localTOTP); err != nil {
 			log.Fatal().Err(err).Msg("GPM_LOCAL_ADMIN_TOTP_SECRET is not a usable base32 TOTP secret; generate one with: gpm totp-secret")
@@ -207,7 +211,8 @@ func main() {
 		MPTCP:                         *mptcp,
 	})
 	// Persist the data-plane SSO signing key under the cert dir when the operator
-	// has not pinned one via GPM_SSO_SIGNING_KEY, so SSO sessions survive restarts.
+	// has not pinned one via GPM_SSO_SIGNING_KEY(_FILE), so SSO sessions survive
+	// restarts.
 	dataplane.SetSSOKeyDir(*certDir)
 	// Re-read the SSO revocation watermark periodically so a revoke issued on a
 	// peer (shared cert dir) - or edited out of band - is honored here without a
@@ -1196,6 +1201,21 @@ func secretFromEnv(key string) (string, error) {
 		return v, nil
 	}
 	return os.Getenv(key), nil
+}
+
+// applySSOSigningKey hands set (dataplane.SetSSOSigningKey) the SSO signing key
+// from GPM_SSO_SIGNING_KEY_FILE or GPM_SSO_SIGNING_KEY, read like every other
+// secret (see secretFromEnv). With neither set the data plane persists or
+// generates a key as before. A named file that cannot be read or is empty is
+// an error: the caller stops startup, because a generated key in its place
+// would sign every SSO user out with no explanation.
+func applySSOSigningKey(set func(string)) error {
+	k, err := secretFromEnv("GPM_SSO_SIGNING_KEY")
+	if err != nil {
+		return err
+	}
+	set(k)
+	return nil
 }
 
 // localAdminSecrets reads the local admin's bcrypt hash and TOTP secret. An

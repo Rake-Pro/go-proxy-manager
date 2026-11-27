@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"syscall"
 )
 
@@ -13,15 +14,28 @@ import (
 // pointed at a cloud metadata service. Private ranges stay allowed, which is
 // where a CrowdSec LAPI normally lives. The webhook, DNS-sync, Kubernetes and
 // Docker clients carry the same hook.
-func refuseLinkLocal(_, address string, _ syscall.RawConn) error {
+func refuseLinkLocal(network, address string, _ syscall.RawConn) error {
+	if strings.HasPrefix(network, "unix") {
+		return nil // a socket path, not a network address
+	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address
+	} else if host == "" {
+		return nil // ":port": net dials the local system
 	}
-	// netip keeps a zone ("fe80::1%eth0"), which net.ParseIP would reject and
-	// so let through.
-	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
-		return fmt.Errorf("link-local destination %s refused", ip)
+	// Control sees the resolved destination, an IP literal. A zone is dropped
+	// before parsing, since netip refuses one on an IPv4 address and an
+	// IPv4-mapped literal with a zone arrives as "169.254.169.254%eth0". What
+	// still does not parse is refused: the guard never lets through an address
+	// it cannot read.
+	bare, _, _ := strings.Cut(host, "%")
+	ip, err := netip.ParseAddr(bare)
+	if err != nil {
+		return fmt.Errorf("destination %q is not an IP address; refused", host)
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Errorf("link-local destination %s refused", host)
 	}
 	return nil
 }

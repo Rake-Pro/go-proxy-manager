@@ -18,6 +18,8 @@ Settings.
 | Client addresses | `settings.trustedProxies` | Which proxies in front of gpm may say who the client is. Empty when gpm faces the internet directly |
 | Review | nothing new | What gets committed, in one git commit |
 
+- **Not offered on a failed read.** When the object counts could not be read,
+  the card stays hidden rather than reading them as zero.
 - **Skip for now** hides the card for this browser. The wizard stays reachable
   from the account menu (**Setup wizard**).
 - Read-only roles and HA followers never see it.
@@ -61,9 +63,14 @@ Three panels sit ahead of the **Needs attention** list.
   a zero is plain text.
 - **Needs attention** lists certificates that failed, expired or are about to
   expire, unhealthy upstream groups, discovery problems, config warnings, hosts
-  in maintenance and a failed certificates, health or discovery read; each row
-  links to the object, and with nothing to report it reads "Nothing needs
-  attention".
+  in maintenance and a failed proxy hosts, certificates, health or discovery
+  read ("Could not read proxy hosts" for the first); each row links to the
+  object, and with nothing to report it reads "Nothing needs attention".
+- **Certificate rows.** A custom certificate in error reads "could not be
+  loaded"; an ACME one reads "has no usable certificate" (it was never issued,
+  or its stored certificate cannot be read). Expiry reads "expires in N days", "expires in 1 day", "expires
+  tomorrow" or "expires today", and one that ended less than a day ago "expired
+  today" or "expired yesterday".
 - **Summary line.** The line under the heading holds only the upstream members
   sentence, for example "4 of 4 upstream members healthy" or "no upstream
   groups".
@@ -134,6 +141,13 @@ full editor instead** controls.
   back.
 - **Import from YAML** fills the steps from a pasted document. Fields the steps
   do not cover are listed, and the full editor is offered with all of them.
+  When the server reports the document invalid, the steps are still filled and
+  the server's message follows the step's own, as `The pasted YAML: <server
+  text>`, at a step that objects; Review shows nothing from the import, only
+  the check of the filled draft.
+- **Add on Review.** Pressing **Add** before the server check has answered
+  shows "Wait for the server check to finish." When the server cannot
+  be reached, Review says so; go **Back**, then **Next** to check again.
 
 ![Import from YAML naming the fields the wizard does not cover](../assets/ui/wizard-import-yaml.png)
 
@@ -326,7 +340,12 @@ own; **Renew now** forces it.
 - The title band carries **Renew now** (ACME only, starts an order at once and
   refreshes the rail), **Clone** and **Delete**.
 - The Authority tab has the same CA picker; choosing a CA fills **Directory
-  URL**, and typing a URL that belongs to a preset selects it.
+  URL**, and typing a URL that belongs to a preset selects it. A warning shows
+  while a private **CA bundle** is set and the directory URL that will be
+  written is a public CA (or blank with a preset picked), because the bundle
+  replaces the system roots and orders fail until it is cleared.
+- A save that does not touch **Challenge** writes no `acme.challenge` the
+  certificate did not already have.
 - The rail on the right shows the status and expiry, the next renewal (ACME),
   the issuer, the names covered, the last renewal attempt and its error, if
   any (ACME), and the config file path; a new certificate shows New and the

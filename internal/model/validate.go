@@ -578,7 +578,9 @@ func (c Config) Warnings() []string {
 	// admits no one; requiredRoles on a gate whose provider maps no role
 	// refuses every user; and requiredRoles on a gate that takes auth-request
 	// mode from its provider is not applied at all (written with an explicit
-	// mode it is a load error). They are warnings so that a config that loads
+	// mode it is a load error). A forward-auth gate refuses every user of a
+	// provider that maps no role even without requiredRoles (forwardAuthGate
+	// admits only a mapped role). They are warnings so that a config that loads
 	// today keeps loading.
 	idpMapsRoles := map[string]bool{}
 	for _, p := range c.IdentityProviders {
@@ -586,12 +588,18 @@ func (c Config) Warnings() []string {
 		idpMapsRoles[p.Name] = rm != nil && (len(rm.AdminGroups) > 0 || len(rm.UserGroups) > 0 || rm.DefaultRole != "")
 	}
 	checkRequiredRoles := func(owner string, a *AuthMiddleware) {
-		if a == nil || len(a.RequiredRoles) == 0 {
+		if a == nil {
 			return
 		}
 		mode := a.Mode
 		if mode == "" {
 			mode = idpTypes[a.IdentityProvider]
+		}
+		if len(a.RequiredRoles) == 0 {
+			if _, known := idpTypes[a.IdentityProvider]; known && mode == AuthModeForwardAuth && !idpMapsRoles[a.IdentityProvider] {
+				out = append(out, fmt.Sprintf("%s: auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider %q gives no user a role, so every request is refused; map groups to roles on the provider (roleMapping.adminGroups, userGroups or defaultRole)", owner, a.IdentityProvider))
+			}
+			return
 		}
 		if mode == AuthModeAuthRequest {
 			out = append(out, fmt.Sprintf("%s: auth.requiredRoles is not applied: the gate takes auth-request mode from identity provider %q, where the auth server decides who may pass; remove requiredRoles", owner, a.IdentityProvider))
@@ -688,6 +696,19 @@ func (c Config) Warnings() []string {
 	}
 	for _, h := range c.ParkedHosts {
 		check("parked host", h.Name, h.TLS.CertificateRef, h.Domains)
+	}
+	// allowInsecureLocal skips every address-literal check when the URL is
+	// validated, so a literal the outbound client refuses on connect anyway
+	// loads, and fails only when a challenge is attempted. A placeholder is
+	// resolved only then, so it cannot be checked here.
+	for _, p := range c.DNSProviders {
+		key := map[string]string{DNSProviderACMEDNS: "baseURL", DNSProviderWebhook: "url"}[p.Provider]
+		if key == "" || !IsTruthyConfig(string(p.Config["allowInsecureLocal"])) || p.Config[key].IsPlaceholder() {
+			continue
+		}
+		if host, refused := dialRefusedHost(string(p.Config[key])); refused {
+			out = append(out, fmt.Sprintf("dns provider %q: config.%s points at the link-local address %s, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; point config.%s at the service's own address", p.Name, key, host, key))
+		}
 	}
 	// Deprecated access-list basic auth. It still works, so this is a warning and
 	// not a validation error, but it is the one login mechanism living in the

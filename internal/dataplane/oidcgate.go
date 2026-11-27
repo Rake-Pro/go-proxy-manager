@@ -68,13 +68,30 @@ var ssoKeyDir atomic.Pointer[string]
 // Call once at startup before serving; the env var always takes precedence.
 func SetSSOKeyDir(dir string) { ssoKeyDir.Store(&dir) }
 
+// ssoKeyOverride, set once at startup via SetSSOSigningKey, is the SSO signing
+// key the process read from GPM_SSO_SIGNING_KEY_FILE or GPM_SSO_SIGNING_KEY.
+var ssoKeyOverride atomic.Pointer[string]
+
+// SetSSOSigningKey supplies the SSO signing key read at startup (cmd/gpm reads
+// GPM_SSO_SIGNING_KEY_FILE, else GPM_SSO_SIGNING_KEY). Call once before
+// serving; a blank key leaves the resolution below unchanged.
+func SetSSOSigningKey(key string) { ssoKeyOverride.Store(&key) }
+
 // ssoSigningKey is the process-wide HMAC key for data-plane SSO cookies. It is
-// taken from GPM_SSO_SIGNING_KEY when set; otherwise, if a state dir was
-// configured (SetSSOKeyDir), it is loaded from (or generated into) a persisted
-// key file so sessions survive restarts; failing both it falls back to a random
-// per-process key. Resolved once, lazily, so a deployment without any
-// OIDC-gated host never touches the key file or logs the ephemeral-key notice.
-var ssoSigningKey = sync.OnceValue(func() []byte {
+// the key given to SetSSOSigningKey, else GPM_SSO_SIGNING_KEY when set;
+// otherwise, if a state dir was configured (SetSSOKeyDir), it is loaded from
+// (or generated into) a persisted key file so sessions survive restarts;
+// failing both it falls back to a random per-process key. Resolved once,
+// lazily, so a deployment without any OIDC-gated host never touches the key
+// file or logs the ephemeral-key notice.
+var ssoSigningKey = sync.OnceValue(resolveSSOSigningKey)
+
+func resolveSSOSigningKey() []byte {
+	if k := ssoKeyOverride.Load(); k != nil {
+		if v := strings.TrimSpace(*k); v != "" {
+			return []byte(v)
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv("GPM_SSO_SIGNING_KEY")); v != "" {
 		return []byte(v)
 	}
@@ -91,7 +108,7 @@ var ssoSigningKey = sync.OnceValue(func() []byte {
 	}
 	log.Warn().Msg("data-plane OIDC: using an ephemeral SSO signing key; set GPM_SSO_SIGNING_KEY to persist sessions across restarts")
 	return k
-})
+}
 
 // loadOrCreateSSOKey reads the persisted 32-byte SSO signing key (hex-encoded)
 // from dir, generating and atomically writing it on first use. The file is 0600

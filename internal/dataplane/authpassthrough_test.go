@@ -877,3 +877,61 @@ func TestOwnedPathsOverlap(t *testing.T) {
 		}
 	}
 }
+
+// TestDebugUpstreamHeaderOmittedOnGatePaths: on an interactive gate's own path
+// (the OIDC callback, the outpost prefix) the gate answers and the upstream is
+// never contacted, so X-GPM-Upstream is left out, as on every other response
+// gpm produces itself. Every other path still names the route's upstream.
+func TestDebugUpstreamHeaderOmittedOnGatePaths(t *testing.T) {
+	ar := sessionOutpost(t, "/outpost.goauthentik.io", "ar")
+	idp := newMockIdP(t)
+	cases := []struct {
+		name string
+		edit func(h *model.ProxyHost)
+		gate string                                   // the gate's own path
+		up   func(host, loc string) map[string]string // path -> X-GPM-Upstream
+	}{
+		{"location-only oidc gate", func(*model.ProxyHost) {}, ptCallback,
+			func(host, loc string) map[string]string { return map[string]string{"/public": host, "/admin": loc} }},
+		{"host auth-request gate", func(h *model.ProxyHost) { h.Auth, h.Locations[0].Auth = ptAR, nil }, ptOutpostURL,
+			func(host, loc string) map[string]string { return map[string]string{"/public": host, "/admin": loc} }},
+		{"auth-request gate on a location covering the gate path", func(h *model.ProxyHost) {
+			h.Locations[0].Path, h.Locations[0].Auth = "/", ptAR
+		}, ptOutpostURL, func(_, loc string) map[string]string { return map[string]string{"/public": loc} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host, hostUp, locUp := ptLocationHost(t, ptOIDC)
+			tc.edit(&host)
+			cfg := ptConfig(t, ar.URL, idp.server.URL)
+			cfg.ProxyHosts = []model.ProxyHost{host}
+			s := New(Config{DebugHeaders: true})
+			if err := s.Reload(cfg); err != nil {
+				t.Fatal(err)
+			}
+			h := s.observe(http.HandlerFunc(s.dispatchHTTP))
+			serve := func(path string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest("GET", "http://"+ptDomain+path, nil)
+				req.RemoteAddr = ptWAN
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				return rec
+			}
+			rec := serve(tc.gate)
+			if !ptGateServed(rec, tc.gate) {
+				t.Fatalf("%s: got %d %q, want the gate's own answer", tc.gate, rec.Code, rec.Body.String())
+			}
+			if v, ok := rec.Header()["X-Gpm-Upstream"]; ok {
+				t.Errorf("%s: X-GPM-Upstream = %q, want none", tc.gate, v)
+			}
+			if got := rec.Header().Get("X-GPM-Host"); got != "app" {
+				t.Errorf("%s: X-GPM-Host = %q, want app", tc.gate, got)
+			}
+			for path, want := range tc.up(hostUp, locUp) {
+				if got := serve(path).Header().Get("X-GPM-Upstream"); got != want {
+					t.Errorf("%s: X-GPM-Upstream = %q, want %q", path, got, want)
+				}
+			}
+		})
+	}
+}

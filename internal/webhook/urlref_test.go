@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -244,7 +243,7 @@ func TestPlaceholderTransportCause(t *testing.T) {
 		{"dns", &url.Error{Op: "Post", URL: "https://" + secretHost + "/x", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Name: secretHost, Err: "no such host", IsNotFound: true}}}, "name resolution failed"},
 		{"refused", &net.OpError{Op: "dial", Net: "tcp", Addr: addr, Err: syscall.ECONNREFUSED}, "connection failed"},
 		{"reset after connect", &net.OpError{Op: "read", Net: "tcp", Addr: addr, Err: syscall.ECONNRESET}, "connection failed"},
-		{"policy", &net.OpError{Op: "dial", Net: "tcp", Addr: addr, Err: linkLocalRefused{netip.MustParseAddr("fe80::1")}}, "refused by the outbound policy"},
+		{"policy", &net.OpError{Op: "dial", Net: "tcp", Addr: addr, Err: linkLocalRefused{"fe80::1", "link-local"}}, "refused by the outbound policy"},
 		{"certificate", &tls.CertificateVerificationError{Err: x509.HostnameError{Host: secretHost}}, "TLS handshake failed"},
 		{"not tls", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, "TLS handshake failed"},
 		{"https to a plain-HTTP receiver", &url.Error{Op: "Post", URL: "https://" + secretHost + "/x", Err: http.ErrSchemeMismatch}, "TLS handshake failed"},

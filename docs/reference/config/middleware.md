@@ -47,7 +47,7 @@ Every object also carries the shared keys `displayName`, `labels`, `tags` and `d
 | `mode` | Identity source | Notes |
 |--------|-----------------|-------|
 | `oidc` | The IdP, via a browser redirect | gpm is the relying party for the host; a signed SSO cookie admits later requests. |
-| `forward-auth` | A trusted upstream proxy's identity headers | Only headers asserted by the provider's `trustedProxies` are believed. |
+| `forward-auth` | A trusted upstream proxy's identity headers | Only headers asserted by the provider's `trustedProxies` are believed. Admits only a user who holds a role: a provider whose `roleMapping` gives no user a role refuses every request, and the config reports a warning (`a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "<idp>" gives no user a role, ...`). |
 | `auth-request` | An external `auth_request` endpoint | The auth server does authorization; `requiredRoles` is refused. |
 | `client-cert` | The TLS handshake | Names no `identityProvider`. The host (or the host a location belongs to) must set its own `tls.clientAuth` (`optional` for a gate that exempts some networks): without it the gate admits only its `allowFrom` exemptions and `GET /health` warns, because a certificate is accepted only when the handshake verified it under this host's SNI configuration, which such a host never requests. The gate also refuses a certificate presented under another host's SNI and re-checks revocation on every request. |
 | `basic` | The middleware's own `basic.users` | Names no `identityProvider`; HTTP basic auth against local bcrypt hashes. |
@@ -165,7 +165,8 @@ In `oidc` mode gpm is itself the OIDC relying party for the host.
 - **Signing key.** Auto-generated and persisted at `<cert-dir>/sso_signing.key`
   (0600) on first use, so sessions survive restarts. Set `GPM_SSO_SIGNING_KEY`
   to supply your own key (useful when rotating or sharing a key across
-  instances).
+  instances), or `GPM_SSO_SIGNING_KEY_FILE` to read it from a file (it wins
+  when set and not empty; an unreadable or empty file stops startup).
 
 After a login the upstream receives `X-Forwarded-User` (the `email` claim, or the
 subject when the token has no email), `X-Forwarded-Email` and
@@ -316,7 +317,7 @@ rewrite:
 | <span id="middleware-rate-limit-window"></span>  `window` | string | none | with `requests` | Go duration string (`"1s"`, `"10s"`, `"1m"`, `"1h"`, ...) the `requests` count applies over. |
 | <span id="middleware-rate-limit-requests-per-second"></span>  `requestsPerSecond` | float | none | one of | Legacy shorthand, `> 0`, equivalent to `requests: <value>` with `window: "1s"`. Kept for backward compatibility; new configs should prefer `requests`/`window`. Mutually exclusive with them. |
 | <span id="middleware-rate-limit-burst"></span>  `burst` | int | `ceil(requests)` | no | Token-bucket capacity: how far above the steady rate a short spike may go. |
-| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays limited, and a path-scoped allow rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-rate-limit-allow-from"></span>  `allowFrom` | []string | none | no | CIDRs, IPs or `@<access-list>` references exempt from rate limiting entirely (no token consumed, no `429`) compared against the derived client IP. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays limited, and a path-scoped allow rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist, and a `disabled` list exempts nobody. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-rate-limit-block-for"></span>  `blockFor` | string | none | no | Go duration. Adds a fixed lockout on top of the bucket, see below. Omitted means the token bucket alone governs. |
 | <span id="middleware-rate-limit-block-backoff"></span>  `blockBackoff` | number | none | no | Multiplier greater than 1. Each block a client earns after its previous block ended lasts this many times longer than the last, up to `blockMax`. Requires `blockFor`. |
 | <span id="middleware-rate-limit-block-max"></span>  `blockMax` | string | `24h` | no | Go duration. The longest a backed-off block can grow to. Must be at least `blockFor`. |
@@ -333,17 +334,13 @@ spreading requests over N location prefixes gets up to N+1 times the rate; set
 locations. A location's own extra limit always applies to that location only. Over-limit requests get `429 Too Many
 Requests` with a `Retry-After` header computed from the refill rate (a slow
 limit like `5` per `1h` can report a Retry-After of several minutes); the
-request is not proxied. The bucket is keyed on the derived client IP, with an
-IPv6 client keyed by its /64, or the `ipv6Prefix` set (one subscriber holds a whole /64, so a per-address
-key would be a fresh bucket per address); the basic-auth lockout keys IPv4 the
-same way and IPv6 by the wider /56 (see
-[Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers));
-a request whose client IP cannot be resolved falls back to a
-single shared bucket (fail-safe, never unlimited, and never matches
-`allowFrom`). The middleware sits **outermost** in the chain (evaluated first)
-so a flood is shed before it can drive an auth subrequest or any other
-per-request work: rate-limit -> path-block -> access-list -> bouncer -> auth -> guard ->
-headers -> rewrite -> upstream.
+request is not proxied. The bucket is keyed as follows:
+
+- **Client IP.** The derived client IP. An IPv6 client is keyed by its /64, or the `ipv6Prefix` set (one subscriber holds a whole /64, so a per-address key would be a fresh bucket per address).
+- **Basic-auth lockout.** Keys IPv4 the same way and IPv6 by the wider /56 (see [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)).
+- **Unresolvable client IP.** A single shared bucket (fail-safe, never unlimited, and never matches `allowFrom`).
+- **Zoned address.** A client whose address carries a zone (an IPv6 link-local peer such as `fe80::1%eth0`) shares one bucket per network interface with every such peer on it, whatever address it uses. Access lists and `allowFrom` still treat it as having no address.
+- **Position.** The middleware sits **outermost** in the chain (evaluated first), so a flood is shed before it can drive an auth subrequest or any other per-request work: rate-limit -> path-block -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> upstream.
 
 `blockFor` (a Go duration string, e.g. `"30s"`, `"5m"`) adds an extra,
 harsher penalty on top of the token bucket: the first request that exceeds
@@ -607,7 +604,7 @@ proxy host. For a task walkthrough see [Block scanner paths](../../how-to/block-
 | <span id="middleware-path-block-extensions"></span>  `extensions` | []string | none | one of `extensions`, `names`, `globs` | File extensions **with the leading dot** (`.php`, `.env`, `.tar.gz`). Matches when any path segment ends with one, so `/a.php/extra` is blocked too, and when a segment is the extension alone (`/.env`). At most 256 entries. |
 | <span id="middleware-path-block-names"></span>  `names` | []string | none | one of `extensions`, `names`, `globs` | Whole path segments (`.git`, `wp-admin`, `wp-login.php`). Matches any segment, directories included, at any depth. At most 256 entries. |
 | <span id="middleware-path-block-globs"></span>  `globs` | []string | none | one of `extensions`, `names`, `globs` | `path.Match` patterns over the whole path, tried on the path as it is and on the folded form described below. Each must start with `/`. `*` and `?` never match `/`, `[a-z]` is a class (written in lower case), a backslash quotes the next character. There is no `**`. At most 64 entries, 128 bytes each and 2048 bytes for all globs of one list together. |
-| <span id="middleware-path-block-allow-from"></span>  `allowFrom` | []string | none | no | Clients the block does not apply to: CIDRs, bare IPs and `@<access-list>` references. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays blocked, and a path-scoped rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
+| <span id="middleware-path-block-allow-from"></span>  `allowFrom` | []string | none | no | Clients the block does not apply to: CIDRs, bare IPs and `@<access-list>` references. `@name` exempts a client only when the first rule of access list `name` that matches it is an allow rule (`cidr` or fetched `source` set) without `paths`, evaluated per request like the list's own gate: a client a `deny` rule above that allow rule matches stays blocked, and a path-scoped rule, the `defaultAction` and the `geo` rules exempt nobody. The list must exist, and a `disabled` list exempts nobody. See [Which IP `allowFrom` compares](../../concepts/request-pipeline.md#which-ip-allowfrom-compares). |
 | <span id="middleware-path-block-deny-status"></span>  `denyStatus` | int | `404` | no | Status of a blocked request: `400` to `599` when set, and unset or `0` means `404`. The default answers like a path that does not exist. |
 | <span id="middleware-path-block-deny-with"></span>  `denyWith` | string | `error-page` | no | `error-page` renders the host's custom error page for the status when one exists; `plain` always writes the bare status text. |
 
