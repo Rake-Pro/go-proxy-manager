@@ -47,7 +47,8 @@ var (
 )
 
 // newListenerServer builds one data-plane http.Server with the shared timeout
-// policy applied. Both listeners go through it so neither can drift.
+// policy and the default header-size limit applied. Both listeners go through
+// it (via Server.listenerServer) so neither can drift.
 func newListenerServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
@@ -55,6 +56,14 @@ func newListenerServer(addr string, h http.Handler) *http.Server {
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		IdleTimeout:       idleTimeout,
+		// MaxHeaderBytes bounds the request line plus headers on HTTP/1 (the
+		// stdlib allows 4096 bytes of read slack on top, then answers 431) and
+		// sets the advertised HTTP/2 MAX_HEADER_LIST_SIZE (the stdlib adds 320
+		// bytes for per-field overhead). A longer h2 header list never reaches
+		// the handler: it gets 431 when it ends in the frame where it
+		// overflows, and a connection error (GOAWAY PROTOCOL_ERROR) when
+		// CONTINUATION frames follow.
+		MaxHeaderBytes: DefaultMaxHeaderBytes,
 		// WriteByteTimeout closes an HTTP/2 connection that has data to send and
 		// makes no write progress; per-stream writes are bounded by the
 		// progressWriter flushDeadlineHandler installs, while the handler runs
@@ -66,6 +75,31 @@ func newListenerServer(addr string, h http.Handler) *http.Server {
 		},
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context { return withConnAnchorCache(ctx) },
 	}
+}
+
+// Bounds for the data-plane request header limit (-max-header-bytes). The
+// stdlib default is 1 MiB, which is the maximum here.
+const (
+	DefaultMaxHeaderBytes = 64 << 10
+	MinMaxHeaderBytes     = 4 << 10
+	MaxMaxHeaderBytes     = 1 << 20
+)
+
+// ValidateMaxHeaderBytes reports whether n is an accepted -max-header-bytes
+// value.
+func ValidateMaxHeaderBytes(n int) error {
+	if n < MinMaxHeaderBytes || n > MaxMaxHeaderBytes {
+		return fmt.Errorf("max header bytes must be between %d and %d, got %d", MinMaxHeaderBytes, MaxMaxHeaderBytes, n)
+	}
+	return nil
+}
+
+// listenerServer is newListenerServer with this Server's header limit; Start
+// builds both listeners through it.
+func (s *Server) listenerServer(addr string, h http.Handler) *http.Server {
+	srv := newListenerServer(addr, h)
+	srv.MaxHeaderBytes = s.maxHeaderBytes
+	return srv
 }
 
 // http2MaxConcurrentStreams is the per-connection stream limit the data-plane
@@ -134,6 +168,9 @@ type Server struct {
 	httpsSrv *http.Server
 	httpSrv  *http.Server
 
+	// maxHeaderBytes is MaxHeaderBytes for both listeners (Config.MaxHeaderBytes).
+	maxHeaderBytes int
+
 	// httpSwitch/httpsSwitch are the listeners' swappable handler chains: plain
 	// dispatch while every observability toggle is off, the observed wrapper
 	// otherwise. nil until Start; SetAccessLog swaps them live.
@@ -191,6 +228,10 @@ type Config struct {
 	// default: nothing gpm fronts needs it, and Go 1.24+ would otherwise open
 	// MPTCP-capable listeners wherever the kernel has net.mptcp.enabled=1.
 	MPTCP bool
+	// MaxHeaderBytes caps the request line plus headers on both data-plane
+	// listeners, HTTP/1 and HTTP/2 (0 selects DefaultMaxHeaderBytes; other
+	// values are clamped to [MinMaxHeaderBytes, MaxMaxHeaderBytes]).
+	MaxHeaderBytes int
 }
 
 // New constructs a data-plane Server. Reload must be called with a valid config
@@ -205,6 +246,12 @@ func New(c Config) *Server {
 	} else if bufSize > MaxAccessLogCapacity {
 		bufSize = MaxAccessLogCapacity
 	}
+	maxHdr := c.MaxHeaderBytes
+	if maxHdr <= 0 {
+		maxHdr = DefaultMaxHeaderBytes
+	} else {
+		maxHdr = min(max(maxHdr, MinMaxHeaderBytes), MaxMaxHeaderBytes)
+	}
 	s := &Server{
 		httpsAddr:     c.HTTPSAddr,
 		httpAddr:      c.HTTPAddr,
@@ -215,6 +262,7 @@ func New(c Config) *Server {
 		streams:       newStreamManager(),
 		health:        newHealthManager(),
 	}
+	s.maxHeaderBytes = maxHdr
 	s.accessLog.Store(c.AccessLog)
 	s.listen.SetMultipathTCP(c.MPTCP)
 	s.streams.listen = &s.listen
@@ -383,8 +431,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.httpSwitch = s.dataHandler(s.dispatchHTTP)
 	s.httpsSwitch = s.dataHandler(s.dispatchHTTPS)
-	s.httpSrv = newListenerServer(s.httpAddr, s.httpSwitch)
-	s.httpsSrv = newListenerServer(s.httpsAddr, s.httpsSwitch)
+	s.httpSrv = s.listenerServer(s.httpAddr, s.httpSwitch)
+	s.httpsSrv = s.listenerServer(s.httpsAddr, s.httpsSwitch)
 	// GetCertificate reads the live router so cert changes apply on reload.
 	// GetConfigForClient lets a host pin a higher minimum TLS version than the
 	// 1.2 floor: it returns that host's config (by SNI) or nil for the default.

@@ -74,6 +74,7 @@ func main() {
 		accessLogBuf  = flag.Int("access-log-buffer", envInt("GPM_ACCESS_LOG_BUFFER", dataplane.DefaultAccessLogCapacity), "access-log entries kept in memory for the Access Logs page (100-100000); the page resizes it live, a restart reverts to this value")
 		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
+		maxHeaderB    = flag.Int("max-header-bytes", envInt("GPM_MAX_HEADER_BYTES", dataplane.DefaultMaxHeaderBytes), "cap on request line plus headers per request on the data-plane listeners, HTTP/1 and HTTP/2 (4096-1048576); larger requests get 431")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
 		haRole        = flag.String("ha-role", envOr("GPM_HA_ROLE", string(ha.RoleLeader)), "HA role: leader (runs ACME and the Ingress/Docker discovery reconcilers, accepts config writes) or follower (read-only, pulls the leader's config repo)")
@@ -109,6 +110,12 @@ func main() {
 			log.Fatal().Err(err).Msg("GPM_LOCAL_ADMIN_TOTP_SECRET is not a usable base32 TOTP secret; generate one with: gpm totp-secret")
 		}
 		log.Info().Msg("local admin TOTP is enabled")
+	}
+
+	// An out-of-range header limit is fatal rather than clamped, so a typo
+	// cannot silently start the listeners with a limit nobody chose.
+	if err := dataplane.ValidateMaxHeaderBytes(*maxHeaderB); err != nil {
+		log.Fatal().Err(err).Msg("invalid -max-header-bytes / GPM_MAX_HEADER_BYTES")
 	}
 
 	// HA role (design/ha.md phase 1). Exactly one instance is the writer:
@@ -209,6 +216,7 @@ func main() {
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
 		MPTCP:                         *mptcp,
+		MaxHeaderBytes:                *maxHeaderB,
 	})
 	// Persist the data-plane SSO signing key under the cert dir when the operator
 	// has not pinned one via GPM_SSO_SIGNING_KEY(_FILE), so SSO sessions survive

@@ -294,3 +294,58 @@ func TestMainRefusesUnreadableSSOKeyFile(t *testing.T) {
 		}
 	}
 }
+
+// -max-header-bytes / GPM_MAX_HEADER_BYTES: a value outside 4096-1048576 stops
+// startup with a message naming both, the flag wins over the env var, and an
+// accepted value lets main run on. The child runs main itself with an invalid
+// -ha-role, so an accepted value fails at that next fatal check instead of
+// starting listeners.
+func TestMainMaxHeaderBytesBounds(t *testing.T) {
+	if os.Getenv("GPM_TEST_RUN_MAIN") == "1" {
+		os.Args = append([]string{"gpm", "-ha-role", "not-a-role"}, strings.Fields(os.Getenv("GPM_TEST_ARGS"))...)
+		main()
+		return
+	}
+	const refused = "invalid -max-header-bytes / GPM_MAX_HEADER_BYTES"
+	for _, tc := range []struct {
+		env, args string
+		ok        bool
+	}{
+		{"", "", true},
+		{"4096", "", true},
+		{"1048576", "", true},
+		{"4095", "", false},
+		{"1048577", "", false},
+		{"", "-max-header-bytes 4095", false},
+		{"", "-max-header-bytes 2000000", false},
+		{"", "-max-header-bytes 8192", true},
+		{"100", "-max-header-bytes 65536", true}, // the flag wins
+		{"65536", "-max-header-bytes 100", false},
+		{"lots", "", true}, // not a number: ignored, the default applies
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMainMaxHeaderBytesBounds$")
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "GPM_") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		cmd.Env = append(cmd.Env, "GPM_TEST_RUN_MAIN=1", "GPM_TEST_ARGS="+tc.args)
+		if tc.env != "" {
+			cmd.Env = append(cmd.Env, "GPM_MAX_HEADER_BYTES="+tc.env)
+		}
+		out, err := cmd.CombinedOutput()
+		cancel()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+			t.Fatalf("env=%q args=%q: main did not exit with an error (err %v):\n%s", tc.env, tc.args, err, out)
+		}
+		gotRefused := strings.Contains(string(out), refused)
+		if gotRefused == tc.ok {
+			t.Fatalf("env=%q args=%q: refused=%v, want %v:\n%s", tc.env, tc.args, gotRefused, !tc.ok, out)
+		}
+		if tc.ok && !strings.Contains(string(out), "invalid HA role") {
+			t.Fatalf("env=%q args=%q: main stopped before the HA role check:\n%s", tc.env, tc.args, out)
+		}
+	}
+}

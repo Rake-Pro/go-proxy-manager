@@ -36,8 +36,9 @@ var dataplaneTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
-	// Upstream response headers are capped like the listeners' request
-	// headers (1 MiB) rather than at the 10 MiB transport default.
+	// Upstream response headers are capped at 1 MiB (the most the listeners
+	// accept for request headers, see MaxMaxHeaderBytes) rather than at the
+	// 10 MiB transport default.
 	MaxResponseHeaderBytes: 1 << 20,
 	// The reverse proxy must not transparently gunzip upstream bodies (CPU cost,
 	// and it strips Content-Length, forcing the flush-per-write chunked path).

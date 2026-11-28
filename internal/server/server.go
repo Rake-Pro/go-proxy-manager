@@ -19,6 +19,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// adminMaxHeaderBytes caps the request line plus headers on the admin listener
+// (the stdlib default is 1 MiB). It is fixed: no admin client needs more.
+const adminMaxHeaderBytes = 64 << 10
+
 // Server is the admin HTTP server.
 type Server struct {
 	addr string
@@ -130,10 +134,12 @@ func New(addr string, st *store.Store, authn *auth.Authenticator, apiHandler, ui
 	// reads a large body, lifts it for its own request. There is no
 	// WriteTimeout for the same long-runner reason. IdleTimeout closes
 	// keep-alive connections that send nothing, which ReadHeaderTimeout does
-	// not cover once a first request has been served.
+	// not cover once a first request has been served. MaxHeaderBytes holds
+	// request headers to adminMaxHeaderBytes instead of the stdlib's 1 MiB.
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           securityHeaders(mux),
+		MaxHeaderBytes:    adminMaxHeaderBytes,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       120 * time.Second,

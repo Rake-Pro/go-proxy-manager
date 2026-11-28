@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"container/heap"
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,10 +20,12 @@ import (
 
 // maxRateLimitBuckets caps how many distinct client buckets a single rate-limit
 // middleware tracks, so a flood of unique source IPs cannot grow the map without
-// bound. At the cap the least-recently-used bucket is evicted in O(1) (see
-// evictLRULocked); the LRU bucket is also the one idle longest, so eviction
-// still targets the buckets nearest a full refill and never makes the limit
-// stricter for an active client.
+// bound. At the cap one bucket is evicted (see evictLocked). While at most half
+// the tracked buckets are blocked, that is the least-recently-used unblocked
+// bucket, which restarts full, so eviction never makes the limit stricter for
+// an active client and new clients that stay within their own limit never lift
+// a block. While more than half are blocked, it is the running block that ends
+// soonest, so blocked buckets cannot crowd unblocked clients out of the table.
 const maxRateLimitBuckets = 16384
 
 // nilIPRateLimitKey is the shared bucket used when the client IP cannot be
@@ -39,19 +42,58 @@ type tokenBucket struct {
 	strikes      int           // blocks served so far in the current streak
 }
 
-// lruBucket is one map/list node: the bucket plus its key (kept so the front
-// element can be deleted from the map on eviction).
+// lruBucket is one tracked client: the bucket plus its key (kept so an evicted
+// node can be deleted from the map). It is in exactly one of the two
+// structures: the order list (el set, heapIdx -1) or the blocked heap (el nil,
+// heapIdx its position there). seq orders blocks that end at the same instant.
 type lruBucket struct {
-	key    string
-	bucket tokenBucket
+	key     string
+	bucket  tokenBucket
+	el      *list.Element
+	heapIdx int
+	seq     uint64
+}
+
+// blockHeap is a min-heap of blocked buckets by blockedUntil, ties by seq (the
+// block started first ends first). It keeps each node's heapIdx current.
+type blockHeap []*lruBucket
+
+func (h blockHeap) Len() int { return len(h) }
+func (h blockHeap) Less(i, j int) bool {
+	a, b := h[i].bucket.blockedUntil, h[j].bucket.blockedUntil
+	if !a.Equal(b) {
+		return a.Before(b)
+	}
+	return h[i].seq < h[j].seq
+}
+func (h blockHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIdx = i
+	h[j].heapIdx = j
+}
+func (h *blockHeap) Push(x any) {
+	lb := x.(*lruBucket)
+	lb.heapIdx = len(*h)
+	*h = append(*h, lb)
+}
+func (h *blockHeap) Pop() any {
+	old := *h
+	lb := old[len(old)-1]
+	old[len(old)-1] = nil
+	*h = old[:len(old)-1]
+	lb.heapIdx = -1
+	return lb
 }
 
 // rateLimiter is a per-client-IP token-bucket limiter. Each instance is scoped to
 // one host's middleware (one buildChain wrap), so keying by client IP within it
 // yields the per-host, per-client-IP semantics. capacity is the burst size and
-// refill is the steady-state requests-per-second. Buckets are held in an LRU
-// (order, front = least-recently-used) so eviction at the cap is O(1) rather than
-// a full-map scan under a high-cardinality flood.
+// refill is the steady-state requests-per-second. Unblocked buckets are held in
+// an LRU (order, front = least-recently-used); a bucket moves to the blocked
+// min-heap when a block starts and back to order when its block is over, on its
+// own next request or when an eviction finds it at the heap top. Cost: O(1) per
+// request, O(log n) when a block starts or ends and when a blocked bucket is
+// evicted, never a scan of the table.
 type rateLimiter struct {
 	capacity float64
 	refill   float64       // tokens per second
@@ -60,9 +102,12 @@ type rateLimiter struct {
 	blockMax time.Duration // cap for a backed-off block
 	now      func() time.Time
 
-	mu      sync.Mutex
-	buckets map[string]*list.Element // key -> *list.Element holding *lruBucket
-	order   *list.List               // *lruBucket, front = LRU, back = MRU
+	mu         sync.Mutex
+	maxBuckets int                   // maxRateLimitBuckets; a field so tests can use small tables
+	buckets    map[string]*lruBucket // every tracked client, in order or in blocked
+	order      *list.List            // unblocked *lruBucket, front = LRU, back = MRU
+	blocked    blockHeap             // blocked *lruBucket, top = block ending soonest
+	blockSeq   uint64                // last seq handed out to a block
 }
 
 func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
@@ -92,14 +137,15 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 		}
 	}
 	return &rateLimiter{
-		capacity: float64(burst),
-		refill:   rate,
-		blockFor: blockFor,
-		backoff:  backoff,
-		blockMax: blockMax,
-		now:      time.Now,
-		buckets:  map[string]*list.Element{},
-		order:    list.New(),
+		capacity:   float64(burst),
+		refill:     rate,
+		blockFor:   blockFor,
+		backoff:    backoff,
+		blockMax:   blockMax,
+		now:        time.Now,
+		maxBuckets: maxRateLimitBuckets,
+		buckets:    map[string]*lruBucket{},
+		order:      list.New(),
 	}
 }
 
@@ -111,35 +157,40 @@ func newRateLimiter(rl model.RateLimitMiddleware) *rateLimiter {
 // backoff set, each block a key earns after the previous one ended lasts
 // backoff times longer (capped at blockMax); the streak is forgotten once the
 // key has gone one full block length past the end of its last block without
-// tripping again (see nextBlock). A blocked key can still be evicted by the LRU
-// cap like any other idle bucket, which also forgets its streak.
+// tripping again (see nextBlock). An eviction at the cap forgets the bucket,
+// block and streak included; see evictLocked for which bucket that is.
 func (l *rateLimiter) allow(key string) (bool, int) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var b *tokenBucket
-	if el := l.buckets[key]; el != nil {
-		lb := el.Value.(*lruBucket)
-		b = &lb.bucket
-		l.order.MoveToBack(el) // mark most-recently-used
-
+	lb := l.buckets[key]
+	if lb != nil {
+		b := &lb.bucket
 		if l.blockFor > 0 && now.Before(b.blockedUntil) {
+			// A hit during the block changes neither structure.
 			retry := b.blockedUntil.Sub(now).Seconds()
 			return false, int(math.Ceil(retry))
+		}
+		if lb.heapIdx >= 0 {
+			heap.Remove(&l.blocked, lb.heapIdx)
+			lb.el = l.order.PushBack(lb)
+		} else {
+			l.order.MoveToBack(lb.el) // mark most-recently-used
 		}
 		if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
 			b.tokens = math.Min(l.capacity, b.tokens+elapsed*l.refill)
 			b.last = now
 		}
 	} else {
-		if l.order.Len() >= maxRateLimitBuckets {
-			l.evictLRULocked()
+		if len(l.buckets) >= l.maxBuckets {
+			l.evictLocked(now)
 		}
-		lb := &lruBucket{key: key, bucket: tokenBucket{tokens: l.capacity, last: now}}
-		l.buckets[key] = l.order.PushBack(lb)
-		b = &lb.bucket
+		lb = &lruBucket{key: key, bucket: tokenBucket{tokens: l.capacity, last: now}, heapIdx: -1}
+		lb.el = l.order.PushBack(lb)
+		l.buckets[key] = lb
 	}
+	b := &lb.bucket
 
 	if b.tokens >= 1 {
 		b.tokens--
@@ -150,6 +201,12 @@ func (l *rateLimiter) allow(key string) (bool, int) {
 		b.blockedUntil = now.Add(d)
 		b.lastBlock = d
 		b.strikes++
+		// Every path here left the node in order; it moves to the heap.
+		l.order.Remove(lb.el)
+		lb.el = nil
+		l.blockSeq++
+		lb.seq = l.blockSeq
+		heap.Push(&l.blocked, lb)
 		return false, int(math.Ceil(d.Seconds()))
 	}
 	retry := (1 - b.tokens) / l.refill // time until the next whole token
@@ -174,17 +231,49 @@ func (l *rateLimiter) nextBlock(b *tokenBucket, now time.Time) time.Duration {
 	return d
 }
 
-// evictLRULocked drops the least-recently-used bucket in O(1). That bucket is the
-// one idle longest, hence nearest a full refill, so removing it never makes the
-// limit stricter for an active client - while a rotating-IP flood pays only O(1)
-// per new key instead of an O(n) scan. Caller holds l.mu.
-func (l *rateLimiter) evictLRULocked() {
-	el := l.order.Front()
-	if el == nil {
+// evictLocked drops one bucket to make room for a new key. First every bucket
+// at the heap top whose block has ended rejoins order at the most-recently-used
+// end, earliest end first: a block end counts as recent activity, so the
+// bucket and its backoff streak are kept as long as any active client's
+// bucket. Each bucket moves at most once per block, so this costs O(log n) per
+// block. Then:
+//
+//   - While more than half the table is blocked, the running block that ends
+//     soonest is dropped, in O(log n): the least block time is lost, and a
+//     repeat offender's long backed-off block outlives fresh short ones. An
+//     unblocked bucket is therefore dropped only while at least half the table
+//     is unblocked, so a table full of blocks cannot turn every new client
+//     into a fresh, full bucket.
+//   - Otherwise the least-recently-used unblocked bucket is dropped, in O(1).
+//     It is the one idle longest, hence nearest a full refill, so removing it
+//     never makes the limit stricter for an active client.
+//
+// So new clients that stay within their own limit never lift a block while at
+// most half the table is blocked; clients that each get themselves blocked can
+// push the blocked share past half, and then blocks are lifted early, the one
+// ending soonest first. One more consequence of ended blocks rejoining as most
+// recently used: a client that last sent while almost the whole table was
+// blocked can be the next bucket dropped once those blocks end together. Like
+// every eviction that only restarts it with a full bucket. Caller holds l.mu.
+func (l *rateLimiter) evictLocked(now time.Time) {
+	for len(l.blocked) > 0 && !l.blocked[0].bucket.blockedUntil.After(now) {
+		lb := heap.Pop(&l.blocked).(*lruBucket)
+		lb.el = l.order.PushBack(lb)
+	}
+	// The map is at the cap here, so an empty order means a full heap, which is
+	// more than half for any cap >= 1: the order and heap checks below are
+	// defensive only.
+	if len(l.blocked) > l.maxBuckets/2 || l.order.Len() == 0 {
+		if len(l.blocked) == 0 {
+			return
+		}
+		lb := heap.Pop(&l.blocked).(*lruBucket)
+		delete(l.buckets, lb.key)
 		return
 	}
-	l.order.Remove(el)
-	delete(l.buckets, el.Value.(*lruBucket).key)
+	lb := l.order.Remove(l.order.Front()).(*lruBucket)
+	lb.el = nil
+	delete(l.buckets, lb.key)
 }
 
 // rateLimitHandlerWith enforces a per-client-IP token-bucket limit through l,

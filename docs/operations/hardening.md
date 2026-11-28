@@ -44,6 +44,15 @@ The settings to check before an instance faces the internet.
   [`settings.clientLimits.maxInFlight`](../reference/config/settings/client-limits.md#settings-client-limits-max-in-flight)
   (off by default; `256` is a starting point) refuses a client's requests
   past the limit with `429`.
+- Keep request headers bounded: `-max-header-bytes` (`GPM_MAX_HEADER_BYTES`,
+  default 64 KiB) caps the request line plus headers on `:80` and `:443`.
+  Past it HTTP/1 gets `431`; HTTP/2 gets `431` when the oversized header block
+  ends in the frame where it overflows, and a connection error (GOAWAY,
+  PROTOCOL_ERROR, closing every stream on that connection) when the client
+  continues the block in CONTINUATION frames after the overflow or
+  sends a single frame several times the limit. Raise it only as far as
+  your largest legitimate cookie or token needs
+  ([Environment variables](../reference/env-vars-and-flags.md)).
 - Run with `cap_drop: ALL` and `no-new-privileges`, as in the
   [Compose file](../getting-started/install-docker.md#compose-file).
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.

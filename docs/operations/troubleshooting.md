@@ -87,6 +87,7 @@ below map each row's wording to its cause and fix.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `431 Request Header Fields Too Large`, or an HTTP/2 protocol error that drops the connection, on requests with very large cookies or headers | The request line plus headers exceed the header limit (default 64 KiB) | Raise `GPM_MAX_HEADER_BYTES` / `-max-header-bytes` (up to `1048576`) and restart, or trim the cookies ([Environment variables](../reference/env-vars-and-flags.md)) |
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check `domains` and `disabled`; two enabled hosts cannot share a domain |
 | Config write refused: `domains: <name> is already claimed by proxy host "<other>"` | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
 | Config write refused, or a config warning: `domain <name> is claimed by ...: the router serves it from only one of them` | Two hosts list spellings of one name, such as `<name>` and `<name>:8443`; the router drops the port | Remove the port (or the duplicate) from one host ([Domains are exclusive](../concepts/config-model.md#domains-are-exclusive)) |

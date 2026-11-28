@@ -550,6 +550,31 @@ vulnerability:
 - A disabled access list no longer exempts anyone through an `@<list>`
   reference in a rate limit's or path block's `allowFrom` (#172), as it already
   granted nothing under `accessListsMode: any`. Takes effect on reload.
+- Rate-limit blocks survive a flood of new clients: at the 16384-bucket cap a
+  rate limit evicted its least recently used bucket even when that client was
+  blocked, so a blocked client that went quiet while 16384 other addresses (or
+  IPv6 prefixes) appeared was served again before its `blockFor` ended, with
+  its `blockBackoff` streak forgotten. Blocked buckets now wait apart, ordered
+  by block end, and a bucket whose block has ended rejoins the unblocked
+  buckets as the most recently used one, so its streak is remembered as long
+  as any active client's bucket. While at most half the table is blocked,
+  eviction takes the
+  least recently used unblocked bucket, so new clients within their own limit
+  never lift a block; while more than half is blocked, it takes the running
+  block that ends soonest, so addresses that each get themselves blocked can
+  still lift a block early (the shortest remaining first), and unblocked
+  clients are never crowded out of the table. A block starting or ending and
+  a blocked eviction cost O(log n); every other request stays O(1).
+- Request headers are capped at 64 KiB on the data-plane listeners (Go's
+  default was 1 MiB, and a 1 MiB header block was accepted and forwarded
+  upstream). On HTTP/1 a larger request line plus headers gets `431`. On
+  HTTP/2 it gets `431` when the oversized header block ends in the frame
+  where it overflows, and a connection error (GOAWAY, PROTOCOL_ERROR, closing
+  every stream on that connection) when the client continues the block in
+  CONTINUATION frames after the overflow or sends a single frame several
+  times the limit. Either way the request never reaches the chain. `-max-header-bytes` / `GPM_MAX_HEADER_BYTES` sets it
+  (`4096` to `1048576`; out of range stops startup); the admin listener has a
+  fixed 64 KiB cap.
 
 - `POST /api/certificates/{name}/revert` needs the `admin` scope (it was
   `certificates:write`), like the middleware revert: a revert restores a stored
