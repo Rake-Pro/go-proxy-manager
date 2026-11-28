@@ -37,8 +37,8 @@ or an API token of any role.
 
 ## Flags and environment variables
 
-Every flag except `-version` has an environment-variable equivalent (the env
-var wins for container deployments).
+Every flag except `-version` has an environment-variable equivalent. The env
+var sets the default; a flag given on the command line wins over it.
 
 | Name | Default | Meaning | Restart needed |
 |------|---------|---------|----------------|
@@ -61,6 +61,7 @@ var wins for container deployments).
 | `GPM_ACCESS_LOG_BUFFER`<br>`-access-log-buffer` | `5000` | Access-log entries kept in memory for the Access Logs page (100-100000, clamped). Startup default only: the page's Buffer selector, or `PUT /api/logs` with `{"capacity": n}` (admin scope), resizes it live keeping the newest entries; a restart reverts to this value | Yes |
 | `GPM_SLOW_REQUEST_MS`<br>`-slow-request-ms` | `0` (off) | Warn on requests slower than N ms | Yes |
 | `GPM_DEBUG_HEADERS`<br>`-debug-headers` | `false` | Add `X-GPM-*` diagnostic response headers: `X-GPM-Host`, `X-GPM-Upstream` and `X-GPM-Request-Id` (leaks upstream info, keep off in production). `X-GPM-Upstream` is absent when a gate serves its own path (the `oidc` sign-in callback `/__gpm/oidc/callback`, an `auth-request` gate's outpost `pathPrefix`), because the upstream is not contacted; a refusal by a tier that runs before the gate on that path (rate limit, path block, access list, bouncer, an outer auth gate) still carries it. `X-GPM-Host` and `X-GPM-Request-Id` are always sent | Yes |
+| `GPM_MAX_HEADER_BYTES`<br>`-max-header-bytes` | `65536` (64 KiB) | Cap on the request line plus headers of one request on the data-plane listeners (`:80`, `:443`), HTTP/1 and HTTP/2; a larger request never reaches an upstream. HTTP/1 gets `431` (Go reads up to 4096 bytes past the cap first). HTTP/2 advertises the cap plus 320 bytes as `SETTINGS_MAX_HEADER_LIST_SIZE`; a longer header list gets `431` when the oversized header block ends in the frame where it overflows, and a connection error (GOAWAY, PROTOCOL_ERROR, closing every stream on that connection) when the client continues the block in CONTINUATION frames after the overflow or sends a single frame several times the limit. `4096` to `1048576`; a value outside that range, or a flag value that is not a number, stops startup (a non-numeric env value is ignored and the default applies). The admin listener has a fixed 64 KiB cap | Yes |
 | `GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT`<br>`-upstream-response-header-timeout` | `0` (unbounded) | Cap time-to-first-byte from an upstream | Yes |
 | `GPM_HA_ROLE`<br>`-ha-role` | `leader` | HA role: `leader` runs ACME + Ingress/Docker discovery and accepts config writes; `follower` disables them and serves the admin API read-only (`503` on writes). See [High availability (two-node active/standby)](../operations/high-availability.md) | Yes |
 | `GPM_HA_POLL_INTERVAL`<br>`-ha-poll-interval` | `20s` | How often a follower runs `git pull --ff-only` on the config repo and reloads when HEAD moved | Yes |

@@ -339,6 +339,7 @@ request is not proxied. The bucket is keyed as follows:
 - **Client IP.** The derived client IP. An IPv6 client is keyed by its /64, or the `ipv6Prefix` set (one subscriber holds a whole /64, so a per-address key would be a fresh bucket per address).
 - **Basic-auth lockout.** Keys IPv4 the same way and IPv6 by the wider /56 (see [Client IP and the three trust tiers](../../concepts/request-pipeline.md#client-ip-and-the-three-trust-tiers)).
 - **Unresolvable client IP.** A single shared bucket (fail-safe, never unlimited, and never matches `allowFrom`).
+- **Bucket cap.** One rate limit tracks at most 16384 client buckets; at the cap a new client evicts one, and a client whose block has ended rejoins the unblocked buckets as the most recently used one, so its streak is remembered as long as any active client's bucket. While at most half the tracked buckets are blocked, the victim is the least recently used unblocked bucket, which restarts full, so new clients that stay within their own limit never lift a block and an eviction never makes the limit stricter. While more than half are blocked, the victim is the running block that ends soonest, so a flood of addresses that each get themselves blocked can lift a block early (the shortest remaining first), but blocked buckets cannot crowd unblocked clients out of the table.
 - **Zoned address.** A client whose address carries a zone (an IPv6 link-local peer such as `fe80::1%eth0`) shares one bucket per network interface with every such peer on it, whatever address it uses. Access lists and `allowFrom` still treat it as having no address.
 - **Position.** The middleware sits **outermost** in the chain (evaluated first), so a flood is shed before it can drive an auth subrequest or any other per-request work: rate-limit -> path-block -> access-list -> bouncer -> auth -> guard -> headers -> rewrite -> upstream.
 
@@ -369,10 +370,11 @@ immediately.
   that served a 4 minute block and then behaves for 4 more minutes starts over
   at `blockFor`.
 - The streak lives in the same per-client bucket as the tokens, so it is lost
-  with the bucket on an LRU eviction, a restart, or a reload that changes this
-  limit's spec, exactly like the block itself. A reload that leaves the limit's
-  spec unchanged (including one that only changes another host) keeps the
-  buckets, blocks and streaks.
+  with the bucket on an eviction at the bucket cap (a running block only while
+  more than half the table is blocked, see **Bucket cap** above), a restart, or
+  a reload that changes this limit's spec, exactly like the block itself. A
+  reload that leaves the limit's spec unchanged (including one that only
+  changes another host) keeps the buckets, blocks and streaks.
 
 With `blockFor: 1m`, `blockBackoff: 2`, `blockMax: 1h` a scanner that keeps
 coming back is blocked for 1m, 2m, 4m, 8m, 16m, 32m, then 1h per round.
