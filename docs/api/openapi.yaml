@@ -267,10 +267,31 @@ components:
           type: string
           description: 'Host header sent upstream: empty keeps the client Host (default), "upstream" sends
             the upstream''s own host:port, anything else is sent literally (a hostname, optionally host:port).'
+        tls:
+          $ref: '#/components/schemas/UpstreamTLS'
       required:
       - scheme
       - host
       - port
+    UpstreamTLS:
+      type: object
+      description: Trust configuration of an https upstream (scheme https only). Omitted when no pin
+        is set; an empty object or an empty list is treated as absent and is never stored.
+        Not accepted on a Docker discovery template (dockerDiscovery.template.upstream, or a profile
+        under dockerDiscovery.profiles); Kubernetes Ingress discovery templates take it.
+      properties:
+        pinnedCertSHA256:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            pattern: '^([0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31})$'
+          description: SHA-256 fingerprints of the upstream's leaf certificate (DER), as printed by
+            `openssl x509 -noout -fingerprint -sha256`. Upper or lower case, with or without ":"
+            separators; stored as 64 lower-case hex characters. Duplicates are rejected. An empty
+            list is accepted and means no pin (it is dropped, never stored). With pins the
+            connection is accepted if and only if the presented leaf certificate's SHA-256 equals one
+            of them; chain, name and validity dates are not checked.
     HSTS:
       type: object
       properties:
@@ -1287,6 +1308,8 @@ components:
         hostHeader:
           type: string
           description: Host header sent to THIS member. Same values as Upstream.hostHeader.
+        tls:
+          $ref: '#/components/schemas/UpstreamTLS'
         weight:
           type: integer
           description: Relative share for round-robin/least-connections, 1-256. 0 defaults to 1. Ignored
@@ -2385,12 +2408,19 @@ components:
             type: string
           description: Required when enabled.
         template:
-          $ref: '#/components/schemas/IngressHostTemplate'
+          allOf:
+          - $ref: '#/components/schemas/IngressHostTemplate'
+          description: Default chain. Its upstream is derived per container; upstream.tls.pinnedCertSHA256
+            is refused here when enabled is true (a disabled block may hold it; enabling re-validates
+            and refuses it).
         profiles:
           type: object
           properties: {}
           description: Named chains a container may select by name. Empty inherits
-            ingressDiscovery.profiles. "template" is reserved.
+            ingressDiscovery.profiles. "template" is reserved. A profile defined here refuses
+            upstream.tls.pinnedCertSHA256 when enabled is true, as the template does. An inherited
+            ingressDiscovery profile with pins is accepted; hosts derived from containers do not
+            get its pin and a warning is logged.
           additionalProperties:
             $ref: '#/components/schemas/IngressHostTemplate'
       description: Disabled (default) is inert. Discovers labelled Docker containers into managed proxy

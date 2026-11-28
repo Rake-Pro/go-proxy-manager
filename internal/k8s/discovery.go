@@ -757,7 +757,7 @@ func derive(ing Ingress, conf model.IngressDiscoverySettings) (string, model.Pro
 			Tags:        append([]string(nil), tmpl.Tags...),
 		},
 		Domains:          domains,
-		Upstream:         tmpl.Upstream,
+		Upstream:         tmpl.Upstream.Clone(),
 		UpstreamGroupRef: tmpl.UpstreamGroupRef,
 		TLS:              tlsSettings,
 		//lint:ignore SA1019 compat copy of deprecated WebsocketsUpgrade so a pre-deprecation template still produces byte-identical derived hosts

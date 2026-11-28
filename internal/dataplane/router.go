@@ -356,13 +356,16 @@ func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.H
 	// the upstream's own response before the stdlib copies it out. A location
 	// inherits it, since buildLocations derives each location from this host.
 	strip := mergedStripResponseHeaders(h.StripResponseHeaders)
-	transport := transportFor(h.Timeouts)
-	if c, ok := transport.(idleCloser); ok {
-		reg.own(c)
-	}
 	var proxy http.Handler
 	var label string
 	if h.UpstreamGroupRef == "" {
+		// A pin only means something on a TLS connection; validation enforces
+		// https, and a config that skipped validation fails the build rather
+		// than proxying in the clear with the pin ignored.
+		if !h.Upstream.TLS.IsZero() && h.Upstream.Scheme != "https" {
+			return nil, "", fmt.Errorf("upstream.tls: requires scheme https, got %q", h.Upstream.Scheme)
+		}
+		transport := reg.upstreamTransport(h.Timeouts, h.Upstream)
 		proxy, label = newReverseProxy(h.Upstream, h.Name, transport, ident, ep, strip), upstreamLabel(h.Upstream)
 	} else {
 		var gh *groupHealth
@@ -372,7 +375,24 @@ func hostProxy(h model.ProxyHost, reg *registry, ep *compiledErrorPages) (http.H
 		if gh == nil {
 			return nil, "", fmt.Errorf("upstream group %q is not available", h.UpstreamGroupRef)
 		}
-		proxy, label = newGroupReverseProxy(gh, h.Name, transport, ident, ep, strip), groupLabel(h.UpstreamGroupRef)
+		// Unpinned members share the host's transport; each pinned member gets
+		// the transport of its own pin set (with the host's timeouts), so the
+		// group's failover attempts each carry the right trust decision.
+		transport := reg.upstreamTransport(h.Timeouts, model.Upstream{})
+		var members map[*upstreamHealth]http.RoundTripper
+		for _, u := range gh.ups {
+			if u.up.TLS.IsZero() {
+				continue
+			}
+			if u.up.Scheme != "https" {
+				return nil, "", fmt.Errorf("upstream group %q: upstream %s: tls requires scheme https", h.UpstreamGroupRef, u.label)
+			}
+			if members == nil {
+				members = map[*upstreamHealth]http.RoundTripper{}
+			}
+			members[u] = reg.pinnedTransport(h.Timeouts, u.up.TLS)
+		}
+		proxy, label = newGroupReverseProxy(gh, h.Name, transport, members, ident, ep, strip), groupLabel(h.UpstreamGroupRef)
 	}
 	if h.Compression.Enabled {
 		proxy = compressionHandler(h.Compression, proxy)

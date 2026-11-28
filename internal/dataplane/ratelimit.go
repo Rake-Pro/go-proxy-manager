@@ -382,11 +382,13 @@ func zonedPeerKey(r *http.Request) (string, bool) {
 // as a compiled chain (the live router, or a build in progress) refers to it,
 // so a removed host or a changed spec leaves nothing behind once the old router
 // is gone, and a build that fails or is only a trial drops nothing the live
-// router uses.
+// router uses. transports holds the pinned-upstream transports the same way
+// (see upstreampin.go), so an unchanged pin keeps its connection pool.
 type chainStates struct {
-	mu       sync.Mutex
-	limiters weakMap[rateLimiter]
-	gates    weakMap[authGate]
+	mu         sync.Mutex
+	limiters   weakMap[rateLimiter]
+	gates      weakMap[authGate]
+	transports weakMap[http.Transport]
 }
 
 func (c *chainStates) limiter(key string, mk func() *rateLimiter) *rateLimiter {
@@ -399,6 +401,12 @@ func (c *chainStates) gate(key string, mk func() *authGate) *authGate {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.gates.get(key, mk)
+}
+
+func (c *chainStates) transport(key string, mk func() *http.Transport) *http.Transport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.transports.get(key, mk)
 }
 
 // weakMap is a string-keyed map of weak pointers with amortized removal of

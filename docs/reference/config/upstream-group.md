@@ -14,9 +14,12 @@ per group, not once per host.
 | <span id="upstream-group-health-check"></span>  `healthCheck` | HealthCheck | no | Active probe tuning (defaults below). |
 
 **GroupUpstream** embeds the whole [Upstream](proxy-host.md#proxy-host-upstream)
-shape, so `path` and `hostHeader` are **per member** as well: `scheme`/`host`/`port`/`path`/`hostHeader` plus `weight`
+shape, so `path`, `hostHeader` and `tls` are **per member** as well: `scheme`/`host`/`port`/`path`/`hostHeader`/`tls` plus `weight`
 (1-256, default 1): the relative share for the weighted policies; ignored by
-`failover` and `ip-hash`.
+`failover` and `ip-hash`. A member's
+[`tls.pinnedCertSHA256`](proxy-host.md#proxy-host-upstream-tls-pinned-cert-sha256)
+pins that member's own certificate: members that are different devices each
+carry their own pins, and an unpinned member is verified the usual way.
 
 **Policies** (unhealthy upstreams always drop to the end of the try-order,
 whatever the policy):
@@ -70,6 +73,22 @@ upstreams:
 healthCheck: {path: /ping, intervalSeconds: 5, fall: 2, rise: 2}
 ```
 
+Two appliances, each with its own self-signed certificate:
+
+```yaml
+name: hypervisors
+upstreams:
+  - scheme: https
+    host: 192.0.2.21
+    port: 8006
+    tls: {pinnedCertSHA256: [5c1e9a7d0b3f42e8a6d1c09b7e2f43a8d5b6c7e8f9012a3b4c5d6e7f8091a2b3]}
+  - scheme: https
+    host: 192.0.2.22
+    port: 8006
+    tls: {pinnedCertSHA256: [0d4b8e2f6a1c93d7e5b0a2c4f6e8d0b1a3c5e7f9d2b4a6c8e0f1d3b5a7c9e2f4]}
+healthCheck: {path: /, intervalSeconds: 10}
+```
+
 Semantics worth knowing:
 
 - **Failover retries only connect-phase failures** (dial refused / no route /
@@ -81,6 +100,12 @@ Semantics worth knowing:
 - **Probes measure the entry point, not the app**: an HTTP probe counts any
   response below 500 as alive. Point `path` at something that reflects the
   upstream proxy/node itself (e.g. a ping endpoint), not at a shared application.
+- **An https probe trusts what the traffic trusts**: a pinned member is probed
+  with its own pins; an unpinned member's certificate is verified against the
+  system roots, so a self-signed member without pins probes as down. The plain
+  TCP probe (no `path`) opens no TLS session and checks no certificate.
+- **A refused pin is a connect-phase failure**: it is retried on the next member
+  and counts toward `fall`, exactly like a certificate verification failure.
 - **Passive detection feeds the same counters**: live-traffic connect failures
   count toward `fall`, so a dead upstream is skipped quickly even between probes.
 - **Fail-open**: with every upstream marked down, requests are still attempted in

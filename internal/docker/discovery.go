@@ -162,6 +162,11 @@ type Discoverer struct {
 	// new leader, or a pass that finds the block disabled starts without it,
 	// and then no stored tag is treated as stale. Guarded by single.
 	stamped discovery.StampedTags
+
+	// pinsWarned is the last set of inherited-pin warnings logged
+	// (Settings.DockerInheritedPinWarnings), so the same warnings are not
+	// repeated on every poll. Guarded by single.
+	pinsWarned string
 }
 
 // New returns a Discoverer. load is called on every reconcile so a settings
@@ -464,6 +469,7 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 		// Disabling forgets the tag memory, so re-enabling behaves exactly like
 		// a restart: no stored tag is treated as stale on the first pass.
 		d.stamped = nil
+		d.pinsWarned = ""
 		d.mu.Lock()
 		d.status = Status{Enabled: false, LastRun: now, Hosts: []HostResult{}}
 		d.mu.Unlock()
@@ -471,6 +477,12 @@ func (d *Discoverer) reconcileLocked(ctx context.Context) error {
 	}
 	if err := conf.Validate(); err != nil {
 		return d.fail(now, true, false, endpoint, fmt.Errorf("docker discovery: %w", err))
+	}
+	if warn := settings.DockerInheritedPinWarnings(); strings.Join(warn, "\n") != d.pinsWarned {
+		d.pinsWarned = strings.Join(warn, "\n")
+		for _, w := range warn {
+			log.Warn().Msg("docker discovery: " + w)
+		}
 	}
 	client, err := d.clientFor(conf)
 	if err != nil {

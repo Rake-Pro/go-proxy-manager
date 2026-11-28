@@ -1,9 +1,13 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // UpstreamHostHeaderUpstream is the sentinel value of Upstream.HostHeader that
@@ -31,7 +35,146 @@ type Upstream struct {
 	//   "upstream" - send the upstream's own "host:port",
 	//   any other  - send that literal hostname (optionally "name:port").
 	HostHeader string `json:"hostHeader,omitempty" yaml:"hostHeader,omitempty"`
+
+	// TLS configures how gpm trusts an https upstream. The zero value (the key
+	// absent) is the default: the upstream's certificate is verified against
+	// the system roots with the usual name check. Valid only with scheme https.
+	TLS UpstreamTLS `json:"tls,omitzero" yaml:"tls,omitempty"`
 }
+
+// MaxUpstreamCertPins is the most fingerprints one upstream may pin. More than
+// one exists so a certificate can be rotated without downtime: pin the new one
+// next to the old, swap the certificate, then drop the old pin.
+const MaxUpstreamCertPins = 4
+
+// UpstreamTLS is the trust configuration of an https upstream.
+//
+// PinnedCertSHA256 lists SHA-256 fingerprints of the upstream's leaf
+// certificate in DER form (what `openssl x509 -noout -fingerprint -sha256`
+// prints). With pins, the TLS connection to the upstream is accepted if and
+// only if the SHA-256 of the leaf certificate the server presents equals one of
+// them: chain building, name matching and validity dates are NOT evaluated, the
+// pin is the whole trust decision. Everything else about the connection is
+// unchanged (protocol versions, ALPN / HTTP/2, SNI). Without pins the upstream
+// is verified exactly as before.
+//
+// Entries are accepted in upper or lower case, with or without ":" between the
+// bytes, and are stored as 64 lower-case hex characters. An empty list (or an
+// empty tls object) is the same as no tls key at all and is never written.
+type UpstreamTLS struct {
+	PinnedCertSHA256 []string `json:"pinnedCertSHA256,omitempty" yaml:"pinnedCertSHA256,omitempty"`
+}
+
+// IsZero reports whether no pin is set; encoding/json (omitzero) and yaml.v3
+// (omitempty) use it to leave the key out.
+func (t UpstreamTLS) IsZero() bool { return len(t.PinnedCertSHA256) == 0 }
+
+// NormalizeCertFingerprint returns s as 64 lower-case hex characters, or false
+// when s is not a SHA-256 fingerprint: 64 hex digits, or 32 two-digit hex
+// bytes separated by single ":" (the openssl form). Nothing else is accepted.
+func NormalizeCertFingerprint(s string) (string, bool) {
+	if strings.Contains(s, ":") {
+		if len(s) != 32*3-1 {
+			return "", false
+		}
+		var b strings.Builder
+		for i := 0; i < len(s); i += 3 {
+			if i+2 < len(s) && s[i+2] != ':' {
+				return "", false
+			}
+			b.WriteString(s[i : i+2])
+		}
+		s = b.String()
+	}
+	if len(s) != 64 {
+		return "", false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return "", false
+		}
+	}
+	return strings.ToLower(s), true
+}
+
+// normalize rewrites every well-formed pin into its stored form and collapses
+// an empty list to nil. A malformed entry is left as written so validate
+// reports it verbatim.
+func (t *UpstreamTLS) normalize() {
+	if len(t.PinnedCertSHA256) == 0 {
+		t.PinnedCertSHA256 = nil
+		return
+	}
+	for i, p := range t.PinnedCertSHA256 {
+		if n, ok := NormalizeCertFingerprint(p); ok {
+			t.PinnedCertSHA256[i] = n
+		}
+	}
+}
+
+// UnmarshalJSON normalizes the pins on the way in, so the API stores them in
+// the canonical form.
+func (t *UpstreamTLS) UnmarshalJSON(b []byte) error {
+	type plain UpstreamTLS
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*t = UpstreamTLS(p)
+	t.normalize()
+	return nil
+}
+
+// UnmarshalYAML normalizes the pins of a hand-written YAML file the same way.
+func (t *UpstreamTLS) UnmarshalYAML(n *yaml.Node) error {
+	type plain UpstreamTLS
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*t = UpstreamTLS(p)
+	t.normalize()
+	return nil
+}
+
+func (t UpstreamTLS) validate(path string) error {
+	pins := t.PinnedCertSHA256
+	if len(pins) > MaxUpstreamCertPins {
+		return fmt.Errorf("%s.pinnedCertSHA256: at most %d fingerprints, got %d", path, MaxUpstreamCertPins, len(pins))
+	}
+	seen := make(map[string]bool, len(pins))
+	for i, p := range pins {
+		n, ok := NormalizeCertFingerprint(p)
+		if !ok {
+			return fmt.Errorf("%s.pinnedCertSHA256[%d]: %q is not a SHA-256 fingerprint (want 64 hex characters, optionally as 32 \":\"-separated bytes)", path, i, p)
+		}
+		if seen[n] {
+			return fmt.Errorf("%s.pinnedCertSHA256[%d]: duplicate fingerprint %s", path, i, n)
+		}
+		seen[n] = true
+	}
+	return nil
+}
+
+// Clone returns a copy of u that shares no slice with it, so a host derived
+// from a template (or a location copied off one) cannot alias the template's
+// pin list.
+func (u Upstream) Clone() Upstream {
+	u.TLS.PinnedCertSHA256 = slices.Clone(u.TLS.PinnedCertSHA256)
+	return u
+}
+
+// Equal reports whether two upstreams are the same backend with the same
+// settings. An empty and a nil pin list are equal (both mean "no pins").
+func (u Upstream) Equal(o Upstream) bool {
+	return u.Scheme == o.Scheme && u.Host == o.Host && u.Port == o.Port &&
+		u.Path == o.Path && u.HostHeader == o.HostHeader &&
+		slices.Equal(u.TLS.PinnedCertSHA256, o.TLS.PinnedCertSHA256)
+}
+
+// Empty reports whether u is the zero upstream (nothing set at all).
+func (u Upstream) Empty() bool { return u.Equal(Upstream{}) }
 
 // validate checks the upstream; path is the dotted JSON path of the upstream
 // object ("upstream" on a host), which every message leads with.
@@ -47,6 +190,14 @@ func (u Upstream) validate(path string) error {
 	}
 	if err := validateUpstreamPath(path+".path", u.Path); err != nil {
 		return err
+	}
+	if !u.TLS.IsZero() {
+		if u.Scheme != "https" {
+			return fmt.Errorf("%s.tls: requires scheme https (a certificate pin has no meaning for plain http), got %q", path, u.Scheme)
+		}
+		if err := u.TLS.validate(path + ".tls"); err != nil {
+			return err
+		}
 	}
 	return validateUpstreamHostHeader(path+".hostHeader", u.HostHeader)
 }
@@ -498,7 +649,7 @@ func (h ProxyHost) Validate() error {
 		if err := h.Upstream.validate("upstream"); err != nil {
 			return fmt.Errorf("proxy host %q: %w", h.Name, err)
 		}
-	} else if h.Upstream != (Upstream{}) {
+	} else if !h.Upstream.Empty() {
 		return fmt.Errorf("proxy host %q: upstream: upstream and upstreamGroupRef are mutually exclusive", h.Name)
 	}
 	if err := h.TLS.validate(); err != nil {
@@ -592,7 +743,7 @@ func CloneLocations(ls []Location) []Location {
 	for i, l := range ls {
 		c := l
 		if l.Upstream != nil {
-			u := *l.Upstream
+			u := l.Upstream.Clone()
 			c.Upstream = &u
 		}
 		if l.Auth != nil {

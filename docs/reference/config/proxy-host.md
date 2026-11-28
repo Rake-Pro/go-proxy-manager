@@ -37,7 +37,9 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-upstream-host"></span>  `host` | string | none | yes | Backend hostname or IP. |
 | <span id="proxy-host-upstream-port"></span>  `port` | int | none | yes | 1-65535. |
 | <span id="proxy-host-upstream-path"></span>  `path` | string | `""` | no | Base path prefixed to every forwarded request: `/api` turns a client `/v1/x` into `/api/v1/x`. Must be absolute, must not contain `.`/`..` segments, `\`, `;`, a query string or a fragment. Applied **last**, after any location prefix strip and any rewrite middleware. |
-| <span id="proxy-host-upstream-host-header"></span>  `hostHeader` | string | `""` | no | Host header sent upstream. `""` keeps the client's Host (today's behaviour); `upstream` sends the upstream's own `host:port`; anything else is sent literally and must be a hostname, optionally `host:port`. |
+| <span id="proxy-host-upstream-host-header"></span>  `hostHeader` | string | `""` | no | Host header sent upstream. `""` keeps the client's Host (today's behaviour); `upstream` sends the upstream's own `host:port`; anything else is sent literally and must be a hostname, optionally `host:port`. It never changes the TLS server name (SNI), which is always taken from `host`. |
+| <span id="proxy-host-upstream-tls"></span>  `tls` | UpstreamTLS | unset | no | How gpm trusts an `https` upstream. Unset: the certificate is verified against the system roots with the usual name check. Only allowed with `scheme: https`. An empty object or an empty pin list is treated as unset and is not stored. |
+| <span id="proxy-host-upstream-tls-pinned-cert-sha256"></span>  `tls.pinnedCertSHA256` | []string | none | no | 1 to 4 SHA-256 fingerprints of the upstream's leaf certificate in DER form, as printed by `openssl x509 -noout -fingerprint -sha256`. Upper or lower case, with or without `:` separators; stored as 64 lower-case hex characters; duplicates rejected. With pins the connection is accepted **if and only if** the presented leaf certificate's SHA-256 equals one of them: chain, name and validity dates are **not** checked. Changing or removing a pin closes the open WebSocket tunnels of every host that routes to that upstream at the reload and stops reuse of its pooled connections. See [Proxy to an upstream with a self-signed certificate](../../how-to/proxy-self-signed-upstream.md). |
 
 ```yaml
 upstream:
@@ -48,8 +50,30 @@ upstream:
   hostHeader: upstream    # backend keys its vhost off its own address
 ```
 
-On an [UpstreamGroup](upstream-group.md) member, `path` and
-`hostHeader` are **per member**, applied by the failover transport on the attempt
+An appliance with a built-in self-signed certificate, trusted by pin:
+
+```yaml
+upstream:
+  scheme: https
+  host: 192.0.2.30
+  port: 443
+  tls:
+    pinnedCertSHA256:
+      - 3a:7f:0c:55:91:de:2b:48:6e:a1:c4:09:f3:8d:72:b6:5e:10:aa:c7:34:9b:e2:61:0f:d8:4c:93:27:b5:e8:1d
+```
+
+**Certificate pinning** (`tls.pinnedCertSHA256`):
+
+- **Whole trust decision.** With pins, no chain is built and no name or date is checked; only the leaf fingerprint matters.
+- **Everything else unchanged.** TLS versions, ALPN and HTTP/2, and SNI (from `host`) are as without pins; `hostHeader` does not affect the pin.
+- **Every handshake.** The pin is checked on every connection, including a resumed TLS session.
+- **Own connection pool.** A pinned upstream never shares a pooled connection with an unpinned or differently pinned upstream, even at the same `host:port`; an unchanged pin keeps its pool across reloads.
+- **Fails closed.** A certificate that matches no pin fails like any upstream TLS error: `502` (the host's error page), and a log line `upstream error` naming the host with `presentedCertSHA256` set to the fingerprint the server presented.
+- **Per upstream.** On an [UpstreamGroup](upstream-group.md) member the pin is that member's own; a location's `upstream` carries its own too.
+- **Rotation.** Pin the new certificate next to the old one, replace the certificate on the device, then remove the old pin.
+
+On an [UpstreamGroup](upstream-group.md) member, `path`,
+`hostHeader` and `tls` are **per member**, applied by the failover transport on the attempt
 that actually reaches that member. `healthCheck.path` is used verbatim and is
 **not** prefixed with `path`, so write the full probe path there.
 

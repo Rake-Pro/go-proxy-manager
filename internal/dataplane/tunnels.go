@@ -23,7 +23,8 @@ import (
 // it no longer holds:
 //
 //   - a reload removes or disables its host, or changes the host's chain key
-//     (the digest of everything that decides who may use the host);
+//     (the digest of everything that decides who may use the host, and the
+//     certificate pins of the upstreams it routes to);
 //   - the SSO session that admitted it expires, or the revocation watermark
 //     moves past the session's issue time;
 //   - the client certificate it was opened with is on the current revocation
@@ -222,9 +223,10 @@ func accessMiddlewareType(t string) bool {
 // hostChainKey digests what decides who may use a proxy host: its access
 // fields and those of its locations, the access middlewares they reference,
 // every access list, identity provider and client CA named in any of that, and
-// the effective trusted-proxy set. Object metadata other than the name and the
-// disabled flag is left out, and so is a client CA's inline CRL, which the
-// revocation check covers on its own.
+// the effective trusted-proxy set, plus the certificate pin set of every
+// upstream it routes to. Object metadata other than the name and the disabled
+// flag is left out, and so is a client CA's inline CRL, which the revocation
+// check covers on its own.
 func hostChainKey(h model.ProxyHost, cfg model.Config, trusted []*net.IPNet) string {
 	type locSpec struct {
 		Path            string
@@ -270,6 +272,7 @@ func hostChainKey(h model.ProxyHost, cfg model.Config, trusted []*net.IPNet) str
 		RefAccessLists  []model.AccessList
 		RefIdPs         []model.IdentityProvider
 		RefClientCAs    []model.ClientCA
+		UpstreamPins    map[string][]string `json:",omitempty"`
 	}{
 		ClientAuth: h.TLS.ClientAuth, MinTLSVersion: h.TLS.MinTLSVersion,
 		Middlewares: access(h.Middlewares), AccessLists: h.AccessLists,
@@ -327,6 +330,40 @@ func hostChainKey(h model.ProxyHost, cfg model.Config, trusted []*net.IPNet) str
 			spec.RefClientCAs = append(spec.RefClientCAs, ca)
 		}
 	}
+	// The pin set of every upstream the host or a location routes to: an open
+	// tunnel rides a connection verified under it, so a changed pin set closes
+	// the tunnel like a changed gate. Filled in after the reference scan, so a
+	// fingerprint or an address is never taken for an object name.
+	pins := map[string][]string{}
+	addUp := func(where string, up model.Upstream) {
+		if p := pinSet(up.TLS); p != nil {
+			pins[where] = p
+		}
+	}
+	addGroup := func(name string) {
+		for _, g := range cfg.UpstreamGroups {
+			if g.Name == name {
+				for _, m := range g.Upstreams {
+					addUp("group "+name+" "+upstreamLabel(m.Upstream), m.Upstream)
+				}
+			}
+		}
+	}
+	if h.UpstreamGroupRef == "" {
+		addUp("upstream", h.Upstream)
+	} else {
+		addGroup(h.UpstreamGroupRef)
+	}
+	// Locations are keyed by index as well as path: validation accepts two
+	// locations with the same path, and each must count on its own.
+	for i, l := range h.Locations {
+		if l.Upstream != nil {
+			addUp("location "+strconv.Itoa(i)+" "+l.Path, *l.Upstream)
+		} else if l.UpstreamGroupRef != "" {
+			addGroup(l.UpstreamGroupRef)
+		}
+	}
+	spec.UpstreamPins = pins
 	key, ok := specKey(spec)
 	if !ok {
 		// Unhashable: a key no other build shares, so a reload closes the

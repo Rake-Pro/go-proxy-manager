@@ -889,7 +889,7 @@ func (t IngressHostTemplate) refErrors(cfg Config, owner string) []error {
 		Locations:            t.Locations,
 		TrustedProxies:       t.TrustedProxies,
 	}
-	if h.Upstream == (Upstream{}) && h.UpstreamGroupRef == "" {
+	if h.Upstream.Empty() && h.UpstreamGroupRef == "" {
 		// Docker derives the upstream per container.
 		h.Upstream = Upstream{Scheme: "http", Host: "192.0.2.1", Port: 80}
 	}
@@ -975,14 +975,14 @@ func (t IngressHostTemplate) validate(path string) error {
 // - is identical, and deliberately so: the two blocks take the same type and
 // must be held to the same standard.
 func (t IngressHostTemplate) validateWith(path string, requireUpstream bool) error {
-	if !requireUpstream && t.UpstreamGroupRef == "" && t.Upstream == (Upstream{}) {
+	if !requireUpstream && t.UpstreamGroupRef == "" && t.Upstream.Empty() {
 		// The upstream is derived per object; there is nothing to validate.
 	} else if t.UpstreamGroupRef == "" {
 		if err := t.Upstream.validate("upstream"); err != nil {
 			return fmt.Errorf("ingressDiscovery.%s.%w", path, err)
 		}
 	} else {
-		if t.Upstream != (Upstream{}) {
+		if !t.Upstream.Empty() {
 			return fmt.Errorf("ingressDiscovery.%s.upstream: upstream and upstreamGroupRef are mutually exclusive", path)
 		}
 		if err := ValidateName(t.UpstreamGroupRef); err != nil {

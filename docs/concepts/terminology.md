@@ -22,6 +22,7 @@ brackets where it differs.
 | **Admin panel** | The admin listener: REST API and web UI, default `:8081`. |
 | **Upstream** | The backend a proxy host or location forwards to: `{scheme, host, port}`. Prose sometimes says "backend" for the same thing; the schema field is always `upstream`. A stream host's equivalent field is `target`, which carries no scheme. |
 | **Upstream group** (`upstream-groups/`, UI: **Upstream Groups**) | An ordered set of interchangeable upstreams with health checks and a failover policy. |
+| **Pin**, **pinned certificate** (`upstream.tls.pinnedCertSHA256`, UI: **Pinned certificate SHA-256**) | The SHA-256 fingerprint of an `https` upstream's own certificate. With pins, a matching certificate is the whole trust decision: no chain, name or date check. See [ProxyHost](../reference/config/proxy-host.md#proxy-host-upstream-tls-pinned-cert-sha256). |
 | **Location** | A path prefix inside a proxy host with its own upstream and extra policy. Always at least as restrictive as its host. |
 | **Chain** | The ordered sequence of middlewares applied to one host or location. Fixed order, not the order you listed them: see [Request pipeline](request-pipeline.md). |
 | **Middleware** (`middlewares/`, UI: **Middleware**) | One reusable policy object in that chain: `auth`, `headers`, `guard`, `rate-limit`, `rewrite`, `bouncer` or `path-block`. |

@@ -115,7 +115,7 @@ func TestReconcileCreatesFromAnnotatedIngress(t *testing.T) {
 		t.Fatalf("domains = %v", h.Domains)
 	}
 	// Everything security-relevant comes from the template, never the Ingress.
-	if h.Upstream != (model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
+	if !h.Upstream.Equal(model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
 		t.Fatalf("upstream = %+v, want the template's ingress-controller address", h.Upstream)
 	}
 	if h.TLS.CertificateRef != "wildcard" {
@@ -1202,7 +1202,7 @@ func TestDerivedHostInheritsUpstreamGroup(t *testing.T) {
 	if h.UpstreamGroupRef != "cluster-nodes" {
 		t.Fatalf("upstreamGroupRef = %q, want the template's group", h.UpstreamGroupRef)
 	}
-	if h.Upstream != (model.Upstream{}) {
+	if !h.Upstream.Equal(model.Upstream{}) {
 		t.Fatalf("upstream = %+v, want empty when a group is named (they are mutually exclusive)", h.Upstream)
 	}
 	if err := h.Validate(); err != nil {
@@ -1272,7 +1272,7 @@ func TestReconcileWithoutProfileAnnotationUsesTheDefaultTemplate(t *testing.T) {
 		if strings.Join(h.Middlewares, ",") != "rate-limit" || strings.Join(h.AccessLists, ",") != "lan-vpn" {
 			t.Fatalf("%s got mw=%v al=%v, want the DEFAULT template's chain", h.Name, h.Middlewares, h.AccessLists)
 		}
-		if h.Upstream != (model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
+		if !h.Upstream.Equal(model.Upstream{Scheme: "http", Host: "10.0.0.40", Port: 80}) {
 			t.Fatalf("%s upstream = %+v, want the default template's", h.Name, h.Upstream)
 		}
 	}
@@ -1320,7 +1320,7 @@ func TestReconcileAppliesTheNamedProfileVerbatim(t *testing.T) {
 	if h.TLS != want.TLS {
 		t.Fatalf("tls = %+v, want the profile's %+v", h.TLS, want.TLS)
 	}
-	if h.UpstreamGroupRef != "cluster-nodes" || h.Upstream != (model.Upstream{}) {
+	if h.UpstreamGroupRef != "cluster-nodes" || !h.Upstream.Equal(model.Upstream{}) {
 		t.Fatalf("upstream = %+v / group = %q, want the profile's group and no single upstream", h.Upstream, h.UpstreamGroupRef)
 	}
 	//lint:ignore SA1019 compat read of deprecated ProxyHost.WebsocketsUpgrade in test fixture
@@ -2522,7 +2522,7 @@ func TestDeriveUsesCustomAnnotationPrefix(t *testing.T) {
 	if prof != "special" {
 		t.Fatalf("profile = %q, want the custom-prefix annotation to have been read (special)", prof)
 	}
-	if host.Upstream != (model.Upstream{Scheme: "http", Host: "h2", Port: 81}) {
+	if !host.Upstream.Equal(model.Upstream{Scheme: "http", Host: "h2", Port: 81}) {
 		t.Fatalf("upstream = %+v, want the \"special\" profile's (the default-prefix annotation must be ignored)", host.Upstream)
 	}
 	wantLabels := map[string]string{"acme.corp.internal/managed-by": model.ManagedByIngressDiscovery}

@@ -1466,6 +1466,26 @@ func (s Settings) Validate() error {
 	if err := s.IngressDiscovery.Validate(); err != nil {
 		return err
 	}
+	// Docker derives every host's upstream from its own container, so a
+	// template pin would be accepted and then never stamped: refused instead.
+	// Only the blocks dockerDiscovery defines itself are checked; profiles it
+	// inherits belong to ingressDiscovery, where pins are stamped.
+	if d := s.DockerDiscovery; d.Enabled {
+		pinned := func(path string, t IngressHostTemplate) error {
+			if t.Upstream.TLS.IsZero() {
+				return nil
+			}
+			return fmt.Errorf("dockerDiscovery.%s.upstream.tls.pinnedCertSHA256: certificate pins are not supported on Docker discovery templates (every container has its own address and certificate); pin the upstream on a hand-written proxy host instead", path)
+		}
+		if err := pinned("template", d.Template); err != nil {
+			return err
+		}
+		for _, name := range d.ProfileNames() {
+			if err := pinned("profiles."+name, d.Profiles[name]); err != nil {
+				return err
+			}
+		}
+	}
 	// Validated through the resolver, so the profile set it inherits from
 	// ingressDiscovery is held to the same standard as one it defines itself.
 	if err := s.DockerDiscoveryResolved().Validate(); err != nil {
