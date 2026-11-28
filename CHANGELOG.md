@@ -7,6 +7,24 @@ All notable changes to go-proxy-manager are documented here. The format follows
 
 ### Added
 
+- Certificate pinning for `https` upstreams: `upstream.tls.pinnedCertSHA256`
+  takes 1 to 4 SHA-256 fingerprints of the upstream's leaf certificate (the
+  `openssl x509 -fingerprint -sha256` form or plain hex, stored lower-case), so
+  an appliance with a built-in self-signed certificate (no subjectAltName, CN
+  not its address) can be proxied over HTTPS. With pins the connection is
+  accepted if and only if the presented certificate matches one, on every
+  handshake; chain, name and dates are not checked. Works on proxy hosts,
+  locations, upstream-group members (including their HTTP health probes) and
+  Kubernetes Ingress discovery templates; an enabled Docker discovery template
+  (or a profile `dockerDiscovery` defines itself) refuses it at validation,
+  since every container has its own address and certificate, and an inherited
+  pinned `ingressDiscovery` profile is accepted with a logged warning that its
+  pin does not apply to container-derived hosts. A pinned upstream gets
+  its own connection pool, kept across reloads while the pin is unchanged; a
+  reload that changes or removes a pin closes the open WebSocket tunnels of
+  every host that routes to that upstream. A mismatch is a `502` with a log line naming the host and
+  `presentedCertSHA256`. Upstreams without pins are unchanged. Editable in the
+  host and upstream-group editors.
 - Config warnings for `auth.requiredRoles` that does not do what it says
   (#65): an entry that is not a role (`admin`, `user`), typically a group
   name; `requiredRoles` on an `oidc` or `forward-auth` gate whose provider

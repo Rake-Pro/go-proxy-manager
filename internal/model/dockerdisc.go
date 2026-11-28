@@ -170,6 +170,27 @@ func (s Settings) DockerDiscoveryResolved() DockerDiscoverySettings {
 	return d
 }
 
+// DockerInheritedPinWarnings names each ingressDiscovery profile that enabled
+// Docker discovery inherits whose upstream carries certificate pins. A host
+// derived from a container takes the container's address as its upstream, so
+// the pin does not apply to it (template locations keep their upstreams, pins
+// included, and are not reported). Advice for the log, not an error: the
+// profile is still right for the Ingress hosts it stamps.
+func (s Settings) DockerInheritedPinWarnings() []string {
+	if !s.DockerDiscovery.Enabled || len(s.DockerDiscovery.Profiles) > 0 {
+		return nil
+	}
+	var out []string
+	for _, name := range s.IngressDiscovery.ProfileNames() {
+		if !s.IngressDiscovery.Profiles[name].Upstream.TLS.IsZero() {
+			out = append(out, fmt.Sprintf("dockerDiscovery inherits ingressDiscovery profile %q, whose upstream.tls.pinnedCertSHA256 does not apply to hosts derived from containers: "+
+				"they take the container's address as their upstream and use normal certificate verification; "+
+				"define dockerDiscovery.profiles to stop inheriting, or pin the upstream on a hand-written proxy host", name))
+		}
+	}
+	return out
+}
+
 // Prefix returns the resolved annotation/label prefix, or the default when the
 // block was not resolved through Settings.DockerDiscoveryResolved.
 func (d DockerDiscoverySettings) Prefix() string {

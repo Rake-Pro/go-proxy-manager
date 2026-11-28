@@ -3188,10 +3188,16 @@ function rateFoldSummary(rl) {
 }
 
 // ---------- upstream escape hatches ----------
-// upstream.path and upstream.hostHeader, rendered wherever a scheme/host/port
-// group is. Both are optional and omitempty: the key is dropped entirely when
-// unset, so a host that never used them round-trips byte-identically.
-function upstreamExtraHtml(p, up) {
+// upstream.path, upstream.hostHeader and upstream.tls.pinnedCertSHA256,
+// rendered wherever a scheme/host/port group is. All are optional and
+// omitempty: the key is dropped entirely when unset, so a host that never used
+// them round-trips byte-identically. pinPath is the model path the pin field
+// answers to in a server error ("upstream.tls.pinnedCertSHA256" on a host),
+// or '' where errors carry no path of their own.
+function upstreamPins(up) {
+  return arr(((up || {}).tls || {}).pinnedCertSHA256);
+}
+function upstreamExtraHtml(p, up, pinPath) {
   up = up || {};
   const hh = up.hostHeader || '';
   const preset = (hh === '' || hh === 'upstream') ? hh : 'custom';
@@ -3208,6 +3214,10 @@ function upstreamExtraHtml(p, up) {
       <div class="field-group" id="${p}-uphh-custom-wrap"${preset === 'custom' ? '' : ' hidden'}><label>Custom Host header</label>
         <input class="field mono" id="${p}-uphh-custom" data-hint="proxyHost.upstream.hostHeaderCustom" value="${esc(preset === 'custom' ? hh : '')}" placeholder="app.internal.example.com" />
       </div>
+    </div>
+    <div class="field-group"><label>Pinned certificate SHA-256</label>
+      <textarea class="field mono" id="${p}-uppins" data-hint="proxyHost.upstream.tls.pinnedCertSHA256"${pinPath ? ` data-path="${esc(pinPath)}"` : ''} rows="2" spellcheck="false" placeholder="AB:CD:...:EF (one per line, or comma separated)">${esc(upstreamPins(up).join('\n'))}</textarea>
+      <div class="hint" id="${p}-uppins-hint"></div>
     </div>`;
 }
 const HOSTHEADER_HINTS = {
@@ -3215,20 +3225,36 @@ const HOSTHEADER_HINTS = {
   'upstream': 'The upstream sees its own address (host:port). Use it for an app that keys its virtual host off its own address.',
   'custom': 'The upstream sees exactly this hostname. Must be a hostname, optionally with a port.',
 };
-function wireUpstreamExtra(p) {
+// schemeSel is the scheme <select> of the same upstream: pins only apply to
+// https, so the field is greyed out (and not sent) for http. orig is the loaded
+// upstream, whose other tls keys (none exist yet) ride through untouched.
+function wireUpstreamExtra(p, schemeSel, orig) {
   const sel = $('#' + p + '-uphh');
   if (!sel) return { get() { return {}; } };
+  const pins = $('#' + p + '-uppins');
+  const origTls = Object.assign({}, (orig || {}).tls);
   function sync() {
     $('#' + p + '-uphh-hint').textContent = HOSTHEADER_HINTS[sel.value] || '';
     const custom = sel.value === 'custom';
     $('#' + p + '-uphh-custom-wrap').hidden = !custom;
     if (!custom) $('#' + p + '-uphh-custom').value = '';
   }
+  function syncPins() {
+    const https = !schemeSel || schemeSel.value === 'https';
+    pins.disabled = !https;
+    $('#' + p + '-uppins-hint').textContent = https
+      ? 'Trust exactly these certificates instead of verifying the chain and name. Read it with openssl x509 -noout -fingerprint -sha256. Two pins let you rotate a certificate.'
+      : 'Only used with https. Pins are not sent while the scheme is http.';
+  }
   sel.addEventListener('change', sync);
+  if (schemeSel) { schemeSel.addEventListener('change', syncPins); schemeSel.addEventListener('schemesync', syncPins); }
   sync();
+  syncPins();
   return {
-    // Returns {path?, hostHeader?} to merge onto an upstream object, or null
-    // after toasting the first problem.
+    // Returns {path?, hostHeader?, tls?} to merge onto an upstream object, or
+    // null after toasting the first problem. The pins are sent as typed: the
+    // server normalizes them and its validation message is what the operator
+    // sees for a malformed one.
     get(label) {
       const where = label ? label + ': ' : '';
       const out = {};
@@ -3243,6 +3269,11 @@ function wireUpstreamExtra(p) {
         if (v.length > 253 || !HOSTHEADER_RE.test(v)) { showInvalid('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".', $('#' + p + '-uphh-custom')); return null; }
         out.hostHeader = v;
       }
+      const tls = Object.assign({}, origTls);
+      delete tls.pinnedCertSHA256;
+      const list = pins.value.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+      if (!pins.disabled && list.length) tls.pinnedCertSHA256 = list;
+      if (Object.keys(tls).length) out.tls = tls;
       return out;
     },
   };
@@ -6102,7 +6133,7 @@ ${panel('routing', `        ${identityCard('f', h, {
               <input class="field mono" id="f-upport" data-hint="proxyHost.upstream.port" data-path="upstream.port" type="number" value="${esc(up.port != null ? up.port : '')}" placeholder="3000" />
             </div>
           </div>
-          ${upstreamExtraHtml('f', up)}
+          ${upstreamExtraHtml('f', up, 'upstream.tls.pinnedCertSHA256')}
         </div>
 
         ${foldHtml('f-locs-card', 'Locations', locSummary, locCount > 0, `
@@ -6358,7 +6389,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   // The two inline blocks. Their folds own the whole key: off omits it.
   const hostAuthCtl = wireAuthBlock('f-auth', h.auth, idps);
   const hostRlCtl = wireRateLimitBlock('f-rl', h.rateLimit);
-  const hostUpExtra = wireUpstreamExtra('f');
+  const hostUpExtra = wireUpstreamExtra('f', $('#f-scheme'), up);
   wireInlineFold('f-auth');
   wireInlineFold('f-rl');
   const syncInlineOrderHint = () => {
@@ -6475,7 +6506,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         ${switchHtml(p + '-strip', !!loc.stripPrefix, 'Strip prefix', 'proxyHost.locations.stripPrefix')}
       </div>
       <div class="hint loc-strip-preview" hidden></div>
-      ${upstreamExtraHtml(p, lu)}
+      ${upstreamExtraHtml(p, lu, '')}
       <div class="inline-fields">
         <div class="field-group"><label>Middlewares</label>
           <select multiple class="field mono loc-mw" data-hint="proxyHost.locations.middlewares" size="4" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
@@ -6493,7 +6524,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
 
     const ctl = {
       div, p, _orig: loc,
-      up: wireUpstreamExtra(p),
+      up: wireUpstreamExtra(p, div.querySelector('.loc-scheme'), lu),
       auth: wireAuthBlock(p + '-auth', loc.auth, idps),
       rl: wireRateLimitBlock(p + '-rl', loc.rateLimit),
     };
@@ -6545,7 +6576,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   arr(h.locations).forEach(locRow);
   $('#addLoc').addEventListener('click', () => locRow({}));
   $('#f-scheme').addEventListener('change', () => {
-    $$('#f-locs .loc-scheme[data-follow]').forEach((s) => { s.value = $('#f-scheme').value; });
+    // 'schemesync', not 'change': a change would end the following.
+    $$('#f-locs .loc-scheme[data-follow]').forEach((s) => { s.value = $('#f-scheme').value; s.dispatchEvent(new Event('schemesync')); });
   });
 
   // HSTS show/hide
@@ -6685,14 +6717,14 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       const portVal = parseInt($('#f-upport').value, 10);
       if (!$('#f-uphost').value.trim() || isNaN(portVal)) { showInvalid('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.', $('#f-uphost').value.trim() ? $('#f-upport') : $('#f-uphost')); return; }
       // MERGED over the stored upstream, never rebuilt from the three inputs:
-      // Upstream also carries path and hostHeader, and a rebuild dropped both on
-      // every save (silently undoing a git-authored escape hatch). The two
+      // Upstream also carries path, hostHeader and tls, and a rebuild dropped
+      // them on every save (silently undoing a git-authored escape hatch). The
       // fields this form renders are then set explicitly, including their
       // absence, so clearing one in the UI actually clears it.
       const upObj = Object.assign({}, up, { scheme: $('#f-scheme').value, host: $('#f-uphost').value.trim(), port: portVal });
       const extra = hostUpExtra.get();
       if (!extra) return;
-      delete upObj.path; delete upObj.hostHeader;
+      delete upObj.path; delete upObj.hostHeader; delete upObj.tls;
       Object.assign(upObj, extra);
       obj.upstream = upObj;
     }
@@ -6915,11 +6947,11 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
           continue;
         }
         // Merged over the stored upstream for the same reason as the host's:
-        // path and hostHeader have to survive a save that does not touch them.
+        // path, hostHeader and tls have to survive a save that does not touch them.
         const lup = Object.assign({}, origUp, { scheme: ls, host: lh, port: lp });
         const lextra = ctl.up.get('location ' + path);
         if (!lextra) { locAborted = true; break; }
-        delete lup.path; delete lup.hostHeader;
+        delete lup.path; delete lup.hostHeader; delete lup.tls;
         Object.assign(lup, lextra);
         loc.upstream = lup;
       }
@@ -9955,8 +9987,8 @@ function filenameFromDisposition(cd) {
 }
 
 // ---------- UPSTREAM GROUP EDITOR ----------
-function upExtraSummary(path, hostHeader) {
-  const parts = [path ? 'base path ' + path : '', hostHeader ? 'Host ' + hostHeader : ''].filter(Boolean);
+function upExtraSummary(path, hostHeader, pinCount) {
+  const parts = [path ? 'base path ' + path : '', hostHeader ? 'Host ' + hostHeader : '', pinCount ? plural(pinCount, 'pinned certificate', 'pinned certificates') : ''].filter(Boolean);
   return 'Advanced' + (parts.length ? ' - ' + parts.join(', ') : '');
 }
 async function upstreamGroupEditor(c, name) {
@@ -10034,7 +10066,7 @@ async function upstreamGroupEditor(c, name) {
     // The two escape hatches are behind a disclosure so a plain member row stays
     // one line - opened automatically when either already holds a value, so a
     // configured field is never hidden from someone scanning the page.
-    const hasExtra = !!(u.path || u.hostHeader);
+    const hasExtra = !!(u.path || u.hostHeader || upstreamPins(u).length);
     div.innerHTML = `
       <div class="loc-row">
         <select class="field mono up-scheme" data-hint="upstreamGroup.upstreams.scheme" style="flex:0 0 90px" aria-label="Upstream scheme"><option value="http"${u.scheme === 'https' ? '' : ' selected'}>http</option><option value="https"${u.scheme === 'https' ? ' selected' : ''}>https</option></select>
@@ -10044,15 +10076,17 @@ async function upstreamGroupEditor(c, name) {
         ${u.host ? healthChip(u) : ''}
         <button class="icon-btn up-del" type="button" aria-label="Remove upstream">${ICON.x}</button>
       </div>
-      <details class="fold sub-fold" id="${p}-adv"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">${esc(upExtraSummary(u.path, u.hostHeader))}</span></summary>
-        ${upstreamExtraHtml(p, u)}
+      <details class="fold sub-fold" id="${p}-adv"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">${esc(upExtraSummary(u.path, u.hostHeader, upstreamPins(u).length))}</span></summary>
+        ${upstreamExtraHtml(p, u, 'upstreams.tls.pinnedCertSHA256')}
       </details>`;
     upsWrap.appendChild(div);
-    const ctl = { div, _orig: u, extra: wireUpstreamExtra(p) };
+    const ctl = { div, _orig: u, extra: wireUpstreamExtra(p, div.querySelector('.up-scheme'), u) };
     upCtls.push(ctl);
     advSums[p + '-adv'] = () => {
       const hh = $('#' + p + '-uphh').value;
-      return upExtraSummary($('#' + p + '-uppath').value.trim(), hh === 'custom' ? $('#' + p + '-uphh-custom').value.trim() : hh);
+      const pinsEl = $('#' + p + '-uppins');
+      const pinCount = pinsEl.disabled ? 0 : pinsEl.value.split(/[\s,]+/).filter(Boolean).length;
+      return upExtraSummary($('#' + p + '-uppath').value.trim(), hh === 'custom' ? $('#' + p + '-uphh-custom').value.trim() : hh, pinCount);
     };
     div.querySelector('.up-del').addEventListener('click', () => {
       div.remove();
@@ -10078,13 +10112,13 @@ async function upstreamGroupEditor(c, name) {
       // A half-filled member is marked on its own row, like a location row.
       if (!host || isNaN(port)) { markRowError(row, host ? 'This upstream needs a port.' : 'This upstream needs a host.'); bad = row.querySelector(host ? '.up-port' : '.up-host'); break; }
       // Merged over the stored member for the same reason as the host editor's
-      // upstream: path and hostHeader must survive a save that does not touch them.
+      // upstream: path, hostHeader and tls must survive a save that does not touch them.
       const up = Object.assign({}, ctl._orig, { scheme: row.querySelector('.up-scheme').value, host, port });
       const weight = parseInt(row.querySelector('.up-weight').value, 10);
       if (!isNaN(weight) && weight > 0) up.weight = weight; else delete up.weight;
       const extra = ctl.extra.get(host + ':' + port);
       if (!extra) { aborted = true; break; }
-      delete up.path; delete up.hostHeader;
+      delete up.path; delete up.hostHeader; delete up.tls;
       Object.assign(up, extra);
       ups.push(up);
     }

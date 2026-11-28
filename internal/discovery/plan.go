@@ -704,7 +704,7 @@ func Plan(cfg model.Config, own Ownership, items []Item) Result {
 				// chain comparison leaves out: a stored one may belong to another
 				// container by now, and nothing else rewrites it while the conflict
 				// lasts.
-				upstreamStale := !templateUpstream && (cur.Upstream != want.Upstream || cur.UpstreamGroupRef != want.UpstreamGroupRef)
+				upstreamStale := !templateUpstream && (!cur.Upstream.Equal(want.Upstream) || cur.UpstreamGroupRef != want.UpstreamGroupRef)
 				chainStale := chain
 				chain = chain || upstreamStale
 				if chain || domain {

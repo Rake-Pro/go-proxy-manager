@@ -99,6 +99,10 @@
     "text": "The exact hostname to send as the Host header. A hostname, optionally with a port.",
     "doc": "reference/config/proxy-host.md#proxy-host-upstream-host-header"
   },
+  "proxyHost.upstream.tls.pinnedCertSHA256": {
+    "text": "SHA-256 fingerprints of the upstream's own certificate (https only). With a pin, gpm accepts the connection only when the certificate matches one of them, and checks nothing else: no chain, no name, no dates. For appliances with a built-in self-signed certificate.",
+    "doc": "reference/config/proxy-host.md#proxy-host-upstream-tls-pinned-cert-sha256"
+  },
   "proxyHost.robotsNoIndex": {
     "text": "Sends X-Robots-Tag: noindex, nofollow on every response, asking search engines not to index this host.",
     "doc": "reference/config/proxy-host.md#proxy-host-robots-no-index"

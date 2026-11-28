@@ -106,8 +106,9 @@ func (p *bufferPool) Put(b []byte) {
 // newReverseProxy builds the terminal reverse-proxy handler for an upstream.
 // WebSocket upgrades are carried transparently by httputil.ReverseProxy when the
 // request advertises them (the per-host toggle gates whether Upgrade is offered).
-// transport is the host's RoundTripper from transportFor (nil means the shared
-// pooled transport). ep is the host's compiled errorPages override (nil if it
+// transport is the upstream's RoundTripper from registry.upstreamTransport
+// (transportFor, or the pinned transport of an upstream with
+// tls.pinnedCertSHA256; nil means the shared pooled transport). ep is the host's compiled errorPages override (nil if it
 // has none); it drives
 // the custom page for a 502/504 upstream-unreachable response and, when
 // configured, InterceptUpstream replacement of the upstream's own error body.
@@ -137,10 +138,12 @@ func newReverseProxy(up model.Upstream, hostName string, transport http.RoundTri
 // A member's own upstream.path / upstream.hostHeader are applied per attempt by
 // the groupTransport (which is the only layer that knows which candidate a
 // request actually went to), not here.
-func newGroupReverseProxy(gh *groupHealth, hostName string, transport http.RoundTripper, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
+// members maps each pinned member to its own pinned transport (nil when no
+// member is pinned); every other member rides transport.
+func newGroupReverseProxy(gh *groupHealth, hostName string, transport http.RoundTripper, members map[*upstreamHealth]http.RoundTripper, identityHeaders []string, ep *compiledErrorPages, strip []string) http.Handler {
 	first := gh.ups[0]
 	target := &url.URL{Scheme: first.up.Scheme, Host: first.addr}
-	return newProxyWith(target, &groupTransport{gh: gh, base: transport}, hostName, identityHeaders, ep, strip, "")
+	return newProxyWith(target, &groupTransport{gh: gh, base: transport, members: members}, hostName, identityHeaders, ep, strip, "")
 }
 
 // reassertIdentity re-applies the identity headers gpm itself set on the inbound
@@ -304,7 +307,13 @@ func newProxyWith(target *url.URL, transport http.RoundTripper, hostName string,
 			reassertIdentity(pr, identityHeaders)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Warn().Str("host", hostName).Str("path", logPath(r.URL.Path)).Err(err).Msg("upstream error")
+			ev := log.Warn().Str("host", hostName).Str("path", logPath(r.URL.Path)).Err(err)
+			if fp, ok := pinMismatch(err); ok {
+				// A pinned upstream presented a certificate whose fingerprint is not
+				// pinned: name it, so the operator can compare it with the config.
+				ev = ev.Str("presentedCertSHA256", fp)
+			}
+			ev.Msg("upstream error")
 			if mh := metricsHook(); mh != nil {
 				mh.UpstreamError(hostName)
 			}

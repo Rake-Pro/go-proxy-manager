@@ -14,7 +14,7 @@ the subsystem is inert and never opens the socket.
 It is the same machinery as
 [`ingressDiscovery`](ingress-discovery.md) with a
 different source: the same `template` shape, the same profiles, the same
-ownership rules, the same freeze-on-unreadable behaviour. Only the four
+ownership rules, the same freeze-on-unreadable behaviour. Only the five
 Docker-specific items below differ. Design note:
 [Design: Docker container discovery](https://github.com/Rake-Pro/go-proxy-manager/blob/main/design/docker-discovery.md).
 
@@ -22,7 +22,24 @@ Docker-specific items below differ. Design note:
   (default `gpm.rake.pro`); there is no second prefix knob.
 - **Same profiles.** `dockerDiscovery.profiles` empty means
   `ingressDiscovery.profiles`; a profile's `upstream`/`upstreamGroupRef` is
-  ignored here because the upstream is the container's own address.
+  ignored here because the upstream is the container's own address. A template
+  location's own `upstream`, pins included, is stamped.
+- **No upstream certificate pins.** Every container has its own address and
+  certificate, so one template-wide pin has no meaning; pin the upstream on a
+  hand-written proxy host instead.
+    - `upstream.tls.pinnedCertSHA256` on `dockerDiscovery.template` or on a
+      profile defined under `dockerDiscovery.profiles` is refused when
+      `dockerDiscovery.enabled` is `true`. A disabled block may hold it;
+      enabling the block re-validates it and refuses the write.
+    - An inherited `ingressDiscovery` profile keeps its pins for
+      Ingress-derived hosts and is accepted. A host derived from a container
+      that selects it takes the container's address and uses normal
+      certificate verification, without the pin.
+    - For each such inherited pinned profile the reconciler logs one warning,
+      `docker discovery: dockerDiscovery inherits ingressDiscovery profile
+      "<name>", whose upstream.tls.pinnedCertSHA256 does not apply to hosts
+      derived from containers ...`, once each time the set of warnings
+      changes rather than per poll.
 - **Different ownership value.** Derived hosts carry
   `gpm.rake.pro/managed-by: docker-discovery`, so the two reconcilers can run
   side by side and neither can update or delete the other's hosts.
@@ -46,7 +63,7 @@ Docker-specific items below differ. Design note:
 | <span id="settings-docker-discovery-include-stopped"></span> `includeStopped` | bool | `false` | no | List non-running containers too. A stopped container has no address, so its host is skipped and frozen rather than derived. |
 | <span id="settings-docker-discovery-poll-interval"></span> `pollInterval` | duration | `1m` | no | Fallback loop interval, minimum `15s`. Events drive the normal case. |
 | <span id="settings-docker-discovery-allowed-domain-suffixes"></span> `allowedDomainSuffixes` | []string | none | **yes** | Bounds every hostname a label can publish. A derived domain must equal one of these or end in `.` + one of them. |
-| <span id="settings-docker-discovery-template"></span> `template` | IngressHostTemplate | none | **yes** | The default chain every derived host takes. Same shape and validation as `ingressDiscovery.template`, except `upstream`/`upstreamGroupRef`, which are derived per container. |
+| <span id="settings-docker-discovery-template"></span> `template` | IngressHostTemplate | none | **yes** | The default chain every derived host takes. Same shape and validation as `ingressDiscovery.template`, except `upstream`/`upstreamGroupRef`, which are derived per container; `upstream.tls.pinnedCertSHA256` is refused while the block is enabled (see above). |
 | <span id="settings-docker-discovery-profiles"></span> `profiles` | map[string]IngressHostTemplate | `ingressDiscovery.profiles` | no | Named chains a container may select by name. Empty inherits the Ingress block's set. `template` is reserved. |
 
 **`template` and every `profiles` entry carry the full ProxyHost shapes.** The

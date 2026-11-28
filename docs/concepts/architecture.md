@@ -604,7 +604,36 @@ live, the idle connections of every pool only the replaced router owned are
 closed (`CloseIdleConnections`), which leaves in-flight requests and upgraded
 connections running. A connection handed back by a request still finishing on
 the old router is closed on return, or reaped by the pool's 90 s idle timeout
-if another such request reused the pool meanwhile.
+if another such request reused the pool meanwhile. A pinned upstream's
+transport (below) is the exception to "per router": it is kept across reloads
+while its spec is unchanged, so its pool survives like the shared one.
+
+**Upstream certificate pins** (`internal/dataplane/upstreampin.go`). An `https`
+upstream with `tls.pinnedCertSHA256` is trusted by the SHA-256 of the leaf
+certificate it presents, and by nothing else.
+
+- **Check:** `tls.Config.VerifyConnection` compares the full digest with every pin
+  on every handshake, a resumed session included; `InsecureSkipVerify` is set only
+  on that config (a test fails on any other use), so chain, name and dates are not
+  evaluated. Versions, ALPN / HTTP/2 and SNI are unchanged.
+- **Pools:** each distinct (host timeouts, pin set) gets its own clone of the
+  shared transport, so a pinned connection never serves an unpinned or differently
+  pinned upstream at the same address, and the reverse. Unpinned upstreams keep
+  the shared transport (or their timeout clone) exactly as before.
+- **Lifetime:** the transports live in the server's reload-surviving chain state,
+  held weakly and keyed by that spec, like rate limiters: an unchanged pin keeps
+  its pool, a removed or changed one has its idle connections closed at the
+  router swap. Their number is bounded by the distinct pin sets in the config.
+- **Open tunnels:** the pin set of every upstream a host routes to (its own,
+  a location's own, each member of a group it uses) is part of the host's chain
+  key, so a reload that adds, removes or replaces a pin closes the WebSocket and
+  other upgraded tunnels open through that host; an unchanged pin set keeps them.
+- **Every dial path:** single upstream, location upstream, each upstream-group
+  member (its own pin on every failover attempt), timeout overrides, WebSocket
+  upgrades, and a group's HTTP health probe of a pinned member.
+- **Failure:** a mismatch is a `tls.CertificateVerificationError`, so it is a
+  `502` through the host's error page, a connect-phase failure for group retry
+  and passive health, and a log line carrying `presentedCertSHA256`.
 
 **Inbound PROXY protocol** (`internal/dataplane/proxyproto.go`). When
 `settings.proxyProtocol` is on, every data-plane listener (HTTP, HTTPS, and each
@@ -680,7 +709,8 @@ disturbs nothing). Per request, a failover-aware transport orders the healthy
 upstreams by the group's policy (`failover` (list order), `round-robin`
 (smooth weighted), `least-connections` (in-flight/weight), `ip-hash`
 (rendezvous)), optionally honors a signed sticky-session cookie with a
-server-enforced TTL, and retries the next candidate **only on connect-phase
+server-enforced TTL, sends each attempt over the member's own transport (its
+certificate pin, if any), and retries the next candidate **only on connect-phase
 errors** (dial/TLS: the request was never transmitted, so non-idempotent
 requests cannot double-apply; request bodies up to 1 MiB are buffered to make
 the replay possible). With every upstream down the group fails open and attempts

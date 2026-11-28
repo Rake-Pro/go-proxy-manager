@@ -55,7 +55,7 @@ applied verbatim to each derived host:
 
 | Template key | Shape | Sub-keys documented at |
 |---|---|---|
-| `template.upstream` | `Upstream` | [ProxyHost: Upstream](../proxy-host.md#proxy-host-upstream): `scheme`, `host`, `port`, `path`, `hostHeader` |
+| `template.upstream` | `Upstream` | [ProxyHost: Upstream](../proxy-host.md#proxy-host-upstream): `scheme`, `host`, `port`, `path`, `hostHeader`, `tls.pinnedCertSHA256` |
 | `template.tls` | `TLSSettings` | [ProxyHost: `tls`](../proxy-host.md#proxy-host-tls): `certificateRef`, `forceSSL`, `minTLSVersion`, `hsts.*`, `clientAuth.*` |
 | `template.tls.hsts` | `HSTS` | [ProxyHost: `tls.hsts`](../proxy-host.md#proxy-host-tls): `enabled`, `maxAge`, `includeSubdomains`, `preload` |
 | `template.tls.clientAuth` | `ClientAuth` | [ProxyHost: `tls.clientAuth`](../proxy-host.md#proxy-host-tls): `caRef`, `mode`, `identityHeaders.*` |
@@ -430,7 +430,10 @@ once, at the edge, and the edge->LB hop is a trusted LAN path). With
 `scheme: https` the Go transport derives SNI and certificate verification from the
 **upstream host**, not from the forwarded `Host`, so an https upstream must name a
 hostname the controller's certificate actually covers; pointing it at a bare IP
-will fail verification.
+will fail verification. A controller with a self-signed default certificate can
+instead be trusted by pin with
+[`template.upstream.tls.pinnedCertSHA256`](../proxy-host.md#proxy-host-upstream-tls-pinned-cert-sha256),
+which every derived host carries.
 
 **Derived objects.** Each opted-in Ingress produces one proxy host named
 `ing-<ingressName>.<namespace>` (e.g. `ing-grafana.monitoring`), carrying
