@@ -777,12 +777,13 @@ func (e *rateLimitExemptList) walk(ip net.IP) (exempt bool, compared int) {
 }
 
 // rateLimitExemption returns the "@<name>" exemption of this build, or nil
-// when the registry has no such list (it then exempts nobody). It runs while
-// the build's handlers are constructed, never per request: the first call for
-// a name compiles the list, later calls of the same build share it.
+// when the registry has no such list or the list is disabled (it then exempts
+// nobody). It runs while the build's handlers are constructed, never per
+// request: the first call for a name compiles the list, later calls of the same
+// build share it.
 func (reg *registry) rateLimitExemption(name string) func(net.IP) bool {
 	al, ok := reg.accessLists[name]
-	if !ok {
+	if !ok || al.Disabled {
 		return nil
 	}
 	reg.rateLimitExemptMu.Lock()

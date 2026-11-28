@@ -203,7 +203,8 @@ path; `stripPrefix` then removes that matched prefix; the rewrite middleware
 then applies its rules; and the upstream's base `path` is prefixed last, riding
 on the reverse proxy's target URL for a single upstream and applied per attempt
 by the failover transport for an upstream group (so each group member can carry
-its own base path and Host header). Every stage is wrapped innermost, so
+its own base path and Host header, and is dialled with its own certificate pin,
+if any; see [Data plane](architecture.md#data-plane)). Every stage is wrapped innermost, so
 rate-limit, access-list, bouncer, auth and guard all evaluate the ORIGINAL
 client path and no composition step can carry a request past a path-scoped
 security control. `RawQuery` is never touched, and none of it is ever an HTTP

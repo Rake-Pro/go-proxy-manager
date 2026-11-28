@@ -60,6 +60,7 @@ nav:
   - How-to:
       - Hosts and certificates:
           - Add an HTTPS host: how-to/add-https-host.md
+          - Upstream with a self-signed certificate: how-to/proxy-self-signed-upstream.md
           - Wildcard over DNS-01 (Cloudflare): how-to/dns-01-cloudflare.md
           - DNS-01 for any nameserver: how-to/generic-dns01-rfc2136-acme-dns.md
           - Certificates from a private step-ca: how-to/step-ca.md

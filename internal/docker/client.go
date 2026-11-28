@@ -240,13 +240,28 @@ func clientTLS(cfg ClientConfig) (*tls.Config, error) {
 	return out, nil
 }
 
-func refuseLinkLocal(_, address string, _ syscall.RawConn) error {
+func refuseLinkLocal(network, address string, _ syscall.RawConn) error {
+	if strings.HasPrefix(network, "unix") {
+		return nil // a socket path, not a network address
+	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address
+	} else if host == "" {
+		return nil // ":port": net dials the local system
 	}
-	if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) { // netip keeps a %zone, which net.ParseIP rejects and so would let through
-		return fmt.Errorf("docker: link-local destination %s refused", ip)
+	// Control sees the resolved destination, an IP literal. A zone is dropped
+	// before parsing, since netip refuses one on an IPv4 address and an
+	// IPv4-mapped literal with a zone arrives as "169.254.169.254%eth0". What
+	// still does not parse is refused: the guard never lets through an address
+	// it cannot read.
+	bare, _, _ := strings.Cut(host, "%")
+	ip, err := netip.ParseAddr(bare)
+	if err != nil {
+		return fmt.Errorf("docker: destination %q is not an IP address; refused", host)
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Errorf("docker: link-local destination %s refused", host)
 	}
 	return nil
 }

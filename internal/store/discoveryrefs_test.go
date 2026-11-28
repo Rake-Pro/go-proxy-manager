@@ -100,6 +100,18 @@ func TestObjectWritesKeepDiscoveryRefsResolvable(t *testing.T) {
 		}, func(cfg model.Config) model.Config {
 			return withoutObject(&cfg, "Certificate", "wildcard")
 		}, true},
+		{"apply batch deletes a list a template names", func(st *Store, _ string) error {
+			_, err := st.ApplyBatch(ctx, nil, []ObjectRef{{Kind: "AccessList", Name: "vpn"}}, "batch", author, nil)
+			return err
+		}, func(cfg model.Config) model.Config {
+			return withoutObject(&cfg, "AccessList", "vpn")
+		}, false},
+		{"apply batch makes a list unusable in any mode", func(st *Store, _ string) error {
+			_, err := st.ApplyBatch(ctx, []model.Object{list("lan", model.ActionAllow)}, nil, "batch", author, nil)
+			return err
+		}, func(cfg model.Config) model.Config {
+			return withObject(&cfg, list("lan", model.ActionAllow))
+		}, false},
 		{"revert one object", func(st *Store, old string) error {
 			_, err := st.RevertObject(ctx, "AccessList", "lan", old, author)
 			return err
@@ -161,6 +173,9 @@ func TestObjectWritesKeepDiscoveryRefsResolvable(t *testing.T) {
 		}
 		if _, err := st.Save(ctx, sampleHost("app"), author); err != nil {
 			t.Fatalf("an unrelated write on an already failing config must go through: %v", err)
+		}
+		if _, err := st.ApplyBatch(ctx, []model.Object{sampleHost("app2")}, nil, "batch", author, nil); err != nil {
+			t.Fatalf("an unrelated batch on an already failing config must go through: %v", err)
 		}
 
 		if _, err := st.Save(ctx, list("lan", ""), author); err != nil {

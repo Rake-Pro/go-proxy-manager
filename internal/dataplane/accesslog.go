@@ -254,10 +254,15 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		// capture, log line, and slow-warn decision below must agree.
 		accessLog := s.accessLog.Load()
 
+		// Active is read once: the collector can be switched on between two
+		// reads, and the host label, the note and the event below must agree.
+		sink := analyticsSink()
+		active := sink != nil && sink.Active()
+
 		// The matched proxy host, resolved once: the debug headers and the metric
 		// labels want the same answer, and lookup is a map hit.
 		hostName := ""
-		if s.debugHeaders || mh != nil || analyticsActive() {
+		if s.debugHeaders || mh != nil || active {
 			if rt := s.current(); rt != nil {
 				if hh, ok := rt.lookup(r.Host); ok {
 					hostName = hh.host
@@ -294,12 +299,8 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		// while a collector or the access log is switched on. The tiers write the
 		// denial reason and signature into it; the analytics event and the log
 		// entry below are built after the handler returns.
-		sink := analyticsSink()
 		var meta *reqMeta
 		var origPath, origQuery string
-		// Active is read once: the collector can be switched on between two
-		// reads, and the event below needs the note this decision allocates.
-		active := sink != nil && sink.Active()
 		if accessLog || active {
 			meta = &reqMeta{}
 			r = withReqMeta(r, meta)

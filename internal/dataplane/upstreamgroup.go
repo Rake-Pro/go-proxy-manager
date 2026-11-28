@@ -77,6 +77,9 @@ type upstreamHealth struct {
 	label  string // scheme://host:port for logs/status
 	group  string // owning UpstreamGroup name, for the notify hook
 	weight int    // effective weight (>= 1)
+	// probe is the health-probe client of a pinned member (see
+	// newPinnedProbeClient); nil uses probeHTTPClient.
+	probe *http.Client
 
 	healthy atomic.Bool
 	// active counts in-flight requests currently held by this upstream
@@ -352,6 +355,9 @@ func newGroupHealth(g model.UpstreamGroup) *groupHealth {
 			rise:   g.HealthCheck.RiseCount(),
 			fall:   g.HealthCheck.FallCount(),
 		}
+		if !up.TLS.IsZero() {
+			u.probe = newPinnedProbeClient(up.TLS)
+		}
 		u.healthy.Store(true) // start optimistic so boot never drops traffic pre-probe
 		gh.ups = append(gh.ups, u)
 		gh.byLabel[u.label] = u
@@ -386,7 +392,12 @@ func (g *groupHealth) probeLoop() {
 // probeHTTPClient issues health-check requests. Redirects are not followed (a
 // redirect is a response, which already proves the entry point is alive) and
 // connections are not pooled - each probe exercises a fresh connect, which is
-// exactly the signal failover needs.
+// exactly the signal failover needs. An https probe verifies the member's
+// certificate against the system roots with the usual name check, like the
+// proxied traffic of an unpinned member; a pinned member probes with its own
+// client instead (upstreamHealth.probe), carrying the same pin check as its
+// traffic. The plain TCP probe (no healthCheck.path) opens no TLS session at
+// all, so it checks neither.
 var probeHTTPClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	Transport: &http.Transport{
@@ -417,7 +428,11 @@ func probeUpstream(u *upstreamHealth, path string, timeout time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := probeHTTPClient.Do(req)
+	client := probeHTTPClient
+	if u.probe != nil {
+		client = u.probe
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -441,6 +456,9 @@ func probeUpstream(u *upstreamHealth, path string, timeout time.Duration) bool {
 type groupTransport struct {
 	gh   *groupHealth
 	base http.RoundTripper
+	// members holds the pinned transport of each pinned member; an attempt at
+	// any other member rides base.
+	members map[*upstreamHealth]http.RoundTripper
 }
 
 // groupRetryBufBytes caps how much of a request body is buffered to keep a
@@ -508,8 +526,12 @@ func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			applyHostHeader(out, u.up.HostHeader, req.Host)
 		}
 		out.Body = body.next()
+		rt := t.base
+		if m := t.members[u]; m != nil {
+			rt = m
+		}
 		u.active.Add(1)
-		resp, err := t.base.RoundTrip(out)
+		resp, err := rt.RoundTrip(out)
 		if err == nil {
 			// Live traffic reaching an upstream is success evidence, feeding the
 			// same rise counter as the active probe. The request stays counted
@@ -531,7 +553,11 @@ func (t *groupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		u.reportFailure()
 		lastErr = err
-		log.Warn().Str("group", t.gh.name).Str("upstream", u.label).Err(err).Msg("upstream connect failed, trying next")
+		ev := log.Warn().Str("group", t.gh.name).Str("upstream", u.label).Err(err)
+		if fp, ok := pinMismatch(err); ok {
+			ev = ev.Str("presentedCertSHA256", fp)
+		}
+		ev.Msg("upstream connect failed, trying next")
 	}
 	return nil, lastErr
 }

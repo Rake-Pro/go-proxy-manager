@@ -44,13 +44,22 @@ The settings to check before an instance faces the internet.
   [`settings.clientLimits.maxInFlight`](../reference/config/settings/client-limits.md#settings-client-limits-max-in-flight)
   (off by default; `256` is a starting point) refuses a client's requests
   past the limit with `429`.
+- Keep request headers bounded: `-max-header-bytes` (`GPM_MAX_HEADER_BYTES`,
+  default 64 KiB) caps the request line plus headers on `:80` and `:443`.
+  Past it HTTP/1 gets `431`; HTTP/2 gets `431` when the oversized header block
+  ends in the frame where it overflows, and a connection error (GOAWAY,
+  PROTOCOL_ERROR, closing every stream on that connection) when the client
+  continues the block in CONTINUATION frames after the overflow or
+  sends a single frame several times the limit. Raise it only as far as
+  your largest legitimate cookie or token needs
+  ([Environment variables](../reference/env-vars-and-flags.md)).
 - Run with `cap_drop: ALL` and `no-new-privileges`, as in the
   [Compose file](../getting-started/install-docker.md#compose-file).
 - Put the admin panel behind your ingress / a tunnel, not on the public internet.
 - Prefer `${FILE:...}` secrets (Docker secrets) over `${ENV:...}` so values don't
   show up in the process environment.
 - Keep `acme.caBundle` to the one private root you mean to trust: a certificate that sets it trusts **only** that bundle for its ACME directory, and setting or changing it through the API needs the `admin` scope (with `directoryURL` and `eab`), because it decides which server gpm accepts as the CA.
-- Give a `webhook` DNS provider a `https` `url` and a `token` held as a `${ENV:}` or `${FILE:}` placeholder (the `url` is a plain setting: a literal is committed and readable by anyone who can read DNS providers, so use a placeholder if it carries a credential). gpm refuses loopback, link-local, unspecified and multicast literals at write time unless `allowInsecureLocal` is set, always refuses a link-local destination when it connects, never follows redirects with the token attached, and warns in the log about a plain-`http` URL to a non-loopback host; writes on `/api/dns-providers` need the `admin` scope.
+- Give a `webhook` DNS provider a `https` `url` and a `token` held as a `${ENV:}` or `${FILE:}` placeholder (the `url` is a plain setting: a literal is committed and readable by anyone who can read DNS providers, so use a placeholder if it carries a credential). gpm refuses loopback, link-local, unspecified and multicast literals at write time unless `allowInsecureLocal` is set, always refuses a link-local destination when it connects (the same guard covers the bouncer, webhook and notification targets, the acme-dns, webhook, DigitalOcean, Hetzner and deSEC DNS-01 solvers, Kubernetes and Docker discovery, and DNS sync, not the Cloudflare and RFC 2136 solvers or the ACME CA client; it ignores an address zone, so `[::ffff:169.254.169.254%25eth0]` is refused, and it refuses a destination it cannot read), never follows redirects with the token attached, and warns in the log about a plain-`http` URL to a non-loopback host; writes on `/api/dns-providers` need the `admin` scope.
 - Give a webhook or notification `url` that carries a credential in its path
   (a chat or incident hook token) as a whole-value `${ENV:NAME}` or
   `${FILE:path}` placeholder, so only the reference is committed to git and

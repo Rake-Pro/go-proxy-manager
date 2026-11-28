@@ -26,7 +26,12 @@ info:
 
 
     HA: on an instance running GPM_HA_ROLE=follower, every write (any POST/PUT/DELETE under /api/) answers
-    503 rather than being applied; reads are unaffected. See docs/ha.md.'
+    503 rather than being applied; reads are unaffected. Three non-GET calls only read or end this
+    instance''s own sessions, so a follower still answers them (PUT /api/{plural}/{name}?dryRun=1 (or
+    true), POST /api/{plural}/_parse and POST /api/sessions/revoke). Only PUT /api/{plural}/{name}
+    implements a dry run: any other write that carries dryRun=1, true or an unrecognised value is refused
+    with 400 and writes nothing (a follower answers 503 first, except for POST /api/sessions/revoke).
+    See docs/operations/high-availability.md.'
   license:
     name: See repository LICENSE
 servers:
@@ -262,10 +267,31 @@ components:
           type: string
           description: 'Host header sent upstream: empty keeps the client Host (default), "upstream" sends
             the upstream''s own host:port, anything else is sent literally (a hostname, optionally host:port).'
+        tls:
+          $ref: '#/components/schemas/UpstreamTLS'
       required:
       - scheme
       - host
       - port
+    UpstreamTLS:
+      type: object
+      description: Trust configuration of an https upstream (scheme https only). Omitted when no pin
+        is set; an empty object or an empty list is treated as absent and is never stored.
+        Not accepted on a Docker discovery template (dockerDiscovery.template.upstream, or a profile
+        under dockerDiscovery.profiles); Kubernetes Ingress discovery templates take it.
+      properties:
+        pinnedCertSHA256:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            pattern: '^([0-9A-Fa-f]{64}|[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31})$'
+          description: SHA-256 fingerprints of the upstream's leaf certificate (DER), as printed by
+            `openssl x509 -noout -fingerprint -sha256`. Upper or lower case, with or without ":"
+            separators; stored as 64 lower-case hex characters. Duplicates are rejected. An empty
+            list is accepted and means no pin (it is dropped, never stored). With pins the
+            connection is accepted if and only if the presented leaf certificate's SHA-256 equals one
+            of them; chain, name and validity dates are not checked.
     HSTS:
       type: object
       properties:
@@ -444,7 +470,9 @@ components:
           type: array
           items:
             type: string
-          description: Host-wide, applied before any location-scoped ones.
+          description: 'Host-wide middleware names. Chain order is fixed by middleware type, not by list
+            position. Within one type the last-referenced name runs first, and a location''s middlewares
+            run before the host''s. See docs/concepts/request-pipeline.md#middleware-ordering.'
         accessLists:
           type: array
           items:
@@ -1280,6 +1308,8 @@ components:
         hostHeader:
           type: string
           description: Host header sent to THIS member. Same values as Upstream.hostHeader.
+        tls:
+          $ref: '#/components/schemas/UpstreamTLS'
         weight:
           type: integer
           description: Relative share for round-robin/least-connections, 1-256. 0 defaults to 1. Ignored
@@ -2378,12 +2408,19 @@ components:
             type: string
           description: Required when enabled.
         template:
-          $ref: '#/components/schemas/IngressHostTemplate'
+          allOf:
+          - $ref: '#/components/schemas/IngressHostTemplate'
+          description: Default chain. Its upstream is derived per container; upstream.tls.pinnedCertSHA256
+            is refused here when enabled is true (a disabled block may hold it; enabling re-validates
+            and refuses it).
         profiles:
           type: object
           properties: {}
           description: Named chains a container may select by name. Empty inherits
-            ingressDiscovery.profiles. "template" is reserved.
+            ingressDiscovery.profiles. "template" is reserved. A profile defined here refuses
+            upstream.tls.pinnedCertSHA256 when enabled is true, as the template does. An inherited
+            ingressDiscovery profile with pins is accepted; hosts derived from containers do not
+            get its pin and a warning is logged.
           additionalProperties:
             $ref: '#/components/schemas/IngressHostTemplate'
       description: Disabled (default) is inert. Discovers labelled Docker containers into managed proxy
@@ -3489,7 +3526,8 @@ components:
   responses:
     BadRequest:
       description: Malformed request body, invalid object, or a validation error (e.g. a dangling reference,
-        a literal secret, an invalid name).
+        a literal secret, an invalid name). Also the answer to a write other than PUT /api/{plural}/{name}
+        that carries dryRun=1, true or an unrecognised value; nothing was written.
       content:
         application/json:
           schema:
@@ -3521,7 +3559,9 @@ components:
             $ref: '#/components/schemas/Error'
     FollowerReadOnly:
       description: This instance is an HA follower (GPM_HA_ROLE=follower) and refuses every write; make
-        the change on the leader.
+        the change on the leader. A PUT /api/{plural}/{name} with ?dryRun=1 (or true), POST /api/{plural}/_parse and POST
+        /api/sessions/revoke are not writes and are still answered. Any other write, with or without
+        dryRun, answers 503 here.
       content:
         application/json:
           schema:
@@ -6614,7 +6654,11 @@ paths:
     put:
       summary: Replace the application settings
       description: 'Admin scope, not settings:write: a settings write can point webhooks/dnsSync at an
-        attacker-controlled URL with a ${ENV:...} placeholder, and can rewrite adminAuth.'
+        attacker-controlled URL with a ${ENV:...} placeholder, and can rewrite adminAuth. A body equal
+        to the stored settings (defaults filled in) writes nothing and makes no commit when the config
+        repository has no uncommitted changes: the X-Config-Commit header is empty and no reload or
+        event follows. Changing appName still commits; emptying it removes the key, and it reads back
+        as the default name.'
       tags:
       - Settings
       requestBody:
@@ -6663,7 +6707,8 @@ paths:
       summary: Replace the admin UI's saved list filters
       description: Replaces only the `savedFilters` section of settings and commits. `settings:write`
         rather than admin, as the full settings write requires, because this section is inert
-        (the UI interprets a query locally; nothing resolves or dispatches).
+        (the UI interprets a query locally; nothing resolves or dispatches). A list equal to the
+        stored one makes no commit, as for the full settings write, and the X-Config-Commit header is empty.
       tags:
       - Settings
       requestBody:

@@ -14,7 +14,7 @@ to the page that explains the mechanism behind it.
 
 | Row | Severity | Source | Link |
 |---|---|---|---|
-| Certificate failed to renew, or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
+| Certificate has no usable certificate (ACME), could not be loaded (custom), or has expired | problem | `GET /api/certificates` state `error` / `expired` | The certificate |
 | Certificate expires in N days | warning | `GET /api/certificates` state `expiring` (inside `min(30 days, lifetime / 3)` of expiry) | The certificate |
 | Upstream group has unhealthy members | problem | `GET /api/health` `upstreamGroups[]` | The group |
 | Ingress or Docker discovery failed | problem | `GET /api/ingress-discovery/status`, `GET /api/docker-discovery/status` `error` | Integrations |
@@ -63,6 +63,7 @@ below map each row's wording to its cause and fix.
 | `state: pending` never clears | The first ACME order has not completed or keeps failing | Read `lastError`; verify DNS-01 credentials, or that `:80` is reachable for HTTP-01 ([Certificate health](certificate-health.md)) |
 | `state: error` on a `custom` certificate | `certFile`/`keyFile` could not be read or parsed as PEM | Check the path inside the cert store and the PEM contents |
 | DNS-01 fails with `refusing to use a partial listing` | A Hetzner or deSEC listing ran past 100 pages, so the solver stopped instead of acting on part of the account | Use a token scoped to fewer zones or domains |
+| DNS-01 fails with `digitalocean: domain listing next page link ... refusing to use a partial listing` | The DigitalOcean domain listing's next-page link (quoted in the error, cut to 200 bytes) leaves `https://api.digitalocean.com` (another scheme or host), is opaque, does not parse, or has a `.` or `..` path segment; the token is only sent to the configured API | Check that nothing between gpm and the API rewrites its responses, then retry |
 | `POST .../renew` returns `409`, message names an order in flight | Another order is already running on this instance; nothing is queued | Wait and retry |
 | `POST .../renew` returns `409`, message says `retry in ...` | The certificate is inside its 1-hour renew cooldown, counted from `lastAttempt`: failed attempts start it too | Wait out the stated time; read `lastError` meanwhile ([Certificate health](certificate-health.md)) |
 | `POST .../renew` returns `400` | The certificate is `type: custom`; gpm does not renew those | Replace the file and `PUT` the object |
@@ -86,6 +87,7 @@ below map each row's wording to its cause and fix.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `431 Request Header Fields Too Large`, or an HTTP/2 protocol error that drops the connection, on requests with very large cookies or headers | The request line plus headers exceed the header limit (default 64 KiB) | Raise `GPM_MAX_HEADER_BYTES` / `-max-header-bytes` (up to `1048576`) and restart, or trim the cookies ([Environment variables](../reference/env-vars-and-flags.md)) |
 | `404` for a domain you configured | No enabled host claims it, or another host claims it first | Check `domains` and `disabled`; two enabled hosts cannot share a domain |
 | Config write refused: `domains: <name> is already claimed by proxy host "<other>"` | Domains are exclusive across enabled hosts | Disable the old host in the same change ([Configuration model](../concepts/config-model.md)) |
 | Config write refused, or a config warning: `domain <name> is claimed by ...: the router serves it from only one of them` | Two hosts list spellings of one name, such as `<name>` and `<name>:8443`; the router drops the port | Remove the port (or the duplicate) from one host ([Domains are exclusive](../concepts/config-model.md#domains-are-exclusive)) |
@@ -97,6 +99,8 @@ below map each row's wording to its cause and fix.
 | Sign-in loops or fails on a host after `settings.pathBlock` was set | An entry matches the auth gate's own path (the `auth-request` outpost prefix or `/__gpm/oidc/callback`); the path block runs outside authentication | Remove the matching entry, or set `pathBlock: off` on the host |
 | A guard answers `400` on a URL containing `;` | A guard with a `queryEquals` trigger fails closed on legacy `;` separators | Remove the `;`, or drop the `queryEquals` trigger |
 | `502` reaching the admin UI through gpm | The proxy host's upstream does not match `GPM_ADMIN_ADDR` | Align both ([Admin UI behind gpm](../how-to/admin-ui-behind-gpm.md)) |
+| `502` on an `https` upstream with a private or self-signed certificate, log line `upstream error` with `tls: failed to verify certificate: x509: ...` | The upstream's certificate is verified against the system roots and the usual name check, which an appliance certificate (self-signed, no subjectAltName) cannot pass | Pin its fingerprint with `upstream.tls.pinnedCertSHA256` ([Proxy to an upstream with a self-signed certificate](../how-to/proxy-self-signed-upstream.md)) |
+| `502` on a pinned upstream, log line `upstream error` with `presentedCertSHA256` and `does not match any pinned fingerprint` | The upstream presents a certificate none of the pins match (replaced or regenerated) | Compare `presentedCertSHA256` with the device's certificate; pin the new one ([Rotate the certificate](../how-to/proxy-self-signed-upstream.md#troubleshooting)) |
 | Login redirects in a loop through gpm's own host | `externalBaseURL` does not match the browser's scheme and host | Set it to exactly that value |
 | A stream backend stalls for seconds per connection | `proxyProtocol.enabled` is on but the relay does not send a header | Enable it on the relay first ([PROXY protocol](../reference/config/settings/proxy-protocol.md)) |
 | `502` on one path, log line `upstream sent too many interim (1xx) responses` | The upstream sent more than 256 interim responses for one request | Fix the upstream; gpm relays the first 16 interim responses and ends the exchange past 256 |
@@ -115,6 +119,8 @@ below map each row's wording to its cause and fix.
 | Geo rules deny everything | Geo is configured but no GeoIP database is loaded; geo fails closed | Set `GPM_GEOIP_DB`, or remove the geo rules |
 | SSO users are all denied `403` | Group claims are not in the ID token | gpm reads claims from the ID token; configure the IdP accordingly |
 | SSO users are all denied `403` and the Overview shows a config warning about `requiredRoles` | `requiredRoles` lists a group name (only `admin` and `user` are roles), or the provider's `roleMapping` gives no user a role | Use the role the group maps to, or map groups to roles on the provider ([Gate a host with SSO](../how-to/per-host-sso.md)) |
+| Config warning `<owner>: auth: a forward-auth gate admits only a user with a role, but the roleMapping of identity provider "<idp>" gives no user a role, so every request is refused; ...` (`<owner>` is `middleware "<n>"`, `proxy host "<h>"` or `proxy host "<h>": location "<p>"`) | A `forward-auth` gate admits only a user who holds a role, and the provider's `roleMapping` gives none | Map groups to roles on the provider: `roleMapping.adminGroups`, `userGroups` or `defaultRole` ([Gate a host with SSO](../how-to/per-host-sso.md)) |
+| Config warning `dns provider "<n>": config.<key> points at the link-local address <host>, which gpm refuses to connect to even with config.allowInsecureLocal set, so every DNS-01 challenge through this provider fails; ...` (`<key>` is `baseURL` for acme-dns and `url` for webhook) | `allowInsecureLocal` lets a link-local literal pass validation, but gpm never connects to one | Point `config.baseURL` (acme-dns) or `config.url` (webhook) at the service's own address ([DNSProvider](../reference/config/dns-provider.md)) |
 | Config write refused: `allowFrom` not permitted | `allowFrom` in `oidc` or `forward-auth` mode, including via an unset `mode` | Set `mode` explicitly, or use an access list |
 | A LAN client is prompted for a password after migrating basic auth | The old list required both the IP and the password, so no `allowFrom` was copied | Add the CIDR to the middleware's `allowFrom` deliberately ([Migrate basic auth](../how-to/migrate-basic-auth.md)) |
 | `409` from `migrate-basic-auth` | A middleware named `<list>-basic` already exists | Rename or delete it, or migrate by hand |

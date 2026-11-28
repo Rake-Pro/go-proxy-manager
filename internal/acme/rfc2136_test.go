@@ -61,19 +61,27 @@ func newFakeDNS(t *testing.T, keyName, secretB64 string, alg tsigAlg, soaZones .
 	}
 	f := &fakeDNS{keyName: strings.ToLower(keyName), secret: secret, alg: alg, soaZones: soaZones}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("resolve udp: %v", err)
+	// The kernel picks the UDP port; TCP is bound to the same port so one
+	// "host:port" reaches both transports. That port can already be taken for
+	// TCP by another socket, so a pair that does not bind is dropped and the
+	// kernel picks again.
+	var tcpErr error
+	for range 50 {
+		udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("listen udp: %v", err)
+		}
+		tcp, err := net.Listen("tcp", udp.LocalAddr().String())
+		if err != nil {
+			udp.Close()
+			tcpErr = err
+			continue
+		}
+		f.udp, f.tcp = udp, tcp
+		break
 	}
-	f.udp, err = net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	// Bind TCP to the same port so one "host:port" reaches both transports.
-	f.tcp, err = net.Listen("tcp", f.udp.LocalAddr().String())
-	if err != nil {
-		f.udp.Close()
-		t.Fatalf("listen tcp: %v", err)
+	if f.tcp == nil {
+		t.Fatalf("listen tcp on the udp port: %v", tcpErr)
 	}
 	go f.serveUDP()
 	go f.serveTCP()

@@ -27,7 +27,7 @@ rationale is in [Design: Kubernetes Ingress discovery (DNS sync phase 2)](https:
 | <span id="settings-ingress-discovery-template-tls"></span> `template.tls` | TLSSettings | Applied verbatim. `certificateRef` is **required**: discovery never issues a certificate, so one operator-maintained (typically wildcard) certificate must already cover the discovered names. It does not *select* the certificate: derived hosts are L7, and the proxy listeners match by SNI. See [Which certificate a host serves](../certificate.md#which-certificate-a-host-serves). |
 | <span id="settings-ingress-discovery-template-robots-no-index"></span> `template.robotsNoIndex` | bool | Applied to every derived host: sends `X-Robots-Tag: noindex, nofollow`, exactly as on a hand-written host. Omit it and derived hosts carry no such header; do **not** reach for a `headers` middleware instead. |
 | <span id="settings-ingress-discovery-template-timeouts"></span> `template.timeouts` | HostTimeouts | Upstream `connectSeconds`/`readSeconds` override, applied to every derived host and validated by the **same rules as a proxy host's** (0-3600). Unset means the shared pooled transport. |
-| <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host, in order. |
+| <span id="settings-ingress-discovery-template-middlewares"></span> `template.middlewares` | []string | Applied to every derived host. Order is fixed by middleware type; within one type the last-listed runs first ([Middleware ordering](../../../concepts/request-pipeline.md#middleware-ordering)). |
 | <span id="settings-ingress-discovery-template-access-lists"></span> `template.accessLists` | []string | Applied to every derived host. |
 | <span id="settings-ingress-discovery-template-access-lists-mode"></span> `template.accessListsMode` | string | Stamped onto every derived host as its [`accessListsMode`](../proxy-host.md#proxy-host-access-lists-mode): `all` (default when unset, every list must allow) or `any` (one allowing list is enough). Validated by the same rules as a hand-written host: `any` needs at least one entry in `template.accessLists` and refuses a list with `defaultAction: allow`, with `geo.countryDeny` or with `basicAuth` users. A named profile takes the same key. |
 | <span id="settings-ingress-discovery-template-tags"></span> `template.tags` | []string | Free-form grouping labels applied to every derived host, for filtering in the host list. No effect on the proxy listeners. A managed host's tags are the template's tags first, then the host's other tags: a tag added by hand is kept. See [Tags on managed hosts](#tags-on-managed-hosts). |
@@ -55,7 +55,7 @@ applied verbatim to each derived host:
 
 | Template key | Shape | Sub-keys documented at |
 |---|---|---|
-| `template.upstream` | `Upstream` | [ProxyHost: Upstream](../proxy-host.md#proxy-host-upstream): `scheme`, `host`, `port`, `path`, `hostHeader` |
+| `template.upstream` | `Upstream` | [ProxyHost: Upstream](../proxy-host.md#proxy-host-upstream): `scheme`, `host`, `port`, `path`, `hostHeader`, `tls.pinnedCertSHA256` |
 | `template.tls` | `TLSSettings` | [ProxyHost: `tls`](../proxy-host.md#proxy-host-tls): `certificateRef`, `forceSSL`, `minTLSVersion`, `hsts.*`, `clientAuth.*` |
 | `template.tls.hsts` | `HSTS` | [ProxyHost: `tls.hsts`](../proxy-host.md#proxy-host-tls): `enabled`, `maxAge`, `includeSubdomains`, `preload` |
 | `template.tls.clientAuth` | `ClientAuth` | [ProxyHost: `tls.clientAuth`](../proxy-host.md#proxy-host-tls): `caRef`, `mode`, `identityHeaders.*` |
@@ -430,7 +430,10 @@ once, at the edge, and the edge->LB hop is a trusted LAN path). With
 `scheme: https` the Go transport derives SNI and certificate verification from the
 **upstream host**, not from the forwarded `Host`, so an https upstream must name a
 hostname the controller's certificate actually covers; pointing it at a bare IP
-will fail verification.
+will fail verification. A controller with a self-signed default certificate can
+instead be trusted by pin with
+[`template.upstream.tls.pinnedCertSHA256`](../proxy-host.md#proxy-host-upstream-tls-pinned-cert-sha256),
+which every derived host carries.
 
 **Derived objects.** Each opted-in Ingress produces one proxy host named
 `ing-<ingressName>.<namespace>` (e.g. `ing-grafana.monitoring`), carrying

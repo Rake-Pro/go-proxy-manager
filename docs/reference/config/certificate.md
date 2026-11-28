@@ -1,24 +1,31 @@
 # Certificate
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| <span id="certificate-type"></span> `type` | string | yes | `custom` or `acme`. |
-| <span id="certificate-domains"></span> `domains` | []string | yes | Domains the cert covers (`*.example.com` for wildcard). Each must be a hostname, optionally with a leading `*.`: no port, no trailing dot. A write that adds another spelling is refused; a stored one loads with a config warning. |
-| <span id="certificate-acme"></span> `acme` | ACMESpec | when `type: acme` | |
-| <span id="certificate-custom"></span> `custom` | CustomCertSpec | when `type: custom` | |
+A TLS certificate gpm serves, either issued and renewed over ACME (`type: acme`) or loaded from files in the cert store (`type: custom`).
 
-**ACMESpec**
+Every object also carries the shared keys `displayName`, `labels`, `tags` and `disabled`, documented under [Common fields](../../concepts/config-model.md#common-fields-every-object).
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| <span id="certificate-acme-email"></span> `email` | string | yes | ACME account contact. Let's Encrypt stopped sending expiration reminders in 2025; this is used for account/policy notices only. |
-| <span id="certificate-acme-challenge"></span> `challenge` | string | no | `dns-01` or `http-01`. Default: `dns-01` when `dnsProvider` is set (so configs written before this field existed keep their behaviour), `http-01` otherwise. |
-| <span id="certificate-acme-dns-provider"></span> `dnsProvider` | string | for `dns-01` | A [DNSProvider](dns-provider.md) name. Rejected with `http-01`. |
-| <span id="certificate-acme-directory-url"></span> `directoryURL` | string | no | Defaults to Let's Encrypt production. Setting or changing it through the API needs the `admin` scope ([API token scopes](api-token.md#scopes)). |
-| <span id="certificate-acme-key-type"></span> `keyType` | string | no | `ecdsa` only (default when empty). `rsa` is not implemented and is rejected at config validation time. |
-| <span id="certificate-acme-eab"></span> `eab` | EABSpec | no | External Account Binding, for CAs that require it. Setting or changing it through the API needs the `admin` scope. |
-| <span id="certificate-acme-profile"></span> `profile` | string | no | The CA's issuance profile for every order of this certificate (for example a short-lived one); the CA lists its profiles in its directory. 1 to 64 characters of letters, digits, `_` or `-`. Empty uses the CA's default. A CA that advertises no profiles, or not this one, fails the order (`acme: certificate authority does not support profiles`, or `does not advertise a profile with name <p>` followed by the profiles it supports). Changing it on an issued certificate makes the certificate due for renewal at the next pass, like changing its domains. |
-| <span id="certificate-acme-ca-bundle"></span> `caBundle` | string | no | Trust anchors for a private CA's ACME directory: inline PEM (one or more `CERTIFICATE` blocks) or a `${FILE:/path}` / `${ENV:NAME}` placeholder. At most 65536 bytes. **Not a secret:** inline PEM is stored and returned by the API as written. A `${FILE:}` bundle must lie under the secret file roots (`/run/secrets` by default, or the directories in `GPM_SECRET_FILE_ROOTS`); a path outside them fails the renewal attempt. When set, every exchange with this certificate's ACME directory (account, order, renewal information) trusts **only** this bundle, not the system roots. A bundle that cannot be resolved or parsed fails the renewal attempt; there is no fallback to system trust. A placeholder is not checked at write time. Setting or changing it through the API needs the `admin` scope. |
+## Certificate object
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="certificate-name"></span> `name` | string | none | yes | Unique name. Lowercase letters, digits, `-`, `_` and `.`, starting and ending with a letter or digit. |
+| <span id="certificate-type"></span> `type` | string | none | yes | `custom` or `acme`. |
+| <span id="certificate-domains"></span> `domains` | []string | none | yes, at least one | Domains the cert covers (`*.example.com` for wildcard). Each must be a hostname, optionally with a leading `*.`: no port, no trailing dot. A write that adds another spelling is refused; a stored one loads with a config warning. |
+| <span id="certificate-acme"></span> `acme` | ACMESpec | none | with `type: acme` | Spec for `acme`. |
+| <span id="certificate-custom"></span> `custom` | CustomCertSpec | none | with `type: custom` | Spec for `custom`. |
+
+## ACMESpec (`acme`)
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="certificate-acme-email"></span> `email` | string | none | yes | ACME account contact. Let's Encrypt stopped sending expiration reminders in 2025; this is used for account/policy notices only. |
+| <span id="certificate-acme-challenge"></span> `challenge` | string | `dns-01` when `dnsProvider` is set (so configs written before this field existed keep their behaviour), `http-01` otherwise | no | `dns-01` or `http-01`. |
+| <span id="certificate-acme-dns-provider"></span> `dnsProvider` | string | none | with `dns-01` | A [DNSProvider](dns-provider.md) name. Rejected with `http-01`. |
+| <span id="certificate-acme-directory-url"></span> `directoryURL` | string | Let's Encrypt production | no | Setting or changing it through the API needs the `admin` scope ([API token scopes](api-token.md#scopes)). |
+| <span id="certificate-acme-key-type"></span> `keyType` | string | `ecdsa` | no | `ecdsa` only (the default when empty). `rsa` is not implemented and is rejected at config validation time. |
+| <span id="certificate-acme-eab"></span> `eab` | EABSpec | none | no | External Account Binding, for CAs that require it. Setting or changing it through the API needs the `admin` scope. |
+| <span id="certificate-acme-profile"></span> `profile` | string | none, the CA's default profile | no | The CA's issuance profile for every order of this certificate (for example a short-lived one); the CA lists its profiles in its directory. 1 to 64 characters of letters, digits, `_` or `-`. Empty uses the CA's default. A CA that advertises no profiles, or not this one, fails the order (`acme: certificate authority does not support profiles`, or `does not advertise a profile with name <p>` followed by the profiles it supports). Changing it on an issued certificate makes the certificate due for renewal at the next pass, like changing its domains. |
+| <span id="certificate-acme-ca-bundle"></span> `caBundle` | string | none, system roots | no | Trust anchors for a private CA's ACME directory: inline PEM (one or more `CERTIFICATE` blocks) or a `${FILE:/path}` / `${ENV:NAME}` placeholder. At most 65536 bytes. **Not a secret:** inline PEM is stored and returned by the API as written. A `${FILE:}` bundle must lie under the secret file roots (`/run/secrets` by default, or the directories in `GPM_SECRET_FILE_ROOTS`); a path outside them fails the renewal attempt. When set, every exchange with this certificate's ACME directory (account, order, renewal information) trusts **only** this bundle, not the system roots. A bundle that cannot be resolved or parsed fails the renewal attempt; there is no fallback to system trust. A placeholder is not checked at write time. Setting or changing it through the API needs the `admin` scope. |
 
 Validation errors for the two new keys (each prefixed `certificate "<name>": `):
 
@@ -31,10 +38,22 @@ Validation errors for the two new keys (each prefixed `certificate "<name>": `):
 | `acme.caBundle` | `acme.caBundle: certificate <i> does not parse: <error>` |
 | `acme.caBundle` | `acme.caBundle: contains no PEM CERTIFICATE block` |
 
-**EABSpec**: `kid` (the key id the CA issued) and `hmacKey` (Secret; base64url
-as the CA issued it). Both are required together. An EAB key id widens the ACME
-account identity, so two external accounts on the same CA get separate account
-keys under `<cert-dir>/acme/accounts/`.
+## EABSpec (`eab`)
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="certificate-acme-eab-kid"></span> `kid` | string | none | yes, with `eab` | The key id the CA issued. |
+| <span id="certificate-acme-eab-hmac-key"></span> `hmacKey` | Secret | none | yes, with `eab` | Base64url, as the CA issued it. |
+
+- **Both are required together.** An `eab` block with an empty `kid` or `hmacKey` is rejected.
+- **Separate accounts.** An EAB key id widens the ACME account identity, so two external accounts on the same CA get separate account keys under `<cert-dir>/acme/accounts/`.
+
+## CustomCertSpec (`custom`)
+
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="certificate-custom-cert-file"></span> `certFile` | string | none | yes, with `type: custom` | Path **relative to the cert store** (absolute paths and `..` are rejected). A file reference, not inline PEM. |
+| <span id="certificate-custom-key-file"></span> `keyFile` | string | none | yes, with `type: custom` | Path **relative to the cert store**, same rules as `certFile`. A file reference, not inline PEM. |
 
 <span id="certificate-ca-directories"></span>
 **CA directories in the admin UI**
@@ -100,9 +119,6 @@ acme:
     hmacKey: ${FILE:/run/secrets/google_ca_eab_hmac}
 ```
 
-**CustomCertSpec**: `certFile`, `keyFile`: paths **relative to the cert store**
-(absolute paths and `..` are rejected). These are file references, not inline PEM.
-
 ```yaml
 # Private CA (step-ca) with its root certificate, short-lived profile
 name: internal-ca
@@ -148,18 +164,18 @@ stored object with these read-only fields, computed from the certificate store
 on disk (`lastError`/`lastAttempt` come from the ACME manager's in-memory
 state instead). None are accepted on write and none are stored in the YAML.
 
-| Field | Type | Notes |
-|-------|------|-------|
-| <span id="certificate-status-not-before"></span> `notBefore` | string (RFC 3339) | Leaf certificate's validity start. Absent for an `acme` certificate with no completed order yet (`state: pending`). |
-| <span id="certificate-status-not-after"></span> `notAfter` | string (RFC 3339) | Leaf certificate's expiry. Absent alongside `notBefore`. |
-| <span id="certificate-status-days-remaining"></span> `daysRemaining` | int | Whole days until `notAfter`, negative once expired. Absent alongside `notAfter`. |
-| <span id="certificate-status-issuer"></span> `issuer` | string | Leaf certificate's issuer common name. Absent alongside `notAfter`. |
-| <span id="certificate-status-state"></span> `state` | string | `valid`, `expiring` (at or inside `min(30 days, lifetime / 3)` of `notAfter`, lifetime being `notAfter - notBefore`; for a `custom` certificate it stays a fixed 30 days, because nothing renews it), `expired`, `pending` (`acme`, no order has completed yet) or `error` (a never-issued `acme` certificate whose attempt failed, or a leaf that cannot be read; see `lastError`). An issued `acme` certificate whose renewal fails keeps `valid` or `expiring` with `lastError` set. |
-| <span id="certificate-status-last-error"></span> `lastError` | string | Most recent renewal (or, for `custom`, file-read) failure. Empty or absent means the last attempt succeeded. **The text depends on the caller:** an admin gets the raw ACME or file/parse message truncated to 300 characters; any non-admin caller (the read-only `user` role, or a `certificates:read` token) gets the same short classified reason `GET /api/health` uses, e.g. `dns-01 challenge or DNS provider failure`. The raw text can embed a third party's response body, so it is not disclosed more widely than `/health` does. |
-| <span id="certificate-status-last-attempt"></span> `lastAttempt` | string (RFC 3339) | When the ACME manager last attempted to issue/renew this certificate. `acme` certificates only; absent on an HA follower, which does not run the manager. |
-| <span id="certificate-status-sans"></span> `sans` | []string | Leaf certificate's subject alternative names (DNS names and IPs). |
-| <span id="certificate-status-renew-at"></span> `renewAt` | string (RFC 3339) | When the ACME manager next renews this certificate, same format as `notAfter`. A time in the past means the renewal is due and has not succeeded yet. Issued `acme` certificates only; absent for `custom`, pending and disabled certificates, on an HA follower, and before the manager's first pass. |
-| <span id="certificate-status-renew-reason"></span> `renewReason` | string | `lifetime` (the renewal rule set `renewAt`), `ari` (the CA's renewal information set an earlier time) or `changed` (the certificate's domains or `acme.profile` changed, so it is due now; `renewAt` is then the time of the pass). Absent alongside `renewAt`. |
+| Key | Type | Default | Required | Description |
+|-----|------|---------|----------|-------------|
+| <span id="certificate-status-not-before"></span> `notBefore` | string (RFC 3339) | none | no, read-only | Leaf certificate's validity start. Absent for an `acme` certificate with no completed order yet (`state: pending`). |
+| <span id="certificate-status-not-after"></span> `notAfter` | string (RFC 3339) | none | no, read-only | Leaf certificate's expiry. Absent alongside `notBefore`. |
+| <span id="certificate-status-days-remaining"></span> `daysRemaining` | int | none | no, read-only | Whole days until `notAfter`, negative once expired. Absent alongside `notAfter`. |
+| <span id="certificate-status-issuer"></span> `issuer` | string | none | no, read-only | Leaf certificate's issuer common name. Absent alongside `notAfter`. |
+| <span id="certificate-status-state"></span> `state` | string | none | no, read-only | `valid`, `expiring` (at or inside `min(30 days, lifetime / 3)` of `notAfter`, lifetime being `notAfter - notBefore`; for a `custom` certificate it stays a fixed 30 days, because nothing renews it), `expired`, `pending` (`acme`, no order has completed yet) or `error` (a never-issued `acme` certificate whose attempt failed, or a leaf that cannot be read; see `lastError`). An issued `acme` certificate whose renewal fails keeps `valid` or `expiring` with `lastError` set. |
+| <span id="certificate-status-last-error"></span> `lastError` | string | none | no, read-only | Most recent renewal (or, for `custom`, file-read) failure. Empty or absent means the last attempt succeeded. **The text depends on the caller:** an admin gets the raw ACME or file/parse message truncated to 300 characters; any non-admin caller (the read-only `user` role, or a `certificates:read` token) gets the same short classified reason `GET /api/health` uses, e.g. `dns-01 challenge or DNS provider failure`. The raw text can embed a third party's response body, so it is not disclosed more widely than `/health` does. |
+| <span id="certificate-status-last-attempt"></span> `lastAttempt` | string (RFC 3339) | none | no, read-only | When the ACME manager last attempted to issue/renew this certificate. `acme` certificates only; absent on an HA follower, which does not run the manager. |
+| <span id="certificate-status-sans"></span> `sans` | []string | none | no, read-only | Leaf certificate's subject alternative names (DNS names and IPs). |
+| <span id="certificate-status-renew-at"></span> `renewAt` | string (RFC 3339) | none | no, read-only | When the ACME manager next renews this certificate, same format as `notAfter`. A time in the past means the renewal is due and has not succeeded yet. Issued `acme` certificates only; absent for `custom`, pending and disabled certificates, on an HA follower, and before the manager's first pass. |
+| <span id="certificate-status-renew-reason"></span> `renewReason` | string | none | no, read-only | `lifetime` (the renewal rule set `renewAt`), `ari` (the CA's renewal information set an earlier time) or `changed` (the certificate's domains or `acme.profile` changed, so it is due now; `renewAt` is then the time of the pass). Absent alongside `renewAt`. |
 
 Force an immediate renewal, ignoring every renewal window, with
 `POST /api/certificates/{name}/renew` (`certificates:write` scope). It

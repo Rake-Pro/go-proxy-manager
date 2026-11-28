@@ -11,7 +11,7 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-timeouts"></span>  `timeouts` | HostTimeouts | no | Per-host upstream timeout overrides (below). |
 | <span id="proxy-host-tls"></span>  `tls` | TLSSettings | no | Certificate + TLS behaviour. |
 | <span id="proxy-host-dns"></span>  `dns` | DNSSyncPolicy | no | Opt this host's domains into DNS record management (below). |
-| <span id="proxy-host-middlewares"></span>  `middlewares` | []string | no | Host-wide middleware names, applied top-down. |
+| <span id="proxy-host-middlewares"></span>  `middlewares` | []string | no | Host-wide middleware names. Order in the chain is fixed by middleware type, not by list position; within one type the last-referenced name runs first. See [Middleware ordering](../../concepts/request-pipeline.md#middleware-ordering). |
 | <span id="proxy-host-access-lists"></span>  `accessLists` | []string | no | Host-wide access-list names. |
 | <span id="proxy-host-access-lists-mode"></span>  `accessListsMode` | string | no | How `accessLists` combine. `all` (default when unset): every list must allow the request. `any`: the request passes when at least one list allows it, and a deny rule in one list does not override another list's allow. `any` composes allow-lists only: it needs at least one list, refuses a list with `defaultAction: allow`, with `geo.countryDeny` or with the deprecated `basicAuth` users, and skips a `disabled` list. See [Composing access lists](access-list.md#access-list-composing). |
 | <span id="proxy-host-auth"></span>  `auth` | AuthMiddleware | no | Gate this host through an identity provider **without a Middleware object**. Same shape and same gate as a `type: auth` middleware. See [Inline auth and rate limit](#proxy-host-inline-auth-and-rate-limit). |
@@ -37,7 +37,9 @@ Terminates TLS for one or more domains and reverse-proxies to an upstream.
 | <span id="proxy-host-upstream-host"></span>  `host` | string | none | yes | Backend hostname or IP. |
 | <span id="proxy-host-upstream-port"></span>  `port` | int | none | yes | 1-65535. |
 | <span id="proxy-host-upstream-path"></span>  `path` | string | `""` | no | Base path prefixed to every forwarded request: `/api` turns a client `/v1/x` into `/api/v1/x`. Must be absolute, must not contain `.`/`..` segments, `\`, `;`, a query string or a fragment. Applied **last**, after any location prefix strip and any rewrite middleware. |
-| <span id="proxy-host-upstream-host-header"></span>  `hostHeader` | string | `""` | no | Host header sent upstream. `""` keeps the client's Host (today's behaviour); `upstream` sends the upstream's own `host:port`; anything else is sent literally and must be a hostname, optionally `host:port`. |
+| <span id="proxy-host-upstream-host-header"></span>  `hostHeader` | string | `""` | no | Host header sent upstream. `""` keeps the client's Host (today's behaviour); `upstream` sends the upstream's own `host:port`; anything else is sent literally and must be a hostname, optionally `host:port`. It never changes the TLS server name (SNI), which is always taken from `host`. |
+| <span id="proxy-host-upstream-tls"></span>  `tls` | UpstreamTLS | unset | no | How gpm trusts an `https` upstream. Unset: the certificate is verified against the system roots with the usual name check. Only allowed with `scheme: https`. An empty object or an empty pin list is treated as unset and is not stored. |
+| <span id="proxy-host-upstream-tls-pinned-cert-sha256"></span>  `tls.pinnedCertSHA256` | []string | none | no | 1 to 4 SHA-256 fingerprints of the upstream's leaf certificate in DER form, as printed by `openssl x509 -noout -fingerprint -sha256`. Upper or lower case, with or without `:` separators; stored as 64 lower-case hex characters; duplicates rejected. With pins the connection is accepted **if and only if** the presented leaf certificate's SHA-256 equals one of them: chain, name and validity dates are **not** checked. Changing or removing a pin closes the open WebSocket tunnels of every host that routes to that upstream at the reload and stops reuse of its pooled connections. See [Proxy to an upstream with a self-signed certificate](../../how-to/proxy-self-signed-upstream.md). |
 
 ```yaml
 upstream:
@@ -48,8 +50,30 @@ upstream:
   hostHeader: upstream    # backend keys its vhost off its own address
 ```
 
-On an [UpstreamGroup](upstream-group.md) member, `path` and
-`hostHeader` are **per member**, applied by the failover transport on the attempt
+An appliance with a built-in self-signed certificate, trusted by pin:
+
+```yaml
+upstream:
+  scheme: https
+  host: 192.0.2.30
+  port: 443
+  tls:
+    pinnedCertSHA256:
+      - 3a:7f:0c:55:91:de:2b:48:6e:a1:c4:09:f3:8d:72:b6:5e:10:aa:c7:34:9b:e2:61:0f:d8:4c:93:27:b5:e8:1d
+```
+
+**Certificate pinning** (`tls.pinnedCertSHA256`):
+
+- **Whole trust decision.** With pins, no chain is built and no name or date is checked; only the leaf fingerprint matters.
+- **Everything else unchanged.** TLS versions, ALPN and HTTP/2, and SNI (from `host`) are as without pins; `hostHeader` does not affect the pin.
+- **Every handshake.** The pin is checked on every connection, including a resumed TLS session.
+- **Own connection pool.** A pinned upstream never shares a pooled connection with an unpinned or differently pinned upstream, even at the same `host:port`; an unchanged pin keeps its pool across reloads.
+- **Fails closed.** A certificate that matches no pin fails like any upstream TLS error: `502` (the host's error page), and a log line `upstream error` naming the host with `presentedCertSHA256` set to the fingerprint the server presented.
+- **Per upstream.** On an [UpstreamGroup](upstream-group.md) member the pin is that member's own; a location's `upstream` carries its own too.
+- **Rotation.** Pin the new certificate next to the old one, replace the certificate on the device, then remove the old pin.
+
+On an [UpstreamGroup](upstream-group.md) member, `path`,
+`hostHeader` and `tls` are **per member**, applied by the failover transport on the attempt
 that actually reaches that member. `healthCheck.path` is used verbatim and is
 **not** prefixed with `path`, so write the full probe path there.
 
@@ -156,7 +180,7 @@ than replacing it, so a location is always at least as restrictive as its host.
 | <span id="proxy-host-locations-upstream"></span>  `upstream` | Upstream | host's backend | no | Single backend for this path. Mutually exclusive with `upstreamGroupRef`; with neither, the host's backend (including an upstream group) is inherited. |
 | <span id="proxy-host-locations-upstream-group-ref"></span>  `upstreamGroupRef` | string | host's backend | no | UpstreamGroup name for this path. Mutually exclusive with `upstream`. |
 | <span id="proxy-host-locations-strip-prefix"></span>  `stripPrefix` | bool | false | no | Remove this location's matched prefix before forwarding: `/app/foo` reaches the backend as `/foo`, and `/app` (or `/app/`) as `/`. A root location (`path: /`) strips nothing. |
-| <span id="proxy-host-locations-middlewares"></span>  `middlewares` | []string | none | no | Middleware names appended to the host's. |
+| <span id="proxy-host-locations-middlewares"></span>  `middlewares` | []string | none | no | Middleware names appended to the host's. Within one type a location's names run before the host's, and the last-referenced runs first ([Middleware ordering](../../concepts/request-pipeline.md#middleware-ordering)). |
 | <span id="proxy-host-locations-access-lists"></span>  `accessLists` | []string | none | no | Access-list names checked in addition to the host's. |
 | <span id="proxy-host-locations-access-lists-mode"></span>  `accessListsMode` | string | `all` | no | How this location's own `accessLists` combine: `all` or `any`, same rules as the host field. The host's lists stay a separate group under the host's mode and both groups must pass, so a mode on one level never opens the other. |
 | <span id="proxy-host-locations-auth"></span>  `auth` | AuthMiddleware | none | no | Inline auth gate for this path, stacked on top of the host's (below). |

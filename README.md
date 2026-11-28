@@ -30,6 +30,8 @@ discovery, git-backed config, a REST API and a web UI, in one static binary.
   path-scoped locations within one host.
 - **Upstream groups.** Failover, weighted round-robin, least-connections or
   sticky ip-hash balancing, with active health checks and passive failure detection.
+- **Pinned upstream certificates.** An `https` upstream with a self-signed appliance
+  certificate is trusted by its SHA-256 fingerprint ([how-to](docs/how-to/proxy-self-signed-upstream.md)).
 - **Redirect, stream and parked hosts.** Raw TCP/UDP forwarding with SNI routing
   and L4 access lists, reserved names, and a catch-all for unmatched vhosts.
 

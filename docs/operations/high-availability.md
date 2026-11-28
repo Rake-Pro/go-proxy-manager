@@ -32,7 +32,14 @@ Both nodes serve traffic-side config identically; only *who may write* differs.
 An unrecognised `GPM_HA_ROLE` is fatal at startup: a typo must never start a
 second ACME writer.
 
-A follower refuses every mutating admin/API request (`PUT`/`POST`/`DELETE`) with:
+A follower refuses every mutating admin/API request (`PUT`/`POST`/`DELETE`) with
+the response below. Three non-`GET` calls are answered as on the leader, because
+they change no config: `PUT /api/{plural}/{name}?dryRun=1` (or `dryRun=true`),
+`POST /api/{plural}/_parse` and `POST /api/sessions/revoke` (it ends sessions on
+this instance only). No other write has a dry run: with `dryRun=1`, `dryRun=true`
+or an unrecognised value it answers `503` here as any write does, and `400` on
+the leader (see [REST API](../reference/api.md#previewing-and-importing-objects)).
+`POST /api/sessions/revoke?dryRun=1` gets that `400` on a follower too.
 
 ```
 HTTP/1.1 503 Service Unavailable
@@ -107,7 +114,7 @@ replicates on its own channel. The single-writer rule makes a shared volume safe
   acme/
     accounts/<hash>.key         ACME account key: both nodes must present the same one
     issued/<name>/              leaf cert + key + meta.json: leader writes, both read
-  sso_signing.key               only when GPM_SSO_SIGNING_KEY is unset (see below)
+  sso_signing.key               only when no SSO signing key is set (see below)
   sso_not_before                SSO revocation watermark: shared, re-read on a ticker
 ```
 
@@ -116,12 +123,12 @@ the leader as the only writer, or `rsync` it leader -> follower on a short
 interval. Certificates are read at TLS handshake time, so the follower picks up a
 renewal with no restart.
 
-**`GPM_SSO_SIGNING_KEY`**: set the *same* value on both nodes. Per-host SSO
-cookies are stateless HMACs, so a shared key is what lets the survivor accept
-cookies the other node minted; without it every SSO user re-authenticates at
-failover. Setting it explicitly also keeps the key out of the file-sync path;
-leave it unset only if `<cert-dir>` itself is shared (then `sso_signing.key` is
-the shared copy).
+**`GPM_SSO_SIGNING_KEY`**: set the *same* value on both nodes.
+
+- **Why.** Per-host SSO cookies are stateless HMACs, so a shared key is what lets the survivor accept cookies the other node minted; without it every SSO user re-authenticates at failover.
+- **From a file.** `GPM_SSO_SIGNING_KEY_FILE` (a path, for a mounted secret) supplies the same key. A non-empty file wins over `GPM_SSO_SIGNING_KEY`; an unreadable or empty file stops startup.
+- **File sync.** Setting the key through either variable also keeps it out of the file-sync path.
+- **Unset.** Leave both unset only if `<cert-dir>` itself is shared (then `sso_signing.key` is the shared copy).
 
 **SSO revocation** (`POST /api/sso/revoke`, leader-only) moves the watermark in
 `<cert-dir>/sso_not_before`. Every instance re-reads that file every 30s and
@@ -180,7 +187,7 @@ HTTP requests in flight are lost like any connection reset; browsers retry.
 1. Both nodes on the same subnet, same gpm version, same image.
 2. keepalived on both (`MASTER` = the leader node), VIP in DNS and NAT forwards.
 3. `<cert-dir>` shared or rsynced; leader is the only writer.
-4. Identical `GPM_SSO_SIGNING_KEY`, `GPM_LOCAL_ADMIN_PASSWORD_HASH` and
+4. Identical `GPM_SSO_SIGNING_KEY` (or the same key through `GPM_SSO_SIGNING_KEY_FILE`), `GPM_LOCAL_ADMIN_PASSWORD_HASH` and
    `${ENV:...}` secrets on both nodes.
 5. Leader: `GPM_HA_ROLE=leader` (or unset). Follower: `GPM_HA_ROLE=follower`
    plus the `origin` remote on `/data/config`.

@@ -54,16 +54,15 @@ webhooks:
 ## Payload and delivery
 
 After every successful config change gpm POSTs a JSON event
-`{"action","kind","name","commit","time"}` to each enabled target. `action` is one
-of `save` | `delete` | `restore` | `revert` | `settings` | `ingress-discovery` | `docker-discovery`. Delivery is asynchronous
-and best-effort under a 10s timeout: a slow or unreachable endpoint never blocks
-or fails the config write, it is only logged. Because targets are admin-configured
-URLs, delivery is SSRF-bounded as defense in depth: **redirects are never
-followed** (a 3xx counts as a failed delivery, so a receiver cannot bounce gpm to
-a URL the admin didn't configure) and **link-local destinations are refused at
-connect time, post-DNS** (blocking cloud-metadata pivots such as
-`169.254.169.254` even via a rebinding resolver). Private/LAN targets remain
-allowed: they are the normal self-hosted case.
+`{"action","kind","name","commit","time"}` to each enabled target.
+
+- **`action`** is one of `save` | `delete` | `restore` | `revert` | `settings` | `ingress-discovery` | `docker-discovery`.
+- **Asynchronous and best-effort**, under a 10s timeout: a slow or unreachable endpoint never blocks or fails the config write, it is only logged.
+- **SSRF-bounded**, as defense in depth, because targets are admin-configured URLs:
+  - **Redirects are never followed.** A 3xx counts as a failed delivery, so a receiver cannot bounce gpm to a URL the admin didn't configure.
+  - **Link-local destinations are refused at connect time, post-DNS**, blocking cloud-metadata pivots such as `169.254.169.254` even via a rebinding resolver.
+  - **What the guard refuses:** `169.254.0.0/16`, `fe80::/10` and link-local multicast, and any destination address it cannot read. It ignores an address zone when deciding, so a literal such as `[::ffff:169.254.169.254%25eth0]` is refused too.
+  - **Private/LAN targets remain allowed:** they are the normal self-hosted case.
 
 **Delivery is bounded, and drops rather than queues.** At most 8 deliveries are
 in flight at once. An event that would exceed that bound is **dropped for that

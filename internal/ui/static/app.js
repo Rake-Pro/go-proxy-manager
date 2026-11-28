@@ -1482,7 +1482,8 @@ async function loadRuntime() {
 // Object counts per kind, from GET /api/config/summary - a counts-only endpoint,
 // so the sidebar no longer pulls the whole config just to len() a dozen slices.
 // Only the sidebar and the Overview empty-state summary read them, so a failed fetch
-// degrades to "everything empty" rather than an error. The response keys are the
+// leaves them empty (unknown) rather than raising an error; setupOffered reads a
+// missing count as unknown, never as zero. The response keys are the
 // kebab-case API plurals; state.counts keeps its camelCase names because other
 // code (navGroupDefaultOpen, the Overview summary) reads them.
 async function loadCounts() {
@@ -3187,10 +3188,16 @@ function rateFoldSummary(rl) {
 }
 
 // ---------- upstream escape hatches ----------
-// upstream.path and upstream.hostHeader, rendered wherever a scheme/host/port
-// group is. Both are optional and omitempty: the key is dropped entirely when
-// unset, so a host that never used them round-trips byte-identically.
-function upstreamExtraHtml(p, up) {
+// upstream.path, upstream.hostHeader and upstream.tls.pinnedCertSHA256,
+// rendered wherever a scheme/host/port group is. All are optional and
+// omitempty: the key is dropped entirely when unset, so a host that never used
+// them round-trips byte-identically. pinPath is the model path the pin field
+// answers to in a server error ("upstream.tls.pinnedCertSHA256" on a host),
+// or '' where errors carry no path of their own.
+function upstreamPins(up) {
+  return arr(((up || {}).tls || {}).pinnedCertSHA256);
+}
+function upstreamExtraHtml(p, up, pinPath) {
   up = up || {};
   const hh = up.hostHeader || '';
   const preset = (hh === '' || hh === 'upstream') ? hh : 'custom';
@@ -3207,6 +3214,10 @@ function upstreamExtraHtml(p, up) {
       <div class="field-group" id="${p}-uphh-custom-wrap"${preset === 'custom' ? '' : ' hidden'}><label>Custom Host header</label>
         <input class="field mono" id="${p}-uphh-custom" data-hint="proxyHost.upstream.hostHeaderCustom" value="${esc(preset === 'custom' ? hh : '')}" placeholder="app.internal.example.com" />
       </div>
+    </div>
+    <div class="field-group"><label>Pinned certificate SHA-256</label>
+      <textarea class="field mono" id="${p}-uppins" data-hint="proxyHost.upstream.tls.pinnedCertSHA256"${pinPath ? ` data-path="${esc(pinPath)}"` : ''} rows="2" spellcheck="false" placeholder="AB:CD:...:EF (one per line, or comma separated)">${esc(upstreamPins(up).join('\n'))}</textarea>
+      <div class="hint" id="${p}-uppins-hint"></div>
     </div>`;
 }
 const HOSTHEADER_HINTS = {
@@ -3214,20 +3225,36 @@ const HOSTHEADER_HINTS = {
   'upstream': 'The upstream sees its own address (host:port). Use it for an app that keys its virtual host off its own address.',
   'custom': 'The upstream sees exactly this hostname. Must be a hostname, optionally with a port.',
 };
-function wireUpstreamExtra(p) {
+// schemeSel is the scheme <select> of the same upstream: pins only apply to
+// https, so the field is greyed out (and not sent) for http. orig is the loaded
+// upstream, whose other tls keys (none exist yet) ride through untouched.
+function wireUpstreamExtra(p, schemeSel, orig) {
   const sel = $('#' + p + '-uphh');
   if (!sel) return { get() { return {}; } };
+  const pins = $('#' + p + '-uppins');
+  const origTls = Object.assign({}, (orig || {}).tls);
   function sync() {
     $('#' + p + '-uphh-hint').textContent = HOSTHEADER_HINTS[sel.value] || '';
     const custom = sel.value === 'custom';
     $('#' + p + '-uphh-custom-wrap').hidden = !custom;
     if (!custom) $('#' + p + '-uphh-custom').value = '';
   }
+  function syncPins() {
+    const https = !schemeSel || schemeSel.value === 'https';
+    pins.disabled = !https;
+    $('#' + p + '-uppins-hint').textContent = https
+      ? 'Trust exactly these certificates instead of verifying the chain and name. Read it with openssl x509 -noout -fingerprint -sha256. Two pins let you rotate a certificate.'
+      : 'Only used with https. Pins are not sent while the scheme is http.';
+  }
   sel.addEventListener('change', sync);
+  if (schemeSel) { schemeSel.addEventListener('change', syncPins); schemeSel.addEventListener('schemesync', syncPins); }
   sync();
+  syncPins();
   return {
-    // Returns {path?, hostHeader?} to merge onto an upstream object, or null
-    // after toasting the first problem.
+    // Returns {path?, hostHeader?, tls?} to merge onto an upstream object, or
+    // null after toasting the first problem. The pins are sent as typed: the
+    // server normalizes them and its validation message is what the operator
+    // sees for a malformed one.
     get(label) {
       const where = label ? label + ': ' : '';
       const out = {};
@@ -3242,6 +3269,11 @@ function wireUpstreamExtra(p) {
         if (v.length > 253 || !HOSTHEADER_RE.test(v)) { showInvalid('Invalid host header', where + 'Host header must be a hostname, optionally "host:port".', $('#' + p + '-uphh-custom')); return null; }
         out.hostHeader = v;
       }
+      const tls = Object.assign({}, origTls);
+      delete tls.pinnedCertSHA256;
+      const list = pins.value.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+      if (!pins.disabled && list.length) tls.pinnedCertSHA256 = list;
+      if (Object.keys(tls).length) out.tls = tls;
       return out;
     },
   };
@@ -3634,12 +3666,13 @@ let revertingHash = false;
 // every tab's controls are in the DOM at once (that is what lets any tab's Save
 // send the whole settings object), so switching one re-renders nothing, keeps
 // unsaved edits and must not raise the discard prompt.
+// A ?query on the hash is not part of the tab, as in route().
 function settingsTabOf(hash) {
-  const m = /^#\/settings(?:\/([^/]+))?$/.exec(hash || '');
+  const m = /^#\/settings(?:\/([^/]+))?$/.exec((hash || '').split('?')[0]);
   return m ? (m[1] || SETTINGS_TABS[0].id) : null;
 }
 function integrationsTabOf(hash) {
-  const m = /^#\/integrations(?:\/([^/]+))?$/.exec(hash || '');
+  const m = /^#\/integrations(?:\/([^/]+))?$/.exec((hash || '').split('?')[0]);
   return m ? (m[1] || INTEGRATIONS_TABS[0].id) : null;
 }
 let leavePrompt = false;
@@ -3794,26 +3827,42 @@ async function viewIntegrations(c, tab) {
     loadCapabilities(),
     loadCounts(),
   ]);
-  const s = setR.data || {};
+  // The loaded copies every save overlays. adoptStored fills them in place
+  // from a settings object: the GET here, and the reply after each save, so a
+  // later save in the same visit overlays what is stored, not what the page
+  // first loaded. Profile rows carry their loaded profile as row._orig, and
+  // are re-pointed by name.
+  const s = {}, idc = {}, idt = {}, dd = {}, ddt = {};
+  function adoptStored(stored) {
+    const put = (o, v) => { Object.keys(o).forEach((k) => { delete o[k]; }); Object.assign(o, v); };
+    put(s, stored);
+    put(idc, Object.assign({ template: {} }, s.ingressDiscovery || {}));
+    put(idt, Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {}));
+    idt.upstream = idt.upstream || {};
+    idt.tls = idt.tls || {};
+    idt.defaultDNS = idt.defaultDNS || {};
+    put(dd, Object.assign({ template: {} }, s.dockerDiscovery || {}));
+    put(ddt, Object.assign({ tls: {}, defaultDNS: {} }, dd.template || {}));
+    ddt.tls = ddt.tls || {};
+    ddt.defaultDNS = ddt.defaultDNS || {};
+    const byName = (rows, cls, profiles) => $$(rows).forEach((row) => {
+      const n = row.querySelector(cls).value.trim();
+      row._orig = (n && profiles && profiles[n]) || {};
+    });
+    byName('#set-id-profiles .id-profile', '.pf-name', idc.profiles);
+    byName('#set-dkr-profiles .dkr-profile', '.dpf-name', dd.profiles);
+  }
+  adoptStored(setR.data || {});
   const ds = Object.assign({ pihole: {}, cloudflare: {} }, s.dnsSync || {});
   ds.pihole = ds.pihole || {};
   ds.cloudflare = ds.cloudflare || {};
   const alsEnabled = !(s.accessListSync && s.accessListSync.enabled === false);
   const alsPoll = (s.accessListSync && s.accessListSync.pollInterval) || '';
-  const idc = Object.assign({ template: {} }, s.ingressDiscovery || {});
-  const idt = Object.assign({ upstream: {}, tls: {}, defaultDNS: {} }, idc.template || {});
-  idt.upstream = idt.upstream || {};
-  idt.tls = idt.tls || {};
-  idt.defaultDNS = idt.defaultDNS || {};
   // Left as a plain object for reading only: `timeoutsPayload` returns undefined
   // when both inputs are blank, so an unset block never round-trips a
   // `timeouts: {}` onto the template (and from there onto every derived host).
   const idTo = idt.timeouts || {};
   const idProfiles = (idc.profiles && typeof idc.profiles === 'object') ? idc.profiles : {};
-  const dd = Object.assign({ template: {} }, s.dockerDiscovery || {});
-  const ddt = Object.assign({ tls: {}, defaultDNS: {} }, dd.template || {});
-  ddt.tls = ddt.tls || {};
-  ddt.defaultDNS = ddt.defaultDNS || {};
   const ddTo = ddt.timeouts || {};
   const ddProfiles = (dd.profiles && typeof dd.profiles === 'object') ? dd.profiles : {};
   const resolvedPrefix = idc.annotationPrefix || 'gpm.rake.pro';
@@ -4734,6 +4783,7 @@ async function viewIntegrations(c, tab) {
     // and an explicit [] (trust nobody) is sent as [].
     const idTp = idTpCtl.get();
     if (idTp === null) return;
+    const idUp = upstreamPayload($('#set-id-up-scheme'), $('#set-id-up-host'), $('#set-id-up-port'));
 
     // annotationPrefix and annotationPrefixMigrate belong to Settings ->
     // Advanced, so they are carried forward from the loaded block rather than
@@ -4747,11 +4797,16 @@ async function viewIntegrations(c, tab) {
       labelSelector: $('#set-id-sel').value.trim(),
       pollInterval: $('#set-id-poll').value.trim(),
       allowedDomainSuffixes: idSuffixCtl.get(),
-      template: {
+      // The form's fields are laid over the loaded template, so a key this
+      // form has no control for survives a save. A field the form owns is
+      // always listed below, undefined when it is to be left out.
+      template: Object.assign({}, idc.template, {
         // Mutually exclusive server-side, so send only the one that is filled
         // in: an empty upstream object alongside a group ref would be rejected.
+        // The three fields are laid over the loaded upstream, so path and
+        // hostHeader (no control here) survive; a cleared address drops it all.
         upstream: $('#set-id-up-group').value.trim() ? undefined
-          : upstreamPayload($('#set-id-up-scheme'), $('#set-id-up-host'), $('#set-id-up-port')),
+          : (idUp && Object.assign({}, idt.upstream, idUp)),
         upstreamGroupRef: $('#set-id-up-group').value.trim() || undefined,
         // INVARIANT: tls is MERGED over what was loaded, never rebuilt from the
         // two fields this form renders. A settings write is a full replacement
@@ -4789,7 +4844,8 @@ async function viewIntegrations(c, tab) {
         locations: arr(idt.locations).length ? idt.locations : undefined,
         allowedDomainSuffixes: idTemplateSuffixCtl.get().length ? idTemplateSuffixCtl.get() : undefined,
         allowedHostnames: arr(idt.allowedHostnames).length ? idt.allowedHostnames : undefined,
-      },
+        defaultDNS: undefined, // set below when either switch is on
+      }),
     };
     if (idc.annotationPrefixMigrate) ingressDiscovery.annotationPrefixMigrate = true;
     if (isOn('set-id-on')) ingressDiscovery.enabled = true;
@@ -4814,9 +4870,13 @@ async function viewIntegrations(c, tab) {
       const tp = row._tp.get();
       if (tp === null) { pfTpBad = true; return; }
       const group = row.querySelector('.pf-up-group').value.trim();
-      const prof = {
+      const pfUp = upstreamPayload(row.querySelector('.pf-up-scheme'), row.querySelector('.pf-up-host'), row.querySelector('.pf-up-port'));
+      // Laid over the row's loaded profile like the template, and the upstream
+      // over its loaded upstream: path and hostHeader have no control here. A
+      // new row's _orig is {}, so it invents nothing.
+      const prof = Object.assign({}, row._orig, {
         upstream: group ? undefined
-          : upstreamPayload(row.querySelector('.pf-up-scheme'), row.querySelector('.pf-up-host'), row.querySelector('.pf-up-port')),
+          : (pfUp && Object.assign({}, (row._orig || {}).upstream, pfUp)),
         upstreamGroupRef: group || undefined,
         // Same invariant as the template block above: merge over the loaded
         // profile so an unrelated save cannot strip a clientAuth / minTLSVersion /
@@ -4841,7 +4901,8 @@ async function viewIntegrations(c, tab) {
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
         allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
-      };
+        defaultDNS: undefined, // set below when either switch is on
+      });
       if (isOn('pf-dns-lan-' + uid) || isOn('pf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('pf-dns-lan-' + uid), publicCname: isOn('pf-dns-pub-' + uid) };
       }
@@ -4909,7 +4970,9 @@ async function viewIntegrations(c, tab) {
       publishedHost: $('#set-dkr-pubhost').value.trim() || undefined,
       pollInterval: $('#set-dkr-poll').value.trim() || undefined,
       allowedDomainSuffixes: dkrSuffixes.length ? dkrSuffixes : undefined,
-      template: {
+      // Laid over the loaded template like the ingress one: upstream and
+      // upstreamGroupRef have no control here and are kept as loaded.
+      template: Object.assign({}, dd.template, {
         tls: Object.assign({}, ddt.tls, {
           certificateRef: $('#set-dkr-cert').value.trim(),
           forceSSL: isOn('set-dkr-forcessl'),
@@ -4928,7 +4991,8 @@ async function viewIntegrations(c, tab) {
         locations: arr(ddt.locations).length ? ddt.locations : undefined,
         allowedDomainSuffixes: dkrTemplateSuffixCtl.get().length ? dkrTemplateSuffixCtl.get() : undefined,
         allowedHostnames: arr(ddt.allowedHostnames).length ? ddt.allowedHostnames : undefined,
-      },
+        defaultDNS: undefined, // set below when either switch is on
+      }),
     };
     if (dkrOn) dockerDiscovery.enabled = true;
     if (isOn('set-dkr-pubports')) dockerDiscovery.usePublishedPorts = true;
@@ -4948,7 +5012,9 @@ async function viewIntegrations(c, tab) {
       const uid = row.dataset.uid;
       const tp = row._tp.get();
       if (tp === null) { dpfTpBad = true; return; }
-      const prof = {
+      // Laid over the row's loaded profile: upstream and upstreamGroupRef have
+      // no control here and are kept as loaded.
+      const prof = Object.assign({}, row._orig, {
         tls: Object.assign({}, (row._orig || {}).tls, {
           certificateRef: row.querySelector('.dpf-cert').value.trim(),
           forceSSL: isOn('dpf-forcessl-' + uid),
@@ -4967,7 +5033,8 @@ async function viewIntegrations(c, tab) {
         locations: arr((row._orig || {}).locations).length ? (row._orig || {}).locations : undefined,
         allowedDomainSuffixes: row._suffixes.get().length ? row._suffixes.get() : undefined,
         allowedHostnames: arr((row._orig || {}).allowedHostnames).length ? (row._orig || {}).allowedHostnames : undefined,
-      };
+        defaultDNS: undefined, // set below when either switch is on
+      });
       if (isOn('dpf-dns-lan-' + uid) || isOn('dpf-dns-pub-' + uid)) {
         prof.defaultDNS = { lanDirect: isOn('dpf-dns-lan-' + uid), publicCname: isOn('dpf-dns-pub-' + uid) };
       }
@@ -4991,6 +5058,8 @@ async function viewIntegrations(c, tab) {
       // The per-route memo now holds a settings object this save superseded.
       resetRouteMemo();
       toastSaved(r.commit); refreshHeadSha(); clearDirty();
+      // The reply is the settings as stored; the next save overlays it.
+      adoptStored(r.data && typeof r.data === 'object' ? r.data : body);
       // ingressDiscovery.enabled and dockerDiscovery.enabled are capability
       // probe values this save can flip. Dropping the cache is not enough on
       // its own: a null cache reads as "every capability false" for every view
@@ -5140,18 +5209,32 @@ async function viewOverview(c) {
       const typ = ct.type === 'acme' ? 'ACME' : (ct.type === 'custom' ? 'Custom' : esc(ct.type || 'cert'));
       const href = '#/certs/' + encodeURIComponent(ct.name);
       if (ct.state === 'error') {
-        errRows.push(attnRow('err', `Certificate <b>${name}</b> failed to renew`,
+        // The API reports error, without notAfter, when a custom certificate's
+        // files cannot be read or parsed (or none are configured), and when an
+        // ACME certificate has no readable issued certificate: a first order
+        // that failed, or an issued file that cannot be read. A renewal that
+        // fails on a readable certificate keeps its expiry state instead.
+        const what = ct.type === 'custom' ? 'could not be loaded' : 'has no usable certificate';
+        errRows.push(attnRow('err', `Certificate <b>${name}</b> ${what}`,
           [typ, domains, ct.lastError ? esc(ct.lastError) : ''].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       } else if (ct.state === 'expired') {
         const ago = ct.daysRemaining != null ? -ct.daysRemaining : null;
+        // Under a day ago counts 0 whole days: today or, before midnight, yesterday.
+        const agoText = ago == null ? 'expired'
+          : (ago >= 1 ? `expired ${plural(ago, 'day', 'days')} ago`
+            : (ct.notAfter && fmtDate(ct.notAfter) !== fmtDate(new Date()) ? 'expired yesterday' : 'expired today'));
         errRows.push(attnRow('err', `Certificate <b>${name}</b> has expired`,
-          [ago != null ? `expired ${plural(ago, 'day', 'days')} ago` : 'expired', domains].filter(Boolean).join(' &middot; '),
+          [agoText, domains].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       } else if (ct.state === 'expiring') {
         const days = ct.daysRemaining;
         const renew = certRenewInfo(ct);
-        warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires in ${plural(days, 'day', 'days')}`,
+        // daysRemaining counts whole days left, so 0 is under 24 hours: today
+        // or, past midnight, tomorrow.
+        const when = days >= 1 ? 'in ' + plural(days, 'day', 'days')
+          : (ct.notAfter && fmtDate(ct.notAfter) !== fmtDate(new Date()) ? 'tomorrow' : 'today');
+        warnRows.push(attnRow('warn', `Certificate <b>${name}</b> expires ${when}`,
           [typ, domains, ct.notAfter ? fmtDate(ct.notAfter) : '', renew ? esc(renew.short) : ''].filter(Boolean).join(' &middot; '),
           href, 'Open'));
       }
@@ -5216,6 +5299,10 @@ async function viewOverview(c) {
   const hostAgg = hostsR.ok ? hostAggregate(hostsR.data) : null;
   const certAgg = certsR.ok ? certAggregate(certsWithStatus) : null;
   const maintHosts = hostsR.ok ? hostsR.data.filter((h) => hostStatus(h) === 'maintenance') : [];
+  if (!hostsR.ok) {
+    warnRows.push(attnRow('warn', 'Could not read proxy hosts',
+      esc((hostsR.err && hostsR.err.message) || 'request failed'), '#/hosts', 'Open'));
+  }
   const infoRows = maintHosts.map((h) => attnRow('info',
     `Proxy host <b>${esc(arr(h.domains)[0] || h.name)}</b> is in maintenance`,
     'It answers 503 instead of passing requests to its upstream.',
@@ -6046,7 +6133,7 @@ ${panel('routing', `        ${identityCard('f', h, {
               <input class="field mono" id="f-upport" data-hint="proxyHost.upstream.port" data-path="upstream.port" type="number" value="${esc(up.port != null ? up.port : '')}" placeholder="3000" />
             </div>
           </div>
-          ${upstreamExtraHtml('f', up)}
+          ${upstreamExtraHtml('f', up, 'upstream.tls.pinnedCertSHA256')}
         </div>
 
         ${foldHtml('f-locs-card', 'Locations', locSummary, locCount > 0, `
@@ -6302,7 +6389,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   // The two inline blocks. Their folds own the whole key: off omits it.
   const hostAuthCtl = wireAuthBlock('f-auth', h.auth, idps);
   const hostRlCtl = wireRateLimitBlock('f-rl', h.rateLimit);
-  const hostUpExtra = wireUpstreamExtra('f');
+  const hostUpExtra = wireUpstreamExtra('f', $('#f-scheme'), up);
   wireInlineFold('f-auth');
   wireInlineFold('f-rl');
   const syncInlineOrderHint = () => {
@@ -6419,7 +6506,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
         ${switchHtml(p + '-strip', !!loc.stripPrefix, 'Strip prefix', 'proxyHost.locations.stripPrefix')}
       </div>
       <div class="hint loc-strip-preview" hidden></div>
-      ${upstreamExtraHtml(p, lu)}
+      ${upstreamExtraHtml(p, lu, '')}
       <div class="inline-fields">
         <div class="field-group"><label>Middlewares</label>
           <select multiple class="field mono loc-mw" data-hint="proxyHost.locations.middlewares" size="4" aria-label="Location middlewares" title="Middlewares for this path only (blank = host chain applies)">${middlewares.map((m) => `<option value="${esc(m.name)}"${arr(loc.middlewares).indexOf(m.name) !== -1 ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
@@ -6437,7 +6524,7 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
 
     const ctl = {
       div, p, _orig: loc,
-      up: wireUpstreamExtra(p),
+      up: wireUpstreamExtra(p, div.querySelector('.loc-scheme'), lu),
       auth: wireAuthBlock(p + '-auth', loc.auth, idps),
       rl: wireRateLimitBlock(p + '-rl', loc.rateLimit),
     };
@@ -6489,7 +6576,8 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
   arr(h.locations).forEach(locRow);
   $('#addLoc').addEventListener('click', () => locRow({}));
   $('#f-scheme').addEventListener('change', () => {
-    $$('#f-locs .loc-scheme[data-follow]').forEach((s) => { s.value = $('#f-scheme').value; });
+    // 'schemesync', not 'change': a change would end the following.
+    $$('#f-locs .loc-scheme[data-follow]').forEach((s) => { s.value = $('#f-scheme').value; s.dispatchEvent(new Event('schemesync')); });
   });
 
   // HSTS show/hide
@@ -6629,14 +6717,14 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
       const portVal = parseInt($('#f-upport').value, 10);
       if (!$('#f-uphost').value.trim() || isNaN(portVal)) { showInvalid('Upstream incomplete', 'Set the upstream host and port, or select an upstream group.', $('#f-uphost').value.trim() ? $('#f-upport') : $('#f-uphost')); return; }
       // MERGED over the stored upstream, never rebuilt from the three inputs:
-      // Upstream also carries path and hostHeader, and a rebuild dropped both on
-      // every save (silently undoing a git-authored escape hatch). The two
+      // Upstream also carries path, hostHeader and tls, and a rebuild dropped
+      // them on every save (silently undoing a git-authored escape hatch). The
       // fields this form renders are then set explicitly, including their
       // absence, so clearing one in the UI actually clears it.
       const upObj = Object.assign({}, up, { scheme: $('#f-scheme').value, host: $('#f-uphost').value.trim(), port: portVal });
       const extra = hostUpExtra.get();
       if (!extra) return;
-      delete upObj.path; delete upObj.hostHeader;
+      delete upObj.path; delete upObj.hostHeader; delete upObj.tls;
       Object.assign(upObj, extra);
       obj.upstream = upObj;
     }
@@ -6859,11 +6947,11 @@ ${panel('advanced', `        ${foldHtml('f-errp-card', 'Error pages', epSummary,
           continue;
         }
         // Merged over the stored upstream for the same reason as the host's:
-        // path and hostHeader have to survive a save that does not touch them.
+        // path, hostHeader and tls have to survive a save that does not touch them.
         const lup = Object.assign({}, origUp, { scheme: ls, host: lh, port: lp });
         const lextra = ctl.up.get('location ' + path);
         if (!lextra) { locAborted = true; break; }
-        delete lup.path; delete lup.hostHeader;
+        delete lup.path; delete lup.hostHeader; delete lup.tls;
         Object.assign(lup, lextra);
         loc.upstream = lup;
       }
@@ -7236,6 +7324,7 @@ ${panel('authority', `        <div class="card form-section">
               ${CA_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
             </select>
             <div class="hint" id="ct-ca-line">${esc(preset.line)}</div>
+            <div class="hint warn" id="ct-ca-bundle-warn" hidden>This certificate has a private CA bundle, which replaces the system roots, so orders against this CA will fail until the CA bundle below is cleared.</div>
           </div>
           <div class="field-group"><label>Account email</label><input class="field mono" id="ct-email" data-hint="certificate.acme.email" data-path="acme.email" value="${esc(acme.email || '')}" placeholder="you@example.com" /></div>
           <div class="field-group"><label>Directory URL</label><input class="field mono" id="ct-dir" data-hint="certificate.acme.directoryURL" data-path="acme.directoryURL" value="${esc(acme.directoryURL || '')}" placeholder="https://acme-v02.api.letsencrypt.org/directory" /></div>
@@ -7280,8 +7369,9 @@ ${panel('validation', `        <div class="card form-section">
 `)}
 ${panel('files', `        <div class="card form-section">
           <p class="section-label">Custom certificate</p>
-          <div class="hint" style="margin-bottom:8px">Paths are relative to the cert store on the gpm host (<span class="mono">-cert-dir</span>, default <span class="mono">/data/certs</span>) - there is no upload here, the files must already exist there.</div>
-          <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" data-hint="certificate.custom.certFile" data-path="custom.certFile" value="${esc(custom.certFile || '')}" placeholder="fullchain.pem" /></div>
+          <div class="field-group"><label>Certificate file</label><input class="field mono" id="ct-certfile" data-hint="certificate.custom.certFile" data-path="custom.certFile" value="${esc(custom.certFile || '')}" placeholder="fullchain.pem" />
+            <div class="hint">Paths are relative to the cert store on the gpm host (<span class="mono">-cert-dir</span>, default <span class="mono">/data/certs</span>) - there is no upload here, the files must already exist there.</div>
+          </div>
           <div class="field-group"><label>Key file</label><input class="field mono" id="ct-keyfile" data-hint="certificate.custom.keyFile" data-path="custom.keyFile" value="${esc(custom.keyFile || '')}" placeholder="privkey.pem" /></div>
         </div>
 `)}
@@ -7338,7 +7428,20 @@ ${panel('files', `        <div class="card form-section">
     else if (picked && prev.eab === 'required' && !$('#ct-eab-kid').value.trim() && !$('#ct-eab-hmac').value.trim()) sw.setAttribute('aria-checked', 'false');
     gateControl(sw, !lock, caEABText(p));
     $('#ct-eab-fields').style.display = isOn('ct-eab') ? '' : 'none';
+    bundleWarn();
   }
+  // A CA bundle is the only trust for the directory, so a preset's public CA
+  // fails with one set. Decided from the URL that will be written, not the
+  // picker label (Custom keeps whatever URL the field holds); a blank field is
+  // Let's Encrypt, except under Custom, where the save refuses it anyway.
+  // Warned, never cleared for the operator.
+  function bundleWarn() {
+    const url = $('#ct-dir').value.trim();
+    const ca = url ? caPresetFor(url) : preset;
+    $('#ct-ca-bundle-warn').hidden = ca.id === 'custom' || !$('#ct-cabundle').value.trim();
+  }
+  $('#ct-cabundle').addEventListener('input', bundleWarn);
+  $('#ct-dir').addEventListener('input', bundleWarn);
   applyCA(preset, false);
   $('#ct-ca').addEventListener('change', () => {
     const p = CA_PRESETS.find((x) => x.id === $('#ct-ca').value);
@@ -7371,7 +7474,11 @@ ${panel('files', `        <div class="card form-section">
     if (isOn('ct-disabled')) obj.disabled = true;
     if (t === 'acme') {
       const ch = $('#ct-challenge').value;
-      const a = { email: $('#ct-email').value.trim(), challenge: ch };
+      const a = { email: $('#ct-email').value.trim() };
+      // A stored certificate without the key keeps it absent while the picker
+      // still shows the implied value: dnsProvider is written only for dns-01,
+      // so the omission means the same challenge.
+      if (isNew || acme.challenge || ch !== challenge) a.challenge = ch;
       const dir = $('#ct-dir').value.trim(); if (dir) a.directoryURL = dir;
       // A blank URL is Let's Encrypt, so Custom with no URL would not save
       // what the picker says.
@@ -9880,8 +9987,8 @@ function filenameFromDisposition(cd) {
 }
 
 // ---------- UPSTREAM GROUP EDITOR ----------
-function upExtraSummary(path, hostHeader) {
-  const parts = [path ? 'base path ' + path : '', hostHeader ? 'Host ' + hostHeader : ''].filter(Boolean);
+function upExtraSummary(path, hostHeader, pinCount) {
+  const parts = [path ? 'base path ' + path : '', hostHeader ? 'Host ' + hostHeader : '', pinCount ? plural(pinCount, 'pinned certificate', 'pinned certificates') : ''].filter(Boolean);
   return 'Advanced' + (parts.length ? ' - ' + parts.join(', ') : '');
 }
 async function upstreamGroupEditor(c, name) {
@@ -9959,7 +10066,7 @@ async function upstreamGroupEditor(c, name) {
     // The two escape hatches are behind a disclosure so a plain member row stays
     // one line - opened automatically when either already holds a value, so a
     // configured field is never hidden from someone scanning the page.
-    const hasExtra = !!(u.path || u.hostHeader);
+    const hasExtra = !!(u.path || u.hostHeader || upstreamPins(u).length);
     div.innerHTML = `
       <div class="loc-row">
         <select class="field mono up-scheme" data-hint="upstreamGroup.upstreams.scheme" style="flex:0 0 90px" aria-label="Upstream scheme"><option value="http"${u.scheme === 'https' ? '' : ' selected'}>http</option><option value="https"${u.scheme === 'https' ? ' selected' : ''}>https</option></select>
@@ -9969,15 +10076,17 @@ async function upstreamGroupEditor(c, name) {
         ${u.host ? healthChip(u) : ''}
         <button class="icon-btn up-del" type="button" aria-label="Remove upstream">${ICON.x}</button>
       </div>
-      <details class="fold sub-fold" id="${p}-adv"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">${esc(upExtraSummary(u.path, u.hostHeader))}</span></summary>
-        ${upstreamExtraHtml(p, u)}
+      <details class="fold sub-fold" id="${p}-adv"${hasExtra ? ' open' : ''}><summary><span class="fold-sum">${esc(upExtraSummary(u.path, u.hostHeader, upstreamPins(u).length))}</span></summary>
+        ${upstreamExtraHtml(p, u, 'upstreams.tls.pinnedCertSHA256')}
       </details>`;
     upsWrap.appendChild(div);
-    const ctl = { div, _orig: u, extra: wireUpstreamExtra(p) };
+    const ctl = { div, _orig: u, extra: wireUpstreamExtra(p, div.querySelector('.up-scheme'), u) };
     upCtls.push(ctl);
     advSums[p + '-adv'] = () => {
       const hh = $('#' + p + '-uphh').value;
-      return upExtraSummary($('#' + p + '-uppath').value.trim(), hh === 'custom' ? $('#' + p + '-uphh-custom').value.trim() : hh);
+      const pinsEl = $('#' + p + '-uppins');
+      const pinCount = pinsEl.disabled ? 0 : pinsEl.value.split(/[\s,]+/).filter(Boolean).length;
+      return upExtraSummary($('#' + p + '-uppath').value.trim(), hh === 'custom' ? $('#' + p + '-uphh-custom').value.trim() : hh, pinCount);
     };
     div.querySelector('.up-del').addEventListener('click', () => {
       div.remove();
@@ -10003,13 +10112,13 @@ async function upstreamGroupEditor(c, name) {
       // A half-filled member is marked on its own row, like a location row.
       if (!host || isNaN(port)) { markRowError(row, host ? 'This upstream needs a port.' : 'This upstream needs a host.'); bad = row.querySelector(host ? '.up-port' : '.up-host'); break; }
       // Merged over the stored member for the same reason as the host editor's
-      // upstream: path and hostHeader must survive a save that does not touch them.
+      // upstream: path, hostHeader and tls must survive a save that does not touch them.
       const up = Object.assign({}, ctl._orig, { scheme: row.querySelector('.up-scheme').value, host, port });
       const weight = parseInt(row.querySelector('.up-weight').value, 10);
       if (!isNaN(weight) && weight > 0) up.weight = weight; else delete up.weight;
       const extra = ctl.extra.get(host + ':' + port);
       if (!extra) { aborted = true; break; }
-      delete up.path; delete up.hostHeader;
+      delete up.path; delete up.hostHeader; delete up.tls;
       Object.assign(up, extra);
       ups.push(up);
     }
@@ -11798,7 +11907,8 @@ function applyNavGroupDefaults() {
 //   ctl.read(draft) copies the pane's controls into the draft.
 //   opts.onFinish(draft) performs the write; a thrown error shows in the footer.
 //   opts.importYAML(text) -> { draft, invalid, note, full } fills the steps
-//   from pasted YAML (see openHostWizard for the shape).
+//   from pasted YAML (see openHostWizard for the shape); a non-empty invalid
+//   still fills the steps and follows the message of a step that objects.
 //   opts.altLink = { label, href, carry(draft)? } is the footer's way out to
 //   the full editor; carry, when set, receives the committed draft.
 function wizard(opts) {
@@ -11987,11 +12097,18 @@ function wizard(opts) {
         catch (e) { setErr(e && e.message ? e.message : String(e)); btn.disabled = false; return; }
         if (closed) return;
         // Walk the imported draft through every step's own checks: the first
-        // step that objects is shown with its message, otherwise Review.
+        // step that objects is shown with its message, otherwise Review. An
+        // incomplete document still fills the steps. The server's verdict on
+        // the pasted document (r.invalid) follows the objecting step's message
+        // when it says something else; it lives in the error line, so the next
+        // step change or import clears it. Review shows none of it: its dry
+        // run is the check of the filled draft.
+        const inv = r.invalid || '';
         const landing = () => {
           for (let i = 0; i < steps.length - 1; i++) {
             const err = steps[i].validate ? steps[i].validate(draft) : '';
-            if (err) { doneUpTo = i - 1; return show(i).then(() => setErr(err)); }
+            const msg = !inv || err === inv ? err : `${err} The pasted YAML: ${inv}`;
+            if (err) { doneUpTo = i - 1; return show(i).then(() => setErr(msg)); }
           }
           doneUpTo = steps.length - 2;
           return show(steps.length - 1);
@@ -12118,6 +12235,9 @@ async function runHostWizard() {
     return `covered by <span class="mono">${names.map(esc).join(', ')}</span>`;
   };
   let reviewErr = '';
+  let reviewPending = false;
+  let reviewOffline = false;
+  const REVIEW_WAIT = 'Wait for the server check to finish.';
   let reviewSeq = 0;
 
   const steps = [
@@ -12241,7 +12361,15 @@ async function runHostWizard() {
       id: 'review', title: 'Review',
       async render(pane, d) {
         reviewErr = '';
+        reviewOffline = false;
+        reviewPending = true; // Add waits for the server's answer
         const tok = ++reviewSeq; // a reply from an earlier render is dropped
+        // The answer clears a wait message left by an early Add.
+        const answered = () => {
+          reviewPending = false;
+          const el = pane.closest('.modal') && pane.closest('.modal').querySelector('#wz-err');
+          if (el && el.textContent === REVIEW_WAIT) el.textContent = '';
+        };
         pane.innerHTML = `<h3>Review</h3><p class="lead">What gets committed to git when you add the host.</p>
           <dl class="dl-h" style="margin-bottom:20px">
             <dt>Domains</dt><dd class="mono">${d.domains.map(esc).join(', ')}</dd>
@@ -12257,6 +12385,7 @@ async function runHostWizard() {
         try {
           const r = await api('/api/proxy-hosts/' + encodeURIComponent(d.name) + '?dryRun=1', { method: 'PUT', body: hostWizardObject(d) });
           if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
           const y = r.data || {};
           const slot = pane.querySelector('#wz-dry');
           if (!slot) return null;
@@ -12275,13 +12404,24 @@ async function runHostWizard() {
           pane.querySelector('#wz-copy').addEventListener('click', (e) => copyText(yaml, e.currentTarget));
         } catch (e) {
           if (tok !== reviewSeq || !pane.isConnected) return null;
+          answered();
           reviewErr = (e && e.message) || String(e);
+          // No HTTP status: the request never reached the server.
+          reviewOffline = !(e && e.status);
           const slot = pane.querySelector('#wz-dry');
-          if (slot) slot.outerHTML = `<div class="inline-error"><b>The server rejected this host.</b><br/>${esc(reviewErr)}</div>`;
+          if (slot) {
+            slot.outerHTML = reviewOffline
+              ? `<div class="inline-error"><b>The server could not be reached.</b><br/>${esc(reviewErr)}. Go Back, then Next to check again.</div>`
+              : `<div class="inline-error"><b>The server rejected this host.</b><br/>${esc(reviewErr)}</div>`;
+          }
         }
         return null;
       },
-      validate() { return reviewErr ? 'Fix the rejected step first: ' + reviewErr : ''; },
+      validate() {
+        if (reviewPending) return REVIEW_WAIT;
+        if (reviewOffline) return 'The server could not be reached. Go Back, then Next to check again.';
+        return reviewErr ? 'Fix the rejected step first: ' + reviewErr : '';
+      },
     },
   ];
 
@@ -12765,7 +12905,9 @@ function markSetupDone() {
 function setupOffered() {
   if (isRoleReadOnly() || hasCapability('ha.readOnly') || setupDismissed()) return false;
   const c = state.counts || {};
-  return !(c.proxyHosts || 0) && !(c.certificates || 0);
+  // A failed summary read leaves the counts unknown, not zero.
+  if (c.proxyHosts == null || c.certificates == null) return false;
+  return !c.proxyHosts && !c.certificates;
 }
 let setupWizardBusy = false;
 async function openSetupWizard() {

@@ -74,6 +74,7 @@ func main() {
 		accessLogBuf  = flag.Int("access-log-buffer", envInt("GPM_ACCESS_LOG_BUFFER", dataplane.DefaultAccessLogCapacity), "access-log entries kept in memory for the Access Logs page (100-100000); the page resizes it live, a restart reverts to this value")
 		slowReqMS     = flag.Int("slow-request-ms", envInt("GPM_SLOW_REQUEST_MS", 0), "warn-log data-plane requests slower than N ms, even with access-log off (0 = disabled)")
 		debugHeaders  = flag.Bool("debug-headers", os.Getenv("GPM_DEBUG_HEADERS") == "1", "add X-GPM-* diagnostic response headers (request id, matched host, upstream)")
+		maxHeaderB    = flag.Int("max-header-bytes", envInt("GPM_MAX_HEADER_BYTES", dataplane.DefaultMaxHeaderBytes), "cap on request line plus headers per request on the data-plane listeners, HTTP/1 and HTTP/2 (4096-1048576); larger requests get 431")
 		upstreamHdrTO = flag.Duration("upstream-response-header-timeout", envDur("GPM_UPSTREAM_RESPONSE_HEADER_TIMEOUT", 0), "cap on time awaiting upstream response headers, e.g. 30s (0 = unbounded)")
 		geoDBPath     = flag.String("geoip-db", envOr("GPM_GEOIP_DB", ""), "path to an operator-supplied GeoLite2/GeoIP2 .mmdb file for AccessList geo rules (unset disables geo rules; none is bundled)")
 		haRole        = flag.String("ha-role", envOr("GPM_HA_ROLE", string(ha.RoleLeader)), "HA role: leader (runs ACME and the Ingress/Docker discovery reconcilers, accepts config writes) or follower (read-only, pulls the leader's config repo)")
@@ -100,11 +101,21 @@ func main() {
 	// an operator believes is protecting them. Generate one with: gpm totp-secret
 	localHash, localTOTP := localAdminSecrets()
 
+	if err := applySSOSigningKey(dataplane.SetSSOSigningKey); err != nil {
+		log.Fatal().Err(err).Msg("SSO signing key file is unreadable or empty; refusing to start rather than sign every SSO user out with a generated key")
+	}
+
 	if localTOTP != "" {
 		if _, err := auth.NormalizeTOTPSecret(localTOTP); err != nil {
 			log.Fatal().Err(err).Msg("GPM_LOCAL_ADMIN_TOTP_SECRET is not a usable base32 TOTP secret; generate one with: gpm totp-secret")
 		}
 		log.Info().Msg("local admin TOTP is enabled")
+	}
+
+	// An out-of-range header limit is fatal rather than clamped, so a typo
+	// cannot silently start the listeners with a limit nobody chose.
+	if err := dataplane.ValidateMaxHeaderBytes(*maxHeaderB); err != nil {
+		log.Fatal().Err(err).Msg("invalid -max-header-bytes / GPM_MAX_HEADER_BYTES")
 	}
 
 	// HA role (design/ha.md phase 1). Exactly one instance is the writer:
@@ -205,9 +216,11 @@ func main() {
 		DebugHeaders:                  *debugHeaders,
 		UpstreamResponseHeaderTimeout: *upstreamHdrTO,
 		MPTCP:                         *mptcp,
+		MaxHeaderBytes:                *maxHeaderB,
 	})
 	// Persist the data-plane SSO signing key under the cert dir when the operator
-	// has not pinned one via GPM_SSO_SIGNING_KEY, so SSO sessions survive restarts.
+	// has not pinned one via GPM_SSO_SIGNING_KEY(_FILE), so SSO sessions survive
+	// restarts.
 	dataplane.SetSSOKeyDir(*certDir)
 	// Re-read the SSO revocation watermark periodically so a revoke issued on a
 	// peer (shared cert dir) - or edited out of band - is honored here without a
@@ -1196,6 +1209,21 @@ func secretFromEnv(key string) (string, error) {
 		return v, nil
 	}
 	return os.Getenv(key), nil
+}
+
+// applySSOSigningKey hands set (dataplane.SetSSOSigningKey) the SSO signing key
+// from GPM_SSO_SIGNING_KEY_FILE or GPM_SSO_SIGNING_KEY, read like every other
+// secret (see secretFromEnv). With neither set the data plane persists or
+// generates a key as before. A named file that cannot be read or is empty is
+// an error: the caller stops startup, because a generated key in its place
+// would sign every SSO user out with no explanation.
+func applySSOSigningKey(set func(string)) error {
+	k, err := secretFromEnv("GPM_SSO_SIGNING_KEY")
+	if err != nil {
+		return err
+	}
+	set(k)
+	return nil
 }
 
 // localAdminSecrets reads the local admin's bcrypt hash and TOTP secret. An
